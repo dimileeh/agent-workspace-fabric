@@ -77,6 +77,7 @@ async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
         _log_store = None
         _runner = runner
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -177,7 +178,7 @@ async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -266,6 +267,7 @@ async def test_execute_marks_post_agent_missing_head_when_recovery_helper_absent
         _log_store = None
         _runner = _Runner()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -346,7 +348,7 @@ async def test_execute_marks_post_agent_missing_head_when_recovery_helper_absent
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -429,6 +431,7 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -503,7 +506,7 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -624,6 +627,7 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -698,7 +702,7 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -822,6 +826,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verif
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -908,7 +913,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verif
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -992,6 +997,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_head_recovery_fails(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -1077,7 +1083,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_head_recovery_fails(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -1162,6 +1168,7 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -1242,7 +1249,7 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,

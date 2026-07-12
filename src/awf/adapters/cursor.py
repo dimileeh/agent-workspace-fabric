@@ -37,6 +37,17 @@ class CursorAdapter(AgentAdapter):
         del model
         return "cursor"
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Cursor hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the
+        ``CURSOR_API_KEY`` entry in ``AGENT_AUTH_ENV_VARS`` so a hosted
+        executor can resolve and inject the same credential a local Compose
+        run would surface.
+        """
+        return ("CURSOR_API_KEY",)
+
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the cursor-agent print-mode command arguments."""
         selected_model = self._selected_model_for_run(model=model)

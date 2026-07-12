@@ -449,6 +449,7 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
 
         async def _begin_execution(
             self,
@@ -495,7 +496,7 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
 
     def fake_get_adapter(*args: object, **kwargs: object) -> object:
         events.append("adapter")
-        return SimpleNamespace(runtime_scratch_paths=())
+        return SimpleNamespace(runtime_scratch_paths=(), is_hosted=False)
 
     async def fail_sync_resolved_profile(*args: object, **kwargs: object) -> WorkspaceProfile:
         raise AssertionError("frozen resolved_profile should skip persistence sync")

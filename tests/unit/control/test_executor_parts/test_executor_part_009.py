@@ -588,3 +588,61 @@ def test_agent_service_recovery_helper_rejects_non_matching_cleanup_and_conforma
         agent_service_recovery._conformance_stall_timeout_source_reason_code(conformance_failure)
         is None
     )
+
+
+@pytest.mark.unit
+def test_cleanup_failure_indicates_agent_down_falls_back_to_str_when_no_result() -> None:
+    """A cleanup failure with no captured result still inspects the exception text.
+
+    When ``cleanup_result is None`` the helper falls back to ``str(exc)`` (which
+    embeds the operator message) so a cleanup failure carrying the agent-down
+    marker in its message is still classified as agent-service-down. This
+    exercises the ``result is None`` branch distinct from the result-with-empty-
+    output branch.
+    """
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="executor",
+        message='service "agent" is not running',
+        cleanup_result=None,
+    )
+    assert agent_service_recovery._cleanup_failure_indicates_agent_service_down(cleanup_error)
+
+
+@pytest.mark.unit
+def test_classify_conformance_timeout_reads_provider_recovery_and_non_mapping_stall() -> None:
+    """The conformance-timeout classifier reads nested recovery + non-mapping stall.
+
+    ``_classify_conformance_timeout_failure_with_service_health`` must read a
+    Mapping ``provider_recovery`` (instead of substituting the empty default)
+    and substitute the empty default when ``conformance_stall`` is present but
+    not a Mapping — falling back to ``failure.message`` for the stderr
+    evidence. The returned classification must still surface the provider/model
+    sourced from the nested recovery mapping.
+    """
+    from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+
+    failure = _PlanningRunFailure(
+        message="plan conformance stalled (no_output)",
+        reason_code=AGENT_STALLED_IN_CONFORMANCE,
+        details={
+            "provider_recovery": {"provider": "anthropic", "model": "claude-test"},
+            # Non-mapping stall forces the ``{}`` default + message fallback.
+            "conformance_stall": "not-a-mapping",
+        },
+    )
+
+    result = agent_service_recovery._classify_conformance_timeout_failure_with_service_health(
+        failure,
+        source_reason_code=AGENT_IDLE_TIMEOUT,
+        model="fallback-model",
+        service_healthy=False,
+    )
+
+    assert result is not None
+    metadata = result.to_metadata() if result is not None else {}
+    assert metadata.get("provider") == "anthropic"
+    assert metadata.get("model") == "claude-test"
+    # Non-mapping stall falls back to the failure message as stderr evidence.
+    assert metadata.get("recommended_action") is not None

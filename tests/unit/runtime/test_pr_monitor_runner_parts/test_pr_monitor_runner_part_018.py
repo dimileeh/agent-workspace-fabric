@@ -163,3 +163,68 @@ def test_monitor_agent_recovery_helpers_ignore_invalid_timeout_details() -> None
     cleanup_error.reason_code = "OTHER_REASON"  # type: ignore[attr-defined]
 
     assert not agent_service_recovery._cleanup_failure_indicates_agent_service_down(cleanup_error)
+
+
+@pytest.mark.unit
+def test_cleanup_failure_indicates_agent_down_falls_back_to_str_when_no_result() -> None:
+    """A cleanup failure with no captured result still inspects the exception text.
+
+    When ``cleanup_result is None`` the helper falls back to ``str(exc)`` so a
+    cleanup failure carrying the agent-down marker in its message (but no
+    separate result object) is still classified as an agent-service-down
+    signal. The message rendered by ``ComposeExecCleanupError`` embeds the
+    operator-supplied message, so a marker placed there is detected.
+    """
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="monitor",
+        message='service "agent" is not running',
+        cleanup_result=None,
+    )
+    assert agent_service_recovery._cleanup_failure_indicates_agent_service_down(cleanup_error)
+
+
+@pytest.mark.unit
+def test_provider_and_model_from_error_read_provider_recovery_mapping() -> None:
+    """``_provider_from_error`` / ``_model_from_error`` read the nested mapping.
+
+    A provider-recovery mapping carrying a non-string (or blank) provider/model
+    must fall through to ``None`` rather than surfacing the raw value — only a
+    non-empty string is a usable provider/model identity. This exercises the
+    branch where ``provider_recovery`` is a Mapping but its inner field is not a
+    usable string, distinct from the top-level ``details is None`` path.
+    """
+    timeout_error = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(returncode=124, stdout="", stderr=""),
+        reason_code=AGENT_IDLE_TIMEOUT,
+        details={
+            "provider_recovery": {"provider": None, "model": "  "},
+        },
+    )
+
+    assert agent_service_recovery._provider_from_error(timeout_error) is None
+    assert agent_service_recovery._model_from_error(timeout_error) is None
+
+
+@pytest.mark.unit
+def test_provider_and_model_from_error_return_recovery_mapping_strings() -> None:
+    """A non-empty string inside ``provider_recovery`` is returned trimmed.
+
+    When the top-level ``provider``/``model`` fields are absent/blank but the
+    nested ``provider_recovery`` mapping carries a usable string, that value is
+    returned (trimmed) — mirroring the provider-recovery contract used by the
+    Compose-path classifier.
+    """
+    timeout_error = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(returncode=124, stdout="", stderr=""),
+        reason_code=AGENT_IDLE_TIMEOUT,
+        details={
+            "provider_recovery": {"provider": "  anthropic  ", "model": "claude-foo"},
+        },
+    )
+
+    assert agent_service_recovery._provider_from_error(timeout_error) == "anthropic"
+    assert agent_service_recovery._model_from_error(timeout_error) == "claude-foo"

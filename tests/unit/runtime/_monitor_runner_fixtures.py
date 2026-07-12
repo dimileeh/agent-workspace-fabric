@@ -58,9 +58,18 @@ class FakeAdapter(AgentAdapter):
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
 
-    def __init__(self, *, default_model: str | None = None) -> None:  # type: ignore[override]
+    def __init__(  # type: ignore[override]
+        self,
+        *,
+        default_model: str | None = None,
+        runtime_executor: object | None = None,
+    ) -> None:
         """Store queue-backed run results for this test adapter."""
-        super().__init__(runner=None, default_model=default_model)  # type: ignore[arg-type]
+        super().__init__(  # type: ignore[arg-type]
+            runner=None,
+            default_model=default_model,
+            runtime_executor=runtime_executor,  # type: ignore[arg-type]
+        )
         self._queued = []
         self.calls = []
         self.workspace_ids = []

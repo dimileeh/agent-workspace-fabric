@@ -313,6 +313,7 @@ async def execute(
             agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
+            runtime_executor=self._agent_runtime_executor,
         )
         # Ignore checkout-local agent scratch dirs before validation cleanliness
         # can treat them as dirty worktree state.

@@ -187,6 +187,20 @@ async def _recover_monitor_agent_service_after_error(
 ) -> int | None:
     if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
         return None
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # docker compose agent service to probe or restart — the hosted runtime
+    # owns process lifecycle. Re-raising the timeout preserves the original
+    # failure reason; attempting Compose restarts here would misclassify the
+    # timeout as AGENT_SERVICE_UNHEALTHY and can fail/terminate monitor
+    # recovery on GKE. Local Core (executor is None) keeps the restart path.
+    if self._deps.adapter.is_hosted:
+        _log.warning(
+            "monitor.agent_service_recovery_skipped_hosted",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            hosted=True,
+        )
+        return None
     if not compose_file.is_file():
         return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
@@ -227,6 +241,22 @@ async def _recover_monitor_agent_service_after_cleanup_error(
     command_evidence: list[str] | None,
     operation_start_head: str | None,
 ) -> int | None:
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # docker compose agent service to probe or restart — the hosted runtime
+    # owns process lifecycle. Re-raising preserves the original cleanup
+    # failure reason; probing/restarting Compose here would remap a hosted
+    # ComposeExecCleanupError to AGENT_SERVICE_UNHEALTHY and can fail/terminate
+    # monitor recovery on GKE. Local Core (executor is None) keeps the
+    # recovery path. Mirrors the hosted guard in
+    # _recover_monitor_agent_service_after_error.
+    if self._deps.adapter.is_hosted:
+        _log.warning(
+            "monitor.agent_service_recovery_skipped_hosted",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            hosted=True,
+        )
+        return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
     if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(exc):
         return None

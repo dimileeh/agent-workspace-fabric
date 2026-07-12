@@ -39,6 +39,18 @@ _BeforeMarkFailed = Callable[..., None | Awaitable[None]]
 _RecoveryCallbackResult = bool | str
 
 
+def _should_skip_compose_recovery(adapter: AgentAdapter | None) -> bool:
+    """Return True when hosted mode should bypass Compose-service recovery.
+
+    In hosted mode (an agent runtime executor is injected) there is no Compose
+    agent service to probe or restart — the hosted runtime owns process
+    lifecycle, so Compose-based recovery would misclassify a hosted failure as
+    ``AGENT_SERVICE_UNHEALTHY``. Local Core (``adapter is None`` or
+    ``adapter.is_hosted`` is False) keeps the restart path.
+    """
+    return adapter is not None and adapter.is_hosted
+
+
 def _build_agent_service_recovery_callbacks(
     self: Any,
     *,
@@ -173,6 +185,7 @@ async def _run_agent_task_with_service_recovery(
     return await _run_agent_callable_with_service_recovery(
         self,
         run_agent=_run_initial_agent,
+        adapter=adapter,
         workspace=workspace,
         profile=profile,
         compose_project=compose_project,
@@ -191,6 +204,7 @@ async def _run_agent_callable_with_service_recovery(
     self: Any,
     *,
     run_agent: Callable[[bool], Awaitable[Any]],
+    adapter: AgentAdapter | None = None,
     workspace: Any,
     profile: WorkspaceProfile,
     compose_project: str,
@@ -232,6 +246,7 @@ async def _run_agent_callable_with_service_recovery(
             planning_result = await run_agent(restart_attempts > 0)
             restart_result = await _restart_after_conformance_timeout_failure(
                 self,
+                adapter=adapter,
                 planning_result=planning_result,
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -253,6 +268,14 @@ async def _run_agent_callable_with_service_recovery(
             run_before_retry = True
         except AgentRunError as exc:
             if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
+                raise
+            # In hosted mode (an agent runtime executor is injected) there is no
+            # Compose agent service to probe or restart — the hosted runtime owns
+            # process lifecycle. Re-raising preserves the original timeout reason;
+            # probing/restarting Compose would misclassify the timeout as
+            # AGENT_SERVICE_UNHEALTHY and can fail recovery when no Compose agent
+            # ran the CLI. Mirrors the monitor fix in PRRT_kwDOSJAM6s6PNKHp.
+            if _should_skip_compose_recovery(adapter):
                 raise
             if not compose_file.is_file():
                 raise
@@ -291,6 +314,12 @@ async def _run_agent_callable_with_service_recovery(
                 return False, None
             run_before_retry = True
         except ComposeExecCleanupError as exc:
+            # Hosted mode has no Compose agent service to probe or restart; a
+            # cleanup failure here means the hosted runtime leaked a Compose
+            # exec, so re-raise unchanged rather than misclassify as
+            # AGENT_SERVICE_UNHEALTHY. Mirrors the timeout-branch guard above.
+            if _should_skip_compose_recovery(adapter):
+                raise
             service_healthy = await probe_agent_service_health(
                 RuntimeInspector(),
                 compose_project,
@@ -409,6 +438,7 @@ def _agent_service_restart_timeout_seconds(
 async def _restart_after_conformance_timeout_failure(
     self: Any,
     *,
+    adapter: AgentAdapter | None,
     planning_result: Any,
     workspace_id: str,
     compose_project: str,
@@ -424,6 +454,15 @@ async def _restart_after_conformance_timeout_failure(
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
     if source_reason_code is None:
+        return None
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # Compose agent service to probe or restart — the hosted runtime owns
+    # process lifecycle. Returning None preserves the original conformance
+    # stall result; probing/restarting Compose would misclassify a hosted
+    # conformance timeout as AGENT_SERVICE_UNHEALTHY even though no Compose
+    # service ran the CLI. Mirrors the timeout-branch guard in
+    # ``_run_agent_callable_with_service_recovery`` (PRRT_kwDOSJAM6s6PNKHp).
+    if _should_skip_compose_recovery(adapter):
         return None
     if not compose_file.is_file():
         return None

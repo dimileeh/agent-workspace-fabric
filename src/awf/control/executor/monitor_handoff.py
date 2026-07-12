@@ -63,7 +63,7 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
-from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
 _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
@@ -104,6 +104,12 @@ class ResumeHandoff:
     compose_project: str
     compose_file: Path
     run_kwargs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ComposeRuntimeRequirements:
+    service_names: set[str]
+    successful_completion_services: set[str]
 
 
 class MonitorResumePreStartError(Exception):
@@ -244,6 +250,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
+    # The agent runtime executor seam only hostifies agent CLI runs (wired
+    # through the adapter below); it does NOT hostify validation. The resumed
+    # monitor's ValidationRunner still builds ``docker compose exec`` commands
+    # for pre-push validation, and companion services (e.g. postgres) still run
+    # in the compose stack. So even when an agent runtime executor is injected,
+    # keep the compose stack available for validation — otherwise a worker that
+    # resumes a monitor after the compose project was stopped would see a
+    # hosted agent repair succeed and then validation fail as infrastructure
+    # because the validation/companion stack was never brought back up. A future
+    # hosted validation runner seam would allow skipping this; until then the
+    # restart + companion env precheck runs unconditionally.
     try:
         _precheck_required_companion_env_secrets_for_resume(
             companion_specs=companion_specs,
@@ -291,7 +308,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        if not await _compose_runtime_usable_after_restart_failure(compose_project):
+        runtime_usable = await _compose_runtime_usable_after_restart_failure(
+            compose_project,
+            Path(compose_file_path),
+        )
+        if not runtime_usable:
+            _log.warning(
+                "executor.resume_compose_up_failed_runtime_unusable",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
             return None
         _log.warning(
             "executor.resume_compose_up_failed_runtime_still_usable",
@@ -314,6 +341,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -484,7 +512,10 @@ async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
     return await RuntimeInspector().inspect(compose_project)
 
 
-async def _compose_runtime_usable_after_restart_failure(compose_project: str) -> bool:
+async def _compose_runtime_usable_after_restart_failure(
+    compose_project: str,
+    compose_file: Path,
+) -> bool:
     """Return whether monitor resume can proceed after a compose restart failure."""
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
@@ -494,7 +525,158 @@ async def _compose_runtime_usable_after_restart_failure(compose_project: str) ->
             compose_project_name=compose_project,
         )
         return False
-    return snapshot.stack_state == "running"
+    if snapshot.stack_state != "running":
+        return False
+    requirements = _compose_runtime_requirements_from_file(compose_file)
+    if requirements is None:
+        _log.warning(
+            "executor.resume_compose_runtime_expected_services_unavailable_continuing",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return True
+    expected_services = requirements.service_names
+    if not expected_services:
+        _log.warning(
+            "executor.resume_compose_runtime_missing_expected_services",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return False
+    ready_services = {
+        service.name
+        for service in snapshot.services
+        if _compose_runtime_service_satisfied_after_restart_failure(
+            service,
+            successful_completion_services=requirements.successful_completion_services,
+        )
+    }
+    missing_services = expected_services - ready_services
+    if missing_services:
+        _log.warning(
+            "executor.resume_compose_runtime_partial_stack",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+            missing_services=sorted(missing_services),
+        )
+        return False
+    return True
+
+
+def _compose_runtime_requirements_from_file(
+    compose_file: Path,
+) -> _ComposeRuntimeRequirements | None:
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_runtime_service_parse_failed",
+            compose_file=str(compose_file),
+        )
+        return None
+    if not isinstance(payload, dict):
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
+    active_profiles = {
+        profile.strip()
+        for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
+        if profile.strip()
+    }
+    active_services = {
+        name: service
+        for name, service in services.items()
+        if isinstance(name, str)
+        and name
+        and _compose_service_enabled_for_active_profiles(
+            service,
+            active_profiles=active_profiles,
+        )
+    }
+    service_names = set(active_services)
+    return _ComposeRuntimeRequirements(
+        service_names=service_names,
+        successful_completion_services=_compose_successful_completion_service_names(
+            active_services,
+            service_names=service_names,
+        ),
+    )
+
+
+def _compose_service_enabled_for_active_profiles(
+    service: object,
+    *,
+    active_profiles: set[str],
+) -> bool:
+    """Mirror Compose's default service selection for ``COMPOSE_PROFILES``."""
+    if not isinstance(service, dict):
+        return True
+    profiles = service.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        return True
+    declared_profiles = {profile for profile in profiles if isinstance(profile, str) and profile}
+    if len(declared_profiles) != len(profiles):
+        # Keep malformed service definitions conservative. Compose itself rejects
+        # them, but an already-running service must not be silently waived here.
+        return True
+    return "*" in active_profiles or not declared_profiles.isdisjoint(active_profiles)
+
+
+def _compose_successful_completion_service_names(
+    services: Mapping[str, object],
+    *,
+    service_names: set[str],
+) -> set[str]:
+    names: set[str] = set()
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        depends_on = service.get("depends_on")
+        if not isinstance(depends_on, dict):
+            continue
+        for dependency_name, dependency_config in depends_on.items():
+            if not isinstance(dependency_name, str) or dependency_name not in service_names:
+                continue
+            if not isinstance(dependency_config, dict):
+                continue
+            condition = dependency_config.get("condition")
+            if (
+                isinstance(condition, str)
+                and condition.strip().lower() == "service_completed_successfully"
+            ):
+                names.add(dependency_name)
+    return names
+
+
+def _compose_runtime_service_satisfied_after_restart_failure(
+    service: RuntimeService,
+    *,
+    successful_completion_services: set[str],
+) -> bool:
+    if _compose_runtime_service_ready(service):
+        return True
+    if service.name not in successful_completion_services:
+        return False
+    return _compose_runtime_service_completed_successfully(service)
+
+
+def _compose_runtime_service_ready(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "running":
+        return False
+    health = (service.health or "").strip().lower()
+    return health not in {"starting", "unhealthy"}
+
+
+def _compose_runtime_service_completed_successfully(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "exited":
+        return False
+    status = (service.status or "").strip().lower()
+    return re.match(r"^exited\s*\(\s*0\s*\)(?:\s|$)", status) is not None
 
 
 def _precheck_required_companion_env_secrets_for_resume(
@@ -1000,6 +1182,7 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,

@@ -978,6 +978,7 @@ def _stub_worker_runtime_dependencies(
             pr_monitor_factory: object,
             log_store: object,
             usage_sampler: object = None,
+            agent_runtime_executor: object = None,
         ) -> None:
             """Test helper for  init  ."""
             created["executor_monitor_factory"] = pr_monitor_factory

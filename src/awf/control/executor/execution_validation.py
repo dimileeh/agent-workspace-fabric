@@ -612,6 +612,7 @@ async def run_validation_and_fix_cycle(
                     ) = await _run_agent_callable_with_service_recovery(
                         self,
                         run_agent=_run_conformance_agent,
+                        adapter=adapter,
                         workspace=ws,
                         profile=profile,
                         compose_project=compose_project,
@@ -1033,6 +1034,7 @@ async def run_validation_and_fix_cycle(
             fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(
                 self,
                 run_agent=_run_fix_agent,
+                adapter=adapter,
                 workspace=ws,
                 profile=profile,
                 compose_project=compose_project,

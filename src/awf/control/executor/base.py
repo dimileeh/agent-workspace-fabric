@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import (
 
 from awf.adapters.base import AgentDefaults
 from awf.adapters.defaults import defaults_with_model_overrides
+from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
 from awf.control.executor import execution_flow as _execution_flow
@@ -57,6 +58,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
         usage_sampler: UsageSampler | None = None,
+        agent_runtime_executor: AgentRuntimeExecutor | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -69,6 +71,13 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
           that builds a ``PullRequestMonitorRunner`` from the adapter,
           GitHub client, worktree paths, and resolved workspace profile.
           Adapter-only factories are still accepted for older tests.
+
+        ``agent_runtime_executor`` is the cloud-neutral hosted execution
+        seam. ``None`` (default) preserves the exact tracked
+        ``docker compose exec`` path. A hosted AWF Cloud deployment
+        injects an executor (e.g. Kubernetes Jobs) so PR monitor repair
+        is not hard-wired to Docker Compose; the worker does NOT build a
+        Kubernetes executor in Core.
 
         If both are None the monitor stage is skipped and the executor
         preserves the original ``pushing → completed`` contract (the
@@ -85,6 +94,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
         self._usage_sampler = usage_sampler
+        self._agent_runtime_executor = agent_runtime_executor
 
     async def execute(
         self: Any,
@@ -93,6 +103,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         execution_owner_id: str | None = None,
         execution_lease_expires_at: datetime | None = None,
     ) -> None:
+        """Run the workspace execution flow for a claimed workspace."""
         return await _execution_flow.execute(
             self,
             workspace_id=workspace_id,
