@@ -456,6 +456,7 @@ async def _run_hosted_monitor_handoff_profile_setup(
     pr_identity: Mapping[str, object] | None = None,
 ) -> bool:
     """Delegate hosted setup before handing an adopted PR to the monitor."""
+    mirror_path = mirror_path_for_worktree(worktree_path)
     validation = getattr(self, "_hosted_validation", None)
     if validation is None:
         await _mark_failed_or_raise_setup_failure(
@@ -469,6 +470,17 @@ async def _run_hosted_monitor_handoff_profile_setup(
             reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
         )
         return False
+
+    async def _repair_mirror_hooks_path_or_mark_failed(*, failure_stage: str) -> bool:
+        repaired = await repair_mirror_hooks_path_or_mark_failed(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=False,
+            failure_stage=failure_stage,
+        )
+        return repaired is True
 
     try:
         setup_result = await validation.run_profile_phases(
@@ -508,6 +520,10 @@ async def _run_hosted_monitor_handoff_profile_setup(
         )
 
     if setup_result.all_passed:
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after successful hosted monitor handoff setup"
+        ):
+            return False
         return await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,

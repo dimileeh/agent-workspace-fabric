@@ -17,6 +17,7 @@ from awf.control.executor.constants import (
 )
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
+    _run_hosted_monitor_handoff_profile_setup,
     _run_monitor_handoff_profile_setup,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -97,6 +98,18 @@ class _HostedSetupValidation:
         self.phase_kwargs.append(dict(kwargs))
         self._trace.append("hosted_setup")
         return self._result
+
+
+class _HostedSetupPreflightValidation(_HostedSetupValidation):
+    async def run_profile_tool_preflight(
+        self,
+        *,
+        workspace_id: str,
+        profile: object,
+    ) -> ValidationResult:
+        del workspace_id, profile
+        self._trace.append("preflight")
+        return ValidationResult()
 
 
 @pytest.mark.unit
@@ -948,6 +961,118 @@ class TestExecutorMonitorHandoffSetupSplit:
 
 
 class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_repairs_mirror_hooks_before_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted setup repairs Core mirror hooks before preflight can enter monitor work."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightValidation(trace)
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        def _mirror_path_for_worktree(path: Path) -> Path:
+            assert path == worktree_path
+            return mirror_path
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            return True
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            _mirror_path_for_worktree,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-hosted",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is True
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks", "preflight"]
+        assert mark_failed_calls == []
+
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_mirror_repair_failure_blocks_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A poisoned Core mirror fails hosted handoff before profile preflight."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightValidation(trace)
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _path: mirror_path,
+        )
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            raise OSError("could not lock config")
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-hosted",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is False
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks"]
+        assert len(mark_failed_calls) == 1
+        assert mark_failed_calls[0]["failure_reason"] == FailureReason.infrastructure_failure
+        assert mark_failed_calls[0]["reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert "after successful hosted monitor handoff setup" in mark_failed_calls[0]["message"]
+
     @pytest.mark.unit
     async def test_hosted_sync_feature_pr_handoff_delegates_profile_setup_before_monitor(
         self,
