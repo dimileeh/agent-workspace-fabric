@@ -861,17 +861,28 @@ def _coverage_result_from_payload(
         if isinstance(command_result_payload, Mapping)
         else None
     )
+    enforce = bool(payload.get("enforce", False))
+    status = _coverage_status_from_payload(payload, enforce=enforce)
     gaps = payload.get("gaps", [])
     return ValidationCoverageResult(
         provider=_str_field(payload, "provider"),
         percent=_optional_float(payload.get("percent")),
         minimum_percent=_float_field(payload, "minimum_percent"),
-        enforce=bool(payload.get("enforce", False)),
-        status=_str_field(payload, "status"),
+        enforce=enforce,
+        status=status,
         reason_code=_str_field(payload, "reason_code"),
         command_result=command_result,
         gaps=gaps if isinstance(gaps, list) else [],
     )
+
+
+def _coverage_status_from_payload(payload: Mapping[str, Any], *, enforce: bool) -> str:
+    status = _str_field(payload, "status").strip().lower()
+    if not status:
+        raise HostedDelegationProtocolError("hosted delegation response missing status")
+    if enforce and status != "passed":
+        return "failed"
+    return status
 
 
 def _operation_ref_from_payload(

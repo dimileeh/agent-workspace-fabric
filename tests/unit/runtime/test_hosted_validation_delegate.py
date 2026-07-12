@@ -604,6 +604,58 @@ async def test_hosted_coverage_rejects_invalid_optional_percent(tmp_path: Path) 
 
 
 @pytest.mark.unit
+async def test_hosted_coverage_fails_closed_on_enforced_unexpected_status(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "error",
+                        "reason_code": "COVERAGE_PROVIDER_FAILED",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+        )
+
+    assert result is not None
+    assert not result.ok
+    assert result.status == "failed"
+    assert result.reason_code == "COVERAGE_PROVIDER_FAILED"
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_requires_payload_on_success(tmp_path: Path) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/validation-runs":
