@@ -262,6 +262,30 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_AGENT_IDLE_TIMEOUT_SECONDS"] == (
             "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
+        assert environment["AWF_HOSTED_DELEGATION_BASE_URL"] == (
+            "${AWF_HOSTED_DELEGATION_BASE_URL:-}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_BEARER_TOKEN"] == (
+            "${AWF_HOSTED_DELEGATION_BEARER_TOKEN:-}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"] == (
+            "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_POLL_INTERVAL_SECONDS"] == (
+            "${AWF_HOSTED_DELEGATION_POLL_INTERVAL_SECONDS:-2.0}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_OPERATION_TIMEOUT_SECONDS"] == (
+            "${AWF_HOSTED_DELEGATION_OPERATION_TIMEOUT_SECONDS:-7200.0}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_REQUEST_TIMEOUT_SECONDS"] == (
+            "${AWF_HOSTED_DELEGATION_REQUEST_TIMEOUT_SECONDS:-30.0}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_CANCEL_TIMEOUT_SECONDS"] == (
+            "${AWF_HOSTED_DELEGATION_CANCEL_TIMEOUT_SECONDS:-10.0}"
+        )
+        assert environment["AWF_HOSTED_DELEGATION_MAX_OUTPUT_BYTES"] == (
+            "${AWF_HOSTED_DELEGATION_MAX_OUTPUT_BYTES:-1000000}"
+        )
         assert environment["AWF_AUTO_CLEANUP_ORPHANS"] == "${AWF_AUTO_CLEANUP_ORPHANS:-true}"
         # GC-B base reaper is default-on, so its kill-switch must be forwarded into
         # the API/worker containers or operators could never disable it.
