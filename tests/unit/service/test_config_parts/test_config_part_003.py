@@ -15,9 +15,11 @@ from awf.common.config import (
     DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
     Settings,
 )
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_API_TOKEN,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
+    hosted_delegation_config_from_service_settings,
     local_service_environ,
     resolve_service_settings,
     service_config_payload,
@@ -71,6 +73,32 @@ def test_agent_watchdog_settings_flow_from_settings_to_service_settings() -> Non
 
     assert settings.agent_wall_timeout_seconds == 1234
     assert settings.agent_idle_timeout_seconds == 56
+
+
+@pytest.mark.unit
+def test_hosted_delegation_service_settings_match_worker_visible_config() -> None:
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(base, environ={"HOSTED_TOKEN": "secret-token"})
+    config = hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert config is not None
+    assert config.base_url == "https://hosted.example.test"
+    assert config.bearer_token == "secret-token"
+
+    unconfigured = resolve_service_settings(Settings(_env_file=None), environ={})
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(unconfigured, required=True)
+    assert excinfo.value.detail() == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
+    }
 
 
 @pytest.mark.unit

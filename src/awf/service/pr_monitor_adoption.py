@@ -46,6 +46,10 @@ from awf.runtime.hosted_delegation import (
     HostedDelegationConfigError,
     hosted_delegation_config_from_settings,
 )
+from awf.service.config import (
+    hosted_delegation_config_from_service_settings,
+    resolve_service_settings,
+)
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -980,6 +984,8 @@ def _raise_if_hosted_delegation_unconfigured(
         return
     try:
         hosted_delegation_config_from_settings(settings)
+        service_settings = resolve_service_settings(settings)
+        hosted_delegation_config_from_service_settings(service_settings, required=True)
     except HostedDelegationConfigError as exc:
         raise PRMonitorAdoptionError(
             error_code="HOSTED_DELEGATION_NOT_CONFIGURED",

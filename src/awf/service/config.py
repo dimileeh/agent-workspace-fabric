@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import yaml
 from sqlalchemy.engine import make_url
@@ -30,6 +30,9 @@ from awf.service.environment import (
     compose_expand_value,
     env_lookup,
 )
+
+if TYPE_CHECKING:
+    from awf.runtime.hosted_delegation import HostedDelegationConfig
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
@@ -64,6 +67,7 @@ __all__ = [
     "LOCAL_SERVICE_COMPOSE_FILE",
     "LOCAL_SERVICE_INCLUDED_COMPOSE_FILE",
     "ServiceSettings",
+    "hosted_delegation_config_from_service_settings",
     "local_service_environ",
     "local_service_worker_environment",
     "local_service_worker_environment_keys",
@@ -331,6 +335,39 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
         if payload.get(key):
             payload[key] = "<redacted>"
     return payload
+
+
+def hosted_delegation_config_from_service_settings(
+    settings: ServiceSettings,
+    *,
+    required: bool = False,
+) -> HostedDelegationConfig | None:
+    """Return hosted delegation config using the worker-visible service settings."""
+
+    from awf.runtime.hosted_delegation import (
+        HOSTED_DELEGATION_MISSING_BASE_URL,
+        HOSTED_DELEGATION_MISSING_TOKEN,
+        HostedDelegationConfigError,
+        hosted_delegation_config_from_values,
+    )
+
+    base_url = _empty_to_none(settings.hosted_delegation_base_url)
+    token = _empty_to_none(settings.hosted_delegation_bearer_token)
+    if base_url is None and token is None:
+        if not required:
+            return None
+        raise HostedDelegationConfigError(
+            missing=(HOSTED_DELEGATION_MISSING_BASE_URL, HOSTED_DELEGATION_MISSING_TOKEN)
+        )
+    return hosted_delegation_config_from_values(
+        base_url=settings.hosted_delegation_base_url,
+        bearer_token=settings.hosted_delegation_bearer_token,
+        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
+        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
+        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
+        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
+        max_output_bytes=settings.hosted_delegation_max_output_bytes,
+    )
 
 
 def _resolve_hosted_delegation_bearer_token(

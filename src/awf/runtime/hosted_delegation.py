@@ -133,29 +133,56 @@ def hosted_delegation_config_from_settings(
 ) -> HostedDelegationConfig:
     """Resolve hosted delegation config or raise a redacted diagnostic error."""
 
+    return hosted_delegation_config_from_values(
+        base_url=settings.hosted_delegation_base_url,
+        bearer_token=settings.hosted_delegation_bearer_token,
+        bearer_token_env=settings.hosted_delegation_bearer_token_env,
+        environ=environ,
+        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
+        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
+        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
+        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
+        max_output_bytes=settings.hosted_delegation_max_output_bytes,
+    )
+
+
+def hosted_delegation_config_from_values(
+    *,
+    base_url: str | None,
+    bearer_token: str | None,
+    bearer_token_env: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    poll_interval_seconds: float,
+    operation_timeout_seconds: float,
+    request_timeout_seconds: float,
+    cancel_timeout_seconds: float,
+    max_output_bytes: int,
+) -> HostedDelegationConfig:
+    """Resolve hosted delegation config from already-selected settings values."""
+
     env = os.environ if environ is None else environ
     missing: list[str] = []
-    base_url = _normalized_url(settings.hosted_delegation_base_url)
-    if base_url is None:
+    resolved_base_url = _normalized_url(base_url)
+    if resolved_base_url is None:
         missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
-    token = _normalized_secret(settings.hosted_delegation_bearer_token)
-    token_env = _normalized_env_name(settings.hosted_delegation_bearer_token_env)
+    token = _normalized_secret(bearer_token)
+    token_env = _normalized_env_name(bearer_token_env)
     if token is None and token_env is not None:
         token = _normalized_secret(env.get(token_env))
     if token is None:
         missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
     if missing:
         raise HostedDelegationConfigError(missing=tuple(missing))
-    assert base_url is not None
+    assert resolved_base_url is not None
     assert token is not None
     return HostedDelegationConfig(
-        base_url=base_url,
+        base_url=resolved_base_url,
         bearer_token=token,
-        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
-        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
-        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
-        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
-        max_output_bytes=settings.hosted_delegation_max_output_bytes,
+        poll_interval_seconds=poll_interval_seconds,
+        operation_timeout_seconds=operation_timeout_seconds,
+        request_timeout_seconds=request_timeout_seconds,
+        cancel_timeout_seconds=cancel_timeout_seconds,
+        max_output_bytes=max_output_bytes,
     )
 
 

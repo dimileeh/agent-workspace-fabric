@@ -19,6 +19,7 @@ import structlog
 from awf.common.config import Settings
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.service import worker as worker_mod
 from awf.service.config import resolve_service_settings
 from tests.unit.service.test_worker import _in_process_merge_coordinator, _settings
@@ -217,12 +218,16 @@ def test_worker_hosted_delegation_config_is_bounded_and_fails_closed(tmp_path: P
     assert config.poll_interval_seconds == 3.0
 
     partial = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
-    with pytest.raises(ValueError, match="HOSTED_DELEGATION_BEARER_TOKEN"):
+    with pytest.raises(HostedDelegationConfigError) as partial_excinfo:
         worker_mod._hosted_delegation_config_for_worker(partial)
+    assert partial_excinfo.value.detail() == {
+        "missing": ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"],
+    }
 
     invalid = dataclasses.replace(settings, hosted_delegation_base_url="not-a-url")
-    with pytest.raises(ValueError, match="HOSTED_DELEGATION_BASE_URL"):
+    with pytest.raises(HostedDelegationConfigError) as invalid_excinfo:
         worker_mod._hosted_delegation_config_for_worker(invalid)
+    assert invalid_excinfo.value.detail() == {"missing": ["AWF_HOSTED_DELEGATION_BASE_URL"]}
 
 
 @pytest.mark.unit

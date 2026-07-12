@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -56,7 +55,7 @@ from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
-from awf.service.config import ServiceSettings
+from awf.service.config import ServiceSettings, hosted_delegation_config_from_service_settings
 from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
@@ -107,31 +106,7 @@ def _hosted_delegation_config_for_worker(
 ) -> HostedDelegationConfig | None:
     """Return hosted delegation config for the worker, or fail on partial config."""
 
-    base_url = (settings.hosted_delegation_base_url or "").strip().rstrip("/")
-    token = (settings.hosted_delegation_bearer_token or "").strip()
-    if not base_url and not token:
-        return None
-    missing: list[str] = []
-    if not base_url:
-        missing.append("AWF_HOSTED_DELEGATION_BASE_URL")
-    if not token:
-        missing.append(
-            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
-        )
-    if missing:
-        raise ValueError("hosted delegation config incomplete: " + ", ".join(missing))
-    parsed = urlsplit(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("hosted delegation config invalid: AWF_HOSTED_DELEGATION_BASE_URL")
-    return HostedDelegationConfig(
-        base_url=base_url,
-        bearer_token=token,
-        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
-        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
-        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
-        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
-        max_output_bytes=settings.hosted_delegation_max_output_bytes,
-    )
+    return hosted_delegation_config_from_service_settings(settings)
 
 
 def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
