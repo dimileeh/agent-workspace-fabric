@@ -67,6 +67,11 @@ HOSTED_DELEGATION_MISSING_TOKEN = (
 )
 _ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
+_HOSTED_VALIDATION_TERMINAL_FAILURES = {
+    "failed": (1, "HOSTED_VALIDATION_FAILED"),
+    "cancelled": (130, "HOSTED_VALIDATION_CANCELLED"),
+    "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, "HOSTED_VALIDATION_TIMED_OUT"),
+}
 
 
 class HostedDelegationConfigError(ValueError):
@@ -516,6 +521,7 @@ def _validation_result_from_terminal(
     artifacts_dir: Path,
     max_output_bytes: int,
 ) -> ValidationResult:
+    state = _operation_state(payload)
     commands_payload = payload.get("commands", [])
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
@@ -529,6 +535,17 @@ def _validation_result_from_terminal(
         )
         for index, item in enumerate(commands_payload, start=1)
     ]
+    if state in _HOSTED_VALIDATION_TERMINAL_FAILURES and not any(
+        command.blocks_validation for command in commands
+    ):
+        commands.append(
+            _validation_terminal_failure_result(
+                payload,
+                artifacts_dir=artifacts_dir,
+                index=len(commands) + 1,
+                max_output_bytes=max_output_bytes,
+            )
+        )
     coverage_payload = payload.get("coverage")
     coverage = (
         _coverage_result_from_payload(
@@ -540,6 +557,39 @@ def _validation_result_from_terminal(
         else None
     )
     return ValidationResult(commands=commands, coverage=coverage)
+
+
+def _validation_terminal_failure_result(
+    payload: Mapping[str, Any],
+    *,
+    artifacts_dir: Path,
+    index: int,
+    max_output_bytes: int,
+) -> ValidationCommandResult:
+    state = _operation_state(payload)
+    returncode, reason_code = _HOSTED_VALIDATION_TERMINAL_FAILURES[state]
+    stdout = _text_payload_field(payload, "stdout")
+    stderr = _text_payload_field(payload, "stderr")
+    if not stderr:
+        message = _optional_str(payload.get("message"))
+        stderr = f"{message or f'hosted validation operation {state}'}\n"
+    return _validation_command_result_from_payload(
+        {
+            "command": _optional_str(payload.get("command")) or "hosted validation operation",
+            "returncode": _int_payload_field(payload.get("returncode"), default=returncode),
+            "duration_seconds": _optional_float(payload.get("duration_seconds")) or 0.0,
+            "stdout": stdout,
+            "stderr": stderr,
+            "phase": _optional_str(payload.get("phase")) or "validate",
+            "reason_code": _optional_str(payload.get("reason_code")) or reason_code,
+            "metadata": {
+                "hosted_operation_state": state,
+            },
+        },
+        artifacts_dir=artifacts_dir,
+        index=index,
+        max_output_bytes=max_output_bytes,
+    )
 
 
 def _validation_command_result_from_payload(

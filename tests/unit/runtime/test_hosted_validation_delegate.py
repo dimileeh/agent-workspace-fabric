@@ -245,6 +245,69 @@ async def test_hosted_validation_sanitizes_remote_phase_before_artifact_write(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("state", "expected_returncode", "expected_reason_code"),
+    [
+        ("failed", 1, "HOSTED_VALIDATION_FAILED"),
+        ("cancelled", 130, "HOSTED_VALIDATION_CANCELLED"),
+        ("timed_out", 124, "HOSTED_VALIDATION_TIMED_OUT"),
+    ],
+)
+async def test_hosted_validation_fails_closed_when_terminal_failure_has_no_commands(
+    tmp_path: Path,
+    state: str,
+    expected_returncode: int,
+    expected_reason_code: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": state,
+                    "message": "host-side job did not produce command results",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+        )
+
+    assert not result.all_passed
+    assert len(result.commands) == 1
+    command = result.commands[0]
+    assert command.command == "hosted validation operation"
+    assert command.phase == "validate"
+    assert command.returncode == expected_returncode
+    assert command.reason_code == expected_reason_code
+    assert command.stderr_path.read_text(encoding="utf-8") == (
+        "host-side job did not produce command results\n"
+    )
+
+
+@pytest.mark.unit
 async def test_hosted_validation_rejects_command_output_over_max_output_bytes(
     tmp_path: Path,
 ) -> None:
