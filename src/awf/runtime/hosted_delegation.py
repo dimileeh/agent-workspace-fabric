@@ -78,7 +78,7 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SECRET_VALUE_PATTERN = compile_known_token_re(match_truncated_provider_tokens=False)
-_URL_WITH_CREDENTIALS_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")
+_URL_WITH_CREDENTIALS_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]+@")
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 _HOSTED_VALIDATION_TERMINAL_FAILURES = {
     "failed": (1, "HOSTED_VALIDATION_FAILED"),

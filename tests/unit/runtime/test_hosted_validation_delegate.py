@@ -39,6 +39,7 @@ def _profile_with_runtime_secret() -> WorkspaceProfile:
                 "environment": {
                     "NPM_TOKEN": "npm-profile-secret",
                     "OLLAMA_HOST": "http://ollama.profile:11434",
+                    "PIP_INDEX_URL": "https://pkg-token@packages.example/simple",
                 }
             },
         }
@@ -344,9 +345,11 @@ async def test_hosted_validation_sanitizes_literal_runtime_environment_secrets(
 
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "npm-profile-secret" not in body_blob
+    assert "pkg-token" not in body_blob
     assert seen["body"]["profile"]["runtime"]["environment"] == {
         "NPM_TOKEN": "${NPM_TOKEN}",
         "OLLAMA_HOST": "http://ollama.profile:11434",
+        "PIP_INDEX_URL": "${PIP_INDEX_URL}",
     }
 
 
