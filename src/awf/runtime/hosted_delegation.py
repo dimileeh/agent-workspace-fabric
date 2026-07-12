@@ -17,11 +17,12 @@ Operation state machine for AWF Cloud implementers:
 4. Core polls ``operation_url`` until a terminal state: ``succeeded``,
    ``failed``, ``cancelled``, or ``timed_out``. Every poll response must echo
    the same ``workspace_id`` and ``operation_id``.
-5. Agent repair terminal responses must include ``returncode``, ``stdout``,
-   ``stderr``, and optional ``timeout_reason``. Successful agent repair
-   terminals must also include ``terminal_head_sha`` for the remote PR head
+5. Successful agent repair terminal responses must include ``returncode``,
+   ``stdout``, ``stderr``, and ``terminal_head_sha`` for the remote PR head
    pushed by the host. Core fetches the PR branch and verifies that SHA before
-   monitor bookkeeping continues.
+   monitor bookkeeping continues. Failed, cancelled, and timed-out hosted
+   operations are mapped from the operation state and must not be upgraded by
+   stale success fields.
 6. Validation terminal responses return Core-compatible validation command
    results; CI remains a separate required merge gate.
 
@@ -82,6 +83,11 @@ _HOSTED_VALIDATION_TERMINAL_FAILURES = {
     "failed": (1, "HOSTED_VALIDATION_FAILED"),
     "cancelled": (130, "HOSTED_VALIDATION_CANCELLED"),
     "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, "HOSTED_VALIDATION_TIMED_OUT"),
+}
+_HOSTED_AGENT_TERMINAL_FAILURES = {
+    "failed": (1, ""),
+    "cancelled": (130, ""),
+    "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, COMMAND_TIMEOUT_REASON),
 }
 
 
@@ -581,6 +587,9 @@ def _agent_result_from_terminal(
     *,
     max_output_bytes: int,
 ) -> AgentRuntimeExecResult:
+    state = _operation_state(payload)
+    if state in _HOSTED_AGENT_TERMINAL_FAILURES:
+        return _agent_terminal_failure_result(payload, max_output_bytes=max_output_bytes)
     stdout = _text_field(payload, "stdout")
     stderr = _text_field(payload, "stderr")
     _ensure_output_within_limit(stdout, stderr, max_output_bytes=max_output_bytes)
@@ -590,6 +599,28 @@ def _agent_result_from_terminal(
         stderr=stderr,
         timeout_reason=_optional_str(payload.get("timeout_reason")) or "",
         terminal_head_sha=_optional_str(payload.get("terminal_head_sha")),
+    )
+
+
+def _agent_terminal_failure_result(
+    payload: Mapping[str, Any],
+    *,
+    max_output_bytes: int,
+) -> AgentRuntimeExecResult:
+    state = _operation_state(payload)
+    returncode, default_timeout_reason = _HOSTED_AGENT_TERMINAL_FAILURES[state]
+    stdout = _text_payload_field(payload, "stdout")
+    stderr = _text_payload_field(payload, "stderr")
+    if not stderr:
+        message = _optional_str(payload.get("message"))
+        stderr = f"{message or f'hosted agent operation {state}'}\n"
+    _ensure_output_within_limit(stdout, stderr, max_output_bytes=max_output_bytes)
+    return AgentRuntimeExecResult(
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        timeout_reason=_optional_str(payload.get("timeout_reason")) or default_timeout_reason,
+        terminal_head_sha=None,
     )
 
 

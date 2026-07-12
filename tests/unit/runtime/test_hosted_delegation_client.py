@@ -171,6 +171,57 @@ async def test_agent_delegation_maps_unsuccessful_terminal_without_head_sha(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("state", "expected_returncode", "expected_timeout_reason"),
+    [
+        ("failed", 1, ""),
+        ("cancelled", 130, ""),
+        ("timed_out", 124, COMMAND_TIMEOUT_REASON),
+    ],
+)
+async def test_agent_delegation_terminal_failure_state_overrides_stale_success_payload(
+    state: str,
+    expected_returncode: int,
+    expected_timeout_reason: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": state,
+                    "returncode": 0,
+                    "stdout": "partial agent stdout",
+                    "stderr": "hosted operation did not complete successfully",
+                    "terminal_head_sha": "b" * 40,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request()
+        )
+
+    assert result.returncode == expected_returncode
+    assert result.stdout == "partial agent stdout"
+    assert result.stderr == "hosted operation did not complete successfully"
+    assert result.timeout_reason == expected_timeout_reason
+    assert result.terminal_head_sha is None
+
+
+@pytest.mark.unit
 async def test_agent_delegation_rejects_oversized_poll_response_before_json_parse() -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/agent-runs":
