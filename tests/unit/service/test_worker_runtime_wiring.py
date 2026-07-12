@@ -1061,6 +1061,54 @@ def _stub_worker_runtime_dependencies(
 
 
 @pytest.mark.unit
+def test_pr_monitor_factory_rejects_hosted_adoption_before_forge_client_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted adoption without delegation must fail before building a forge client."""
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+    forge_calls: list[object] = []
+
+    def _unexpected_builder(**_kwargs: object) -> object:
+        raise AssertionError("monitor builder should not run")
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_unexpected_builder,
+        build_release=_unexpected_builder,
+    )
+
+    def _record_forge_client(forge: object, _runner: object) -> _RecordingForgeClient:
+        forge_calls.append(forge)
+        return forge_client
+
+    monkeypatch.setattr(worker_mod, "make_forge_client", _record_forge_client)
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    with pytest.raises(
+        RuntimeError,
+        match="hosted PR adoption requested but hosted validation is not configured",
+    ):
+        factory(
+            object(),
+            WorkspaceProfile(name="default"),
+            SimpleNamespace(
+                auto_merge=True,
+                initial_review_grace_period_seconds=None,
+                task_kind="feature_branch_pr",
+                repo_url="https://github.com/o/r.git",
+                task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            ),
+        )
+
+    assert forge_calls == []
+
+
+@pytest.mark.unit
 def test_pr_monitor_factory_closes_forge_client_when_builder_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

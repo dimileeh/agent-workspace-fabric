@@ -258,6 +258,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.auto_merge and not force_release_monitor
             else build_release_pr_monitor
         )
+        workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
+        if workspace_is_hosted and hosted_validation_delegate is None:
+            raise RuntimeError(
+                "hosted PR adoption requested but hosted validation is not configured"
+            )
         # Build the forge client from the persisted resolved forge (reconstructed,
         # never re-resolved). github → GitHubClient; bitbucket → BitbucketClient
         # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
@@ -278,11 +283,6 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.initial_review_grace_period_seconds is not None
             else profile.monitor.initial_review_grace_period_seconds
         )
-        workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
-        if workspace_is_hosted and hosted_validation_delegate is None:
-            raise RuntimeError(
-                "hosted PR adoption requested but hosted validation is not configured"
-            )
         monitor_kwargs: dict[str, Any] = {
             "session_factory": session_factory,
             "runner": runner,
