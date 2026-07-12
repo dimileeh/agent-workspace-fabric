@@ -1308,7 +1308,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
         assert inspector.calls == ["awf_retry_provider_state_running"]
 
     @pytest.mark.unit
-    async def test_stale_hosted_pr_adoption_without_setup_evidence_does_not_attach_monitor(
+    async def test_stale_hosted_pr_adoption_without_setup_evidence_fails_without_runtime_inspection(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1356,7 +1356,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
 
         await worker._recover_stale_active_executions()  # noqa: SLF001
 
-        assert inspector.calls == [None]
+        assert inspector.calls == []
         assert executor.resume_calls == []
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
@@ -1364,7 +1364,17 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.failure_message is not None
-            assert "no managed runtime containers were found" in ws.failure_message
+            assert "hosted monitor handoff setup did not complete" in ws.failure_message
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            state_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
             recovery_events = await WorkspaceEventRepository(session).list(
                 workspace_id=workspace_id,
                 event_type="workspace.monitor_recovery_started",
@@ -1374,6 +1384,8 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
                 event_type="workspace.active_execution_salvage_monitor_attached",
             )
 
+        assert state_events[0].reason_code == "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+        assert runtime_events == []
         assert recovery_events == []
         assert salvage_events == []
 

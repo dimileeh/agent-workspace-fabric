@@ -112,6 +112,8 @@ from awf.service.workspace_runtime_health import (
     has_open_pr_for_remonitor,
 )
 
+_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+
 
 async def _maybe_recover_stale_active_executions(self: Any) -> None:
     now = monotonic()
@@ -496,9 +498,15 @@ async def _recover_hosted_pr_adoption_active_execution(
                 "worker.hosted_pr_adoption_stale_active_setup_incomplete",
                 workspace_id=candidate.workspace_id,
                 status=candidate.status.value,
-                reason_code="HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE",
+                reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
             )
-            return False
+            await _fail_hosted_pr_adoption_setup_incomplete_after_restart(
+                repo,
+                ws,
+                candidate,
+            )
+            await session.commit()
+            return True
 
         previous_claim = _workspace_claim_snapshot(ws)
         claims_will_clear = any(
@@ -551,6 +559,46 @@ async def _recover_hosted_pr_adoption_active_execution(
         reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     )
     return True
+
+
+async def _fail_hosted_pr_adoption_setup_incomplete_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+) -> None:
+    message = (
+        "hosted monitor handoff setup did not complete before worker restart; "
+        "hosted PR adoption does not have a local Compose runtime to recover"
+    )
+    previous_claim = _workspace_claim_snapshot(ws)
+    claim_cutoff = datetime.now(UTC)
+    payload = {
+        "source": "hosted_pr_adoption",
+        "reason_code": _HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "message": message,
+        "previous_claim": previous_claim,
+        "pr_url": ws.pr_url,
+        "pr_number": ws.pr_number,
+    }
+    transitioned = await repo.transition_if_current(
+        candidate.workspace_id,
+        from_status=candidate.status,
+        to=WorkspaceStatus.failed,
+        reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        payload=payload,
+        extra_conditions=_claim_recheck_conditions(candidate.status, claim_cutoff),
+    )
+    if transitioned is None:
+        return
+    ws = transitioned
+    ws.execution_claimed_by = None
+    ws.execution_claim_expires_at = None
+    ws.monitor_claimed_by = None
+    ws.monitor_claim_expires_at = None
+    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+    ws.failure_reason = FailureReason.infrastructure_failure.value
+    ws.failure_message = message[:2048]
 
 
 async def _has_hosted_monitor_handoff_setup_completed_for_status(
