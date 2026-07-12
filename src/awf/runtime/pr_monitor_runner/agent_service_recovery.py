@@ -25,6 +25,7 @@ from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
     verify_head_object_exists,
@@ -219,8 +220,10 @@ async def _sync_hosted_worktree_to_terminal_head(
             ),
             reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
         )
+    git_env = git_env_without_object_lookup_overrides()
     fetch = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "fetch", "--no-tags", repo_url, head_ref]
+        ["git", "-C", str(worktree_path), "fetch", "--no-tags", repo_url, head_ref],
+        env=git_env,
     )
     if not fetch.ok:
         raise AgentRunError(
@@ -229,7 +232,8 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
         )
     rev_parse = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"]
+        ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"],
+        env=git_env,
     )
     fetched_sha = str(rev_parse.stdout).strip()
     if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
@@ -246,7 +250,8 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
         )
     reset = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "reset", "--hard", fetched_sha]
+        ["git", "-C", str(worktree_path), "reset", "--hard", fetched_sha],
+        env=git_env,
     )
     if not reset.ok:
         raise AgentRunError(

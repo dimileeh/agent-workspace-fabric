@@ -22,9 +22,16 @@ class _Runner:
     def __init__(self, *, fetched_sha: str) -> None:
         self.fetched_sha = fetched_sha
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str] | None] = []
 
-    async def run(self, args: list[str]) -> CommandResult:
+    async def run(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
         self.calls.append(args)
+        self.envs.append(env)
         if args[-1] == "feature/ready":
             return CommandResult(returncode=0, stdout="", stderr="")
         if args[-1] == "FETCH_HEAD":
@@ -137,6 +144,35 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
         ["git", "-C", str(tmp_path / "ws_hosted"), "rev-parse", "FETCH_HEAD"],
         ["git", "-C", str(tmp_path / "ws_hosted"), "reset", "--hard", sha],
     ]
+
+
+@pytest.mark.unit
+async def test_sync_hosted_worktree_scrubs_git_object_lookup_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    monkeypatch.setenv("AWF_HOSTED_SYNC_TEST_ENV", "preserved")
+    sha = "b" * 40
+    runner = _Runner(fetched_sha=sha)
+
+    await _sync_hosted_worktree_to_terminal_head(
+        _runner_context(tmp_path, runner),
+        workspace_id="ws_hosted",
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+            "head_ref": "feature/ready",
+        },
+        terminal_head_sha=sha,
+    )
+
+    assert len(runner.envs) == 3
+    for env in runner.envs:
+        assert env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+        assert env["AWF_HOSTED_SYNC_TEST_ENV"] == "preserved"
 
 
 @pytest.mark.unit
