@@ -56,6 +56,10 @@ from tests.postgres import postgres_test_engine
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
 PRESERVED_EXECUTION_SUBPHASE = "runtime_preserved_after_restart"
+HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE = (
+    "workspace.hosted_monitor_handoff_setup_completed"
+)
+HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED"
 WORKER_TEST_TIMEOUT_SECONDS = 300.0
 
 
@@ -1304,7 +1308,77 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
         assert inspector.calls == ["awf_retry_provider_state_running"]
 
     @pytest.mark.unit
-    async def test_stale_hosted_pr_adoption_with_open_pr_attaches_monitor_without_local_runtime(
+    async def test_stale_hosted_pr_adoption_without_setup_evidence_does_not_attach_monitor(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "hosted-pr-adoption-stale-open-pr-no-setup-evidence",
+            WorkspaceStatus.running,
+            persist_compose_project=False,
+            task_policy=task_policy,
+            node_id="node-a",
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/774"
+            ws.pr_number = 774
+            ws.execution_claimed_by = "hosted-worker-before-restart"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert inspector.calls == [None]
+        assert executor.resume_calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "no managed runtime containers were found" in ws.failure_message
+            recovery_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+            salvage_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+
+        assert recovery_events == []
+        assert salvage_events == []
+
+    @pytest.mark.unit
+    async def test_stale_hosted_pr_adoption_with_setup_evidence_attaches_monitor(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1320,12 +1394,22 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
             node_id="node-a",
         )
         async with session_factory() as session:
-            ws = await WorkspaceRepository(session).get(workspace_id)
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
             assert ws is not None
             ws.pr_url = "https://github.com/example/repo/pull/774"
             ws.pr_number = 774
             ws.execution_claimed_by = "hosted-worker-before-restart"
             ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+                reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+                payload={
+                    "source": "hosted_pr_adoption",
+                    "phase_names": ["setup", "pre_agent"],
+                },
+            )
             await session.commit()
 
         inspector = _RecordingRuntimeInspector(

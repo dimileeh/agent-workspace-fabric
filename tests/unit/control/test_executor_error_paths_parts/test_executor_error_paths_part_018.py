@@ -13,6 +13,8 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
 from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
 )
 from awf.control.executor.monitor_handoff_setup import (
@@ -964,6 +966,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
     @pytest.mark.unit
     async def test_hosted_monitor_handoff_profile_setup_repairs_mirror_hooks_before_preflight(
         self,
+        factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
@@ -973,8 +976,16 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         mirror_path = tmp_path / "mirror.git"
         worktree_path = tmp_path / "worktree"
         mark_failed_calls: list[dict[str, Any]] = []
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await s.commit()
 
         class _Executor:
+            _session_factory = factory
             _hosted_validation = validation
 
             async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
@@ -1005,7 +1016,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
 
         ok = await _run_hosted_monitor_handoff_profile_setup(
             _Executor(),
-            workspace_id="ws-hosted",
+            workspace_id=workspace_id,
             profile=object(),
             compose_project="awf_x",
             compose_file=tmp_path / "compose.yml",
@@ -1016,6 +1027,22 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         assert ok is True
         assert trace == ["hosted_setup", "setup_events", "repair_hooks", "preflight"]
         assert mark_failed_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
+        assert completed_events[0].payload == {
+            "source": "hosted_pr_adoption",
+            "phase_names": ["setup", "pre_agent"],
+            "profile_preflight_passed": True,
+        }
 
     @pytest.mark.unit
     async def test_hosted_monitor_handoff_profile_setup_mirror_repair_failure_blocks_preflight(
@@ -1130,6 +1157,14 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
 
     @pytest.mark.unit
     async def test_hosted_sync_feature_pr_handoff_setup_failure_blocks_monitor(

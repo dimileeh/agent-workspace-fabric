@@ -23,6 +23,10 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+)
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS,
@@ -487,6 +491,14 @@ async def _recover_hosted_pr_adoption_active_execution(
                 reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
             )
             return False
+        if not await _has_hosted_monitor_handoff_setup_completed_for_status(session, ws):
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_setup_incomplete",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code="HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE",
+            )
+            return False
 
         previous_claim = _workspace_claim_snapshot(ws)
         claims_will_clear = any(
@@ -539,6 +551,38 @@ async def _recover_hosted_pr_adoption_active_execution(
         reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     )
     return True
+
+
+async def _has_hosted_monitor_handoff_setup_completed_for_status(
+    session: AsyncSession,
+    ws: Workspace,
+) -> bool:
+    status_started_stmt = (
+        select(WorkspaceEvent.occurred_at)
+        .where(
+            WorkspaceEvent.workspace_id == ws.id,
+            WorkspaceEvent.event_type == "workspace.state_changed",
+            WorkspaceEvent.new_state == ws.status,
+        )
+        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+        .limit(1)
+    )
+    status_started_at = (await session.execute(status_started_stmt)).scalar_one_or_none()
+    setup_completed_stmt = (
+        select(literal(1))
+        .select_from(WorkspaceEvent)
+        .where(
+            WorkspaceEvent.workspace_id == ws.id,
+            WorkspaceEvent.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+            WorkspaceEvent.reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+        )
+        .limit(1)
+    )
+    if status_started_at is not None:
+        setup_completed_stmt = setup_completed_stmt.where(
+            WorkspaceEvent.occurred_at >= _utc_datetime(status_started_at)
+        )
+    return (await session.execute(setup_completed_stmt)).scalar_one_or_none() is not None
 
 
 async def _stale_active_candidate_is_current(

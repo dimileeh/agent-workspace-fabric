@@ -11,6 +11,8 @@ from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_mes
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
     PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
 )
@@ -21,6 +23,7 @@ from awf.control.executor.logging_ops import (
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
@@ -524,11 +527,17 @@ async def _run_hosted_monitor_handoff_profile_setup(
             failure_stage="after successful hosted monitor handoff setup"
         ):
             return False
-        return await _run_monitor_handoff_profile_preflight(
+        preflight_passed = await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,
             validation=validation,
             profile=profile,
+        )
+        if not preflight_passed:
+            return False
+        return await _record_hosted_monitor_handoff_setup_completed(
+            self,
+            workspace_id=workspace_id,
         )
 
     first_fail = setup_result.first_failure
@@ -552,3 +561,28 @@ async def _run_hosted_monitor_handoff_profile_setup(
         details=setup_dependency_details,
     )
     return False
+
+
+async def _record_hosted_monitor_handoff_setup_completed(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> bool:
+    """Persist durable evidence that hosted handoff setup finished successfully."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get_for_update(workspace_id)
+        if ws is None or ws.status != WorkspaceStatus.running.value:
+            return False
+        await repo.add_event(
+            ws,
+            event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+            reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+            payload={
+                "source": "hosted_pr_adoption",
+                "phase_names": ["setup", "pre_agent"],
+                "profile_preflight_passed": True,
+            },
+        )
+        await session.commit()
+    return True
