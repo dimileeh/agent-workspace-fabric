@@ -245,6 +245,10 @@ class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
                 ),
                 timeout_reason=COMMAND_TIMEOUT_REASON,
             )
+        except Exception:
+            if operation is not None:
+                await self._cancel_operation(client, operation)
+            raise
         finally:
             if owns_client:
                 await client.aclose()
@@ -535,6 +539,10 @@ class HostedValidationDelegate:
             if operation is not None:
                 await _cancel_operation(client, self._config, operation)
             raise HostedDelegationProtocolError("hosted validation operation timed out") from exc
+        except Exception:
+            if operation is not None:
+                await _cancel_operation(client, self._config, operation)
+            raise
         finally:
             if owns_client:
                 await client.aclose()

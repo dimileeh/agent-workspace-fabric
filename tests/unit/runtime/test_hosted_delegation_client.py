@@ -760,6 +760,8 @@ async def test_agent_delegation_rejects_non_object_poll_response(
     poll_content: bytes,
     match: str,
 ) -> None:
+    cancel_paths: list[str] = []
+
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/agent-runs":
             return httpx.Response(
@@ -772,11 +774,16 @@ async def test_agent_delegation_rejects_non_object_poll_response(
             )
         if request.method == "GET" and request.url.path == "/v1/operations/op_1":
             return httpx.Response(200, content=poll_content)
+        if request.method == "POST" and request.url.path == "/v1/operations/op_1/cancel":
+            cancel_paths.append(request.url.path)
+            return httpx.Response(202, json={"state": "cancelled"})
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
         with pytest.raises(HostedDelegationProtocolError, match=match):
             await HostedAgentRuntimeExecutor(_config(), client=client).execute(_agent_request())
+
+    assert cancel_paths == ["/v1/operations/op_1/cancel"]
 
 
 @pytest.mark.unit
