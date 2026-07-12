@@ -90,6 +90,7 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
     "cancelled": (130, ""),
     "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, COMMAND_TIMEOUT_REASON),
 }
+_HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
 
 
 class HostedDelegationConfigError(ValueError):
@@ -342,7 +343,7 @@ class HostedValidationDelegate:
                 "run_healthchecks": run_healthchecks,
                 "worktree_path": str(worktree_path) if worktree_path is not None else None,
                 "include_coverage": include_coverage,
-                "pr_identity": dict(pr_identity or {}),
+                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
             },
             poll_response_max_bytes=_response_json_max_bytes(
                 self._config.max_output_bytes,
@@ -384,7 +385,7 @@ class HostedValidationDelegate:
                 "run_healthchecks": False,
                 "include_coverage": True,
                 "parallel_worker_cpu_limit": parallel_worker_cpu_limit,
-                "pr_identity": dict(pr_identity or {}),
+                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
             },
             poll_response_max_bytes=_response_json_max_bytes(
                 self._config.max_output_bytes,
@@ -548,10 +549,36 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
     ):
         value = getattr(request, key)
         if value is not None:
+            if key in _HOSTED_PR_IDENTITY_URL_FIELDS and isinstance(value, str):
+                value = _strip_url_userinfo(value)
             identity[key] = value
     if request.owned_paths:
         identity["owned_paths"] = list(request.owned_paths)
     return identity
+
+
+def _hosted_pr_identity_payload(identity: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(identity)
+    for key in _HOSTED_PR_IDENTITY_URL_FIELDS:
+        value = payload.get(key)
+        if isinstance(value, str):
+            payload[key] = _strip_url_userinfo(value)
+    return payload
+
+
+def _strip_url_userinfo(value: str) -> str:
+    parsed = urlsplit(value)
+    if not parsed.scheme or "@" not in parsed.netloc:
+        return value
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc.rsplit("@", 1)[1],
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def _hosted_validation_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:

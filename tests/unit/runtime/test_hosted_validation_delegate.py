@@ -185,6 +185,72 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
 
 
 @pytest.mark.unit
+async def test_hosted_validation_strips_credentials_from_pr_identity_urls(
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "uv run pytest tests/unit/foo -q",
+                            "returncode": 0,
+                            "duration_seconds": 1.25,
+                            "stdout": "passed\n",
+                            "stderr": "",
+                            "phase": "validate",
+                            "reason_code": "COMMAND_FAILED",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+            pr_identity={
+                "repo_url": "https://base-secret-123@github.com/base/repo.git",
+                "head_repo_url": "https://user:fork-secret-456@github.com/fork/repo.git",
+                "pr_number": 277,
+            },
+        )
+
+    pr_identity = seen["body"]["pr_identity"]
+    assert pr_identity["repo_url"] == "https://github.com/base/repo.git"
+    assert pr_identity["head_repo_url"] == "https://github.com/fork/repo.git"
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "base-secret-123" not in body_blob
+    assert "fork-secret-456" not in body_blob
+
+
+@pytest.mark.unit
 async def test_hosted_validation_profile_without_service_environment_passes_through(
     tmp_path: Path,
 ) -> None:
