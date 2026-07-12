@@ -866,3 +866,51 @@ async def test_agent_delegation_cancellation_posts_cancel_without_leaking_prompt
             await task
 
     assert cancel_paths == ["/v1/operations/op_1/cancel"]
+
+
+@pytest.mark.unit
+async def test_agent_delegation_start_cancellation_raises_without_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = HostedAgentRuntimeExecutor(_config())
+    cancel_called = False
+
+    async def _start(_client: httpx.AsyncClient, _request: AgentRuntimeExecRequest) -> Any:
+        raise asyncio.CancelledError
+
+    async def _cancel_operation(_client: httpx.AsyncClient, _operation: object) -> None:
+        nonlocal cancel_called
+        cancel_called = True
+
+    monkeypatch.setattr(executor, "_start", _start)
+    monkeypatch.setattr(executor, "_cancel_operation", _cancel_operation)
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.execute(_agent_request())
+
+    assert cancel_called is False
+
+
+@pytest.mark.unit
+async def test_agent_delegation_start_timeout_maps_timeout_without_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = HostedAgentRuntimeExecutor(_config(operation_timeout_seconds=7.0))
+    cancel_called = False
+
+    async def _start(_client: httpx.AsyncClient, _request: AgentRuntimeExecRequest) -> Any:
+        raise TimeoutError
+
+    async def _cancel_operation(_client: httpx.AsyncClient, _operation: object) -> None:
+        nonlocal cancel_called
+        cancel_called = True
+
+    monkeypatch.setattr(executor, "_start", _start)
+    monkeypatch.setattr(executor, "_cancel_operation", _cancel_operation)
+
+    result = await executor.execute(_agent_request())
+
+    assert cancel_called is False
+    assert result.returncode == 124
+    assert result.stderr == "hosted delegation operation timed out after 7s"
+    assert result.timeout_reason == COMMAND_TIMEOUT_REASON

@@ -15,6 +15,9 @@ from awf.runtime.hosted_delegation import (
     HostedDelegationConfig,
     HostedDelegationProtocolError,
     HostedValidationDelegate,
+    _hosted_validation_profile_payload,
+    _hosted_validation_sanitize_environment_container,
+    _hosted_validation_sanitize_secret_refs,
 )
 
 
@@ -1663,3 +1666,117 @@ async def test_hosted_validation_cancellation_posts_cancel(tmp_path: Path) -> No
             await task
 
     assert cancel_paths == ["/v1/operations/val_1/cancel"]
+
+
+@pytest.mark.unit
+async def test_hosted_validation_start_cancellation_raises_without_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path)
+    cancel_called = False
+
+    async def _start_operation(
+        _client: httpx.AsyncClient,
+        *,
+        workspace_id: str,
+        start_path: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        assert workspace_id == "ws_hosted"
+        assert start_path == "/v1/validation-runs"
+        assert payload["workspace_id"] == "ws_hosted"
+        raise asyncio.CancelledError
+
+    async def _cancel_operation(_client: httpx.AsyncClient, _operation: object) -> None:
+        nonlocal cancel_called
+        cancel_called = True
+
+    monkeypatch.setattr(delegate, "_start_operation", _start_operation)
+    monkeypatch.setattr(
+        "awf.runtime.hosted_delegation._cancel_operation",
+        _cancel_operation,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+        )
+
+    assert cancel_called is False
+
+
+@pytest.mark.unit
+async def test_hosted_validation_start_timeout_raises_protocol_error_without_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path)
+    cancel_called = False
+
+    async def _start_operation(
+        _client: httpx.AsyncClient,
+        *,
+        workspace_id: str,
+        start_path: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        assert workspace_id == "ws_hosted"
+        assert start_path == "/v1/validation-runs"
+        assert payload["workspace_id"] == "ws_hosted"
+        raise TimeoutError
+
+    async def _cancel_operation(_client: httpx.AsyncClient, _operation: object) -> None:
+        nonlocal cancel_called
+        cancel_called = True
+
+    monkeypatch.setattr(delegate, "_start_operation", _start_operation)
+    monkeypatch.setattr(
+        "awf.runtime.hosted_delegation._cancel_operation",
+        _cancel_operation,
+    )
+
+    with pytest.raises(HostedDelegationProtocolError, match="operation timed out"):
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+        )
+
+    assert cancel_called is False
+
+
+@pytest.mark.unit
+def test_hosted_validation_sanitizers_ignore_malformed_optional_containers() -> None:
+    non_list_secrets: dict[str, object] = {"ref": "local-file:///should-not-change"}
+    mixed_secrets: list[object] = [
+        "not-a-secret-object",
+        {"name": "codex", "ref": "local-file:///home/user/.awf/codex"},
+    ]
+    runtime_container: dict[str, object] = {"environment": "not-a-mapping"}
+    service_container: object = "not-a-mapping"
+
+    _hosted_validation_sanitize_secret_refs(non_list_secrets)
+    _hosted_validation_sanitize_secret_refs(mixed_secrets)
+    _hosted_validation_sanitize_environment_container(runtime_container)
+    _hosted_validation_sanitize_environment_container(service_container)
+
+    assert non_list_secrets == {"ref": "local-file:///should-not-change"}
+    assert mixed_secrets == ["not-a-secret-object", {"name": "codex"}]
+    assert runtime_container == {"environment": "not-a-mapping"}
+    assert service_container == "not-a-mapping"
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_empty_services() -> None:
+    payload = _hosted_validation_profile_payload(
+        WorkspaceProfile.model_validate({"name": "empty-services", "services": []})
+    )
+
+    assert payload["services"] == []
