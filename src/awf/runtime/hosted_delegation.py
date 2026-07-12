@@ -18,9 +18,10 @@ Operation state machine for AWF Cloud implementers:
    ``failed``, ``cancelled``, or ``timed_out``. Every poll response must echo
    the same ``workspace_id`` and ``operation_id``.
 5. Agent repair terminal responses must include ``returncode``, ``stdout``,
-   ``stderr``, optional ``timeout_reason``, and ``terminal_head_sha`` for the
-   remote PR head pushed by the host. Core fetches the PR branch and verifies
-   that SHA before monitor bookkeeping continues.
+   ``stderr``, and optional ``timeout_reason``. Successful agent repair
+   terminals must also include ``terminal_head_sha`` for the remote PR head
+   pushed by the host. Core fetches the PR branch and verifies that SHA before
+   monitor bookkeeping continues.
 6. Validation terminal responses return Core-compatible validation command
    results; CI remains a separate required merge gate.
 
@@ -227,7 +228,11 @@ class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
                 await asyncio.sleep(self._config.poll_interval_seconds)
                 continue
             if state in {"succeeded", "failed", "cancelled", "timed_out"}:
-                if terminal_head_sha_required and not _valid_sha(payload.get("terminal_head_sha")):
+                if (
+                    state == "succeeded"
+                    and terminal_head_sha_required
+                    and not _valid_sha(payload.get("terminal_head_sha"))
+                ):
                     raise HostedDelegationProtocolError(
                         "hosted delegation terminal response missing terminal_head_sha"
                     )

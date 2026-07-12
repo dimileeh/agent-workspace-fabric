@@ -120,11 +120,70 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("state", "returncode", "timeout_reason"),
+    [
+        ("failed", 1, ""),
+        ("cancelled", 130, ""),
+        ("timed_out", 124, COMMAND_TIMEOUT_REASON),
+    ],
+)
+async def test_agent_delegation_maps_unsuccessful_terminal_without_head_sha(
+    state: str,
+    returncode: int,
+    timeout_reason: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": state,
+                    "returncode": returncode,
+                    "stdout": "agent stdout",
+                    "stderr": "agent stderr",
+                    "timeout_reason": timeout_reason,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request()
+        )
+
+    assert result.returncode == returncode
+    assert result.stdout == "agent stdout"
+    assert result.stderr == "agent stderr"
+    assert result.timeout_reason == timeout_reason
+    assert result.terminal_head_sha is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "terminal_payload",
     [
         {"operation_id": "op_1", "workspace_id": "other", "state": "succeeded"},
         {"operation_id": "op_2", "workspace_id": "ws_hosted", "state": "succeeded"},
         {"operation_id": "op_1", "workspace_id": "ws_hosted", "state": "succeeded"},
+        {
+            "operation_id": "op_1",
+            "workspace_id": "ws_hosted",
+            "state": "succeeded",
+            "returncode": 0,
+            "stdout": "ok",
+            "stderr": "",
+        },
     ],
 )
 async def test_agent_delegation_rejects_malformed_or_cross_workspace_terminal_response(
