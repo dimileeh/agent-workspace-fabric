@@ -15,6 +15,17 @@ from awf.runtime.hosted_delegation import (
 from tests.unit.runtime.test_hosted_validation_delegate import _config
 
 
+def _profile_with_two_validation_commands() -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-test",
+            "phases": {
+                "validate": ["ruff check src/awf", "pytest tests/unit -q"],
+            },
+        }
+    )
+
+
 @pytest.mark.unit
 async def test_hosted_validation_sanitizes_remote_phase_before_artifact_write(
     tmp_path: Path,
@@ -266,6 +277,119 @@ async def test_hosted_validation_fails_closed_when_terminal_failure_has_no_comma
     assert command.stderr_path.read_text(encoding="utf-8") == (
         "host-side job did not produce command results\n"
     )
+
+
+@pytest.mark.unit
+async def test_hosted_validation_rejects_success_with_missing_nonblocking_command_evidence(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "ruff check src/awf",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "",
+                            "phase": "validate",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(
+            HostedDelegationProtocolError,
+            match="missing command evidence",
+        ):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=_profile_with_two_validation_commands(),
+                phase_names=("validate",),
+            )
+
+
+@pytest.mark.unit
+async def test_hosted_validation_returns_early_failure_with_missing_later_command_evidence(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "ruff check src/awf",
+                            "returncode": 1,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "ruff failed\n",
+                            "phase": "validate",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=_profile_with_two_validation_commands(),
+            phase_names=("validate",),
+        )
+
+    assert not result.all_passed
+    assert result.first_failure is result.commands[0]
+    assert len(result.commands) == 1
+    command = result.commands[0]
+    assert command.command == "ruff check src/awf"
+    assert command.returncode == 1
+    assert command.blocks_validation
+    assert command.stderr_path.read_text(encoding="utf-8") == "ruff failed\n"
 
 
 @pytest.mark.unit

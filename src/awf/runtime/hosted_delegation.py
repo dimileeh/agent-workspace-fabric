@@ -893,6 +893,7 @@ def _validation_result_from_terminal(
         state == "succeeded"
         and expected_command_count > 0
         and len(commands) < expected_command_count
+        and not any(command.blocks_validation for command in commands)
     ):
         raise HostedDelegationProtocolError(
             "hosted validation terminal response missing command evidence"
