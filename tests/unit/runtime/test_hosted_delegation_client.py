@@ -940,6 +940,48 @@ async def test_agent_delegation_operation_timeout_posts_cancel_and_maps_timeout(
 
 
 @pytest.mark.unit
+async def test_agent_delegation_cancel_preserves_operation_url_query() -> None:
+    cancel_requests: list[tuple[str, str]] = []
+    operation_query = "tenant=a&signature=signed%2Ftoken"
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": (
+                        f"https://hosted.example.test/v1/operations/op_1?{operation_query}"
+                    ),
+                },
+            )
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"operation_id": "op_1", "workspace_id": "ws_hosted", "state": "running"},
+            )
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/operations/op_1/cancel"
+            and request.url.query.decode("ascii") == operation_query
+        ):
+            cancel_requests.append((request.url.path, request.url.query.decode("ascii")))
+            return httpx.Response(202, json={"state": "cancelled"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(
+            _config(operation_timeout_seconds=0.003),
+            client=client,
+        ).execute(_agent_request())
+
+    assert cancel_requests == [("/v1/operations/op_1/cancel", operation_query)]
+    assert result.returncode == 124
+    assert result.timeout_reason == COMMAND_TIMEOUT_REASON
+
+
+@pytest.mark.unit
 async def test_agent_delegation_operation_timeout_ignores_cancel_failure() -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/agent-runs":

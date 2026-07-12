@@ -1303,6 +1303,14 @@ def _join_url(base_url: str, path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path)
 
 
+def _append_url_path_segment(base_url: str, segment: str) -> str:
+    parsed = urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    suffix = segment.strip("/")
+    path = f"{base_path}/{suffix}" if base_path else f"/{suffix}"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
 async def _cancel_operation(
     client: httpx.AsyncClient,
     config: HostedDelegationConfig,
@@ -1310,7 +1318,7 @@ async def _cancel_operation(
 ) -> None:
     try:
         await client.post(
-            _join_url(operation.url, "cancel"),
+            _append_url_path_segment(operation.url, "cancel"),
             headers=_auth_headers(config),
             timeout=config.cancel_timeout_seconds,
         )
