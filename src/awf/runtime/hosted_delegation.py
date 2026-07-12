@@ -86,7 +86,9 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SECRET_VALUE_PATTERN = compile_known_token_re(match_truncated_provider_tokens=False)
-_URL_WITH_CREDENTIALS_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]+@")
+_URL_WITH_USERINFO_PATTERN = re.compile(
+    r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<userinfo>[^/?#\s@]+)@"
+)
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 _HOSTED_VALIDATION_TERMINAL_FAILURES = {
     "failed": (1, "HOSTED_VALIDATION_FAILED"),
@@ -778,10 +780,20 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     return (
         bool(_SECRET_ENV_NAME_PATTERN.search(name))
         or bool(_SECRET_VALUE_PATTERN.search(stripped))
-        or bool(_URL_WITH_CREDENTIALS_PATTERN.search(stripped))
+        or _hosted_validation_value_has_url_credentials(stripped)
         or "-----BEGIN " in stripped
         or "\n" in stripped
     )
+
+
+def _hosted_validation_value_has_url_credentials(value: str) -> bool:
+    for match in _URL_WITH_USERINFO_PATTERN.finditer(value):
+        scheme = match.group("scheme").lower()
+        userinfo = match.group("userinfo")
+        if scheme in {"ssh", "git+ssh"} and userinfo == "git":
+            continue
+        return True
+    return False
 
 
 def _hosted_validation_poll_output_slots(

@@ -600,6 +600,44 @@ def test_hosted_validation_sanitizers_ignore_malformed_optional_containers() -> 
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_passwordless_ssh_env_urls() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-passwordless-ssh",
+            "runtime": {
+                "environment": {
+                    "REPOSITORY_URL": "ssh://git@github.com/org/repo.git",
+                    "PRIVATE_PACKAGE_URL": "git+ssh://git@github.com/org/pkg.git",
+                    "TOKENIZED_PACKAGE_URL": "git+ssh://token@github.com/org/private.git",
+                },
+            },
+            "services": [
+                {
+                    "name": "builder",
+                    "image": "builder:latest",
+                    "environment": {
+                        "DEPENDENCY_URL": "git+ssh://git@github.com/org/dep.git",
+                        "FORK_URL": "ssh://git:fork-secret@github.com/org/fork.git",
+                    },
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "REPOSITORY_URL": "ssh://git@github.com/org/repo.git",
+        "PRIVATE_PACKAGE_URL": "git+ssh://git@github.com/org/pkg.git",
+        "TOKENIZED_PACKAGE_URL": "${TOKENIZED_PACKAGE_URL}",
+    }
+    assert payload["services"][0]["environment"] == {
+        "DEPENDENCY_URL": "git+ssh://git@github.com/org/dep.git",
+        "FORK_URL": "${FORK_URL}",
+    }
+
+
+@pytest.mark.unit
 def test_hosted_validation_sanitizer_preserves_only_env_source_name_refs() -> None:
     secrets: list[object] = [
         {"name": "prefixed", "kind": "env", "provider": "env", "ref": "env/AWF_NPM_TOKEN"},
