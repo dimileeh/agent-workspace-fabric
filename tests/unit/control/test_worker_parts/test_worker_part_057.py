@@ -21,6 +21,7 @@ from tests.unit.control.test_worker_parts.test_worker_part_016 import (
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     _create_active_execution,
+    _create_requested,
     _RecordingExecutor,
     _RecordingRuntimeInspector,
     _TransitioningProvisioner,
@@ -104,6 +105,88 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
             ws = await WorkspaceRepository(session).get(workspace_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            salvage_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+
+        assert len(runtime_events) == 1
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["runtime"]["stack_state"] == "hosted"
+        assert len(salvage_events) == 1
+
+    @pytest.mark.unit
+    async def test_stale_hosted_pr_adoption_provisioning_with_setup_evidence_attaches_monitor_without_runtime_inspection(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "hosted-pr-adoption-stale-provisioning",
+            task_policy=task_policy,
+        )
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            ws.node_id = "node-a"
+            ws.branch_name = f"awf/{workspace_id}"
+            ws.remote_push_branch = ws.branch_name
+            ws.base_commit = "a" * 40
+            ws.pr_url = "https://github.com/example/repo/pull/776"
+            ws.pr_number = 776
+            ws.execution_claimed_by = "hosted-worker-before-restart"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+                reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+                payload={
+                    "source": "hosted_pr_adoption",
+                    "phase_names": ["setup", "pre_agent"],
+                },
+            )
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert inspector.calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.compose_project_name is None
             assert ws.execution_claimed_by is None
             assert ws.execution_claim_expires_at is None
             runtime_events = await WorkspaceEventRepository(session).list(

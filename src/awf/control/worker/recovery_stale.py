@@ -433,7 +433,7 @@ async def _recover_hosted_pr_adoption_active_execution(
     self: Any,
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
-    if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+    if candidate.status not in (WorkspaceStatus.provisioning, *_ACTIVE_EXECUTION_STATUSES):
         return False
     if not pr_adoption_is_hosted(candidate.task_policy):
         return False
