@@ -484,7 +484,7 @@ async def _recover_hosted_pr_adoption_active_execution(
                 reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
             )
             return False
-        if not await _has_hosted_monitor_handoff_setup_completed_for_status(session, ws):
+        if not await _has_hosted_monitor_handoff_setup_completed(session, ws):
             _log.warning(
                 "worker.hosted_pr_adoption_stale_active_setup_incomplete",
                 workspace_id=candidate.workspace_id,
@@ -592,21 +592,10 @@ async def _fail_hosted_pr_adoption_setup_incomplete_after_restart(
     ws.failure_message = message[:2048]
 
 
-async def _has_hosted_monitor_handoff_setup_completed_for_status(
+async def _has_hosted_monitor_handoff_setup_completed(
     session: AsyncSession,
     ws: Workspace,
 ) -> bool:
-    status_started_stmt = (
-        select(WorkspaceEvent.occurred_at)
-        .where(
-            WorkspaceEvent.workspace_id == ws.id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
-            WorkspaceEvent.new_state == ws.status,
-        )
-        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
-        .limit(1)
-    )
-    status_started_at = (await session.execute(status_started_stmt)).scalar_one_or_none()
     setup_completed_stmt = (
         select(literal(1))
         .select_from(WorkspaceEvent)
@@ -617,10 +606,6 @@ async def _has_hosted_monitor_handoff_setup_completed_for_status(
         )
         .limit(1)
     )
-    if status_started_at is not None:
-        setup_completed_stmt = setup_completed_stmt.where(
-            WorkspaceEvent.occurred_at >= _utc_datetime(status_started_at)
-        )
     return (await session.execute(setup_completed_stmt)).scalar_one_or_none() is not None
 
 
