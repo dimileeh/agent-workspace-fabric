@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -14,11 +14,16 @@ import yaml
 from awf.adapters.runtime_executor import AgentRuntimeExecRequest
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
+from awf.common.token_patterns import (
+    TOKEN_ASSIGNMENT_KEY_PATTERN,
+    compile_known_token_re,
+    compile_provider_ref_re,
+)
 from awf.profiles.models import WorkspaceProfile
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+_SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
     rf"^(?:{TOKEN_ASSIGNMENT_KEY_PATTERN})$|"
     r"(?:^|[_-])(?:TOKEN|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|"
@@ -26,12 +31,28 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SECRET_VALUE_PATTERN = compile_known_token_re(match_truncated_provider_tokens=False)
+_PROVIDER_REF_PATTERN = compile_provider_ref_re()
+_HOSTED_COMMAND_ASSIGNMENT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z_][A-Za-z0-9_-]*)"
+    r"\s*[:=]\s*"
+    r"(?P<quote>[\"'])?"
+    r"(?P<value>[^\s\"'`,;)\]]+)"
+    r"(?(quote)\s*(?P=quote)|)",
+    re.IGNORECASE,
+)
+_HOSTED_COMMAND_BEARER_PATTERN = re.compile(
+    r"(?:\bAuthorization\s*:\s*)?\bBearer\s+[A-Za-z0-9._~+/=-]{8,}",
+    re.IGNORECASE,
+)
 _URL_WITH_USERINFO_PATTERN = re.compile(
     r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<userinfo>[^/?#\s@]+)@"
 )
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
 _HOSTED_RENDERED_STACK_SCHEMA = "hosted_validation_rendered_stack.v1"
 _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
+_HOSTED_PHASE_COMMAND_FIELDS = ("setup", "pre_agent", "post_agent", "validate", "cleanup")
+_HOSTED_DATABASE_COMMAND_FIELDS = ("generated_setup", "pre_validation_refresh")
+_HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS = frozenset({"MYSQL_PWD", "PGPASSWORD"})
 _log = get_logger(__name__)
 
 
@@ -252,7 +273,136 @@ def _hosted_validation_profile_payload(
     if isinstance(services, list):
         for service in services:
             _hosted_validation_sanitize_environment_container(service)
+    _hosted_validation_reject_secret_bearing_commands(payload)
     return payload
+
+
+def _hosted_validation_reject_secret_bearing_commands(payload: Mapping[str, Any]) -> None:
+    secret_paths = [
+        path
+        for path, value in _hosted_validation_command_fields(payload)
+        if _hosted_validation_command_value_is_secret(value)
+    ]
+    if secret_paths:
+        joined_paths = ", ".join(secret_paths)
+        raise ValueError(
+            f"hosted profile payload contains secret-bearing command fields: {joined_paths}"
+        )
+
+
+def _hosted_validation_command_fields(payload: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
+    phases = payload.get("phases")
+    if isinstance(phases, Mapping):
+        for field in _HOSTED_PHASE_COMMAND_FIELDS:
+            yield from _hosted_validation_command_list_fields(
+                phases.get(field),
+                f"phases.{field}",
+            )
+
+    database = payload.get("database")
+    if isinstance(database, Mapping):
+        for field in _HOSTED_DATABASE_COMMAND_FIELDS:
+            yield from _hosted_validation_command_list_fields(
+                database.get(field),
+                f"database.{field}",
+            )
+
+    validation = payload.get("validation")
+    if isinstance(validation, Mapping):
+        coverage = validation.get("coverage")
+        if isinstance(coverage, Mapping):
+            yield from _hosted_validation_command_object_fields(
+                coverage.get("command"),
+                "validation.coverage.command",
+            )
+        healthchecks = validation.get("healthchecks")
+        if isinstance(healthchecks, list):
+            for index, healthcheck in enumerate(healthchecks):
+                yield from _hosted_validation_direct_command_field(
+                    healthcheck,
+                    f"validation.healthchecks[{index}].command",
+                )
+
+    services = payload.get("services")
+    if isinstance(services, list):
+        for index, service in enumerate(services):
+            if not isinstance(service, Mapping):
+                continue
+            for field in ("command", "healthcheck_cmd"):
+                yield from _hosted_validation_direct_command_field(
+                    service,
+                    f"services[{index}].{field}",
+                    field=field,
+                )
+
+
+def _hosted_validation_command_list_fields(
+    value: object,
+    path: str,
+) -> Iterator[tuple[str, str]]:
+    if not isinstance(value, list):
+        return
+    for index, item in enumerate(value):
+        yield from _hosted_validation_command_object_fields(item, f"{path}[{index}]")
+
+
+def _hosted_validation_command_object_fields(
+    value: object,
+    path: str,
+) -> Iterator[tuple[str, str]]:
+    yield from _hosted_validation_direct_command_field(
+        value,
+        f"{path}.command",
+    )
+
+
+def _hosted_validation_direct_command_field(
+    value: object,
+    path: str,
+    *,
+    field: str = "command",
+) -> Iterator[tuple[str, str]]:
+    if not isinstance(value, Mapping):
+        return
+    command = value.get(field)
+    if isinstance(command, str):
+        yield path, command
+
+
+def _hosted_validation_command_value_is_secret(value: str) -> bool:
+    return (
+        bool(_SECRET_VALUE_PATTERN.search(value))
+        or bool(_PROVIDER_REF_PATTERN.search(value))
+        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(value))
+        or _hosted_validation_value_has_url_credentials(value)
+        or "-----BEGIN " in value
+        or _hosted_validation_command_has_secret_assignment(value)
+    )
+
+
+def _hosted_validation_command_has_secret_assignment(value: str) -> bool:
+    for match in _HOSTED_COMMAND_ASSIGNMENT_PATTERN.finditer(value):
+        key = match.group("key")
+        if not _hosted_validation_command_assignment_key_is_secret(key):
+            continue
+        assigned_value = match.group("value").strip()
+        if _hosted_validation_command_assignment_value_is_reference(assigned_value):
+            continue
+        return True
+    return False
+
+
+def _hosted_validation_command_assignment_key_is_secret(key: str) -> bool:
+    normalized = key.upper().replace("-", "_")
+    return normalized in _HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS or bool(
+        _SECRET_ENV_NAME_PATTERN.search(key)
+    )
+
+
+def _hosted_validation_command_assignment_value_is_reference(value: str) -> bool:
+    return bool(
+        _ENV_REFERENCE_PATTERN.fullmatch(value) or _SHELL_ENV_REFERENCE_PATTERN.fullmatch(value)
+    )
 
 
 def _hosted_validation_sanitize_secret_refs(secrets: object) -> None:

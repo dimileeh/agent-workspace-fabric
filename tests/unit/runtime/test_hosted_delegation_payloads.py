@@ -239,6 +239,180 @@ def test_hosted_pr_identity_strips_ssh_password_without_username() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("profile_payload", "expected_path", "secret_value"),
+    [
+        (
+            {
+                "name": "hosted-secret-phase-command",
+                "phases": {
+                    "setup": ["NPM_TOKEN=literal-phase-secret npm install"],
+                },
+            },
+            "phases.setup[0].command",
+            "literal-phase-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-generated-setup",
+                "database": {
+                    "generated_setup": ["PGPASSWORD=literal-database-secret alembic upgrade head"],
+                },
+            },
+            "database.generated_setup[0].command",
+            "literal-database-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-private-package-url",
+                "phases": {
+                    "pre_agent": [
+                        "pip install https://user:literal-url-secret@packages.example/pkg"
+                    ],
+                },
+            },
+            "phases.pre_agent[0].command",
+            "literal-url-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-refresh",
+                "database": {
+                    "pre_validation_refresh": ["PASSWORD=literal-refresh-secret ./refresh-db"],
+                },
+            },
+            "database.pre_validation_refresh[0].command",
+            "literal-refresh-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-healthcheck",
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "app",
+                            "command": "curl -H 'Authorization: Bearer abcdefgh123' http://app",
+                        }
+                    ],
+                },
+            },
+            "validation.healthchecks[0].command",
+            "abcdefgh123",
+        ),
+        (
+            {
+                "name": "hosted-secret-coverage",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 1,
+                        "command": "COVERAGE_TOKEN=literal-coverage-secret pytest --cov",
+                    },
+                },
+            },
+            "validation.coverage.command.command",
+            "literal-coverage-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-service-command",
+                "services": [
+                    {
+                        "name": "worker",
+                        "image": "worker:latest",
+                        "command": "API_KEY=literal-service-secret ./start-worker",
+                    }
+                ],
+            },
+            "services[0].command",
+            "literal-service-secret",
+        ),
+        (
+            {
+                "name": "hosted-secret-service-healthcheck",
+                "services": [
+                    {
+                        "name": "worker",
+                        "image": "worker:latest",
+                        "healthcheck_cmd": "PASSWORD=literal-health-secret ./health",
+                    }
+                ],
+            },
+            "services[0].healthcheck_cmd",
+            "literal-health-secret",
+        ),
+    ],
+)
+def test_hosted_validation_profile_payload_rejects_secret_bearing_command_fields(
+    profile_payload: dict[str, object],
+    expected_path: str,
+    secret_value: str,
+) -> None:
+    """Hosted profile payloads reject command strings that would carry credentials."""
+    profile = WorkspaceProfile.model_validate(profile_payload)
+
+    with pytest.raises(ValueError) as excinfo:
+        _hosted_validation_profile_payload(profile)
+
+    message = str(excinfo.value)
+    assert expected_path in message
+    assert secret_value not in message
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_safe_command_fields() -> None:
+    """Non-secret command fields stay available to the hosted validator."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-safe-commands",
+            "services": [
+                {
+                    "name": "worker",
+                    "image": "worker:latest",
+                    "command": "python -m worker",
+                    "healthcheck_cmd": "python -m worker.healthcheck",
+                }
+            ],
+            "phases": {
+                "setup": ["NPM_TOKEN=${NPM_TOKEN} python -m pip install -e ."],
+                "validate": ["pytest tests/unit/runtime/test_hosted_delegation_payloads.py -q"],
+            },
+            "database": {
+                "generated_setup": ["alembic upgrade head"],
+                "pre_validation_refresh": ["python scripts/refresh_fixtures.py"],
+            },
+            "validation": {
+                "healthchecks": [{"name": "app", "command": "curl -fsS http://app:8000/health"}],
+                "coverage": {
+                    "minimum_percent": 1,
+                    "command": "pytest tests/unit/runtime --cov=awf.runtime",
+                },
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["services"][0]["command"] == "python -m worker"
+    assert payload["services"][0]["healthcheck_cmd"] == "python -m worker.healthcheck"
+    assert payload["phases"]["setup"][0]["command"] == (
+        "NPM_TOKEN=${NPM_TOKEN} python -m pip install -e ."
+    )
+    assert payload["phases"]["validate"][0]["command"] == (
+        "pytest tests/unit/runtime/test_hosted_delegation_payloads.py -q"
+    )
+    assert payload["database"]["generated_setup"][0]["command"] == "alembic upgrade head"
+    assert payload["database"]["pre_validation_refresh"][0]["command"] == (
+        "python scripts/refresh_fixtures.py"
+    )
+    assert payload["validation"]["healthchecks"][0]["command"] == (
+        "curl -fsS http://app:8000/health"
+    )
+    assert payload["validation"]["coverage"]["command"]["command"] == (
+        "pytest tests/unit/runtime --cov=awf.runtime"
+    )
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_handles_profiles_without_services() -> None:
     """Profiles with no services still produce a sanitized hosted profile payload."""
     payload = _hosted_validation_profile_payload(WorkspaceProfile(name="hosted-no-services"))
