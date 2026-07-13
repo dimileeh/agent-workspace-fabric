@@ -113,6 +113,7 @@ class ServiceSettings:
     agent_idle_timeout_seconds: float = 3600
     hosted_delegation_base_url: str | None = None
     hosted_delegation_bearer_token: str | None = None
+    hosted_delegation_bearer_token_env: str | None = None
     hosted_delegation_poll_interval_seconds: float = 2.0
     hosted_delegation_operation_timeout_seconds: float = 7200.0
     hosted_delegation_request_timeout_seconds: float = 30.0
@@ -277,6 +278,7 @@ def resolve_service_settings(
             settings,
             worker_env,
         ),
+        hosted_delegation_bearer_token_env=settings.hosted_delegation_bearer_token_env,
         hosted_delegation_poll_interval_seconds=(settings.hosted_delegation_poll_interval_seconds),
         hosted_delegation_operation_timeout_seconds=(
             settings.hosted_delegation_operation_timeout_seconds
@@ -356,24 +358,31 @@ def hosted_delegation_config_from_service_settings(
 
     base_url = _empty_to_none(settings.hosted_delegation_base_url)
     token = _empty_to_none(settings.hosted_delegation_bearer_token)
-    if base_url is None or token is None:
+    token_env = _empty_to_none(settings.hosted_delegation_bearer_token_env)
+    if base_url is None or (token is None and token_env is None):
         if not required:
             return None
         missing: list[str] = []
         if base_url is None:
             missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
-        if token is None:
+        if token is None and token_env is None:
             missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
         raise HostedDelegationConfigError(missing=tuple(missing))
-    return hosted_delegation_config_from_values(
-        base_url=settings.hosted_delegation_base_url,
-        bearer_token=settings.hosted_delegation_bearer_token,
-        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
-        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
-        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
-        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
-        max_output_bytes=settings.hosted_delegation_max_output_bytes,
-    )
+    try:
+        return hosted_delegation_config_from_values(
+            base_url=settings.hosted_delegation_base_url,
+            bearer_token=settings.hosted_delegation_bearer_token,
+            bearer_token_env=settings.hosted_delegation_bearer_token_env,
+            poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
+            operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
+            request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
+            cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
+            max_output_bytes=settings.hosted_delegation_max_output_bytes,
+        )
+    except HostedDelegationConfigError as exc:
+        if not required and exc.missing == (HOSTED_DELEGATION_MISSING_TOKEN,):
+            return None
+        raise
 
 
 def _resolve_hosted_delegation_bearer_token(

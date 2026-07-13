@@ -204,6 +204,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
 
 @pytest.mark.unit
 def test_worker_hosted_delegation_config_is_bounded_and_optional_for_partial_settings(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     settings = dataclasses.replace(
@@ -219,6 +220,23 @@ def test_worker_hosted_delegation_config_is_bounded_and_optional_for_partial_set
     assert config.base_url == "https://hosted.example.test"
     assert config.bearer_token == "secret-token"
     assert config.poll_interval_seconds == 3.0
+
+    monkeypatch.setenv("HOSTED_TOKEN", "env-secret-token")
+    token_env = dataclasses.replace(
+        settings,
+        hosted_delegation_bearer_token=None,
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+    env_config = worker_mod._hosted_delegation_config_for_worker(token_env)
+    assert env_config is not None
+    assert env_config.bearer_token == "env-secret-token"
+
+    missing_token_env = dataclasses.replace(
+        settings,
+        hosted_delegation_bearer_token=None,
+        hosted_delegation_bearer_token_env="MISSING_HOSTED_TOKEN",
+    )
+    assert worker_mod._hosted_delegation_config_for_worker(missing_token_env) is None
 
     base_url_only = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
     assert worker_mod._hosted_delegation_config_for_worker(base_url_only) is None

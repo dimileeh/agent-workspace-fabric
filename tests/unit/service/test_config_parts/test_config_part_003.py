@@ -110,6 +110,25 @@ def test_hosted_delegation_service_settings_match_worker_visible_config() -> Non
 
 
 @pytest.mark.unit
+def test_hosted_delegation_service_settings_resolve_env_named_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOSTED_TOKEN", "service-visible-token")
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(base, environ={})
+    config = hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert settings.hosted_delegation_bearer_token is None
+    assert settings.hosted_delegation_bearer_token_env == "HOSTED_TOKEN"
+    assert config.bearer_token == "service-visible-token"
+
+
+@pytest.mark.unit
 def test_hosted_delegation_token_env_ignores_env_file_only_bare_passthrough(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
