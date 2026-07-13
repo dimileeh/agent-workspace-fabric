@@ -304,6 +304,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
             "workspace_runtime_context": render_workspace_runtime_context(profile),
+            "workspace_profile": profile,
             "provider_recovery_default_model": provider_recovery_default_model,
         }
         try:

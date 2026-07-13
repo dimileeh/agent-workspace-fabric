@@ -278,12 +278,14 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
     adapter = FakeAdapter(runtime_executor=object())
     assert adapter.is_hosted is True
     adapter.queue(exc=timeout_error)
+    profile = WorkspaceProfile(name="hosted-monitor-profile")
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        workspace_profile=profile,
     )
     probe = mocker.patch(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
@@ -313,6 +315,7 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
     probe.assert_not_awaited()
     ensure_project_up.assert_not_awaited()
     assert adapter.hosted_pr_identities
+    assert adapter.profiles == [profile]
     timeout_identity = adapter.hosted_pr_identities[0]
     assert timeout_identity is not None
     assert timeout_identity["repo_url"] == "git@github.com:dimileeh/aira-web.git"

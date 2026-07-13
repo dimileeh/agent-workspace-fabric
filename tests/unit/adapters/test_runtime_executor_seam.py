@@ -38,6 +38,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.db.enums import AgentRuntime
+from awf.profiles.models import WorkspaceProfile
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _COMPOSE_PROJECT = "awf_ws_xyz"
@@ -225,6 +226,27 @@ class TestRuntimeExecutorSeam:
         request = executor.calls[0]
         assert request.compose_project == _COMPOSE_PROJECT
         assert request.compose_file == compose_file
+
+    @pytest.mark.unit
+    async def test_injected_executor_receives_supplied_profile(self) -> None:
+        executor = _RecordingExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+        profile = WorkspaceProfile(name="hosted-repair-profile")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_profile",
+            profile=profile,
+        )
+
+        request = executor.calls[0]
+        assert request.profile is profile
 
     @pytest.mark.unit
     async def test_env_passthrough_names_carry_names_only_no_values(self, tmp_path: Path) -> None:

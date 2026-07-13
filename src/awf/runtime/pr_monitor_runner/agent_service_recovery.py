@@ -106,6 +106,7 @@ async def _run_monitor_agent_with_service_recovery(
                     workspace_id=workspace_id,
                     log_source=log_source,
                     hosted_pr_identity=hosted_pr_identity,
+                    profile=getattr(self, "_workspace_profile", None),
                 )
             else:
                 result = await self._deps.adapter.run(

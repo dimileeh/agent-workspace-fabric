@@ -50,6 +50,7 @@ from awf.profiles.compose import (
     literal_profile_env_from_compose,
 )
 from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres_passwords
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
@@ -348,6 +349,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None = None,
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
+        profile: WorkspaceProfile | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -378,6 +380,7 @@ class AgentAdapter(ABC):
                 workspace_id=workspace_id,
                 log_source=log_source,
                 hosted_pr_identity=hosted_pr_identity,
+                profile=profile,
             )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
@@ -502,6 +505,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         log_source: str,
         hosted_pr_identity: dict[str, Any] | None,
+        profile: WorkspaceProfile | None,
     ) -> AgentRunResult:
         """Delegate agent CLI execution to the injected runtime executor.
 
@@ -660,6 +664,7 @@ class AgentAdapter(ABC):
             env_passthrough_aliases=env_passthrough_aliases,
             file_auth_mount_targets=file_auth_mount_targets,
             profile_env=profile_env,
+            profile=profile,
             compose_project=compose_project,
             compose_file=compose_file,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
