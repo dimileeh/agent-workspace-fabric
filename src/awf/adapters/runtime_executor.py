@@ -21,7 +21,8 @@ them out-of-band. Implementations MUST stream the prompt via stdin
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
@@ -29,6 +30,9 @@ from awf.common.commands import (
     StreamCallback,
 )
 from awf.db.enums import AgentRuntime
+
+if TYPE_CHECKING:
+    from awf.profiles.models import WorkspaceProfile
 
 #: The conventional ``timeout(1)`` exit code the hosted executor uses to signal
 #: a watchdog termination, mirroring the Compose path.
@@ -78,6 +82,12 @@ class AgentRuntimeExecRequest:
     contents; hosted executors resolve any equivalent secret or file mount
     out-of-band from those target identifiers.
 
+    Service context contract: ``profile`` carries a resolved workspace profile
+    when the caller has one, and ``compose_project`` / ``compose_file`` identify
+    the rendered local Compose stack. Hosted executors that need sidecars should
+    use sanitized profile/rendered-stack metadata derived from these fields,
+    not host-local secret values or bind-mount sources.
+
     Streaming contract: when ``on_stdout`` / ``on_stderr`` callbacks are
     supplied, implementations SHOULD invoke them with stdout/stderr chunks as
     they arrive so the log store fills *during* execution (mirroring the
@@ -102,8 +112,20 @@ class AgentRuntimeExecRequest:
     profile_env: tuple[tuple[str, str], ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
+    repo_url: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    head_repo_url: str | None = None
+    head_repo_slug: str | None = None
+    owned_paths: tuple[str, ...] = ()
+    expected_head_sha: str | None = None
     on_stdout: StreamCallback | None = None
     on_stderr: StreamCallback | None = None
+    profile: WorkspaceProfile | None = None
+    compose_project: str | None = None
+    compose_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +147,7 @@ class AgentRuntimeExecResult:
     stdout: str
     stderr: str
     timeout_reason: str = ""
+    terminal_head_sha: str | None = None
 
 
 class AgentRuntimeExecutor(Protocol):

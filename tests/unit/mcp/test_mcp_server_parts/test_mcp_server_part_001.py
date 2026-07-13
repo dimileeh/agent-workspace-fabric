@@ -815,14 +815,22 @@ class TestToolRegistration:
         assert repo_url_schema["maxLength"] == 512
         assert repo_url_schema["minLength"] == 1
 
-        adopt_props = tools["awf_adopt_pull_request_monitor"].inputSchema["properties"]
+        adopt_schema = tools["awf_adopt_pull_request_monitor"].inputSchema
+        adopt_props = adopt_schema["properties"]
         model_schema = _optional_string_schema(adopt_props["model"])
         effort_schema = _optional_string_schema(adopt_props["effort"])
         owned_paths_schema = adopt_props["owned_paths"]
+        execution_schema = adopt_props["execution"]
+        execution_def = adopt_schema["$defs"]["PullRequestMonitorExecutionPolicy"]
+        execution_mode_schema = execution_def["properties"]["mode"]
         assert model_schema["maxLength"] == 128
         assert model_schema["minLength"] == 1
         assert effort_schema["maxLength"] == 64
         assert effort_schema["minLength"] == 1
+        assert execution_schema["$ref"] == "#/$defs/PullRequestMonitorExecutionPolicy"
+        assert execution_def["additionalProperties"] is False
+        assert execution_mode_schema["default"] == "local"
+        assert execution_mode_schema["enum"] == ["local", "hosted"]
         assert owned_paths_schema["maxItems"] == 128
         assert owned_paths_schema["items"] == {
             "maxLength": 512,

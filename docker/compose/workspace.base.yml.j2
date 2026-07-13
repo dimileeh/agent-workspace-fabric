@@ -40,6 +40,7 @@ services:
     {% endif %}{% if s.volumes %}volumes:
       {% for src, tgt in s.volumes %}- {{ (src ~ ":" ~ tgt) | tojson }}
       {% endfor %}
+    {% endif %}{% if s.source_metadata %}x-awf-companion-source: {{ s.source_metadata | tojson }}
     {% endif %}networks:
       - awf_net
     restart: "no"

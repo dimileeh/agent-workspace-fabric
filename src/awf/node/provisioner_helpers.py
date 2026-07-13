@@ -23,13 +23,25 @@ async def _reconcile_active_reservation_for_profile(
     workspace_id: str,
     node_id: str,
     profile: WorkspaceProfile,
+    local_dind_slots: int | None = None,
+    zero_local_capacity: bool = False,
 ) -> None:
     """Update the active resource reservation to match the resolved profile."""
     reservation = await ResourceReservationRepository(session).active_for_workspace(workspace_id)
     if reservation is None:
         return
+    if zero_local_capacity:
+        reservation.node_id = node_id
+        reservation.steady_cpu = 0.0
+        reservation.steady_memory_gb = 0.0
+        reservation.peak_cpu = 0.0
+        reservation.peak_memory_gb = 0.0
+        reservation.dind_slots = 0
+        return
+    if local_dind_slots is None:
+        local_dind_slots = 1 if profile.docker.mode.value == "dind" else 0
     reservation.node_id = node_id
-    reservation.dind_slots = 1 if profile.docker.mode.value == "dind" else 0
+    reservation.dind_slots = local_dind_slots
 
 
 def _stack_secret_lease_mount_metadata(

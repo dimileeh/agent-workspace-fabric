@@ -43,6 +43,7 @@ from awf.common.github_client import RepoRef
 from awf.common.github_retry import GitHubRetryContext, github_retry_context
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig, MonitorState, decide
@@ -100,6 +101,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         workspace_runtime_context: str = "",
+        workspace_profile: WorkspaceProfile | None = None,
         provider_recovery_default_model: str | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -118,6 +120,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
         self._workspace_runtime_context = workspace_runtime_context
+        self._workspace_profile = workspace_profile
         self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
         self._work_dir = _infer_service_work_dir(worktrees_root)

@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -49,6 +50,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             "HEAD object missing during agent cleanup repair",
         ),
         _MonitorMirrorHooksPathRepairFailedError(),
+        _MonitorPolicyBlockedError("hosted validation fix policy blocked"),
     ],
 )
 async def test_pre_push_validation_fix_pass_propagates_recovered_agent_pre_retry_guard_failure(

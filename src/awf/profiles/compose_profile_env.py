@@ -14,6 +14,7 @@ from awf.profiles.compose_env import (
     _compose_resolve_value,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
+    _hosted_env_secret_alias_source_name,
 )
 from awf.profiles.compose_postgres_env import (
     compose_postgres_service_hostnames,
@@ -99,6 +100,8 @@ def literal_profile_env_from_compose(
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
+            continue
+        if _hosted_env_secret_alias_source_name(raw) is not None:
             continue
         if compose_module._is_git_config_protocol_key(key):
             continue

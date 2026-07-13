@@ -4102,6 +4102,10 @@
             ],
             "title": "Effort"
           },
+          "execution": {
+            "$ref": "#/components/schemas/PullRequestMonitorExecutionPolicy",
+            "description": "Explicit PR monitor execution policy. Hosted mode is never inferred from environment or Docker availability."
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
@@ -4414,6 +4418,24 @@
           "logs_url"
         ],
         "title": "PullRequestMonitorAdoptionResponse",
+        "type": "object"
+      },
+      "PullRequestMonitorExecutionPolicy": {
+        "additionalProperties": false,
+        "description": "Execution placement policy for adopted PR monitor repair/validation.",
+        "properties": {
+          "mode": {
+            "default": "local",
+            "description": "Where Core should run PR-monitor repair and post-repair validation. 'local' preserves Docker Compose execution; 'hosted' requires configured hosted delegation and never starts local Compose.",
+            "enum": [
+              "local",
+              "hosted"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "title": "PullRequestMonitorExecutionPolicy",
         "type": "object"
       },
       "QueueDecisionSummaryResponse": {

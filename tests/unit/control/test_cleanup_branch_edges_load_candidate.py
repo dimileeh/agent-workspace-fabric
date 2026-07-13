@@ -57,6 +57,7 @@ async def test_load_terminal_runtime_candidate_returns_none_when_not_terminal(
         "awf_ws",
         "/tmp/ws/compose.yml",
         None,
+        None,
     )
     worker = _load_candidate_worker(row, node_id="node-a")
     monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
@@ -71,7 +72,7 @@ async def test_load_terminal_runtime_candidate_returns_none_when_repo_url_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A terminal row with an empty repo_url is not a candidate."""
-    row = (WorkspaceStatus.failed.value, "", "awf_ws", None, None)
+    row = (WorkspaceStatus.failed.value, "", "awf_ws", None, None, None)
     worker = _load_candidate_worker(row, node_id="node-a")
     monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
 
@@ -89,6 +90,7 @@ async def test_load_terminal_runtime_candidate_returns_none_for_foreign_node(
         WorkspaceStatus.completed.value,
         "https://example.test/r.git",
         "awf_ws",
+        None,
         None,
         "some-other-node",
     )
@@ -110,6 +112,7 @@ async def test_load_terminal_runtime_candidate_builds_candidate_for_local_node(
         "https://example.test/r.git",
         "awf_ws",
         "/tmp/ws/compose.yml",
+        {},
         "node-a",
     )
     worker = _load_candidate_worker(row, node_id="node-a")
@@ -134,6 +137,7 @@ async def test_load_terminal_runtime_candidate_builds_candidate_for_null_node(
     row = (
         WorkspaceStatus.completed.value,
         "https://example.test/r.git",
+        None,
         None,
         None,
         None,

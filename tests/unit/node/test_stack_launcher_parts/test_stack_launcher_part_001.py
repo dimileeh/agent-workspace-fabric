@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.common.git_auth import bitbucket_agent_git_config_entries
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -14,10 +15,15 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import WorktreeLayout
+from awf.node.secret_mounts import SecretLeaseResolutionError
 from awf.node.stack_launcher import (
     ComposeStackLauncher,
     WorkspaceServiceExecutionError,
     WorkspaceStackLaunchRequest,
+)
+from awf.profiles.compose import (
+    hosted_profile_env_passthrough_aliases,
+    literal_profile_env_from_compose,
 )
 from awf.profiles.models import (
     DockerMode,
@@ -28,7 +34,9 @@ from awf.profiles.models import (
 )
 from awf.profiles.resolver import ProfileResolutionError
 from tests.unit.node.test_stack_launcher_parts._helpers import (
+    _DeclaredLeaseResolver,
     _DockerUnavailableCompose,
+    _FailingDeclaredLeaseResolver,
     _layout,
     _RecordingCompanionImageBuilder,
     _RecordingCompose,
@@ -362,6 +370,429 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "rw"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_builds_metadata_without_compose_up() -> None:
+    """Render-only hosted adoption gets stack env metadata without launching Compose."""
+    compose = _RecordingCompose()
+    lease_resolver = _DeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile(
+        name="hosted",
+        runtime=ProfileRuntime(environment={"OLLAMA_HOST": "http://ollama.profile:11434"}),
+        secrets=[
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            }
+        ],
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert paths.compose_file == Path("/tmp/awf-compose/ws_launcher/compose.yml")
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert lease_resolver.calls == []
+    assert compose.specs == []
+    assert compose.waits == []
+    assert len(compose.render_specs) == 1
+    env = dict(compose.render_specs[0].agent_environment)
+    assert env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (("OPENAI_API_KEY", "OPENAI_API_KEY"),)
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_skips_local_secret_resolution() -> None:
+    """Hosted render preserves lease targets without resolving Core-local sources."""
+    compose = _RecordingCompose()
+    lease_resolver = _FailingDeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [
+                {
+                    "name": "npm",
+                    "kind": "env",
+                    "target": "NPM_TOKEN",
+                    "provider": "env",
+                    "ref": "env/NPM_TOKEN",
+                },
+                {
+                    "name": "anthropic",
+                    "kind": "env",
+                    "target": "ANTHROPIC_API_KEY",
+                    "provider": "env",
+                    "ref": "env/MY_ANTHROPIC_TOKEN",
+                },
+                {
+                    "name": "npmrc",
+                    "kind": "mount",
+                    "target": "/home/agent/.npmrc",
+                    "provider": "local-file",
+                    "ref": "file/.npmrc",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert lease_resolver.calls == []
+    assert compose.specs == []
+    assert len(compose.render_specs) == 1
+    env = dict(compose.render_specs[0].agent_environment)
+    assert env["NPM_TOKEN"] != "${NPM_TOKEN}"
+    assert env["ANTHROPIC_API_KEY"] != "${MY_ANTHROPIC_TOKEN}"
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (
+        ("NPM_TOKEN", "NPM_TOKEN"),
+        ("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),
+    )
+    assert "NPM_TOKEN" not in dict(
+        literal_profile_env_from_compose(
+            Path("unused-compose.yml"),
+            compose_env=env,
+            worker_env={},
+        )
+    )
+    assert "ANTHROPIC_API_KEY" not in dict(
+        literal_profile_env_from_compose(
+            Path("unused-compose.yml"),
+            compose_env=env,
+            worker_env={},
+        )
+    )
+    assert paths.secret_lease_mount_metadata["env_count"] == 2
+    assert "total_env_count" not in paths.secret_lease_mount_metadata
+    assert paths.secret_lease_mount_metadata["mount_count"] == 1
+    assert paths.secret_lease_mount_metadata["providers"] == ["env", "local-file"]
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "NPM_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "/home/agent/.npmrc",
+    ]
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_sources() -> None:
+    """Hosted provider leases use real provider source names, not profile refs."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [
+                {
+                    "name": "github",
+                    "kind": "env",
+                    "target": "GH_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+                {
+                    "name": "bitbucket-email",
+                    "kind": "env",
+                    "target": "BITBUCKET_EMAIL",
+                    "provider": "bitbucket",
+                    "ref": "email",
+                },
+                {
+                    "name": "bitbucket-unsupported",
+                    "kind": "env",
+                    "target": "BB_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                    "required": False,
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    env = dict(compose.render_specs[0].agent_environment)
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (
+        ("GH_TOKEN", "AWF_GITHUB_TOKEN"),
+        ("GITHUB_TOKEN", "AWF_GITHUB_TOKEN"),
+        ("BITBUCKET_API_TOKEN", "BITBUCKET_API_TOKEN"),
+        ("BITBUCKET_EMAIL", "BITBUCKET_EMAIL"),
+    )
+    assert paths.secret_lease_mount_metadata["env_count"] == 4
+    assert paths.secret_lease_mount_metadata["providers"] == ["github", "bitbucket"]
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "BITBUCKET_API_TOKEN",
+        "BITBUCKET_EMAIL",
+    ]
+    assert paths.secret_lease_mount_metadata["skipped_unresolved_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_hosted_bitbucket_askpass_wiring() -> None:
+    """Hosted bitbucket token leases keep the agent git auth wiring local Compose uses."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-bitbucket",
+            "secrets": [
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    spec = compose.render_specs[0]
+    env = dict(spec.agent_environment)
+    assert env["BITBUCKET_API_TOKEN"]
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    bitbucket_git_entries = bitbucket_agent_git_config_entries()
+    for index, (key, value) in enumerate(bitbucket_git_entries):
+        assert env[f"GIT_CONFIG_KEY_{index}"] == key
+        assert env[f"GIT_CONFIG_VALUE_{index}"] == value
+    assert env["GIT_CONFIG_COUNT"] == str(len(bitbucket_git_entries))
+
+    askpass_mount = next(
+        mount for mount in spec.auth_mounts if mount.target == "/run/awf/secrets/bb-askpass.sh"
+    )
+    assert askpass_mount.source.startswith("/run/awf/hosted-auth-placeholders/")
+    assert askpass_mount.mode == "ro"
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert (
+        paths.secret_lease_mount_metadata["total_env_count"]
+        == 1 + 2 + (2 * len(bitbucket_git_entries)) + 1
+    )
+    assert paths.secret_lease_mount_metadata["total_env_count"] > 1
+    assert paths.secret_lease_mount_metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_profile_git_askpass_for_bitbucket() -> None:
+    """Hosted bitbucket leases do not override a profile-owned askpass command."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-bitbucket-profile-askpass",
+            "runtime": {"environment": {"GIT_ASKPASS": "/profile/askpass.sh"}},
+            "secrets": [
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    spec = compose.render_specs[0]
+    env = dict(spec.agent_environment)
+    assert env["GIT_ASKPASS"] == "/profile/askpass.sh"
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert not any(mount.target == "/run/awf/secrets/bb-askpass.sh" for mount in spec.auth_mounts)
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert paths.secret_lease_mount_metadata["mount_count"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("secret", "reason_code"),
+    [
+        (
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/1_OPENAI_API_KEY",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "bitbucket-unsupported",
+                "kind": "env",
+                "target": "BB_TOKEN",
+                "provider": "bitbucket",
+                "ref": "token",
+            },
+            "SECRET_LEASE_TARGET_MISMATCH",
+        ),
+        (
+            {
+                "name": "vault",
+                "kind": "env",
+                "target": "VAULT_TOKEN",
+                "provider": "vault",
+                "ref": "token",
+            },
+            "SECRET_LEASE_PROVIDER_UNSUPPORTED",
+        ),
+        (
+            {
+                "name": "github-mount",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "github",
+                "ref": "token",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "local-file-env",
+                "kind": "env",
+                "target": "NPMRC",
+                "provider": "local-file",
+                "ref": "file/.npmrc",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "relative-npmrc",
+                "kind": "mount",
+                "target": "relative-npmrc",
+                "provider": "local-file",
+                "ref": "file/.npmrc",
+            },
+            "SECRET_LEASE_TARGET_MISMATCH",
+        ),
+    ],
+)
+async def test_compose_stack_launcher_render_fails_required_unrenderable_hosted_secret(
+    secret: dict[str, object],
+    reason_code: str,
+) -> None:
+    """Required hosted secret declarations fail before rendering incomplete env."""
+    compose = _RecordingCompose()
+    lease_resolver = _FailingDeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [secret],
+        }
+    )
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        await launcher.render(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+            )
+        )
+
+    assert raised.value.reason_code == reason_code
+    assert raised.value.secret_name == secret["name"]
+    assert lease_resolver.calls == []
+    assert compose.render_specs == []
 
 
 @pytest.mark.unit

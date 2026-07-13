@@ -996,24 +996,35 @@ async def _run_pre_push_validation(
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None
-        result = await self._deps.validation.run_profile_phases(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            phase_names=("post_agent", "validate"),
-            run_healthchecks=True,
-            worktree_path=worktree_path,
-            include_coverage=False,
-        )
-        if _should_run_local_coverage(profile) and result.all_passed:
-            coverage_result = await self._deps.validation.run_profile_coverage(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                phase="coverage",
+        hosted_pr_identity: dict[str, object] | None = None
+        validation_kwargs: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "compose_project": compose_project,
+            "compose_file": compose_file,
+            "profile": profile,
+            "phase_names": ("post_agent", "validate"),
+            "run_healthchecks": True,
+            "worktree_path": worktree_path,
+            "include_coverage": False,
+        }
+        if self._deps.adapter.is_hosted:
+            hosted_pr_identity = await self._hosted_pr_identity_for_workspace(
+                workspace_id,
+                state=state,
             )
+            validation_kwargs["pr_identity"] = hosted_pr_identity
+        result = await self._deps.validation.run_profile_phases(**validation_kwargs)
+        if _should_run_local_coverage(profile) and result.all_passed:
+            coverage_kwargs: dict[str, Any] = {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": compose_file,
+                "profile": profile,
+                "phase": "coverage",
+            }
+            if hosted_pr_identity is not None:
+                coverage_kwargs["pr_identity"] = hosted_pr_identity
+            coverage_result = await self._deps.validation.run_profile_coverage(**coverage_kwargs)
             if coverage_result is not None:
                 result = replace(result, coverage=coverage_result)
     except ComposeExecCleanupError as exc:

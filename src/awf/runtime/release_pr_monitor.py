@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig
@@ -62,6 +63,7 @@ def build_release_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     workspace_runtime_context: str = "",
+    workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
@@ -94,6 +96,7 @@ def build_release_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         workspace_runtime_context=workspace_runtime_context,
+        workspace_profile=workspace_profile,
         provider_recovery_default_model=provider_recovery_default_model,
     )
 
@@ -121,6 +124,7 @@ def build_feature_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     workspace_runtime_context: str = "",
+    workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` for feature→development
@@ -153,5 +157,6 @@ def build_feature_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         workspace_runtime_context=workspace_runtime_context,
+        workspace_profile=workspace_profile,
         provider_recovery_default_model=provider_recovery_default_model,
     )

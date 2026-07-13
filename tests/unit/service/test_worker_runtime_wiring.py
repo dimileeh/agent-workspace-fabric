@@ -19,6 +19,7 @@ import structlog
 from awf.common.config import Settings
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.service import worker as worker_mod
 from awf.service.config import resolve_service_settings
 from tests.unit.service.test_worker import _in_process_merge_coordinator, _settings
@@ -194,9 +195,59 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
     assert created["executor_kwargs"]["compose"] is created["compose"]
     assert created["executor_kwargs"]["validation"] is created["validation"]
+    assert created["executor_kwargs"]["agent_runtime_executor"] is None
+    assert created["executor_kwargs"]["hosted_validation"] is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
+
+
+@pytest.mark.unit
+def test_worker_hosted_delegation_config_is_bounded_and_optional_for_partial_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = dataclasses.replace(
+        _settings(tmp_path),
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token="secret-token",
+        hosted_delegation_poll_interval_seconds=3.0,
+    )
+
+    config = worker_mod._hosted_delegation_config_for_worker(settings)
+
+    assert config is not None
+    assert config.base_url == "https://hosted.example.test"
+    assert config.bearer_token == "secret-token"
+    assert config.poll_interval_seconds == 3.0
+
+    monkeypatch.setenv("HOSTED_TOKEN", "env-secret-token")
+    token_env = dataclasses.replace(
+        settings,
+        hosted_delegation_bearer_token=None,
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+    env_config = worker_mod._hosted_delegation_config_for_worker(token_env)
+    assert env_config is not None
+    assert env_config.bearer_token == "env-secret-token"
+
+    missing_token_env = dataclasses.replace(
+        settings,
+        hosted_delegation_bearer_token=None,
+        hosted_delegation_bearer_token_env="MISSING_HOSTED_TOKEN",
+    )
+    assert worker_mod._hosted_delegation_config_for_worker(missing_token_env) is None
+
+    base_url_only = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
+    assert worker_mod._hosted_delegation_config_for_worker(base_url_only) is None
+
+    token_only = dataclasses.replace(settings, hosted_delegation_base_url=None)
+    assert worker_mod._hosted_delegation_config_for_worker(token_only) is None
+
+    invalid = dataclasses.replace(settings, hosted_delegation_base_url="not-a-url")
+    with pytest.raises(HostedDelegationConfigError) as invalid_excinfo:
+        worker_mod._hosted_delegation_config_for_worker(invalid)
+    assert invalid_excinfo.value.detail() == {"missing": ["AWF_HOSTED_DELEGATION_BASE_URL"]}
 
 
 @pytest.mark.unit
@@ -979,8 +1030,10 @@ def _stub_worker_runtime_dependencies(
             log_store: object,
             usage_sampler: object = None,
             agent_runtime_executor: object = None,
+            hosted_validation: object = None,
         ) -> None:
             """Test helper for  init  ."""
+            del hosted_validation
             created["executor_monitor_factory"] = pr_monitor_factory
 
     class _ControlWorker:
@@ -1026,6 +1079,54 @@ def _stub_worker_runtime_dependencies(
     )
     monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", build_feature)
     monkeypatch.setattr(worker_mod, "build_release_pr_monitor", build_release)
+
+
+@pytest.mark.unit
+def test_pr_monitor_factory_rejects_hosted_adoption_before_forge_client_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted adoption without delegation must fail before building a forge client."""
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+    forge_calls: list[object] = []
+
+    def _unexpected_builder(**_kwargs: object) -> object:
+        raise AssertionError("monitor builder should not run")
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_unexpected_builder,
+        build_release=_unexpected_builder,
+    )
+
+    def _record_forge_client(forge: object, _runner: object) -> _RecordingForgeClient:
+        forge_calls.append(forge)
+        return forge_client
+
+    monkeypatch.setattr(worker_mod, "make_forge_client", _record_forge_client)
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    with pytest.raises(
+        RuntimeError,
+        match="hosted PR adoption requested but hosted validation is not configured",
+    ):
+        factory(
+            object(),
+            WorkspaceProfile(name="default"),
+            SimpleNamespace(
+                auto_merge=True,
+                initial_review_grace_period_seconds=None,
+                task_kind="feature_branch_pr",
+                repo_url="https://github.com/o/r.git",
+                task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            ),
+        )
+
+    assert forge_calls == []
 
 
 @pytest.mark.unit

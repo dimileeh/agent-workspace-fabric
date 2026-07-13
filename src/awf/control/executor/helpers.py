@@ -33,7 +33,7 @@ from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
 )
-from awf.common.workspace_policy import release_sync_source_branch
+from awf.common.workspace_policy import pr_adoption_is_hosted, release_sync_source_branch
 from awf.control.executor.constants import (
     _DEFAULT_RELEASE_SYNC_TARGET_BRANCH,
     _EXCEPTION_TRACEBACK_LIMIT,
@@ -219,10 +219,11 @@ def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
         missing.append(
             f"remote_push_branch (task_kind={ws.task_kind}, branch_name={ws.branch_name!r})"
         )
-    if not ws.compose_project_name:
-        missing.append("compose_project_name")
-    if not ws.compose_file_path:
-        missing.append("compose_file_path")
+    if not pr_adoption_is_hosted(ws.task_policy):
+        if not ws.compose_project_name:
+            missing.append("compose_project_name")
+        if not ws.compose_file_path:
+            missing.append("compose_file_path")
     return missing
 
 

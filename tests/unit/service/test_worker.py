@@ -190,7 +190,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             log_store: object,
             usage_sampler: object = None,
             agent_runtime_executor: object = None,
+            hosted_validation: object = None,
         ) -> None:
+            del hosted_validation
             created["executor"] = self
             created["executor_session_factory"] = session_factory
             created["executor_runner"] = runner

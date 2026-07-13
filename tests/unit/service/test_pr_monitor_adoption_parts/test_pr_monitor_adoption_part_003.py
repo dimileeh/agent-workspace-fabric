@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -28,6 +29,8 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service.pr_monitor_adoption import (
+    _LIVE_ADOPTION_STATUSES,
+    PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
 )
 from tests.postgres import postgres_test_engine
@@ -514,3 +517,88 @@ class TestPullRequestMonitorAdoptionServicePart003:
                     *(f"pr-adopt:exhausted:g{generation}" for generation in range(1, 1000)),
                 ],
             )
+
+    @pytest.mark.unit
+    async def test_concurrent_terminal_history_adoptions_create_one_live_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        fetcher = _MetadataFetcher(_metadata())
+
+        async def _adopt_once() -> Any:
+            async with factory() as session:
+                result = await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=fetcher,
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                    )
+                )
+                await session.commit()
+                return result
+
+        first_result, second_result = await asyncio.gather(_adopt_once(), _adopt_once())
+
+        assert {first_result.workspace_id, second_result.workspace_id} != {first.workspace_id}
+        assert first_result.workspace_id == second_result.workspace_id
+        assert sorted(
+            [first_result.attached_existing, second_result.attached_existing],
+        ) == [False, True]
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            workspaces = await _adoption_workspaces(session)
+            live_workspaces = [
+                workspace for workspace in workspaces if workspace.status in _LIVE_ADOPTION_STATUSES
+            ]
+            assert len(workspaces) == 2
+            assert [workspace.id for workspace in live_workspaces] == [first_result.workspace_id]
+
+    @pytest.mark.unit
+    async def test_replay_with_changed_monitor_policy_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    auto_merge=False,
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        auto_merge=True,
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "existing_auto_merge": False,
+            "requested_auto_merge": True,
+        }

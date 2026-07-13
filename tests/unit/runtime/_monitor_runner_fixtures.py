@@ -32,6 +32,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
@@ -57,6 +58,8 @@ class FakeAdapter(AgentAdapter):
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
+    hosted_pr_identities: list[dict[str, Any] | None] = field(default_factory=list)
+    profiles: list[WorkspaceProfile | None] = field(default_factory=list)
 
     def __init__(  # type: ignore[override]
         self,
@@ -73,6 +76,8 @@ class FakeAdapter(AgentAdapter):
         self._queued = []
         self.calls = []
         self.workspace_ids = []
+        self.hosted_pr_identities = []
+        self.profiles = []
 
     def get_provider(self, model: str | None) -> str:
         """Return the fixed fake provider identifier."""
@@ -102,7 +107,7 @@ class FakeAdapter(AgentAdapter):
             else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
         )
 
-    async def run(  # type: ignore[override]
+    async def run(
         self,
         *,
         compose_project: str,
@@ -111,10 +116,14 @@ class FakeAdapter(AgentAdapter):
         model: str | None = None,
         workspace_id: str | None = None,
         log_source: str = "agent",
+        hosted_pr_identity: dict[str, Any] | None = None,
+        profile: WorkspaceProfile | None = None,
     ) -> AgentRunResult:
         """Consume one queued result and log the dispatched prompt."""
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
+        self.hosted_pr_identities.append(hosted_pr_identity)
+        self.profiles.append(profile)
         if self._log_store and workspace_id:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,
@@ -366,6 +375,7 @@ def make_runner(
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
+    workspace_profile: WorkspaceProfile | None = None,
     gh: Any | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> PullRequestMonitorRunner:
@@ -394,6 +404,7 @@ def make_runner(
         "worktrees_root": worktrees_root,
         "log_store": log_store,
         "provider_recovery_default_model": provider_recovery_default_model,
+        "workspace_profile": workspace_profile,
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root

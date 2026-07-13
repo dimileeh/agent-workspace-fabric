@@ -38,6 +38,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.db.enums import AgentRuntime
+from awf.profiles.models import WorkspaceProfile
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _COMPOSE_PROJECT = "awf_ws_xyz"
@@ -202,6 +203,52 @@ class TestRuntimeExecutorSeam:
         assert request.idle_timeout_seconds is not None and request.idle_timeout_seconds > 0
 
     @pytest.mark.unit
+    async def test_injected_executor_receives_compose_context(self, tmp_path: Path) -> None:
+        executor = _RecordingExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            "services:\n  agent:\n    image: agent:latest\n  backend:\n    image: backend:latest\n",
+            encoding="utf-8",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            workspace_id="ws_context",
+        )
+
+        request = executor.calls[0]
+        assert request.compose_project == _COMPOSE_PROJECT
+        assert request.compose_file == compose_file
+
+    @pytest.mark.unit
+    async def test_injected_executor_receives_supplied_profile(self) -> None:
+        executor = _RecordingExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+        profile = WorkspaceProfile(name="hosted-repair-profile")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_profile",
+            profile=profile,
+        )
+
+        request = executor.calls[0]
+        assert request.profile is profile
+
+    @pytest.mark.unit
     async def test_env_passthrough_names_carry_names_only_no_values(self, tmp_path: Path) -> None:
         executor = _RecordingExecutor()
         adapter = CodexAdapter(
@@ -239,9 +286,13 @@ class TestRuntimeExecutorSeam:
     async def test_hosted_nonzero_exit_raises_agent_run_error_with_classification(
         self,
     ) -> None:
+        terminal_head_sha = "d" * 40
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(
-                returncode=2, stdout="", stderr="codex: please set an auth method"
+                returncode=2,
+                stdout="",
+                stderr="codex: please set an auth method",
+                terminal_head_sha=terminal_head_sha,
             )
         )
         adapter = CodexAdapter(
@@ -264,6 +315,7 @@ class TestRuntimeExecutorSeam:
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
         assert exc.value.details is not None
         assert exc.value.details.get("retryable") is True
+        assert exc.value.details.get("terminal_head_sha") == terminal_head_sha
 
     @pytest.mark.unit
     async def test_hosted_executor_unexpected_exception_becomes_agent_run_error(

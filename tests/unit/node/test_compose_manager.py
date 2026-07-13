@@ -507,6 +507,53 @@ class TestRender:
         assert "image" not in backend
 
     @pytest.mark.unit
+    def test_companion_source_metadata_renders_as_compose_extension(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Hosted companion source metadata is exposed through a service extension."""
+        source_metadata = {
+            "schema": "hosted_companion_source.v1",
+            "name": "backend",
+            "repo_url": "git@github.com:example/backend.git",
+            "base_branch": "development",
+            "commit_sha": "abc123def456",
+            "build_context": "services/api",
+            "dockerfile": "docker/Dockerfile",
+            "env_file": "config/dev.env",
+            "volumes": (
+                {"source": "./fixtures", "target": "/fixtures"},
+                {"source": "cache_data", "target": "/cache"},
+            ),
+        }
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend/services/api",
+                    dockerfile="../../docker/Dockerfile",
+                    env_file="/host/backend/config/dev.env",
+                    source_metadata=source_metadata,
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["build"] == {
+            "context": "/host/backend/services/api",
+            "dockerfile": "../../docker/Dockerfile",
+        }
+        assert backend["x-awf-companion-source"] == {
+            **source_metadata,
+            "volumes": [
+                {"source": "./fixtures", "target": "/fixtures"},
+                {"source": "cache_data", "target": "/cache"},
+            ],
+        }
+
+    @pytest.mark.unit
     def test_companion_prebuilt_image_pins_pull_policy_never(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

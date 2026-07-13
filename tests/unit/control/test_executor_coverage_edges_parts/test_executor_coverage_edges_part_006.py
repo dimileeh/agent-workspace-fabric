@@ -781,6 +781,55 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
 
 
 @pytest.mark.unit
+async def test_final_coverage_gate_uses_supplied_coverage_runner(
+    tmp_path: Path,
+) -> None:
+    local_validation = _CoverageValidation(_coverage(tmp_path, percent=50))
+    hosted_coverage = _coverage(
+        tmp_path,
+        percent=99.5,
+        reason_code="COVERAGE_OK",
+        status="passed",
+    )
+    hosted_validation = _CoverageValidation(hosted_coverage)
+    executor = _executor_with_runner(
+        FakeCommandRunner(),
+        tmp_path,
+        validation=local_validation,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-hosted-runner",
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+    pr_identity = {"pr_number": 764, "head_ref": "awf/ws-hosted"}
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id="ws_hosted_coverage",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=2,
+        workspace_head_sha="head",
+        coverage_runner=hosted_validation,
+        coverage_run_kwargs={"pr_identity": pr_identity},
+    )
+
+    assert result.coverage is hosted_coverage
+    assert result.evidence_status == "executed"
+    assert local_validation.calls == []
+    assert hosted_validation.calls == ["coverage"]
+    assert hosted_validation.kwargs[0]["pr_identity"] == pr_identity
+
+
+@pytest.mark.unit
 async def test_validation_run_evidence_for_conformance_reports_missing_run(
     tmp_path: Path,
 ) -> None:

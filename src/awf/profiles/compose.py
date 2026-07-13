@@ -100,6 +100,7 @@ _HOSTED_FILE_AUTH_MOUNT_TARGETS = frozenset(
         "/home/agent/.ssh",
     }
 )
+_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
 
 
 def _is_secret_like_profile_env_name(name: str) -> bool:
@@ -893,9 +894,9 @@ def hosted_file_auth_mount_targets(
     seen: set[str] = set()
     for volume in volumes:
         target = _compose_volume_target(volume)
-        if (
-            target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS and target not in adc_targets
-        ) or target in seen:
+        if target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS and target not in adc_targets:
+            target = _hosted_placeholder_auth_mount_target(volume)
+        if target is None or target in seen:
             continue
         targets.append(target)
         seen.add(target)
@@ -940,6 +941,32 @@ def _compose_volume_target(volume: object) -> str | None:
         if isinstance(target, str):
             return target
     return None
+
+
+def _compose_volume_source(volume: object) -> str | None:
+    if isinstance(volume, str):
+        parts = volume.split(":")
+        if len(parts) < 2:
+            return None
+        return parts[0]
+    if isinstance(volume, Mapping):
+        source = volume.get("source") or volume.get("src")
+        if isinstance(source, str):
+            return source
+    return None
+
+
+def _hosted_placeholder_auth_mount_target(volume: object) -> str | None:
+    target = _compose_volume_target(volume)
+    source = _compose_volume_source(volume)
+    if (
+        target is None
+        or source is None
+        or not Path(target).is_absolute()
+        or not source.startswith(f"{_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT}/")
+    ):
+        return None
+    return target
 
 
 def _try_agent_environment_keys_from_compose_file(
@@ -1145,6 +1172,14 @@ def hosted_profile_env_passthrough_aliases(
     aliases: list[tuple[str, str]] = []
     for name, raw in compose_env.items():
         if _is_git_config_protocol_key(name):
+            continue
+        hosted_secret_source = _hosted_env_secret_alias_source_name(raw)
+        if hosted_secret_source is not None:
+            if (
+                name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+                and hosted_secret_source not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+            ):
+                aliases.append((name, hosted_secret_source))
             continue
         if raw == _COMPOSE_PASSTHROUGH:
             continue
@@ -1432,6 +1467,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_selected_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
+    _hosted_env_secret_alias_source_name,
 )
 
 # Re-exported for the long-standing ``awf.profiles.compose`` public surface.

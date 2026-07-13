@@ -50,6 +50,7 @@ from awf.profiles.compose import (
     literal_profile_env_from_compose,
 )
 from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres_passwords
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
@@ -158,6 +159,29 @@ def _buffered_output_not_streamed(*, chunks: list[str], buffered: str) -> str:
     return buffered
 
 
+def _hosted_identity_str(identity: dict[str, Any] | None, key: str) -> str | None:
+    if identity is None:
+        return None
+    value = identity.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _hosted_identity_int(identity: dict[str, Any] | None, key: str) -> int | None:
+    if identity is None:
+        return None
+    value = identity.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _hosted_identity_str_tuple(identity: dict[str, Any] | None, key: str) -> tuple[str, ...]:
+    if identity is None:
+        return ()
+    value = identity.get(key)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Structured result of one coding-CLI run."""
@@ -165,6 +189,7 @@ class AgentRunResult:
     returncode: int
     stdout: str
     stderr: str
+    terminal_head_sha: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -323,6 +348,8 @@ class AgentAdapter(ABC):
         model: str | None = None,
         workspace_id: str | None = None,
         log_source: str = "agent",
+        hosted_pr_identity: dict[str, Any] | None = None,
+        profile: WorkspaceProfile | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -352,6 +379,8 @@ class AgentAdapter(ABC):
                 model=model,
                 workspace_id=workspace_id,
                 log_source=log_source,
+                hosted_pr_identity=hosted_pr_identity,
+                profile=profile,
             )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
@@ -475,6 +504,8 @@ class AgentAdapter(ABC):
         model: str | None,
         workspace_id: str | None,
         log_source: str,
+        hosted_pr_identity: dict[str, Any] | None,
+        profile: WorkspaceProfile | None,
     ) -> AgentRunResult:
         """Delegate agent CLI execution to the injected runtime executor.
 
@@ -495,7 +526,6 @@ class AgentAdapter(ABC):
         written to the sinks after ``execute()`` returns, preserving the prior
         buffered-output contract for non-streaming executors.
         """
-        del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
         # Parse the rendered compose file once in a worker thread. The helpers
@@ -634,8 +664,20 @@ class AgentAdapter(ABC):
             env_passthrough_aliases=env_passthrough_aliases,
             file_auth_mount_targets=file_auth_mount_targets,
             profile_env=profile_env,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            repo_url=_hosted_identity_str(hosted_pr_identity, "repo_url"),
+            pr_url=_hosted_identity_str(hosted_pr_identity, "pr_url"),
+            pr_number=_hosted_identity_int(hosted_pr_identity, "pr_number"),
+            base_ref=_hosted_identity_str(hosted_pr_identity, "base_ref"),
+            head_ref=_hosted_identity_str(hosted_pr_identity, "head_ref"),
+            head_repo_url=_hosted_identity_str(hosted_pr_identity, "head_repo_url"),
+            head_repo_slug=_hosted_identity_str(hosted_pr_identity, "head_repo_slug"),
+            owned_paths=_hosted_identity_str_tuple(hosted_pr_identity, "owned_paths"),
+            expected_head_sha=_hosted_identity_str(hosted_pr_identity, "expected_head_sha"),
             on_stdout=on_stdout_cb,
             on_stderr=on_stderr_cb,
         )
@@ -708,6 +750,7 @@ class AgentAdapter(ABC):
                         stdout="".join(streamed_stdout_chunks),
                         stderr=timeout_stderr,
                         timeout_reason=COMMAND_TIMEOUT_REASON,
+                        terminal_head_sha=None,
                     )
             except AgentRunError:
                 raise
@@ -754,6 +797,7 @@ class AgentAdapter(ABC):
                     buffered=hosted_result.stderr,
                 ),
                 timeout_reason=hosted_result.timeout_reason,
+                terminal_head_sha=hosted_result.terminal_head_sha,
             )
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
@@ -857,6 +901,7 @@ class AgentAdapter(ABC):
                 returncode=command_result.returncode,
                 stdout=command_result.stdout,
                 stderr=command_result.stderr,
+                terminal_head_sha=hosted_result.terminal_head_sha,
             )
         provider = self.get_provider(model)
         selected_model = self._selected_model_for_run(model=model)
@@ -894,6 +939,10 @@ class AgentAdapter(ABC):
                 "recommended_action": str(recovery_metadata["recommended_action"]),
                 "provider_recovery": recovery_metadata,
             }
+        if hosted_result.terminal_head_sha:
+            if details is None:
+                details = {}
+            details["terminal_head_sha"] = hosted_result.terminal_head_sha
         raise AgentRunError(
             agent=self.name,
             result=command_result,

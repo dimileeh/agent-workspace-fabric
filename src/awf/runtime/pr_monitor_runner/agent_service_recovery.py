@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -17,19 +17,32 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.common.git_identity import git_safe_directory_config_args
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
     verify_head_object_exists,
 )
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.hosted_pr_identity import (
+    _nonblank_str,
+    hosted_pr_identity_for_workspace,
+)
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -39,24 +52,30 @@ from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS = 300
+_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON = "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
 
 
 async def _run_monitor_agent_with_service_recovery(
@@ -69,18 +88,58 @@ async def _run_monitor_agent_with_service_recovery(
     log_source: str,
     command_evidence: list[str] | None = None,
     operation_start_head: str | None = None,
+    state: Any | None = None,
 ) -> AgentRunResult:
+    hosted_pr_identity = (
+        await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
+        if self._deps.adapter.is_hosted
+        else None
+    )
     restart_attempts = 0
     while True:
         try:
-            result = await self._deps.adapter.run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                workspace_id=workspace_id,
-                log_source=log_source,
-            )
+            if self._deps.adapter.is_hosted:
+                result = await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source=log_source,
+                    hosted_pr_identity=hosted_pr_identity,
+                    profile=getattr(self, "_workspace_profile", None),
+                )
+            else:
+                result = await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source=log_source,
+                )
         except AgentRunError as exc:
+            if self._deps.adapter.is_hosted:
+                terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
+                if terminal_head_sha is not None:
+                    terminal_head_evidence = list(command_evidence or ())
+                    append_command_evidence(
+                        terminal_head_evidence,
+                        stdout=exc.result.stdout,
+                        stderr=exc.result.stderr,
+                    )
+                    synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
+                        self,
+                        workspace_id=workspace_id,
+                        hosted_pr_identity=hosted_pr_identity,
+                        terminal_head_sha=terminal_head_sha,
+                        command_evidence=terminal_head_evidence,
+                        operation_start_head=operation_start_head,
+                    )
+                    if state is not None:
+                        _record_hosted_terminal_head_sync(
+                            state,
+                            synced_head_sha=synced_head_sha,
+                            operation_start_head=operation_start_head,
+                        )
             recovered = await _recover_monitor_agent_service_after_error(
                 self,
                 workspace_id=workspace_id,
@@ -93,6 +152,12 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            if self._deps.adapter.is_hosted and state is not None:
+                hosted_pr_identity = await _hosted_pr_identity_for_workspace(
+                    self,
+                    workspace_id,
+                    state=state,
+                )
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
@@ -123,8 +188,316 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        if self._deps.adapter.is_hosted:
+            if not result.terminal_head_sha:
+                raise AgentRunError(
+                    agent=self._deps.adapter.name,
+                    result=CommandResult(
+                        returncode=1,
+                        stdout=result.stdout,
+                        stderr="hosted repair completed without terminal_head_sha",
+                    ),
+                    reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                )
+            append_command_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
+                self,
+                workspace_id=workspace_id,
+                hosted_pr_identity=hosted_pr_identity,
+                terminal_head_sha=result.terminal_head_sha,
+                command_evidence=command_evidence or (),
+                operation_start_head=operation_start_head,
+            )
+            if state is not None:
+                _record_hosted_terminal_head_sync(
+                    state,
+                    synced_head_sha=synced_head_sha,
+                    operation_start_head=operation_start_head,
+                )
+        else:
+            append_command_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         return cast(AgentRunResult, result)
+
+
+def _record_hosted_terminal_head_sync(
+    state: Any,
+    *,
+    synced_head_sha: str,
+    operation_start_head: str | None,
+) -> None:
+    state.last_push_sha = synced_head_sha
+    start_head = _nonblank_str(operation_start_head)
+    if start_head is not None and synced_head_sha.lower() != start_head.lower():
+        state.hosted_terminal_head_advanced = True
+
+
+async def _hosted_pr_identity_for_workspace(
+    self: Any,
+    workspace_id: str,
+    *,
+    state: Any | None = None,
+) -> dict[str, object]:
+    ws = await self._load_workspace(workspace_id)
+    return hosted_pr_identity_for_workspace(ws, state=state)
+
+
+async def _sync_hosted_worktree_to_terminal_head(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+    terminal_head_sha: str,
+    command_evidence: Sequence[str] = (),
+    operation_start_head: str | None = None,
+) -> str:
+    identity = hosted_pr_identity or {}
+    repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
+        identity.get("repo_url")
+    )
+    head_ref = _nonblank_str(identity.get("head_ref"))
+    worktree_path = self._worktrees_root / workspace_id
+    if repo_url is None or head_ref is None:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="hosted repair missing remote PR head identity",
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+        )
+    git_env = git_env_without_object_lookup_overrides()
+    delta_base_sha = _nonblank_str(operation_start_head)
+    if delta_base_sha is None:
+        current_head = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ],
+            env=git_env,
+        )
+        delta_base_sha = current_head.stdout.strip()
+        if not current_head.ok or not delta_base_sha:
+            raise AgentRunError(
+                agent=self._deps.adapter.name,
+                result=current_head,
+                reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+            )
+    fetch = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            repo_url,
+            head_ref,
+        ],
+        env=git_env,
+    )
+    if not fetch.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=fetch,
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        )
+    rev_parse = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
+        env=git_env,
+    )
+    fetched_sha = str(rev_parse.stdout).strip()
+    if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout=rev_parse.stdout,
+                stderr=(
+                    "hosted repair terminal head mismatch: "
+                    f"reported {terminal_head_sha}, fetched {fetched_sha or '<unknown>'}"
+                ),
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
+        )
+    reset = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "reset",
+            "--hard",
+            fetched_sha,
+        ],
+        env=git_env,
+    )
+    if not reset.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=reset,
+            reason_code="HOSTED_REMOTE_HEAD_SYNC_FAILED",
+        )
+    await _gate_hosted_terminal_head_delta(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_ref=delta_base_sha,
+        terminal_head_sha=fetched_sha,
+        command_evidence=command_evidence,
+    )
+    return fetched_sha
+
+
+async def _gate_hosted_terminal_head_delta(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+    command_evidence: Sequence[str],
+) -> None:
+    changed_paths = await _hosted_terminal_head_delta_paths(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_ref=base_ref,
+        terminal_head_sha=terminal_head_sha,
+    )
+    if not changed_paths:
+        return
+
+    policy_message = await self._refresh_supply_chain_policy_before_push(
+        workspace_id=workspace_id,
+        command_evidence=command_evidence,
+        changed_paths=changed_paths,
+    )
+    if policy_message is not None:
+        raise _MonitorPolicyBlockedError(policy_message)
+
+    try:
+        violations = await _hosted_terminal_head_protected_scope_violations(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            terminal_head_sha=terminal_head_sha,
+            changed_paths=changed_paths,
+        )
+    except ProtectedScopeDiffError as exc:
+        raise _MonitorPolicyBlockedError(
+            f"protected-scope policy could not verify hosted repair terminal head: {exc}",
+            reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        ) from exc
+    if violations:
+        raise _MonitorPolicyBlockedError(
+            quality_gate_violation_message(list(violations)),
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+        )
+
+
+async def _hosted_terminal_head_delta_paths(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+) -> tuple[str, ...]:
+    if base_ref.lower() == terminal_head_sha.lower():
+        return ()
+    diff = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "diff",
+            "--name-status",
+            "-z",
+            f"{base_ref}..{terminal_head_sha}",
+            "--",
+        ],
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not diff.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=diff,
+            reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+        )
+    try:
+        return _changed_paths_from_name_status_z(diff.stdout)
+    except ProtectedScopeDiffError as exc:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout=diff.stdout,
+                stderr=(
+                    f"hosted repair terminal head delta was malformed for {workspace_id}: {exc}"
+                ),
+            ),
+            reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+        ) from exc
+
+
+async def _hosted_terminal_head_protected_scope_violations(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for hosted terminal-head protected-scope validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read hosted terminal-head protected-scope file contents "
+            f"for {terminal_head_sha[:10]}: {exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
+    )
 
 
 async def _rerun_monitor_agent_pre_launch_guards(

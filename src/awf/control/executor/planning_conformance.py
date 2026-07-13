@@ -19,6 +19,11 @@ from typing import Any
 
 from awf.adapters.base import (
     AgentAdapter,
+    AgentRunError,
+    AgentRunResult,
+)
+from awf.common.audit import (
+    redact_audit_text,
 )
 from awf.common.git_identity import (
     git_safe_directory_config_args,
@@ -31,6 +36,10 @@ from awf.control.executor.helpers import (
     _digest_text,
     _read_text_if_present,
     _validation_evidence_json,
+)
+from awf.control.executor.hosted_validation_sync import (
+    _hosted_agent_error_terminal_head_sha,
+    _sync_hosted_validation_fix_head,
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
@@ -252,7 +261,9 @@ async def _run_post_validation_conformance_check(
     handoff: _PlanningValidationHandoff,
     validation_run_id: str,
     base_commit: str,
+    hosted_pr_identity: dict[str, Any] | None = None,
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
+    require_hosted_terminal_head: bool = True,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy. ``profile`` is still needed
@@ -282,20 +293,108 @@ async def _run_post_validation_conformance_check(
     agent_plan_path = agent_artifact_path(handoff.plan_path)
     agent_report_path = agent_artifact_path(handoff.report_path)
     await self._update_subphase(workspace.id, "conformance")
-    compare_result = await adapter.run(
-        compose_project=compose_project,
-        compose_file=compose_file,
-        prompt=build_conformance_prompt(
-            task_prompt=workspace.task_prompt,
-            plan_path=agent_plan_path,
-            report_path=agent_report_path,
-            iteration=handoff.iteration + 1,
-            validation_evidence=evidence,
-            awf_validation_commands=awf_validation_commands,
-        ),
-        model=model,
-        workspace_id=workspace.id,
-    )
+    compare_failure_reason_code = "AGENT_CLI_FAILED"
+    try:
+        compare_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_conformance_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=agent_plan_path,
+                report_path=agent_report_path,
+                iteration=handoff.iteration + 1,
+                validation_evidence=evidence,
+                awf_validation_commands=awf_validation_commands,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+            hosted_pr_identity=hosted_pr_identity,
+            profile=profile,
+        )
+    except AgentRunError as exc:
+        terminal_head_sha = (
+            _hosted_agent_error_terminal_head_sha(exc)
+            if getattr(adapter, "is_hosted", False)
+            else None
+        )
+        if terminal_head_sha is None:
+            raise
+        compare_failure_reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+        compare_result = AgentRunResult(
+            returncode=exc.result.returncode,
+            stdout=exc.result.stdout,
+            stderr=exc.result.stderr,
+            terminal_head_sha=terminal_head_sha,
+        )
+    terminal_head_sha = getattr(compare_result, "terminal_head_sha", None)
+    if getattr(adapter, "is_hosted", False):
+        if not terminal_head_sha and require_hosted_terminal_head:
+            reason_code = "HOSTED_REMOTE_HEAD_MISSING"
+            detail = "hosted conformance run completed without terminal_head_sha"
+            return _PlanningRunFailure(
+                message=(f"hosted post-validation conformance terminal head sync failed: {detail}"),
+                reason_code=reason_code,
+                details={
+                    "hosted_terminal_head_sync": {
+                        "validation_run_id": validation_run_id,
+                        "terminal_head_sha": terminal_head_sha,
+                        "returncode": 1,
+                        "stdout": redact_audit_text(compare_result.stdout, limit=400),
+                        "stderr": detail,
+                    },
+                },
+            )
+        if terminal_head_sha:
+            sync_result = await _sync_hosted_validation_fix_head(
+                self,
+                worktree_path=worktree_path,
+                hosted_pr_identity=hosted_pr_identity,
+                terminal_head_sha=terminal_head_sha,
+            )
+            if not sync_result.ok:
+                reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+                detail = sync_result.stderr or sync_result.stdout or reason_code
+                return _PlanningRunFailure(
+                    message=(
+                        "hosted post-validation conformance terminal head sync failed: "
+                        f"{redact_audit_text(detail, limit=400)}"
+                    ),
+                    reason_code=reason_code,
+                    details={
+                        "hosted_terminal_head_sync": {
+                            "validation_run_id": validation_run_id,
+                            "terminal_head_sha": terminal_head_sha,
+                            "returncode": sync_result.returncode,
+                            "stdout": redact_audit_text(sync_result.stdout, limit=400),
+                            "stderr": redact_audit_text(sync_result.stderr, limit=400),
+                        },
+                    },
+                )
+            if hosted_pr_identity is not None:
+                hosted_pr_identity["expected_head_sha"] = (
+                    sync_result.stdout.strip() or terminal_head_sha
+                )
+    if compare_result.returncode != 0:
+        output = compare_result.stderr.strip() or compare_result.stdout.strip() or "<no output>"
+        return _PlanningRunFailure(
+            message=(
+                "post-validation conformance agent failed "
+                f"({compare_failure_reason_code}, exit {compare_result.returncode}): "
+                f"{redact_audit_text(output, limit=1000)}"
+            )[:2000],
+            reason_code=compare_failure_reason_code,
+            details={
+                "conformance": {
+                    "phase": "post_validation",
+                    "reason_code": compare_failure_reason_code,
+                    "returncode": compare_result.returncode,
+                    "stdout": redact_audit_text(compare_result.stdout.strip(), limit=1000),
+                    "stderr": redact_audit_text(compare_result.stderr.strip(), limit=1000),
+                    "terminal_head_sha": terminal_head_sha,
+                },
+                "validation_run_id": validation_run_id,
+            },
+        )
     after_compare = await self._changed_paths(worktree_path)
     committed_compare = (
         await self._committed_paths_since(worktree_path, before_compare_head)

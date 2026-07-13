@@ -29,6 +29,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -304,9 +305,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
+            hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
+            companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
                 validate_companion_service_graph(
@@ -318,6 +321,22 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     docker_mode=profile.docker.mode,
                 )
                 companion_graph_prevalidated = True
+            if self._stack_launcher is not None and hosted_pr_adoption:
+                materialized_companions = await self._materialize_companions(
+                    workspace_id=workspace_id,
+                    companions=companion_specs,
+                    default_base_branch=ws.branch_base,
+                )
+                stack_paths = await self._stack_launcher.render(
+                    WorkspaceStackLaunchRequest(
+                        workspace_id=workspace_id,
+                        layout=layout,
+                        profile=profile,
+                        companions=materialized_companions,
+                        companion_graph_prevalidated=companion_graph_prevalidated,
+                    )
+                )
+            elif self._stack_launcher is not None:
                 try:
                     await self._check_companion_host_ports(
                         task_policy=ws.task_policy,
@@ -794,10 +813,12 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
+            hosted_pr_adoption = pr_adoption_is_hosted(persisted.task_policy)
             persisted.node_id = self._config.node_id
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
-            persisted.compose_project_name = f"awf_{workspace_id}"
+            if not hosted_pr_adoption:
+                persisted.compose_project_name = f"awf_{workspace_id}"
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
                 persisted.remote_push_branch = remote_push_branch
@@ -810,24 +831,25 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
-                companion_secret_metadata = _stack_companion_env_secret_event_payload(
-                    workspace_id=workspace_id,
-                    stack_paths=stack_paths,
-                )
-                if companion_secret_metadata is not None:
-                    await repo.add_event(
-                        persisted,
-                        event_type="workspace.companion_env_secret_metadata",
-                        reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
-                        payload=companion_secret_metadata,
-                    )
-                await SecretLeaseService(session).record_secret_lease_mounts(
-                    persisted,
-                    mount_metadata=_stack_secret_lease_mount_metadata(
+                if not hosted_pr_adoption:
+                    companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,
                         stack_paths=stack_paths,
-                    ),
-                )
+                    )
+                    if companion_secret_metadata is not None:
+                        await repo.add_event(
+                            persisted,
+                            event_type="workspace.companion_env_secret_metadata",
+                            reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
+                            payload=companion_secret_metadata,
+                        )
+                    await SecretLeaseService(session).record_secret_lease_mounts(
+                        persisted,
+                        mount_metadata=_stack_secret_lease_mount_metadata(
+                            workspace_id=workspace_id,
+                            stack_paths=stack_paths,
+                        ),
+                    )
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True
@@ -838,6 +860,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 workspace_id=workspace_id,
                 node_id=self._config.node_id,
                 profile=profile,
+                zero_local_capacity=hosted_pr_adoption,
             )
 
             if execution_claim_epoch is not None:

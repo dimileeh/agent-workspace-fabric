@@ -9,12 +9,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
+from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
+from awf.control.executor.types import _RebaseRecoveryResult
+from awf.control.quality_gates_common import QualityGateViolation
 from awf.db.enums import (
+    AgentRuntime,
     OperationStatus,
+    WorkspaceStatus,
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationResult
@@ -257,10 +263,17 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
         "_validation_tier_for_workspace",
         lambda *_args, **_kwargs: 1,
     )
+    pre_validation_clean_check = AsyncMock(return_value=setup_check)
+    post_fix_clean_check = AsyncMock(return_value=dirty_fix_pass_check)
     monkeypatch.setattr(
         executor_execution_validation,
         "check_validation_worktree_clean",
-        AsyncMock(side_effect=[setup_check, dirty_fix_pass_check]),
+        pre_validation_clean_check,
+    )
+    monkeypatch.setattr(
+        executor_validation_fix_helpers,
+        "check_validation_worktree_clean",
+        post_fix_clean_check,
     )
     monkeypatch.setattr(
         executor_execution_validation,
@@ -294,6 +307,8 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
 
     assert result.stop
     assert result.successful_validation_run_id is None
+    pre_validation_clean_check.assert_awaited_once()
+    post_fix_clean_check.assert_awaited_once()
     executor._start_validation_run.assert_awaited_once()
     executor._finish_validation_run.assert_awaited_once()
     finish_run_kwargs = executor._finish_validation_run.await_args.kwargs
@@ -306,6 +321,667 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_kwargs["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
     assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("hosted_fix_nonzero", [False, True])
+async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hosted_fix_nonzero: bool,
+) -> None:
+    """Hosted validation fix passes must pass PR identity and sync the remote fix."""
+    profile = WorkspaceProfile.model_validate({"name": "hosted-validation-fix-pass"})
+    initial_head = "c" * 40
+    terminal_head = "d" * 40
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "hosted-validation-fix-pass"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Hosted validation fix",
+        agent="codex",
+        owned_paths=("src/awf",),
+        id="ws_hosted_fix",
+        task_tag=None,
+        task_policy={
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+                "pr_url": "https://github.com/example/repo/pull/764",
+                "pr_number": 764,
+                "base_ref": "main",
+                "head_ref": "awf/pr-764",
+                "head_repo_url": "https://github.com/fork/repo.git",
+                "head_sha": initial_head,
+            }
+        },
+        repo_url="https://github.com/example/repo.git",
+        pr_url="https://github.com/example/repo/pull/764",
+        pr_number=764,
+        branch_base="main",
+        remote_push_branch="awf/pr-764",
+        monitor_last_commit_sha=initial_head,
+    )
+
+    class _UnexpectedLocalValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise AssertionError("hosted PR adoption must use the hosted validator")
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return ValidationResult(
+                commands=[
+                    _command_result(
+                        tmp_path,
+                        returncode=1 if len(self.calls) == 1 else 0,
+                    )
+                ]
+            )
+
+    hosted_validation = _HostedValidation()
+    runner = SimpleNamespace(
+        run=AsyncMock(
+            side_effect=[
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{terminal_head}\n", stderr=""),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        )
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(side_effect=[initial_head, terminal_head]),
+        _start_validation_run=AsyncMock(side_effect=["vr-hosted-1", "vr-hosted-2"]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_UnexpectedLocalValidation(),
+        _hosted_validation=hosted_validation,
+        _runner=runner,
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+    )
+    hosted_fix_result = CommandResult(
+        returncode=1 if hosted_fix_nonzero else 0,
+        stdout="hosted fix stdout",
+        stderr="hosted fix stderr" if hosted_fix_nonzero else "",
+    )
+    adapter = SimpleNamespace(is_hosted=True)
+    if hosted_fix_nonzero:
+        adapter.run = AsyncMock(
+            side_effect=AgentRunError(
+                agent=AgentRuntime.codex,
+                result=hosted_fix_result,
+                reason_code="AGENT_CLI_FAILED",
+                details={"terminal_head_sha": terminal_head},
+            )
+        )
+    else:
+        adapter.run = AsyncMock(
+            return_value=SimpleNamespace(
+                stdout=hosted_fix_result.stdout,
+                stderr=hosted_fix_result.stderr,
+                terminal_head_sha=terminal_head,
+            )
+        )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref=initial_head,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_hosted_fix",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_hosted_fix",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "monitor", "recovery_mode": "validate"},
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert adapter.run.await_args.kwargs["profile"] is profile
+    assert adapter.run.await_args.kwargs["hosted_pr_identity"]["head_ref"] == "awf/pr-764"
+    assert adapter.run.await_args.kwargs["hosted_pr_identity"]["expected_head_sha"] == initial_head
+    assert runner.run.await_count == 3
+    assert runner.run.await_args_list[0].args[0][-4:] == [
+        "fetch",
+        "--no-tags",
+        "https://github.com/fork/repo.git",
+        "awf/pr-764",
+    ]
+    assert runner.run.await_args_list[1].args[0][-2:] == ["rev-parse", "FETCH_HEAD"]
+    assert runner.run.await_args_list[2].args[0][-3:] == ["reset", "--hard", terminal_head]
+    assert hosted_validation.calls[0]["pr_identity"]["expected_head_sha"] == initial_head
+    assert hosted_validation.calls[1]["pr_identity"]["expected_head_sha"] == terminal_head
+
+
+@pytest.mark.unit
+async def test_hosted_rebase_recovery_refreshes_pr_identity_before_validation_and_fix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted rebase recovery must validate and fix against the rebased PR head."""
+    profile = WorkspaceProfile.model_validate({"name": "hosted-rebase-recovery-validation"})
+    stale_head = "b" * 40
+    rebased_head = "c" * 40
+    terminal_head = "d" * 40
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "hosted-rebase-recovery-validation"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Hosted rebase validation",
+        agent="codex",
+        owned_paths=("src/awf",),
+        id="ws_hosted_rebase",
+        task_tag=None,
+        task_policy={
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+                "pr_url": "https://github.com/example/repo/pull/764",
+                "pr_number": 764,
+                "base_ref": "main",
+                "head_ref": "awf/pr-764",
+                "head_repo_url": "https://github.com/fork/repo.git",
+                "head_sha": stale_head,
+            }
+        },
+        repo_url="https://github.com/example/repo.git",
+        pr_url="https://github.com/example/repo/pull/764",
+        pr_number=764,
+        branch_base="main",
+        remote_push_branch="awf/pr-764",
+        monitor_last_commit_sha=stale_head,
+    )
+
+    class _UnexpectedLocalValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise AssertionError("hosted PR adoption must use the hosted validator")
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return ValidationResult(
+                commands=[
+                    _command_result(
+                        tmp_path,
+                        returncode=1 if len(self.calls) == 1 else 0,
+                    )
+                ]
+            )
+
+    hosted_validation = _HostedValidation()
+    runner = SimpleNamespace(
+        run=AsyncMock(
+            side_effect=[
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{terminal_head}\n", stderr=""),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        )
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(side_effect=[rebased_head, terminal_head]),
+        _start_validation_run=AsyncMock(side_effect=["vr-rebase-1", "vr-rebase-2"]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_UnexpectedLocalValidation(),
+        _hosted_validation=hosted_validation,
+        _runner=runner,
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+    )
+    adapter = SimpleNamespace(
+        is_hosted=True,
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                stdout="hosted fix stdout",
+                stderr="",
+                terminal_head_sha=terminal_head,
+            )
+        ),
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref=rebased_head,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_hosted_rebase",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="a" * 40,
+        expected_branch="awf/ws_hosted_rebase",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "monitor", "recovery_mode": "rebase_only"},
+        rebase_recovery_result=_RebaseRecoveryResult(
+            base_sha="a" * 40,
+            head_sha=rebased_head,
+        ),
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert hosted_validation.calls[0]["pr_identity"]["expected_head_sha"] == rebased_head
+    assert adapter.run.await_args.kwargs["hosted_pr_identity"]["expected_head_sha"] == rebased_head
+    assert hosted_validation.calls[1]["pr_identity"]["expected_head_sha"] == terminal_head
+
+
+@pytest.mark.unit
+async def test_hosted_validation_fix_pass_gates_terminal_head_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted validation fixes must gate paths changed by the synced terminal head."""
+    profile = WorkspaceProfile.model_validate({"name": "hosted-validation-fix-gates"})
+    initial_head = "c" * 40
+    terminal_head = "d" * 40
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "hosted-validation-fix-gates"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Hosted validation fix gates",
+        agent="codex",
+        owned_paths=("src/awf",),
+        id="ws_hosted_fix_gates",
+        task_tag=None,
+        task_policy={
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+                "pr_url": "https://github.com/example/repo/pull/764",
+                "pr_number": 764,
+                "base_ref": "main",
+                "head_ref": "awf/pr-764",
+                "head_repo_url": "https://github.com/fork/repo.git",
+                "head_sha": initial_head,
+            }
+        },
+        repo_url="https://github.com/example/repo.git",
+        pr_url="https://github.com/example/repo/pull/764",
+        pr_number=764,
+        branch_base="main",
+        remote_push_branch="awf/pr-764",
+        monitor_last_commit_sha=initial_head,
+    )
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return ValidationResult(
+                commands=[
+                    _command_result(
+                        tmp_path,
+                        returncode=1 if len(self.calls) == 1 else 0,
+                    )
+                ]
+            )
+
+    hosted_validation = _HostedValidation()
+    runner = SimpleNamespace(
+        run=AsyncMock(
+            side_effect=[
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{terminal_head}\n", stderr=""),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        )
+    )
+    violation = QualityGateViolation(
+        path="pyproject.toml",
+        protected_pattern="pyproject.toml",
+        section="project",
+        line=1,
+    )
+
+    def _find_protected_quality_gate_changes(**kwargs: object) -> list[QualityGateViolation]:
+        assert kwargs["changed_paths"] == ["pyproject.toml"]
+        return [violation]
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "find_protected_quality_gate_changes",
+        _find_protected_quality_gate_changes,
+    )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(side_effect=[initial_head, terminal_head]),
+        _start_validation_run=AsyncMock(side_effect=["vr-hosted-1", "vr-hosted-2"]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=SimpleNamespace(run_profile_phases=AsyncMock()),
+        _hosted_validation=hosted_validation,
+        _runner=runner,
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False, findings=()),
+        ),
+        _committed_and_staged_output_is_plan_only=AsyncMock(return_value=False),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _active_operator_grant_specs=AsyncMock(return_value=[]),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        enter_blocked_for_protected_violation=AsyncMock(return_value=True),
+    )
+    adapter = SimpleNamespace(
+        is_hosted=True,
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                stdout="hosted fix stdout",
+                stderr="",
+                terminal_head_sha=terminal_head,
+            )
+        ),
+    )
+    git_in_worktree = AsyncMock(
+        return_value=CommandResult(returncode=0, stdout="pyproject.toml\n", stderr="")
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref=initial_head,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_hosted_fix_gates",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_hosted_fix_gates",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "monitor", "recovery_mode": "validate"},
+        rebase_recovery_result=None,
+        git_in_worktree=git_in_worktree,
+        execution_owner_id="worker-hosted",
+    )
+
+    assert result.stop
+    git_in_worktree.assert_awaited_once_with(
+        ["diff", "--name-only", f"{initial_head}..{terminal_head}"]
+    )
+    executor._refresh_supply_chain_policy_for_workspace.assert_awaited_once()
+    supply_kwargs = executor._refresh_supply_chain_policy_for_workspace.await_args.kwargs
+    assert supply_kwargs["changed_paths"] == ["pyproject.toml"]
+    executor._committed_and_staged_output_is_plan_only.assert_awaited_once_with(
+        worktree_path=tmp_path / "worktree",
+        base_commit=initial_head,
+        staged_paths=["pyproject.toml"],
+    )
+    executor._protected_file_diffs_for_staged_paths.assert_awaited_once_with(
+        worktree_path=tmp_path / "worktree",
+        base_ref=initial_head,
+        changed_paths=["pyproject.toml"],
+        owned_paths=["src/awf"],
+    )
+    executor.enter_blocked_for_protected_violation.assert_awaited_once()
+    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
+    assert block_kwargs["from_status"] == WorkspaceStatus.validating
+    assert block_kwargs["resume_phase"] == "validation_fix_cycle"
+    assert block_kwargs["execution_owner_id"] == "worker-hosted"
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert len(hosted_validation.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("identity", "queued_results", "expected_reason", "expected_calls"),
+    [
+        (
+            {},
+            [],
+            "HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+            0,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [CommandResult(returncode=128, stdout="", stderr="fetch failed")],
+            "HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            1,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'e' * 40}\n", stderr=""),
+            ],
+            "HOSTED_REMOTE_HEAD_MISMATCH",
+            2,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'d' * 40}\n", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="reset failed"),
+            ],
+            "HOSTED_REMOTE_HEAD_SYNC_FAILED",
+            3,
+        ),
+    ],
+)
+async def test_hosted_validation_fix_head_sync_reports_failures(
+    tmp_path: Path,
+    identity: dict[str, object],
+    queued_results: list[CommandResult],
+    expected_reason: str,
+    expected_calls: int,
+) -> None:
+    """Hosted fix head sync failures should keep actionable reason codes."""
+    runner = SimpleNamespace(run=AsyncMock(side_effect=queued_results))
+    result = await executor_execution_validation._sync_hosted_validation_fix_head(  # noqa: SLF001
+        SimpleNamespace(_runner=runner),
+        worktree_path=tmp_path / "worktree",
+        hosted_pr_identity=identity,
+        terminal_head_sha="d" * 40,
+    )
+
+    assert not result.ok
+    assert result.reason_code == expected_reason
+    assert runner.run.await_count == expected_calls
+
+
+@pytest.mark.unit
+def test_hosted_agent_error_terminal_head_prefers_result_sha_over_details() -> None:
+    """Hosted fix-pass sync should use the executor result head over stale details."""
+    result = SimpleNamespace(
+        returncode=1,
+        stdout="hosted pushed fix",
+        stderr="agent exited after push",
+        terminal_head_sha="d" * 40,
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=result,  # type: ignore[arg-type]
+        details={"terminal_head_sha": "e" * 40},
+    )
+
+    assert executor_execution_validation._hosted_agent_error_terminal_head_sha(exc) == "d" * 40
 
 
 @pytest.mark.unit
