@@ -433,6 +433,23 @@ async def _recover_hosted_pr_adoption_active_execution(
     self: Any,
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
+    if candidate.status == WorkspaceStatus.provisioning:
+        if not pr_adoption_is_hosted(candidate.task_policy):
+            return False
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return True
+            if not pr_adoption_is_hosted(ws.task_policy):
+                return False
+        snapshot = RuntimeSnapshot(
+            stack_state="hosted",
+            reason="hosted PR adoption provisioning does not use a local Compose runtime",
+        )
+        await self._record_stale_active_execution_detected(candidate, snapshot)
+        return True
+
     if candidate.status == WorkspaceStatus.ready:
         if not pr_adoption_is_hosted(candidate.task_policy):
             return False
@@ -443,7 +460,7 @@ async def _recover_hosted_pr_adoption_active_execution(
                 return True
             return pr_adoption_is_hosted(ws.task_policy)
 
-    if candidate.status not in (WorkspaceStatus.provisioning, *_ACTIVE_EXECUTION_STATUSES):
+    if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
         return False
     if not pr_adoption_is_hosted(candidate.task_policy):
         return False

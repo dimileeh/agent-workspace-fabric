@@ -123,7 +123,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
         assert len(salvage_events) == 1
 
     @pytest.mark.unit
-    async def test_stale_hosted_pr_adoption_provisioning_with_setup_evidence_attaches_monitor_without_runtime_inspection(
+    async def test_stale_hosted_pr_adoption_provisioning_skips_setup_recovery_and_runtime_health(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -148,15 +148,6 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
             ws.pr_number = 776
             ws.execution_claimed_by = "hosted-worker-before-restart"
             ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
-            await repo.add_event(
-                ws,
-                event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
-                reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
-                payload={
-                    "source": "hosted_pr_adoption",
-                    "phase_names": ["setup", "pre_agent"],
-                },
-            )
             await session.commit()
 
         inspector = _RecordingRuntimeInspector(
@@ -181,15 +172,16 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
         )
 
         await worker._recover_stale_active_executions()  # noqa: SLF001
+        await worker._recover_stale_active_executions()  # noqa: SLF001
 
         assert inspector.calls == []
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.status == WorkspaceStatus.provisioning.value
             assert ws.compose_project_name is None
-            assert ws.execution_claimed_by is None
-            assert ws.execution_claim_expires_at is None
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
             runtime_events = await WorkspaceEventRepository(session).list(
                 workspace_id=workspace_id,
                 event_type="workspace.runtime_stranded_detected",
@@ -198,11 +190,20 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_monitor_attached",
             )
+            stale_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
 
-        assert len(runtime_events) == 1
-        assert runtime_events[0].payload is not None
-        assert runtime_events[0].payload["runtime"]["stack_state"] == "hosted"
-        assert len(salvage_events) == 1
+        assert runtime_events == []
+        assert salvage_events == []
+        assert len(stale_events) == 1
+        assert stale_events[0].payload is not None
+        assert stale_events[0].payload["runtime"]["stack_state"] == "hosted"
+        assert not any(
+            event.reason_code == "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE" for event in events
+        )
 
     @pytest.mark.unit
     async def test_stale_hosted_pr_adoption_ready_skips_runtime_health_without_runtime_inspection(
