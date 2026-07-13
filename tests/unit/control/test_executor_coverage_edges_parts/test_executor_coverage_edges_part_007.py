@@ -966,6 +966,24 @@ async def test_hosted_validation_fix_head_sync_reports_failures(
 
 
 @pytest.mark.unit
+def test_hosted_agent_error_terminal_head_prefers_result_sha_over_details() -> None:
+    """Hosted fix-pass sync should use the executor result head over stale details."""
+    result = SimpleNamespace(
+        returncode=1,
+        stdout="hosted pushed fix",
+        stderr="agent exited after push",
+        terminal_head_sha="d" * 40,
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=result,  # type: ignore[arg-type]
+        details={"terminal_head_sha": "e" * 40},
+    )
+
+    assert executor_execution_validation._hosted_agent_error_terminal_head_sha(exc) == "d" * 40
+
+
+@pytest.mark.unit
 async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanup_exception(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
