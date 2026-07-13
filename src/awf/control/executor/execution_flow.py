@@ -95,6 +95,7 @@ from awf.node.git_manager import (
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -235,6 +236,10 @@ async def execute(
     post_agent_mirror_repair_done = False
     mirror_path = mirror_path_for_worktree(worktree_path)
     recovery_active = recovery is not None
+    hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
+    hosted_pr_identity: dict[str, object] | None = (
+        hosted_pr_identity_for_workspace(ws) if hosted_pr_adoption else None
+    )
 
     _repair_mirror_hooks_path_or_mark_failed = partial(
         repair_mirror_hooks_path_or_mark_failed,
@@ -308,9 +313,7 @@ async def execute(
             agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
-            runtime_executor=(
-                self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
-            ),
+            runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
         )
         # Ignore checkout-local agent scratch dirs before validation cleanliness
         # can treat them as dirty worktree state.
@@ -387,14 +390,42 @@ async def execute(
                 compose_file=compose_file,
                 profile=profile,
             )
+        setup_validation_runner = self._validation
+        setup_run_kwargs: dict[str, Any] = {}
+        if hosted_pr_adoption:
+            setup_validation_runner = getattr(self, "_hosted_validation", None)
+            if setup_validation_runner is None:
+                setup_missing_message = (
+                    "hosted profile setup failed: no hosted validation runner configured"
+                )
+                if recovery is not None:
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                        error_message=setup_missing_message,
+                    )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=setup_missing_message,
+                    reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                )
+                return
+            setup_run_kwargs = {
+                "include_coverage": False,
+                "pr_identity": hosted_pr_identity,
+            }
         try:
-            setup_result = await self._validation.run_profile_phases(
+            setup_result = await setup_validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
                 phase_names=setup_phase_names,
                 worktree_path=worktree_path,
+                **setup_run_kwargs,
             )
         except ComposeExecCleanupError as exc:
             if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -468,13 +499,14 @@ async def execute(
             failure_stage="after successful profile setup"
         ):
             return
-        await self._record_runtime_toolchain_findings_safe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-        )
-        profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
+        if not hosted_pr_adoption:
+            await self._record_runtime_toolchain_findings_safe(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+        profile_preflight = getattr(setup_validation_runner, "run_profile_tool_preflight", None)
         profile_preflight_result = (
             await profile_preflight(workspace_id=workspace_id, profile=profile)
             if callable(profile_preflight)

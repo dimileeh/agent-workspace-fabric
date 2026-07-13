@@ -162,6 +162,7 @@ class SimpleValidationResult:
 class _RecordingValidation:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.preflight_calls: list[dict[str, Any]] = []
 
     async def run_profile_phases(
         self,
@@ -179,6 +180,10 @@ class _RecordingValidation:
 
     async def run_profile_coverage(self, **_kwargs: Any) -> None:
         return None
+
+    async def run_profile_tool_preflight(self, **kwargs: Any) -> SimpleValidationResult:
+        self.preflight_calls.append(kwargs)
+        return SimpleValidationResult()
 
 
 class _SetupFailureValidation:
@@ -919,11 +924,18 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
 
     await executor.execute(ws_id)
 
-    assert [call["phase_names"] for call in local_validation.calls] == [("setup", "pre_agent")]
-    assert [call["phase_names"] for call in hosted_validation.calls] == [("post_agent", "validate")]
-    hosted_kwargs = hosted_validation.calls[0]["kwargs"]
-    assert hosted_kwargs["pr_identity"]["pr_url"] == "https://github.com/x/y/pull/1"
-    assert hosted_kwargs["pr_identity"]["expected_head_sha"] == "d" * 40
+    assert local_validation.calls == []
+    assert local_validation.preflight_calls == []
+    assert [call["phase_names"] for call in hosted_validation.calls] == [
+        ("setup", "pre_agent"),
+        ("post_agent", "validate"),
+    ]
+    assert len(hosted_validation.preflight_calls) == 1
+    setup_kwargs = hosted_validation.calls[0]["kwargs"]
+    validation_kwargs = hosted_validation.calls[1]["kwargs"]
+    assert setup_kwargs["pr_identity"]["pr_url"] == "https://github.com/x/y/pull/1"
+    assert setup_kwargs["pr_identity"]["expected_head_sha"] == "d" * 40
+    assert validation_kwargs["pr_identity"] == setup_kwargs["pr_identity"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
