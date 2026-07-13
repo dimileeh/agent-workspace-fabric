@@ -338,6 +338,8 @@ async def run_validation_and_fix_cycle(
                     profile=profile,
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
+                    coverage_runner=validation_runner,
+                    coverage_run_kwargs=validation_run_kwargs,
                 )
                 val_result = replace(val_result, coverage=coverage_evidence.coverage)
         except ComposeExecCleanupError as exc:

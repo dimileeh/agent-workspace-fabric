@@ -412,6 +412,8 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
     """Run the final coverage quality gate after validation.
 
@@ -462,7 +464,8 @@ async def _run_final_coverage_gate(
                     source_run_id=reusable.id,
                 )
 
-    result = await executor._validation.run_profile_coverage(
+    runner = coverage_runner or executor._validation
+    result = await runner.run_profile_coverage(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
@@ -472,6 +475,7 @@ async def _run_final_coverage_gate(
             workspace_id,
             profile=profile,
         ),
+        **dict(coverage_run_kwargs or {}),
     )
     return _CoverageEvidenceResult(
         coverage=result,
