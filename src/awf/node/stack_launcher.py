@@ -575,24 +575,21 @@ def _hosted_companion_repo_url(repo_url: str) -> str:
         parsed = urlsplit(repo_url)
     except ValueError:
         return repo_url
-    if not parsed.scheme or "@" not in parsed.netloc:
+    authority = parsed.netloc
+    if not parsed.scheme or "@" not in authority:
+        if parsed.query or parsed.fragment:
+            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
         return repo_url
-    userinfo, _, authority = parsed.netloc.rpartition("@")
+    userinfo, _, authority = authority.rpartition("@")
     if parsed.scheme.lower() in {"ssh", "git+ssh"}:
         username, password_separator, _ = userinfo.partition(":")
         if not password_separator:
+            if parsed.query or parsed.fragment:
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
             return repo_url
         if username:
             authority = f"{username}@{authority}"
-    return urlunsplit(
-        (
-            parsed.scheme,
-            authority,
-            parsed.path,
-            parsed.query,
-            parsed.fragment,
-        )
-    )
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
 def _hosted_secret_lease_placeholder_resolution(
