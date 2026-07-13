@@ -233,7 +233,7 @@ async def test_hosted_post_validation_conformance_syncs_terminal_head_before_sco
 
 
 @pytest.mark.unit
-async def test_hosted_post_validation_conformance_syncs_terminal_head_after_nonzero_exit(
+async def test_hosted_post_validation_conformance_nonzero_exit_fails_after_terminal_head_sync(
     tmp_path: Path,
 ) -> None:
     order: list[str] = []
@@ -277,16 +277,29 @@ async def test_hosted_post_validation_conformance_syncs_terminal_head_after_nonz
         ),
     )
 
-    assert failure is None
-    assert order[:5] == [
+    assert failure is not None
+    assert failure.reason_code == "AGENT_CLI_FAILED"
+    assert "post-validation conformance agent failed" in failure.message
+    assert "exit 2" in failure.message
+    assert failure.details == {
+        "conformance": {
+            "phase": "post_validation",
+            "reason_code": "AGENT_CLI_FAILED",
+            "returncode": 2,
+            "stdout": "",
+            "stderr": "conformance failed",
+            "terminal_head_sha": terminal_head_sha,
+        },
+        "validation_run_id": "val_hosted",
+    }
+    assert order == [
         "adapter",
         "sync-fetch",
         "sync-rev-parse",
         "sync-reset",
-        "changed-paths",
     ]
-    assert context.recorded_reports
-    assert context.recorded_reports[0].summary == "remote terminal report"
+    assert context.changed_paths_calls == 0
+    assert context.recorded_reports == []
 
 
 @pytest.mark.unit

@@ -293,6 +293,7 @@ async def _run_post_validation_conformance_check(
     agent_plan_path = agent_artifact_path(handoff.plan_path)
     agent_report_path = agent_artifact_path(handoff.report_path)
     await self._update_subphase(workspace.id, "conformance")
+    compare_failure_reason_code = "AGENT_CLI_FAILED"
     try:
         compare_result = await adapter.run(
             compose_project=compose_project,
@@ -318,6 +319,7 @@ async def _run_post_validation_conformance_check(
         )
         if terminal_head_sha is None:
             raise
+        compare_failure_reason_code = exc.reason_code or "AGENT_CLI_FAILED"
         compare_result = AgentRunResult(
             returncode=exc.result.returncode,
             stdout=exc.result.stdout,
@@ -368,6 +370,27 @@ async def _run_post_validation_conformance_check(
                         },
                     },
                 )
+    if compare_result.returncode != 0:
+        output = compare_result.stderr.strip() or compare_result.stdout.strip() or "<no output>"
+        return _PlanningRunFailure(
+            message=(
+                "post-validation conformance agent failed "
+                f"({compare_failure_reason_code}, exit {compare_result.returncode}): "
+                f"{redact_audit_text(output, limit=1000)}"
+            )[:2000],
+            reason_code=compare_failure_reason_code,
+            details={
+                "conformance": {
+                    "phase": "post_validation",
+                    "reason_code": compare_failure_reason_code,
+                    "returncode": compare_result.returncode,
+                    "stdout": redact_audit_text(compare_result.stdout.strip(), limit=1000),
+                    "stderr": redact_audit_text(compare_result.stderr.strip(), limit=1000),
+                    "terminal_head_sha": terminal_head_sha,
+                },
+                "validation_run_id": validation_run_id,
+            },
+        )
     after_compare = await self._changed_paths(worktree_path)
     committed_compare = (
         await self._committed_paths_since(worktree_path, before_compare_head)
