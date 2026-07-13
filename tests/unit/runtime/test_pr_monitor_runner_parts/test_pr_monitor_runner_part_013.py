@@ -24,6 +24,7 @@ from awf.profiles.models import ProfileDocker, WorkspaceProfile
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus, PRStatus
 from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
@@ -585,6 +586,159 @@ async def test_monitor_agent_hosted_terminal_head_delta_unavailable_fails_closed
 
     assert raised.value.reason_code == "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
     assert state.last_push_sha == previous_head
+
+
+@pytest.mark.unit
+async def test_hosted_terminal_head_delta_paths_skip_diff_for_unchanged_head(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            runner=cmd,
+            adapter=SimpleNamespace(name=AgentRuntime.codex),
+        )
+    )
+    sha = "a" * 40
+
+    paths = await agent_service_recovery._hosted_terminal_head_delta_paths(
+        runner,
+        workspace_id="ws_hosted",
+        worktree_path=tmp_path / "worktrees" / "ws_hosted",
+        base_ref=sha.upper(),
+        terminal_head_sha=sha,
+    )
+
+    assert paths == ()
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_hosted_terminal_head_delta_paths_wrap_malformed_name_status_output(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\tsrc/app.py\n")
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            runner=cmd,
+            adapter=SimpleNamespace(name=AgentRuntime.codex),
+        )
+    )
+
+    with pytest.raises(AgentRunError) as raised:
+        await agent_service_recovery._hosted_terminal_head_delta_paths(
+            runner,
+            workspace_id="ws_hosted",
+            worktree_path=tmp_path / "worktrees" / "ws_hosted",
+            base_ref="a" * 40,
+            terminal_head_sha="b" * 40,
+        )
+
+    assert raised.value.reason_code == "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+    assert "hosted repair terminal head delta was malformed" in raised.value.result.stderr
+    assert isinstance(raised.value.__cause__, ProtectedScopeDiffError)
+
+
+@pytest.mark.unit
+async def test_gate_hosted_terminal_head_delta_blocks_when_protected_scope_diff_unavailable(
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout="M\0src/app.py\0")
+    supply_chain_calls: list[tuple[str, ...]] = []
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> None:
+        supply_chain_calls.append(tuple(kwargs["changed_paths"]))  # type: ignore[arg-type]
+
+    async def _protected_scope_unavailable(*_args: object, **_kwargs: object) -> list[object]:
+        raise ProtectedScopeDiffError("diff baseline unavailable")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            runner=cmd,
+            adapter=SimpleNamespace(name=AgentRuntime.codex),
+        ),
+        _refresh_supply_chain_policy_before_push=_refresh_supply_chain_policy_before_push,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_hosted_terminal_head_protected_scope_violations",
+        side_effect=_protected_scope_unavailable,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await agent_service_recovery._gate_hosted_terminal_head_delta(
+            runner,
+            workspace_id="ws_hosted",
+            worktree_path=tmp_path / "worktrees" / "ws_hosted",
+            base_ref="a" * 40,
+            terminal_head_sha="b" * 40,
+            command_evidence=(),
+        )
+
+    assert raised.value.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+    assert "diff baseline unavailable" in str(raised.value)
+    assert supply_chain_calls == [("src/app.py",)]
+
+
+@pytest.mark.unit
+async def test_hosted_terminal_head_protected_scope_violations_fail_when_workspace_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="Workspace row ws_missing"):
+        await agent_service_recovery._hosted_terminal_head_protected_scope_violations(
+            runner,
+            workspace_id="ws_missing",
+            worktree_path=tmp_path / "worktrees" / "ws_missing",
+            base_ref="a" * 40,
+            terminal_head_sha="b" * 40,
+            changed_paths=("src/app.py",),
+        )
+
+
+@pytest.mark.unit
+async def test_hosted_terminal_head_protected_scope_violations_wrap_file_diff_errors(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "protected_file_diffs_for_committed_paths",
+        side_effect=RuntimeError("git show failed"),
+    )
+
+    with pytest.raises(ProtectedScopeDiffError) as raised:
+        await agent_service_recovery._hosted_terminal_head_protected_scope_violations(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / "worktrees" / workspace_id,
+            base_ref="a" * 40,
+            terminal_head_sha="b" * 40,
+            changed_paths=("src/app.py",),
+        )
+
+    assert "Could not read hosted terminal-head protected-scope file contents" in str(raised.value)
+    assert "git show failed" in str(raised.value)
 
 
 @pytest.mark.unit

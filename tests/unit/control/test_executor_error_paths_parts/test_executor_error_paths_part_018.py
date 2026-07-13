@@ -1043,6 +1043,40 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
 
     @pytest.mark.unit
+    async def test_record_hosted_monitor_handoff_setup_completed_skips_terminal_status(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Hosted setup completion evidence is only valid before terminal states."""
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.status = WorkspaceStatus.completed.value
+            await s.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        ok = await _record_hosted_monitor_handoff_setup_completed(
+            _Executor(),
+            workspace_id=workspace_id,
+        )
+
+        assert ok is False
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert completed_events == []
+
+    @pytest.mark.unit
     async def test_hosted_monitor_handoff_profile_setup_repairs_mirror_hooks_before_preflight(
         self,
         factory: async_sessionmaker[AsyncSession],

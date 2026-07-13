@@ -28,10 +28,14 @@ class _Runner:
         fetched_sha: str,
         current_sha: str = "a" * 40,
         diff_stdout: str = "",
+        fetch_returncode: int = 0,
+        fetch_stderr: str = "",
     ) -> None:
         self.fetched_sha = fetched_sha
         self.current_sha = current_sha
         self.diff_stdout = diff_stdout
+        self.fetch_returncode = fetch_returncode
+        self.fetch_stderr = fetch_stderr
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str] | None] = []
 
@@ -46,7 +50,11 @@ class _Runner:
         if args[-2:] == ["rev-parse", "HEAD"]:
             return CommandResult(returncode=0, stdout=self.current_sha + "\n", stderr="")
         if args[-1] == "feature/ready":
-            return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(
+                returncode=self.fetch_returncode,
+                stdout="",
+                stderr=self.fetch_stderr,
+            )
         if args[-1] == "FETCH_HEAD":
             return CommandResult(returncode=0, stdout=self.fetched_sha + "\n", stderr="")
         if args[-2:] == ["--hard", self.fetched_sha]:
@@ -245,6 +253,93 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_sync_hosted_worktree_requires_remote_pr_head_identity(tmp_path: Path) -> None:
+    runner = _Runner(fetched_sha="b" * 40)
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _sync_hosted_worktree_to_terminal_head(
+            _runner_context(tmp_path, runner),
+            workspace_id="ws_hosted",
+            hosted_pr_identity={},
+            terminal_head_sha="b" * 40,
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_IDENTITY_MISSING"
+    assert excinfo.value.result.stderr == "hosted repair missing remote PR head identity"
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+async def test_sync_hosted_worktree_fails_closed_when_current_head_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    runner = _Runner(fetched_sha="b" * 40, current_sha="")
+    worktree_path = tmp_path / "ws_hosted"
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _sync_hosted_worktree_to_terminal_head(
+            _runner_context(tmp_path, runner),
+            workspace_id="ws_hosted",
+            hosted_pr_identity={
+                "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+                "head_ref": "feature/ready",
+            },
+            terminal_head_sha="b" * 40,
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+    assert runner.calls == [
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "HEAD",
+        ]
+    ]
+
+
+@pytest.mark.unit
+async def test_sync_hosted_worktree_fails_closed_when_pr_head_fetch_fails(
+    tmp_path: Path,
+) -> None:
+    runner = _Runner(
+        fetched_sha="b" * 40,
+        fetch_returncode=128,
+        fetch_stderr="fatal: could not fetch PR head",
+    )
+    worktree_path = tmp_path / "ws_hosted"
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _sync_hosted_worktree_to_terminal_head(
+            _runner_context(tmp_path, runner),
+            workspace_id="ws_hosted",
+            hosted_pr_identity={
+                "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+                "head_ref": "feature/ready",
+            },
+            terminal_head_sha="b" * 40,
+            operation_start_head="a" * 40,
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
+    assert excinfo.value.result.stderr == "fatal: could not fetch PR head"
+    assert runner.calls == [
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            "git@github.com:dimileeh/aira-web.git",
+            "feature/ready",
+        ]
+    ]
+
+
+@pytest.mark.unit
 async def test_sync_hosted_worktree_scrubs_git_object_lookup_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -433,6 +528,39 @@ async def test_hosted_agent_error_syncs_terminal_head_before_reraising(
 
     assert excinfo.value.reason_code == "AGENT_CLI_FAILED"
     assert state.last_push_sha == sha
+    assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
+    assert runner.calls[-2] == [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "reset",
+        "--hard",
+        sha,
+    ]
+
+
+@pytest.mark.unit
+async def test_hosted_agent_error_syncs_terminal_head_without_monitor_state(
+    tmp_path: Path,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    runner = _Runner(fetched_sha=sha)
+    adapter = _HostedAdapterRaisesWithTerminalHead(sha.upper())
+    context = _monitor_context_with_runner(tmp_path, runner=runner, adapter=adapter)
+    worktree_path = tmp_path / "ws_hosted"
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            context,
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix review",
+            log_source="monitor",
+        )
+
+    assert excinfo.value.reason_code == "AGENT_CLI_FAILED"
     assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
     assert runner.calls[-2] == [
         "git",
