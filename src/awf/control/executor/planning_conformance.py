@@ -306,7 +306,23 @@ async def _run_post_validation_conformance_check(
         profile=profile,
     )
     terminal_head_sha = getattr(compare_result, "terminal_head_sha", None)
-    if getattr(adapter, "is_hosted", False) and terminal_head_sha:
+    if getattr(adapter, "is_hosted", False):
+        if not terminal_head_sha:
+            reason_code = "HOSTED_REMOTE_HEAD_MISSING"
+            detail = "hosted conformance run completed without terminal_head_sha"
+            return _PlanningRunFailure(
+                message=(f"hosted post-validation conformance terminal head sync failed: {detail}"),
+                reason_code=reason_code,
+                details={
+                    "hosted_terminal_head_sync": {
+                        "validation_run_id": validation_run_id,
+                        "terminal_head_sha": terminal_head_sha,
+                        "returncode": 1,
+                        "stdout": redact_audit_text(compare_result.stdout, limit=400),
+                        "stderr": detail,
+                    },
+                },
+            )
         sync_result = await _sync_hosted_validation_fix_head(
             self,
             worktree_path=worktree_path,

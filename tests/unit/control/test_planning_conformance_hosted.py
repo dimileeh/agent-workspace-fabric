@@ -25,7 +25,7 @@ class _HostedConformanceAdapter:
     name = AgentRuntime.codex
     is_hosted = True
 
-    def __init__(self, *, terminal_head_sha: str, order: list[str]) -> None:
+    def __init__(self, *, terminal_head_sha: str | None, order: list[str]) -> None:
         self.terminal_head_sha = terminal_head_sha
         self.order = order
 
@@ -258,6 +258,59 @@ async def test_hosted_post_validation_conformance_sync_failure_fails_closed(
             "returncode": 1,
             "stdout": "",
             "stderr": "hosted validation fix missing remote PR head identity",
+        }
+    }
+    assert order == ["adapter"]
+    assert context.changed_paths_calls == 0
+
+
+@pytest.mark.unit
+async def test_hosted_post_validation_conformance_missing_terminal_head_fails_closed(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    report_path = Path("docs/awf-plans/ws_hosted.conformance.json")
+    context = _HostedConformanceContext(report_path=report_path, order=order)
+    adapter = _HostedConformanceAdapter(
+        terminal_head_sha=None,
+        order=order,
+    )
+
+    failure = await _run_post_validation_conformance_check(
+        context,
+        adapter=adapter,
+        workspace=SimpleNamespace(id="ws_hosted", task_prompt="finish the plan"),
+        profile=WorkspaceProfile(name="hosted-conformance"),
+        compose_project="awf_ws_hosted",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model="gpt-5",
+        handoff=_handoff(report_path),
+        validation_run_id="val_hosted",
+        base_commit="a" * 40,
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:dimileeh/agent-workspace-fabric.git",
+            "head_ref": "awf/ws_hosted",
+        },
+        conformance_scope_baseline=_PostValidationConformanceScopeBaseline(
+            before_compare=set(),
+            before_compare_head="a" * 40,
+            before_dirty_digests={},
+        ),
+    )
+
+    assert failure is not None
+    assert failure.reason_code == "HOSTED_REMOTE_HEAD_MISSING"
+    assert "completed without terminal_head_sha" in failure.message
+    assert failure.details == {
+        "hosted_terminal_head_sync": {
+            "validation_run_id": "val_hosted",
+            "terminal_head_sha": None,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "hosted conformance run completed without terminal_head_sha",
         }
     }
     assert order == ["adapter"]
