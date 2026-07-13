@@ -687,18 +687,20 @@ class _RecordingRuntimeCleaner:
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
+        skip_compose: bool = False,
     ) -> WorkspaceCleanupResult:
-        self.calls.append(
-            {
-                "workspace_id": workspace_id,
-                "repo_url": repo_url,
-                "compose_project_name": compose_project_name,
-                "compose_file_path": compose_file_path,
-                "worktree_host_path": worktree_host_path,
-                "remove_volumes": remove_volumes,
-                "remove_worktree": remove_worktree,
-            }
-        )
+        call: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "repo_url": repo_url,
+            "compose_project_name": compose_project_name,
+            "compose_file_path": compose_file_path,
+            "worktree_host_path": worktree_host_path,
+            "remove_volumes": remove_volumes,
+            "remove_worktree": remove_worktree,
+        }
+        if skip_compose:
+            call["skip_compose"] = True
+        self.calls.append(call)
         return self.result
 
 
@@ -1314,6 +1316,70 @@ class TestRunOnceStaleActiveExecutionRecoveryPart018:
                 and event.reason_code == "STALE_ACTIVE_EXECUTION"
                 for event in events
             )
+
+    @pytest.mark.unit
+    async def test_hosted_stale_active_execution_cleanup_skips_compose(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy: dict[str, object] = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "hosted-stale-running-fail",
+            WorkspaceStatus.running,
+            compose_project_name="awf_hosted_stale_running_fail",
+            task_policy=task_policy,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "zombie-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            ws.execution_claim_epoch = 4
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_hosted_stale_running_fail",
+            compose_file_path="/tmp/awf/ws/compose.yml",
+            repo_url=str(origin_repo),
+            task_policy=task_policy,
+        )
+        snapshot = RuntimeSnapshot(
+            stack_state="running",
+            reason="hosted monitor handoff could not be salvaged",
+        )
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+
+        await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": "awf_hosted_stale_running_fail",
+                "compose_file_path": Path("/tmp/awf/ws/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": True,
+                "remove_worktree": False,
+                "skip_compose": True,
+            }
+        ]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
 
     @pytest.mark.unit
     async def test_stale_active_execution_preserves_validation_failure_and_records_secondary_stale(

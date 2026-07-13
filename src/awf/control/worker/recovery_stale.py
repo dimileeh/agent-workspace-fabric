@@ -792,6 +792,7 @@ async def _cleanup_and_fail_stale_active_execution(
         ),
         remove_volumes=True,
         remove_worktree=False,
+        skip_compose=pr_adoption_is_hosted(candidate.task_policy),
     )
     if not cleanup.ok:
         await self._record_stale_active_execution_cleanup_failed(
