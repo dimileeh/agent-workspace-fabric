@@ -119,12 +119,18 @@ async def _run_monitor_agent_with_service_recovery(
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
+                    terminal_head_evidence = list(command_evidence or ())
+                    append_command_evidence(
+                        terminal_head_evidence,
+                        stdout=exc.result.stdout,
+                        stderr=exc.result.stderr,
+                    )
                     synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
                         self,
                         workspace_id=workspace_id,
                         hosted_pr_identity=hosted_pr_identity,
                         terminal_head_sha=terminal_head_sha,
-                        command_evidence=command_evidence or (),
+                        command_evidence=terminal_head_evidence,
                         operation_start_head=operation_start_head,
                     )
                     if state is not None:
