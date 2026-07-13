@@ -264,9 +264,13 @@ class TestRuntimeExecutorSeam:
     async def test_hosted_nonzero_exit_raises_agent_run_error_with_classification(
         self,
     ) -> None:
+        terminal_head_sha = "d" * 40
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(
-                returncode=2, stdout="", stderr="codex: please set an auth method"
+                returncode=2,
+                stdout="",
+                stderr="codex: please set an auth method",
+                terminal_head_sha=terminal_head_sha,
             )
         )
         adapter = CodexAdapter(
@@ -289,6 +293,7 @@ class TestRuntimeExecutorSeam:
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
         assert exc.value.details is not None
         assert exc.value.details.get("retryable") is True
+        assert exc.value.details.get("terminal_head_sha") == terminal_head_sha
 
     @pytest.mark.unit
     async def test_hosted_executor_unexpected_exception_becomes_agent_run_error(

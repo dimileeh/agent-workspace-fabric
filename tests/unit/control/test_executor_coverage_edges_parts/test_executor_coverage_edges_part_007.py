@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
 from awf.db.enums import (
+    AgentRuntime,
     OperationStatus,
 )
 from awf.profiles.models import WorkspaceProfile
@@ -309,9 +311,11 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("hosted_fix_nonzero", [False, True])
 async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    hosted_fix_nonzero: bool,
 ) -> None:
     """Hosted validation fix passes must pass PR identity and sync the remote fix."""
     profile = WorkspaceProfile.model_validate({"name": "hosted-validation-fix-pass"})
@@ -404,16 +408,29 @@ async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
         _fail_if_plan_only_paths=AsyncMock(return_value=False),
         _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
     )
-    adapter = SimpleNamespace(
-        is_hosted=True,
-        run=AsyncMock(
+    hosted_fix_result = CommandResult(
+        returncode=1 if hosted_fix_nonzero else 0,
+        stdout="hosted fix stdout",
+        stderr="hosted fix stderr" if hosted_fix_nonzero else "",
+    )
+    adapter = SimpleNamespace(is_hosted=True)
+    if hosted_fix_nonzero:
+        adapter.run = AsyncMock(
+            side_effect=AgentRunError(
+                agent=AgentRuntime.codex,
+                result=hosted_fix_result,
+                reason_code="AGENT_CLI_FAILED",
+                details={"terminal_head_sha": terminal_head},
+            )
+        )
+    else:
+        adapter.run = AsyncMock(
             return_value=SimpleNamespace(
-                stdout="hosted fix stdout",
-                stderr="",
+                stdout=hosted_fix_result.stdout,
+                stderr=hosted_fix_result.stderr,
                 terminal_head_sha=terminal_head,
             )
-        ),
-    )
+        )
 
     async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
         return profile

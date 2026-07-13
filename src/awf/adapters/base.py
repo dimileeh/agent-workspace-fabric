@@ -934,6 +934,10 @@ class AgentAdapter(ABC):
                 "recommended_action": str(recovery_metadata["recommended_action"]),
                 "provider_recovery": recovery_metadata,
             }
+        if hosted_result.terminal_head_sha:
+            if details is None:
+                details = {}
+            details["terminal_head_sha"] = hosted_result.terminal_head_sha
         raise AgentRunError(
             agent=self.name,
             result=command_result,
