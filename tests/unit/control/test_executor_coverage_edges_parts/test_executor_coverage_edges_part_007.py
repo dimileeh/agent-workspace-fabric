@@ -14,6 +14,7 @@ from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import validation_cleanup_guards as executor_validation_cleanup_guards
+from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
 from awf.control.quality_gates_common import QualityGateViolation
 from awf.db.enums import (
     AgentRuntime,
@@ -261,10 +262,17 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
         "_validation_tier_for_workspace",
         lambda *_args, **_kwargs: 1,
     )
+    pre_validation_clean_check = AsyncMock(return_value=setup_check)
+    post_fix_clean_check = AsyncMock(return_value=dirty_fix_pass_check)
     monkeypatch.setattr(
         executor_execution_validation,
         "check_validation_worktree_clean",
-        AsyncMock(side_effect=[setup_check, dirty_fix_pass_check]),
+        pre_validation_clean_check,
+    )
+    monkeypatch.setattr(
+        executor_validation_fix_helpers,
+        "check_validation_worktree_clean",
+        post_fix_clean_check,
     )
     monkeypatch.setattr(
         executor_execution_validation,
@@ -298,6 +306,8 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
 
     assert result.stop
     assert result.successful_validation_run_id is None
+    pre_validation_clean_check.assert_awaited_once()
+    post_fix_clean_check.assert_awaited_once()
     executor._start_validation_run.assert_awaited_once()
     executor._finish_validation_run.assert_awaited_once()
     finish_run_kwargs = executor._finish_validation_run.await_args.kwargs
