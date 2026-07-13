@@ -104,6 +104,17 @@ async def _run_monitor_agent_with_service_recovery(
                     log_source=log_source,
                 )
         except AgentRunError as exc:
+            if self._deps.adapter.is_hosted:
+                terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
+                if terminal_head_sha is not None:
+                    synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
+                        self,
+                        workspace_id=workspace_id,
+                        hosted_pr_identity=hosted_pr_identity,
+                        terminal_head_sha=terminal_head_sha,
+                    )
+                    if state is not None:
+                        state.last_push_sha = synced_head_sha
             recovered = await _recover_monitor_agent_service_after_error(
                 self,
                 workspace_id=workspace_id,

@@ -71,6 +71,26 @@ class _HostedAdapterWithTerminalHead:
         )
 
 
+class _HostedAdapterRaisesWithTerminalHead:
+    name = AgentRuntime.codex
+    is_hosted = True
+
+    def __init__(self, terminal_head_sha: str) -> None:
+        self.terminal_head_sha = terminal_head_sha
+        self.hosted_pr_identities: list[dict[str, object] | None] = []
+
+    async def run(self, **kwargs: object) -> AgentRunResult:
+        hosted_pr_identity = kwargs.get("hosted_pr_identity")
+        identity = hosted_pr_identity if isinstance(hosted_pr_identity, dict) else None
+        self.hosted_pr_identities.append(identity)
+        raise AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(returncode=1, stdout="pushed", stderr="failed"),
+            reason_code="AGENT_CLI_FAILED",
+            details={"terminal_head_sha": self.terminal_head_sha},
+        )
+
+
 def _runner_context(tmp_path: Path, runner: _Runner) -> SimpleNamespace:
     return SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -328,3 +348,39 @@ async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
         state=state,
     )
     assert refreshed_identity["expected_head_sha"] == sha
+
+
+@pytest.mark.unit
+async def test_hosted_agent_error_syncs_terminal_head_before_reraising(
+    tmp_path: Path,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    runner = _Runner(fetched_sha=sha)
+    adapter = _HostedAdapterRaisesWithTerminalHead(sha.upper())
+    state = MonitorState(last_push_sha="a" * 40)
+    context = _monitor_context_with_runner(tmp_path, runner=runner, adapter=adapter)
+    worktree_path = tmp_path / "ws_hosted"
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            context,
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix review",
+            log_source="monitor",
+            state=state,
+        )
+
+    assert excinfo.value.reason_code == "AGENT_CLI_FAILED"
+    assert state.last_push_sha == sha
+    assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
+    assert runner.calls[-1] == [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "reset",
+        "--hard",
+        sha,
+    ]
