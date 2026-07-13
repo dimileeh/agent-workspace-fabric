@@ -32,6 +32,7 @@ class TestValidTransitions:
             (WorkspaceStatus.requested, WorkspaceStatus.provisioning),
             (WorkspaceStatus.requested, WorkspaceStatus.cancelled),
             (WorkspaceStatus.provisioning, WorkspaceStatus.ready),
+            (WorkspaceStatus.provisioning, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.provisioning, WorkspaceStatus.failed),
             (WorkspaceStatus.provisioning, WorkspaceStatus.cancelled),
             (WorkspaceStatus.ready, WorkspaceStatus.running),

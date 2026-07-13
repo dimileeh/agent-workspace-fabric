@@ -11,27 +11,13 @@ import pytest
 
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import (
-    HostedDelegationConfig,
     HostedDelegationProtocolError,
     HostedValidationDelegate,
     _hosted_validation_profile_payload,
     _hosted_validation_sanitize_environment_container,
     _hosted_validation_sanitize_secret_refs,
 )
-
-
-def _config(**overrides: object) -> HostedDelegationConfig:
-    values: dict[str, object] = {
-        "base_url": "https://hosted.example.test",
-        "bearer_token": "secret-token",
-        "poll_interval_seconds": 0.001,
-        "operation_timeout_seconds": 1.0,
-        "request_timeout_seconds": 1.0,
-        "cancel_timeout_seconds": 1.0,
-        "max_output_bytes": 100_000,
-    }
-    values.update(overrides)
-    return HostedDelegationConfig(**values)  # type: ignore[arg-type]
+from tests.unit.runtime.test_hosted_validation_delegate import _config
 
 
 @pytest.mark.unit

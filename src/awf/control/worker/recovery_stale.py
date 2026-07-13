@@ -443,13 +443,21 @@ async def _recover_hosted_pr_adoption_active_execution(
                 return True
             if not pr_adoption_is_hosted(ws.task_policy):
                 return False
-        snapshot = RuntimeSnapshot(
-            stack_state="hosted",
-            reason="hosted PR adoption provisioning does not use a local Compose runtime",
-        )
-        if not await self._record_stale_active_execution_detected(candidate, snapshot):
-            await self._fail_stale_active_execution(candidate, snapshot)
-        return True
+            attachable_pr = ws.pr_url is not None and (
+                ws.pr_number is not None or _extract_pr_number(ws.pr_url) is not None
+            )
+            setup_completed = attachable_pr and await _has_hosted_monitor_handoff_setup_completed(
+                session,
+                ws,
+            )
+        if not setup_completed:
+            snapshot = RuntimeSnapshot(
+                stack_state="hosted",
+                reason="hosted PR adoption provisioning does not use a local Compose runtime",
+            )
+            if not await self._record_stale_active_execution_detected(candidate, snapshot):
+                await self._fail_stale_active_execution(candidate, snapshot)
+            return True
 
     if candidate.status == WorkspaceStatus.ready:
         if not pr_adoption_is_hosted(candidate.task_policy):
@@ -468,7 +476,11 @@ async def _recover_hosted_pr_adoption_active_execution(
             if not ws.pr_url:
                 return True
 
-    if candidate.status not in (*_ACTIVE_EXECUTION_STATUSES, WorkspaceStatus.ready):
+    if candidate.status not in (
+        *_ACTIVE_EXECUTION_STATUSES,
+        WorkspaceStatus.provisioning,
+        WorkspaceStatus.ready,
+    ):
         return False
     if not pr_adoption_is_hosted(candidate.task_policy):
         return False
