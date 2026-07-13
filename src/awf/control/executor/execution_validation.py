@@ -80,6 +80,7 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.validation import (
     ValidationCoverageResult,
@@ -94,6 +95,99 @@ from awf.runtime.validation_worktree import (
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
 )
+
+
+def _hosted_identity_str(identity: Mapping[str, Any] | None, key: str) -> str | None:
+    value = identity.get(key) if identity is not None else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+async def _sync_hosted_validation_fix_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    hosted_pr_identity: Mapping[str, Any] | None,
+    terminal_head_sha: str,
+) -> CommandResult:
+    repo_url = _hosted_identity_str(hosted_pr_identity, "head_repo_url") or _hosted_identity_str(
+        hosted_pr_identity,
+        "repo_url",
+    )
+    head_ref = _hosted_identity_str(hosted_pr_identity, "head_ref")
+    if repo_url is None or head_ref is None:
+        return CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="hosted validation fix missing remote PR head identity",
+            reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+        )
+
+    git_env = git_env_without_object_lookup_overrides()
+    fetch = await self._runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            repo_url,
+            head_ref,
+        ],
+        env=git_env,
+    )
+    if not fetch.ok:
+        return CommandResult(
+            returncode=fetch.returncode,
+            stdout=fetch.stdout,
+            stderr=fetch.stderr,
+            reason_code=fetch.reason_code or "HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        )
+
+    rev_parse = await self._runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
+        env=git_env,
+    )
+    fetched_sha = rev_parse.stdout.strip()
+    if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
+        return CommandResult(
+            returncode=rev_parse.returncode if rev_parse.returncode != 0 else 1,
+            stdout=rev_parse.stdout,
+            stderr=(
+                "hosted validation fix terminal head mismatch: "
+                f"reported {terminal_head_sha}, fetched {fetched_sha or '<unknown>'}"
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
+        )
+
+    reset = await self._runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "reset",
+            "--hard",
+            fetched_sha,
+        ],
+        env=git_env,
+    )
+    if not reset.ok:
+        return CommandResult(
+            returncode=reset.returncode,
+            stdout=reset.stdout,
+            stderr=reset.stderr,
+            reason_code=reset.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED",
+        )
+
+    return CommandResult(returncode=0, stdout=fetched_sha, stderr="")
 
 
 async def run_validation_and_fix_cycle(
@@ -152,6 +246,11 @@ async def run_validation_and_fix_cycle(
         workspace_id=workspace_id,
         profile=profile,
         planning_max_iterations_default=self._config.planning_max_iterations_default,
+    )
+    hosted_pr_identity: dict[str, Any] | None = (
+        dict(hosted_pr_identity_for_workspace(ws))
+        if pr_adoption_is_hosted(getattr(ws, "task_policy", None))
+        else None
     )
 
     def _deposit_planning_artifacts_if_required() -> None:
@@ -312,13 +411,13 @@ async def run_validation_and_fix_cycle(
             await self._update_subphase(workspace_id, "validation")
             validation_runner = self._validation
             validation_run_kwargs: dict[str, Any] = {}
-            if pr_adoption_is_hosted(getattr(ws, "task_policy", None)):
+            if hosted_pr_identity is not None:
                 validation_runner = getattr(self, "_hosted_validation", None)
                 if validation_runner is None:
                     raise RuntimeError(
                         "hosted validation runner is not configured for hosted PR adoption"
                     )
-                validation_run_kwargs["pr_identity"] = hosted_pr_identity_for_workspace(ws)
+                validation_run_kwargs["pr_identity"] = hosted_pr_identity
             val_result = await validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -1001,12 +1100,14 @@ async def run_validation_and_fix_cycle(
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
             )
         fix_command_evidence: list[str] = []
+        fix_result: AgentRunResult | None = None
         try:
 
             async def _run_fix_agent(
                 _accept_existing_plan: bool,
                 *,
                 _fix_prompt: str = fix_prompt,
+                _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
             ) -> AgentRunResult:
                 return await adapter.run(
                     compose_project=compose_project,
@@ -1014,6 +1115,7 @@ async def run_validation_and_fix_cycle(
                     prompt=_fix_prompt,
                     model=run_model,
                     workspace_id=workspace_id,
+                    hosted_pr_identity=_hosted_pr_identity,
                 )
 
             async def _finish_fix_recovery_failure(
@@ -1201,6 +1303,80 @@ async def run_validation_and_fix_cycle(
                 reason_code=reason_code,
                 details=details,
             )
+
+        async def _check_post_fix_worktree_clean() -> ExecutionValidationResult | None:
+            fix_pass_ignored_check = await check_validation_worktree_clean(
+                run_git=git_in_worktree,
+                worktree_path=worktree_path,
+                ignore_all_ignored=True,
+            )
+            if fix_pass_ignored_check.clean:
+                return None
+            reason_code = (
+                fix_pass_ignored_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+            )
+            message = (
+                fix_pass_ignored_check.message
+                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+                else validation_worktree_preexisting_dirty_message(fix_pass_ignored_check)
+            )
+            return await _fail_validation_worktree_guard(
+                self,
+                workspace_id=workspace_id,
+                validation_run_id=None,
+                validation_tier=validation_tier,
+                reason_code=reason_code,
+                message=message,
+                profile=profile,
+                worktree_path=worktree_path,
+            )
+
+        if getattr(adapter, "is_hosted", False) and fix_result is not None:
+            if not fix_result.terminal_head_sha:
+                await _fail_fix_pass_git_command(
+                    current_validation_run_id=validation_run_id,
+                    current_validation_coverage=validation_coverage,
+                    reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                    operation="hosted terminal head sync",
+                    result=CommandResult(
+                        returncode=1,
+                        stdout=fix_result.stdout,
+                        stderr="hosted validation fix completed without terminal_head_sha",
+                        reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                    ),
+                )
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
+            sync_result = await _sync_hosted_validation_fix_head(
+                self,
+                worktree_path=worktree_path,
+                hosted_pr_identity=hosted_pr_identity,
+                terminal_head_sha=fix_result.terminal_head_sha,
+            )
+            if not sync_result.ok:
+                await _fail_fix_pass_git_command(
+                    current_validation_run_id=validation_run_id,
+                    current_validation_coverage=validation_coverage,
+                    reason_code=sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED",
+                    operation="hosted terminal head sync",
+                    result=sync_result,
+                )
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
+            if hosted_pr_identity is not None:
+                hosted_pr_identity = {
+                    **hosted_pr_identity,
+                    "expected_head_sha": sync_result.stdout.strip(),
+                }
+            if (dirty_result := await _check_post_fix_worktree_clean()) is not None:
+                return dirty_result
+            continue
 
         # Commit whatever the fix pass produced. Simpler than the initial
         # post-agent commit block — orphan-history recovery isn't possible
@@ -1449,30 +1625,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                 )
 
-        fix_pass_ignored_check = await check_validation_worktree_clean(
-            run_git=git_in_worktree,
-            worktree_path=worktree_path,
-            ignore_all_ignored=True,
-        )
-        if not fix_pass_ignored_check.clean:
-            reason_code = (
-                fix_pass_ignored_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-            )
-            message = (
-                fix_pass_ignored_check.message
-                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
-                else validation_worktree_preexisting_dirty_message(fix_pass_ignored_check)
-            )
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=None,
-                validation_tier=validation_tier,
-                reason_code=reason_code,
-                message=message,
-                profile=profile,
-                worktree_path=worktree_path,
-            )
+        if (dirty_result := await _check_post_fix_worktree_clean()) is not None:
+            return dirty_result
 
         # Loop back to re-validate.
 

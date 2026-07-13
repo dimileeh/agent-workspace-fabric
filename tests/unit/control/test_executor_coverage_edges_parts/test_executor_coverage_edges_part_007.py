@@ -309,6 +309,245 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
 
 
 @pytest.mark.unit
+async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted validation fix passes must pass PR identity and sync the remote fix."""
+    profile = WorkspaceProfile.model_validate({"name": "hosted-validation-fix-pass"})
+    initial_head = "c" * 40
+    terminal_head = "d" * 40
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "hosted-validation-fix-pass"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Hosted validation fix",
+        agent="codex",
+        owned_paths=("src/awf",),
+        id="ws_hosted_fix",
+        task_tag=None,
+        task_policy={
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+                "pr_url": "https://github.com/example/repo/pull/764",
+                "pr_number": 764,
+                "base_ref": "main",
+                "head_ref": "awf/pr-764",
+                "head_repo_url": "https://github.com/fork/repo.git",
+                "head_sha": initial_head,
+            }
+        },
+        repo_url="https://github.com/example/repo.git",
+        pr_url="https://github.com/example/repo/pull/764",
+        pr_number=764,
+        branch_base="main",
+        remote_push_branch="awf/pr-764",
+        monitor_last_commit_sha=initial_head,
+    )
+
+    class _UnexpectedLocalValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise AssertionError("hosted PR adoption must use the hosted validator")
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return ValidationResult(
+                commands=[
+                    _command_result(
+                        tmp_path,
+                        returncode=1 if len(self.calls) == 1 else 0,
+                    )
+                ]
+            )
+
+    hosted_validation = _HostedValidation()
+    runner = SimpleNamespace(
+        run=AsyncMock(
+            side_effect=[
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{terminal_head}\n", stderr=""),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        )
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(side_effect=[initial_head, terminal_head]),
+        _start_validation_run=AsyncMock(side_effect=["vr-hosted-1", "vr-hosted-2"]),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_UnexpectedLocalValidation(),
+        _hosted_validation=hosted_validation,
+        _runner=runner,
+        _repair_agent_git_ownership=AsyncMock(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+    )
+    adapter = SimpleNamespace(
+        is_hosted=True,
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                stdout="hosted fix stdout",
+                stderr="",
+                terminal_head_sha=terminal_head,
+            )
+        ),
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref=initial_head,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_hosted_fix",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_hosted_fix",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery={"source": "monitor", "recovery_mode": "validate"},
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert adapter.run.await_args.kwargs["hosted_pr_identity"]["head_ref"] == "awf/pr-764"
+    assert adapter.run.await_args.kwargs["hosted_pr_identity"]["expected_head_sha"] == initial_head
+    assert runner.run.await_count == 3
+    assert runner.run.await_args_list[0].args[0][-4:] == [
+        "fetch",
+        "--no-tags",
+        "https://github.com/fork/repo.git",
+        "awf/pr-764",
+    ]
+    assert runner.run.await_args_list[1].args[0][-2:] == ["rev-parse", "FETCH_HEAD"]
+    assert runner.run.await_args_list[2].args[0][-3:] == ["reset", "--hard", terminal_head]
+    assert hosted_validation.calls[0]["pr_identity"]["expected_head_sha"] == initial_head
+    assert hosted_validation.calls[1]["pr_identity"]["expected_head_sha"] == terminal_head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("identity", "queued_results", "expected_reason", "expected_calls"),
+    [
+        (
+            {},
+            [],
+            "HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+            0,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [CommandResult(returncode=128, stdout="", stderr="fetch failed")],
+            "HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            1,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'e' * 40}\n", stderr=""),
+            ],
+            "HOSTED_REMOTE_HEAD_MISMATCH",
+            2,
+        ),
+        (
+            {"repo_url": "https://github.com/example/repo.git", "head_ref": "awf/pr-764"},
+            [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'d' * 40}\n", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="reset failed"),
+            ],
+            "HOSTED_REMOTE_HEAD_SYNC_FAILED",
+            3,
+        ),
+    ],
+)
+async def test_hosted_validation_fix_head_sync_reports_failures(
+    tmp_path: Path,
+    identity: dict[str, object],
+    queued_results: list[CommandResult],
+    expected_reason: str,
+    expected_calls: int,
+) -> None:
+    """Hosted fix head sync failures should keep actionable reason codes."""
+    runner = SimpleNamespace(run=AsyncMock(side_effect=queued_results))
+    result = await executor_execution_validation._sync_hosted_validation_fix_head(  # noqa: SLF001
+        SimpleNamespace(_runner=runner),
+        worktree_path=tmp_path / "worktree",
+        hosted_pr_identity=identity,
+        terminal_head_sha="d" * 40,
+    )
+
+    assert not result.ok
+    assert result.reason_code == expected_reason
+    assert runner.run.await_count == expected_calls
+
+
+@pytest.mark.unit
 async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanup_exception(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
