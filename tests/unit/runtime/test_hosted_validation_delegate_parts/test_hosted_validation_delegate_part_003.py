@@ -220,6 +220,82 @@ async def test_hosted_coverage_uses_profile_enforcement_policy(
 
 
 @pytest.mark.unit
+async def test_hosted_coverage_preserves_failure_evidence_fields(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 98.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "failed",
+                        "reason_code": "PYTEST_TEST_FAILURE",
+                        "command_result": {
+                            "command": "uv run pytest --cov=awf",
+                            "returncode": 1,
+                            "duration_seconds": 4.2,
+                            "stdout": "FAILED tests/unit/test_widget.py::test_handles_edges\n",
+                            "stderr": "",
+                            "phase": "coverage",
+                            "reason_code": "PYTEST_TEST_FAILURE",
+                        },
+                        "failing_test_node_ids": ["tests/unit/test_widget.py::test_handles_edges"],
+                        "failing_test_evidence": [
+                            "FAILED tests/unit/test_widget.py::test_handles_edges"
+                        ],
+                        "provider_failure_evidence": [
+                            "Coverage failure: total of 98.5 is less than fail-under=99"
+                        ],
+                        "parallel_workers_requested": 20,
+                        "parallel_workers_effective": 3,
+                        "parallel_distribution": "loadscope",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+        )
+
+    assert result is not None
+    assert result.failing_test_node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
+    assert result.failing_test_evidence == ["FAILED tests/unit/test_widget.py::test_handles_edges"]
+    assert result.provider_failure_evidence == [
+        "Coverage failure: total of 98.5 is less than fail-under=99"
+    ]
+    assert result.parallel_workers_requested == 20
+    assert result.parallel_workers_effective == 3
+    assert result.parallel_distribution == "loadscope"
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_creates_artifacts_dir_for_command_result(
     tmp_path: Path,
 ) -> None:

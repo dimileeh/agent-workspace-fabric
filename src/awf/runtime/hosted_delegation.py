@@ -1043,6 +1043,18 @@ def _coverage_result_from_payload(
         reason_code=reason_code,
         command_result=command_result,
         gaps=gaps if isinstance(gaps, list) else [],
+        failing_test_node_ids=_string_list_from_payload(payload.get("failing_test_node_ids")),
+        failing_test_evidence=_string_list_from_payload(payload.get("failing_test_evidence")),
+        provider_failure_evidence=_string_list_from_payload(
+            payload.get("provider_failure_evidence")
+        ),
+        parallel_workers_requested=_optional_int_from_payload(
+            payload.get("parallel_workers_requested")
+        ),
+        parallel_workers_effective=_optional_int_from_payload(
+            payload.get("parallel_workers_effective")
+        ),
+        parallel_distribution=_optional_str(payload.get("parallel_distribution")),
     )
 
 
@@ -1224,6 +1236,18 @@ def _text_payload_field(payload: Mapping[str, Any], key: str) -> str:
     value = payload.get(key, "")
     if not isinstance(value, str):
         raise HostedDelegationProtocolError(f"hosted delegation response missing {key}")
+    return value
+
+
+def _string_list_from_payload(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _optional_int_from_payload(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
     return value
 
 
