@@ -1299,6 +1299,10 @@ def _normalized_url(value: str | None) -> str | None:
     parsed = urlsplit(normalized)
     if parsed.scheme != "https" or not parsed.netloc:
         return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
     return normalized
 
 

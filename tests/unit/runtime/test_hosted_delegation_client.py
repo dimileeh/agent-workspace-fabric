@@ -175,6 +175,36 @@ def test_hosted_delegation_config_rejects_non_https_base_url() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "https://user:token@hosted.example.test/awf",
+        "https://hosted.example.test/awf?token=query-token",
+        "https://hosted.example.test/awf#access_token=fragment-token",
+    ),
+)
+def test_hosted_delegation_config_rejects_secret_bearing_base_url(
+    base_url: str,
+) -> None:
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_values(
+            base_url=base_url,
+            bearer_token="secret-token",
+            bearer_token_env=None,
+            environ={},
+            poll_interval_seconds=2.0,
+            operation_timeout_seconds=30.0,
+            request_timeout_seconds=5.0,
+            cancel_timeout_seconds=3.0,
+            max_output_bytes=1024,
+        )
+
+    assert excinfo.value.detail() == {
+        "missing": ["AWF_HOSTED_DELEGATION_BASE_URL"],
+    }
+
+
+@pytest.mark.unit
 def test_hosted_delegation_config_reports_unset_base_url() -> None:
     with pytest.raises(HostedDelegationConfigError) as excinfo:
         hosted_delegation_config_from_values(
