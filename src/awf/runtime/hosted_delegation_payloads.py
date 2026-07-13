@@ -218,7 +218,7 @@ def _strip_url_userinfo(value: str) -> str:
     if not parsed.scheme or "@" not in parsed.netloc:
         return value
     userinfo, _, authority = parsed.netloc.rpartition("@")
-    if parsed.scheme.lower() == "ssh":
+    if parsed.scheme.lower() in {"ssh", "git+ssh"}:
         username, password_separator, _ = userinfo.partition(":")
         if not password_separator:
             return value

@@ -197,6 +197,22 @@ def test_hosted_profile_environment_omit_ignores_unexpected_container_shapes() -
 
 
 @pytest.mark.unit
+def test_hosted_pr_identity_preserves_passwordless_git_ssh_username() -> None:
+    """Passwordless git+ssh clone URLs keep the SSH login for hosted fetches."""
+    payload = _hosted_pr_identity_payload(
+        {
+            "repo_url": "git+ssh://git@github.com/org/repo.git",
+            "head_repo_url": "git+ssh://git@github.com/fork/repo.git",
+        }
+    )
+
+    assert payload == {
+        "repo_url": "git+ssh://git@github.com/org/repo.git",
+        "head_repo_url": "git+ssh://git@github.com/fork/repo.git",
+    }
+
+
+@pytest.mark.unit
 def test_hosted_pr_identity_strips_ssh_password_but_keeps_username() -> None:
     """Hosted PR identity carries repository location without URL credentials."""
     payload = _hosted_pr_identity_payload(
