@@ -447,7 +447,8 @@ async def _recover_hosted_pr_adoption_active_execution(
             stack_state="hosted",
             reason="hosted PR adoption provisioning does not use a local Compose runtime",
         )
-        await self._record_stale_active_execution_detected(candidate, snapshot)
+        if not await self._record_stale_active_execution_detected(candidate, snapshot):
+            await self._fail_stale_active_execution(candidate, snapshot)
         return True
 
     if candidate.status == WorkspaceStatus.ready:
