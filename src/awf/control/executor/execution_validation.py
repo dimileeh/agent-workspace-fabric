@@ -21,6 +21,7 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor.agent_service_recovery import (
     AGENT_SERVICE_RECOVERY_ABORTED,
@@ -79,6 +80,7 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
@@ -308,7 +310,16 @@ async def run_validation_and_fix_cycle(
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         try:
             await self._update_subphase(workspace_id, "validation")
-            val_result = await self._validation.run_profile_phases(
+            validation_runner = self._validation
+            validation_run_kwargs: dict[str, Any] = {}
+            if pr_adoption_is_hosted(ws.task_policy):
+                validation_runner = getattr(self, "_hosted_validation", None)
+                if validation_runner is None:
+                    raise RuntimeError(
+                        "hosted validation runner is not configured for hosted PR adoption"
+                    )
+                validation_run_kwargs["pr_identity"] = hosted_pr_identity_for_workspace(ws)
+            val_result = await validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -317,6 +328,7 @@ async def run_validation_and_fix_cycle(
                 run_healthchecks=True,
                 worktree_path=worktree_path,
                 include_coverage=False,
+                **validation_run_kwargs,
             )
             if run_local_coverage and val_result.all_passed:
                 coverage_evidence = await self._run_final_coverage_gate(

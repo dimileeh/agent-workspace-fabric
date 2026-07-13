@@ -99,6 +99,7 @@ def _make_executor(
     max_fix_passes: int = 5,
     pr_monitor_factory: Any = None,
     validation: Any = None,
+    hosted_validation: Any = None,
 ) -> WorkspaceExecutor:
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -120,6 +121,7 @@ def _make_executor(
             max_validation_fix_passes=max_fix_passes,
         ),
         pr_monitor_factory=pr_monitor_factory,
+        hosted_validation=hosted_validation,
     )
 
 
@@ -155,6 +157,28 @@ class SimpleValidationResult:
     total_retries = 0
     commands: list[Any] = []
     coverage = None
+
+
+class _RecordingValidation:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...] | list[str],
+        **kwargs: Any,
+    ) -> SimpleValidationResult:
+        self.calls.append(
+            {
+                "phase_names": tuple(phase_names),
+                "kwargs": kwargs,
+            }
+        )
+        return SimpleValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
 
 
 class _SetupFailureValidation:
@@ -282,6 +306,7 @@ async def _seed_ready_workspace_with_recovery(
     resolved_profile: dict[str, Any] | None = None,
     recovery_payload_overrides: dict[str, Any] | None = None,
     task_kind: str = "feature_branch_pr",
+    task_policy: dict[str, Any] | None = None,
 ) -> str:
     """Insert a workspace already in ``ready`` with a pending `pr_monitor`
     validate operation — the shape the monitor's RECOVERY_DISPATCH path
@@ -299,6 +324,7 @@ async def _seed_ready_workspace_with_recovery(
             requires_database=False,
             resolved_profile=resolved_profile,
             task_kind=task_kind,
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
         ws.branch_name = f"awf/{ws.id}"
@@ -867,6 +893,41 @@ async def test_stale_validation_callback_terminal_status_cancels_recovery_operat
         "actual_status": final_status.value,
         "reason_code": "STALE_CALLBACK_IGNORED",
     }
+
+
+@pytest.mark.unit
+async def test_hosted_recovery_validation_routes_through_hosted_delegate(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    local_validation = _RecordingValidation()
+    hosted_validation = _RecordingValidation()
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=local_validation,
+        hosted_validation=hosted_validation,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+    )
+
+    _queue_validation_head(fake, head="d" * 40)
+
+    await executor.execute(ws_id)
+
+    assert [call["phase_names"] for call in local_validation.calls] == [("setup", "pre_agent")]
+    assert [call["phase_names"] for call in hosted_validation.calls] == [("post_agent", "validate")]
+    hosted_kwargs = hosted_validation.calls[0]["kwargs"]
+    assert hosted_kwargs["pr_identity"]["pr_url"] == "https://github.com/x/y/pull/1"
+    assert hosted_kwargs["pr_identity"]["expected_head_sha"] == "d" * 40
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
 
 
 @pytest.mark.unit
