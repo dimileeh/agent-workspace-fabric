@@ -359,6 +359,57 @@ def test_hosted_validation_profile_payload_rejects_secret_bearing_command_fields
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "PGPASSWORD=${PGPASSWORD:-} psql -c 'select 1'",
+        "PGPASSWORD=${PGPASSWORD-} psql -c 'select 1'",
+    ],
+)
+def test_hosted_validation_profile_payload_allows_empty_default_secret_references(
+    command: str,
+) -> None:
+    """Empty default env references do not carry literal command secrets."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-empty-default-secret-reference",
+            "database": {"generated_setup": [command]},
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["database"]["generated_setup"][0]["command"] == command
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "PGPASSWORD=${PGPASSWORD:-literal-database-secret} psql -c 'select 1'",
+        "PGPASSWORD=${PGPASSWORD-literal-database-secret} psql -c 'select 1'",
+    ],
+)
+def test_hosted_validation_profile_payload_rejects_non_empty_default_secret_references(
+    command: str,
+) -> None:
+    """Non-empty default words can carry secrets and remain disallowed."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-non-empty-default-secret-reference",
+            "database": {"generated_setup": [command]},
+        }
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        _hosted_validation_profile_payload(profile)
+
+    message = str(excinfo.value)
+    assert "database.generated_setup[0].command" in message
+    assert "literal-database-secret" not in message
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_rejects_secret_bearing_healthcheck_url() -> None:
     """Hosted HTTP healthcheck URLs must not carry credentials to the control plane."""
     profile = WorkspaceProfile.model_validate(

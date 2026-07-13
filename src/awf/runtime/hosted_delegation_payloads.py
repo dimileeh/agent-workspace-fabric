@@ -25,6 +25,7 @@ from awf.profiles.models import WorkspaceProfile
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+_ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
     rf"^(?:{TOKEN_ASSIGNMENT_KEY_PATTERN})$|"
@@ -476,7 +477,9 @@ def _hosted_validation_command_assignment_key_is_secret(key: str) -> bool:
 
 def _hosted_validation_command_assignment_value_is_reference(value: str) -> bool:
     return bool(
-        _ENV_REFERENCE_PATTERN.fullmatch(value) or _SHELL_ENV_REFERENCE_PATTERN.fullmatch(value)
+        _ENV_REFERENCE_PATTERN.fullmatch(value)
+        or _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN.fullmatch(value)
+        or _SHELL_ENV_REFERENCE_PATTERN.fullmatch(value)
     )
 
 
