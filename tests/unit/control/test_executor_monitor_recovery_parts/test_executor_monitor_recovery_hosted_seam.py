@@ -30,6 +30,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
@@ -327,3 +328,191 @@ class TestResumeHandoffHostedSeam:
         # Local path still restarts compose exactly once.
         assert compose.ensure_project_up_calls == [ws_id]
         assert len(monitor.run_calls) == 1
+
+
+@pytest.mark.unit
+def test_compose_runtime_requirements_respect_profiles_and_completion_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback inspection mirrors Compose profile filtering and one-shot deps."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      cache: service_started
+      external:
+        condition: service_completed_successfully
+  migrate:
+    image: migrate
+  cache:
+    image: cache
+    profiles: ["worker"]
+  skipped:
+    image: skipped
+    profiles: ["debug"]
+  malformed:
+    image: malformed
+    profiles: ["worker", 7]
+  scalar: scalar-service
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMPOSE_PROFILES", "worker")
+
+    requirements = monitor_handoff_module._compose_runtime_requirements_from_file(compose_file)
+
+    assert requirements is not None
+    assert requirements.service_names == {"app", "migrate", "cache", "malformed", "scalar"}
+    assert requirements.successful_completion_services == {"migrate"}
+
+
+@pytest.mark.unit
+def test_compose_runtime_requirements_handle_unreadable_and_empty_shapes(
+    tmp_path: Path,
+) -> None:
+    """Unavailable service metadata is distinguished from empty service metadata."""
+    compose_file = tmp_path / "compose.yml"
+
+    compose_file.write_text("services: [", encoding="utf-8")
+    assert monitor_handoff_module._compose_runtime_requirements_from_file(compose_file) is None
+
+    compose_file.write_text("[]\n", encoding="utf-8")
+    list_payload = monitor_handoff_module._compose_runtime_requirements_from_file(compose_file)
+    assert list_payload is not None
+    assert list_payload.service_names == set()
+    assert list_payload.successful_completion_services == set()
+
+    compose_file.write_text("services: []\n", encoding="utf-8")
+    list_services = monitor_handoff_module._compose_runtime_requirements_from_file(compose_file)
+    assert list_services is not None
+    assert list_services.service_names == set()
+    assert list_services.successful_completion_services == set()
+
+
+@pytest.mark.unit
+async def test_compose_runtime_fallback_accepts_running_stack_with_completed_one_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed restart can resume when required services are already satisfied."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    image: migrate
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(name="app", container_id="1", image="app", state="running"),
+                RuntimeService(
+                    name="migrate",
+                    container_id="2",
+                    image="migrate",
+                    state="exited",
+                    status="Exited (0) 3 seconds ago",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_ws", compose_file
+    )
+
+
+@pytest.mark.unit
+async def test_compose_runtime_fallback_rejects_unusable_existing_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing or unsatisfied services keep monitor resume stopped after restart failure."""
+    compose_file = tmp_path / "compose.yml"
+    empty_compose_file = tmp_path / "empty-compose.yml"
+    one_shot_compose_file = tmp_path / "one-shot-compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app
+  migrate:
+    image: migrate
+""",
+        encoding="utf-8",
+    )
+    empty_compose_file.write_text("services: {}\n", encoding="utf-8")
+    one_shot_compose_file.write_text(
+        """
+services:
+  app:
+    image: app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    image: migrate
+""",
+        encoding="utf-8",
+    )
+    snapshots: list[RuntimeSnapshot] = [
+        RuntimeSnapshot(stack_state="running"),
+        RuntimeSnapshot(stack_state="stopped"),
+        RuntimeSnapshot(
+            stack_state="running",
+            services=[RuntimeService(name="app", container_id="1", image="app", state="running")],
+        ),
+        RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="app",
+                    container_id="1",
+                    image="app",
+                    state="running",
+                    health="unhealthy",
+                ),
+                RuntimeService(
+                    name="migrate",
+                    container_id="2",
+                    image="migrate",
+                    state="created",
+                    status="Created",
+                ),
+            ],
+        ),
+    ]
+
+    async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_ws", empty_compose_file
+    )
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_ws", compose_file
+    )
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_ws", compose_file
+    )
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_ws", one_shot_compose_file
+    )
