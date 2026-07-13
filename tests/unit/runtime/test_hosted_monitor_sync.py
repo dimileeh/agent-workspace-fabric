@@ -21,8 +21,16 @@ from awf.runtime.pr_monitor_runner.agent_service_recovery import (
 
 
 class _Runner:
-    def __init__(self, *, fetched_sha: str) -> None:
+    def __init__(
+        self,
+        *,
+        fetched_sha: str,
+        current_sha: str = "a" * 40,
+        diff_stdout: str = "",
+    ) -> None:
         self.fetched_sha = fetched_sha
+        self.current_sha = current_sha
+        self.diff_stdout = diff_stdout
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str] | None] = []
 
@@ -34,12 +42,16 @@ class _Runner:
     ) -> CommandResult:
         self.calls.append(args)
         self.envs.append(env)
+        if args[-2:] == ["rev-parse", "HEAD"]:
+            return CommandResult(returncode=0, stdout=self.current_sha + "\n", stderr="")
         if args[-1] == "feature/ready":
             return CommandResult(returncode=0, stdout="", stderr="")
         if args[-1] == "FETCH_HEAD":
             return CommandResult(returncode=0, stdout=self.fetched_sha + "\n", stderr="")
         if args[-2:] == ["--hard", self.fetched_sha]:
             return CommandResult(returncode=0, stdout="reset\n", stderr="")
+        if args[-5:-2] == ["diff", "--name-status", "-z"] and args[-1] == "--":
+            return CommandResult(returncode=0, stdout=self.diff_stdout, stderr="")
         return CommandResult(returncode=1, stdout="", stderr="unexpected command")
 
 
@@ -160,6 +172,14 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
             *git_safe_directory_config_args(worktree_path),
             "-C",
             str(worktree_path),
+            "rev-parse",
+            "HEAD",
+        ],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
             "fetch",
             "--no-tags",
             "git@github.com:dimileeh/aira-web.git",
@@ -181,6 +201,17 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
             "reset",
             "--hard",
             sha,
+        ],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "diff",
+            "--name-status",
+            "-z",
+            f"{'a' * 40}..{sha}",
+            "--",
         ],
     ]
 
@@ -206,7 +237,7 @@ async def test_sync_hosted_worktree_scrubs_git_object_lookup_env(
         terminal_head_sha=sha,
     )
 
-    assert len(runner.envs) == 3
+    assert len(runner.envs) == 5
     for env in runner.envs:
         assert env is not None
         assert "GIT_OBJECT_DIRECTORY" not in env
@@ -232,7 +263,7 @@ async def test_sync_hosted_worktree_accepts_uppercase_terminal_head_sha(
         terminal_head_sha=sha.upper(),
     )
 
-    assert runner.calls[-1] == [
+    assert runner.calls[-2] == [
         "git",
         *git_safe_directory_config_args(worktree_path),
         "-C",
@@ -375,7 +406,7 @@ async def test_hosted_agent_error_syncs_terminal_head_before_reraising(
     assert excinfo.value.reason_code == "AGENT_CLI_FAILED"
     assert state.last_push_sha == sha
     assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
-    assert runner.calls[-1] == [
+    assert runner.calls[-2] == [
         "git",
         *git_safe_directory_config_args(worktree_path),
         "-C",

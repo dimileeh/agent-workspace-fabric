@@ -42,10 +42,8 @@ from awf.control.executor.git_ops import (
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
-    _call_pr_monitor_factory,
     _failure_reason_for_phase,
     _profile_for_workspace,
-    _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -58,19 +56,17 @@ from awf.control.executor.mirror_hooks_repair import (
 )
 from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.pre_push_policy import run_pre_push_policy_checks
-from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
     _is_nothing_to_commit,
     _log,
     _PostAgentCommitStepError,
 )
+from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
-    _recovery_needs_existing_pr_push,
-    _validate_only_recovery_target_head_sha,
 )
 from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
@@ -87,7 +83,6 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
-from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
@@ -1324,136 +1319,22 @@ async def execute(
         validation_result.successful_validation_workspace_head_sha
     )
 
-    # ── Recovery skip-push guard ───────────────────────────────────────
-    # Recovery for a workspace that already has an open PR must NOT
-    # re-create the PR. Clean validate-only recovery does not push; if a
-    # fix pass or handoff report created a new validated local commit,
-    # update the existing PR branch before handing back to the monitor.
-    # Rebase-only recovery already pushed the rebased branch above, but
-    # later validation work can still advance local HEAD.
-    if recovery is not None and ws.pr_url:
-        recovery_requires_pr_update = _recovery_needs_existing_pr_push(
-            recovery,
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-            rebase_recovery_result=rebase_recovery_result,
-        )
-        if rebase_recovery_result is not None and successful_validation_run_id is not None:
-            try:
-                await self._set_validation_run_target_head_sha(
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=rebase_recovery_result.head_sha,
-                )
-                await self._clear_rebase_recovery_staleness(
-                    workspace_id=workspace_id,
-                )
-            except Exception:
-                _log.exception(
-                    "executor.rebase_recovery_staleness_clear_failed",
-                    workspace_id=workspace_id,
-                    validation_run_id=successful_validation_run_id,
-                )
-        validate_only_target_head_sha = _validate_only_recovery_target_head_sha(
-            recovery,
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-        )
-        if (
-            rebase_recovery_result is None
-            and successful_validation_run_id is not None
-            and validate_only_target_head_sha is not None
-        ):
-            try:
-                await self._set_validation_run_target_head_sha(
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=validate_only_target_head_sha,
-                    workspace_head_sha=successful_validation_workspace_head_sha,
-                )
-            except Exception:
-                _log.exception(
-                    "executor.validate_only_recovery_target_head_sha_update_failed",
-                    workspace_id=workspace_id,
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=validate_only_target_head_sha,
-                )
-        if not recovery_requires_pr_update:
-            if not await _repair_mirror_hooks_path_or_mark_failed(
-                failure_stage="before recovery skip-push handoff",
-                failure_from_status=WorkspaceStatus.validating,
-            ):
-                return
-            if not await self._recheck_status(
-                workspace_id,
-                expected=WorkspaceStatus.validating,
-                action="recovery_skip_push",
-            ):
-                return
-            async with self._session_factory() as session:
-                repo = WorkspaceRepository(session)
-                persisted = await repo.get(workspace_id)
-                if persisted is None:  # pragma: no cover - destroyed mid-flight
-                    return
-                if persisted.status != WorkspaceStatus.validating.value:
-                    await self._record_stale_action_skip(
-                        repo,
-                        persisted,
-                        action="recovery_skip_push",
-                        expected=WorkspaceStatus.validating,
-                        reason_code="EXECUTOR_STALE_STATUS",
-                    )
-                    await session.commit()
-                    return
-                has_monitor = self._pr_monitor is not None or self._pr_monitor_factory is not None
-                await repo.transition(
-                    persisted,
-                    to=WorkspaceStatus.monitoring_pr if has_monitor else WorkspaceStatus.completed,
-                    reason_code="RECOVERY_VALIDATION_OK",
-                )
-                await session.commit()
-            _log.info(
-                "executor.recovery_skip_push",
-                workspace_id=workspace_id,
-                pr_url=ws.pr_url,
-                has_monitor=has_monitor,
-            )
-            if has_monitor:
-                _monitor: _MonitorRunnerProto | None = self._pr_monitor
-                if _monitor is None and self._pr_monitor_factory is not None:
-                    _monitor = _call_pr_monitor_factory(
-                        self._pr_monitor_factory,
-                        adapter=adapter,
-                        profile=profile,
-                        workspace=persisted,
-                        provider_recovery_default_model=(
-                            _provider_recovery_default_model_for_monitor_handoff(
-                                adapter=adapter,
-                                defaults=defaults,
-                            )
-                        ),
-                    )
-                if _monitor is not None:
-                    _log.info(
-                        "executor.recovery_handoff_to_pr_monitor",
-                        workspace_id=workspace_id,
-                        pr_url=ws.pr_url,
-                    )
-                    if not await self._recheck_status(
-                        workspace_id,
-                        expected=WorkspaceStatus.monitoring_pr,
-                        action="run_pr_monitor",
-                    ):
-                        return
-                    await _monitor.run(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                    )
-            return
-        _log.info(
-            "executor.recovery_existing_pr_update_required",
-            workspace_id=workspace_id,
-            pr_url=ws.pr_url,
-            source_head_sha=recovery.get("source_head_sha"),
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-        )
+    if await handle_recovery_pr_handoff_after_validation(
+        self,
+        workspace_id=workspace_id,
+        ws=ws,
+        recovery=recovery,
+        rebase_recovery_result=rebase_recovery_result,
+        successful_validation_run_id=successful_validation_run_id,
+        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+        repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
+        adapter=adapter,
+        profile=profile,
+        defaults=defaults,
+        compose_project=compose_project,
+        compose_file=compose_file,
+    ):
+        return
 
     if await run_pre_push_policy_checks(
         self,

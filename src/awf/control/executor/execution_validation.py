@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from awf.common.git_identity import (
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor import validation_fix_helpers as _validation_fix_helpers
 from awf.control.executor.agent_service_recovery import (
     AGENT_SERVICE_RECOVERY_ABORTED,
     _run_agent_callable_with_service_recovery,
@@ -44,13 +46,16 @@ from awf.control.executor.helpers import (
     _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
+from awf.control.executor.hosted_validation_sync import (
+    _hosted_agent_error_terminal_head_sha,
+    _sync_hosted_validation_fix_head,
+)
 from awf.control.executor.quality_gates import (
     _log,
     _post_validation_conformance_agent_failure_details,
     _post_validation_conformance_agent_failure_message,
 )
 from awf.control.executor.state_ops import _sync_resolved_profile
-from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
@@ -67,12 +72,7 @@ from awf.control.executor.validation_cleanup_guards import (
     handle_validation_cleanup_guard as _handle_validation_cleanup_guard,
 )
 from awf.control.executor.validation_side_effects import _side_effect_failure_result
-from awf.control.quality_gates import (
-    PLAN_ONLY_OUTPUT_REASON_CODE,
-    find_protected_quality_gate_changes,
-    plan_only_output_message,
-    quality_gate_violation_message,
-)
+from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     build_fix_prompt,
@@ -80,7 +80,6 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.validation import (
     ValidationCoverageResult,
@@ -95,106 +94,6 @@ from awf.runtime.validation_worktree import (
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
 )
-
-
-def _hosted_identity_str(identity: Mapping[str, Any] | None, key: str) -> str | None:
-    value = identity.get(key) if identity is not None else None
-    return value if isinstance(value, str) and value.strip() else None
-
-
-def _hosted_agent_error_terminal_head_sha(exc: AgentRunError) -> str | None:
-    value = getattr(exc.result, "terminal_head_sha", None)
-    if isinstance(value, str) and value.strip():
-        return value
-    return _hosted_identity_str(exc.details, "terminal_head_sha")
-
-
-async def _sync_hosted_validation_fix_head(
-    self: Any,
-    *,
-    worktree_path: Path,
-    hosted_pr_identity: Mapping[str, Any] | None,
-    terminal_head_sha: str,
-) -> CommandResult:
-    repo_url = _hosted_identity_str(hosted_pr_identity, "head_repo_url") or _hosted_identity_str(
-        hosted_pr_identity,
-        "repo_url",
-    )
-    head_ref = _hosted_identity_str(hosted_pr_identity, "head_ref")
-    if repo_url is None or head_ref is None:
-        return CommandResult(
-            returncode=1,
-            stdout="",
-            stderr="hosted validation fix missing remote PR head identity",
-            reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
-        )
-
-    git_env = git_env_without_object_lookup_overrides()
-    fetch = await self._runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "fetch",
-            "--no-tags",
-            repo_url,
-            head_ref,
-        ],
-        env=git_env,
-    )
-    if not fetch.ok:
-        return CommandResult(
-            returncode=fetch.returncode,
-            stdout=fetch.stdout,
-            stderr=fetch.stderr,
-            reason_code=fetch.reason_code or "HOSTED_REMOTE_HEAD_FETCH_FAILED",
-        )
-
-    rev_parse = await self._runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "rev-parse",
-            "FETCH_HEAD",
-        ],
-        env=git_env,
-    )
-    fetched_sha = rev_parse.stdout.strip()
-    if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
-        return CommandResult(
-            returncode=rev_parse.returncode if rev_parse.returncode != 0 else 1,
-            stdout=rev_parse.stdout,
-            stderr=(
-                "hosted validation fix terminal head mismatch: "
-                f"reported {terminal_head_sha}, fetched {fetched_sha or '<unknown>'}"
-            ),
-            reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
-        )
-
-    reset = await self._runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "reset",
-            "--hard",
-            fetched_sha,
-        ],
-        env=git_env,
-    )
-    if not reset.ok:
-        return CommandResult(
-            returncode=reset.returncode,
-            stdout=reset.stdout,
-            stderr=reset.stderr,
-            reason_code=reset.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED",
-        )
-
-    return CommandResult(returncode=0, stdout=fetched_sha, stderr="")
 
 
 async def run_validation_and_fix_cycle(
@@ -1281,214 +1180,43 @@ async def run_validation_and_fix_cycle(
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
             )
 
-        async def _fail_fix_pass_git_command(
-            *,
-            current_validation_run_id: str,
-            current_validation_coverage: dict[str, object] | None,
-            reason_code: str,
-            operation: str,
-            result: CommandResult,
-        ) -> None:
-            """Record a validation fix-pass git failure and mark workspace failed."""
-            command_output = (result.stderr or result.stdout).strip()
-            message = (
-                f"validation fix pass {operation} failed with exit {result.returncode}"
-                + (f": {command_output}" if command_output else "")
-            )[:2000]
-            details: dict[str, Any] = {
-                "validation_run_id": current_validation_run_id,
-                "operation": operation,
-                "returncode": result.returncode,
-            }
-            if result.reason_code is not None:
-                details["command_reason_code"] = result.reason_code
-            await self._finish_pending_validate_operations(
-                workspace_id=workspace_id,
-                status=OperationStatus.failed,
-                validation_run_id=current_validation_run_id,
-                requested_tier=validation_tier,
-                reason_code=reason_code,
-                coverage=current_validation_coverage,
-                error_message=message,
-            )
-            await _mark_failed_preserving_planning_artifacts(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.validating,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=message,
-                reason_code=reason_code,
-                details=details,
-            )
-
-        async def _check_post_fix_worktree_clean() -> ExecutionValidationResult | None:
-            fix_pass_ignored_check = await check_validation_worktree_clean(
-                run_git=git_in_worktree,
-                worktree_path=worktree_path,
-                ignore_all_ignored=True,
-            )
-            if fix_pass_ignored_check.clean:
-                return None
-            reason_code = (
-                fix_pass_ignored_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-            )
-            message = (
-                fix_pass_ignored_check.message
-                if reason_code == VALIDATION_WORKTREE_STATUS_FAILED
-                else validation_worktree_preexisting_dirty_message(fix_pass_ignored_check)
-            )
-            return await _fail_validation_worktree_guard(
-                self,
-                workspace_id=workspace_id,
-                validation_run_id=None,
-                validation_tier=validation_tier,
-                reason_code=reason_code,
-                message=message,
-                profile=profile,
-                worktree_path=worktree_path,
-            )
-
-        async def _gate_fix_changed_paths(
-            *,
-            changed_paths: list[str],
-            diff_base_ref: str,
-            _fix_command_evidence: list[str] = fix_command_evidence,
-            _validation_run_id: str = validation_run_id,
-            _val_result: ValidationResult = val_result,
-            _successful_validation_run_id: str | None = successful_validation_run_id,
-            _successful_validation_workspace_head_sha: str | None = (
-                successful_validation_workspace_head_sha
+        _fail_fix_pass_git_command = partial(
+            _validation_fix_helpers.fail_fix_pass_git_command,
+            self,
+            workspace_id=workspace_id,
+            validation_tier=validation_tier,
+            mark_failed_preserving_planning_artifacts=(_mark_failed_preserving_planning_artifacts),
+        )
+        _check_post_fix_worktree_clean = partial(
+            _validation_fix_helpers.check_post_fix_worktree_clean,
+            self,
+            workspace_id=workspace_id,
+            validation_tier=validation_tier,
+            git_in_worktree=git_in_worktree,
+            worktree_path=worktree_path,
+            profile=profile,
+        )
+        _gate_fix_changed_paths = partial(
+            _validation_fix_helpers.gate_fix_changed_paths,
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            ws=ws,
+            profile=profile,
+            fix_command_evidence=fix_command_evidence,
+            validation_run_id=validation_run_id,
+            val_result=val_result,
+            validation_tier=validation_tier,
+            baseline_coverage=baseline_coverage,
+            successful_validation_run_id=successful_validation_run_id,
+            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+            find_protected_quality_gate_changes_fn=find_protected_quality_gate_changes,
+            mark_failed_preserving_planning_artifacts=(_mark_failed_preserving_planning_artifacts),
+            enter_blocked_preserving_planning_artifacts=(
+                _enter_blocked_preserving_planning_artifacts
             ),
-        ) -> ExecutionValidationResult | None:
-            supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
-                workspace_id=workspace_id,
-                command_evidence=_fix_command_evidence,
-                changed_paths=changed_paths,
-            )
-            if supply_chain_result.policy_blocked:
-                message = _supply_chain_block_message(supply_chain_result.findings)
-                await self._finish_pending_validate_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.failed,
-                    validation_run_id=_validation_run_id,
-                    requested_tier=validation_tier,
-                    reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
-                    coverage=_validation_run_coverage_metadata(
-                        _val_result,
-                        baseline_coverage=baseline_coverage,
-                    ),
-                    error_message=message,
-                )
-                await _mark_failed_preserving_planning_artifacts(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.validating,
-                    failure_reason=FailureReason.policy_failure,
-                    reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
-                    message=message[:2000],
-                )
-                return ExecutionValidationResult(
-                    stop=True,
-                    successful_validation_run_id=_successful_validation_run_id,
-                    successful_validation_workspace_head_sha=(
-                        _successful_validation_workspace_head_sha
-                    ),
-                )
-            if not changed_paths:
-                return None
-            if await self._committed_and_staged_output_is_plan_only(
-                worktree_path=worktree_path,
-                base_commit=diff_base_ref,
-                staged_paths=changed_paths,
-            ):
-                # Plan-only fix-pass output marks the workspace FAILED. Deposit
-                # the worktree plan + conformance report BEFORE
-                # ``_fail_if_plan_only_paths`` publishes the terminal status —
-                # mirroring the post-agent plan-only gate in ``execution_flow``
-                # and the ``_mark_failed_preserving_planning_artifacts`` helper
-                # every other terminal path in this cycle uses. The console keys
-                # its artifact refetch on the workspace ``updated_at``
-                # (TaskArtifactsSection ``refreshKey``), and
-                # ``_fail_if_plan_only_paths`` routes through bare
-                # ``_mark_failed`` (not the preserving helper), so marking FAILED
-                # first would bump ``updated_at`` and let a poll observe it in
-                # the window before the post-cycle deposit (in
-                # ``execution_flow``), record an empty artifact list, then never
-                # refetch — hiding the Plan/Validation controls on the
-                # preserved-FAILED workspace. Best-effort, idempotent, gated on
-                # ``planning.required``.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
-                # The plan-only gate above already confirmed the fix-pass delta
-                # is entirely internal plan artifacts, so this marks the
-                # workspace FAILED (PLAN_ONLY_OUTPUT) and returns True.
-                await self._fail_if_plan_only_paths(
-                    workspace_id=workspace_id,
-                    changed_paths=changed_paths,
-                    expected_status=WorkspaceStatus.validating,
-                )
-                await self._finish_pending_validate_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.failed,
-                    validation_run_id=_validation_run_id,
-                    requested_tier=validation_tier,
-                    reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
-                    coverage=_validation_run_coverage_metadata(
-                        _val_result,
-                        baseline_coverage=baseline_coverage,
-                    ),
-                    error_message=plan_only_output_message(changed_paths),
-                )
-                return ExecutionValidationResult(
-                    stop=True,
-                    successful_validation_run_id=_successful_validation_run_id,
-                    successful_validation_workspace_head_sha=(
-                        _successful_validation_workspace_head_sha
-                    ),
-                )
-            protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
-                worktree_path=worktree_path,
-                base_ref=diff_base_ref,
-                changed_paths=changed_paths,
-                owned_paths=list(ws.owned_paths),
-            )
-            violations = find_protected_quality_gate_changes(
-                changed_paths=changed_paths,
-                owned_paths=list(ws.owned_paths),
-                protected_file_diffs=protected_file_diffs,
-                operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
-            )
-            if violations:
-                message = quality_gate_violation_message(violations)
-                await self._finish_pending_validate_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.failed,
-                    validation_run_id=_validation_run_id,
-                    requested_tier=validation_tier,
-                    reason_code="QUALITY_GATE_POLICY_CHANGED",
-                    coverage=_validation_run_coverage_metadata(
-                        _val_result,
-                        baseline_coverage=baseline_coverage,
-                    ),
-                    error_message=message,
-                )
-                await _enter_blocked_preserving_planning_artifacts(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.validating,
-                    violations=violations,
-                    resume_phase="validation_fix_cycle",
-                    execution_owner_id=execution_owner_id,
-                )
-                return ExecutionValidationResult(
-                    stop=True,
-                    successful_validation_run_id=_successful_validation_run_id,
-                    successful_validation_workspace_head_sha=(
-                        _successful_validation_workspace_head_sha
-                    ),
-                )
-            return None
+            execution_owner_id=execution_owner_id,
+        )
 
         if getattr(adapter, "is_hosted", False) and fix_result is not None:
             if not fix_result.terminal_head_sha:
