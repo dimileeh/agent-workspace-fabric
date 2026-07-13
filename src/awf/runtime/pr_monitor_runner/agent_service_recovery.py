@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -20,6 +20,12 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
@@ -46,24 +52,30 @@ from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS = 300
+_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON = "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
 
 
 async def _run_monitor_agent_with_service_recovery(
@@ -112,6 +124,8 @@ async def _run_monitor_agent_with_service_recovery(
                         workspace_id=workspace_id,
                         hosted_pr_identity=hosted_pr_identity,
                         terminal_head_sha=terminal_head_sha,
+                        command_evidence=command_evidence or (),
+                        operation_start_head=operation_start_head,
                     )
                     if state is not None:
                         state.last_push_sha = synced_head_sha
@@ -173,6 +187,8 @@ async def _run_monitor_agent_with_service_recovery(
                 workspace_id=workspace_id,
                 hosted_pr_identity=hosted_pr_identity,
                 terminal_head_sha=result.terminal_head_sha,
+                command_evidence=command_evidence or (),
+                operation_start_head=operation_start_head,
             )
             if state is not None:
                 state.last_push_sha = synced_head_sha
@@ -196,6 +212,8 @@ async def _sync_hosted_worktree_to_terminal_head(
     workspace_id: str,
     hosted_pr_identity: dict[str, object] | None,
     terminal_head_sha: str,
+    command_evidence: Sequence[str] = (),
+    operation_start_head: str | None = None,
 ) -> str:
     identity = hosted_pr_identity or {}
     repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
@@ -214,6 +232,26 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
         )
     git_env = git_env_without_object_lookup_overrides()
+    delta_base_sha = _nonblank_str(operation_start_head)
+    if delta_base_sha is None:
+        current_head = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ],
+            env=git_env,
+        )
+        delta_base_sha = current_head.stdout.strip()
+        if not current_head.ok or not delta_base_sha:
+            raise AgentRunError(
+                agent=self._deps.adapter.name,
+                result=current_head,
+                reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+            )
     fetch = await self._deps.runner.run(
         [
             "git",
@@ -276,7 +314,147 @@ async def _sync_hosted_worktree_to_terminal_head(
             result=reset,
             reason_code="HOSTED_REMOTE_HEAD_SYNC_FAILED",
         )
+    await _gate_hosted_terminal_head_delta(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_ref=delta_base_sha,
+        terminal_head_sha=fetched_sha,
+        command_evidence=command_evidence,
+    )
     return fetched_sha
+
+
+async def _gate_hosted_terminal_head_delta(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+    command_evidence: Sequence[str],
+) -> None:
+    changed_paths = await _hosted_terminal_head_delta_paths(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_ref=base_ref,
+        terminal_head_sha=terminal_head_sha,
+    )
+    if not changed_paths:
+        return
+
+    policy_message = await self._refresh_supply_chain_policy_before_push(
+        workspace_id=workspace_id,
+        command_evidence=command_evidence,
+        changed_paths=changed_paths,
+    )
+    if policy_message is not None:
+        raise _MonitorPolicyBlockedError(policy_message)
+
+    try:
+        violations = await _hosted_terminal_head_protected_scope_violations(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            terminal_head_sha=terminal_head_sha,
+            changed_paths=changed_paths,
+        )
+    except ProtectedScopeDiffError as exc:
+        raise _MonitorPolicyBlockedError(
+            f"protected-scope policy could not verify hosted repair terminal head: {exc}",
+            reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        ) from exc
+    if violations:
+        raise _MonitorPolicyBlockedError(
+            quality_gate_violation_message(list(violations)),
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+        )
+
+
+async def _hosted_terminal_head_delta_paths(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+) -> tuple[str, ...]:
+    if base_ref.lower() == terminal_head_sha.lower():
+        return ()
+    diff = await self._deps.runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "diff",
+            "--name-status",
+            "-z",
+            f"{base_ref}..{terminal_head_sha}",
+            "--",
+        ],
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not diff.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=diff,
+            reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+        )
+    try:
+        return _changed_paths_from_name_status_z(diff.stdout)
+    except ProtectedScopeDiffError as exc:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout=diff.stdout,
+                stderr=(
+                    f"hosted repair terminal head delta was malformed for {workspace_id}: {exc}"
+                ),
+            ),
+            reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+        ) from exc
+
+
+async def _hosted_terminal_head_protected_scope_violations(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    terminal_head_sha: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for hosted terminal-head protected-scope validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read hosted terminal-head protected-scope file contents "
+            f"for {terminal_head_sha[:10]}: {exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
+    )
 
 
 async def _rerun_monitor_agent_pre_launch_guards(

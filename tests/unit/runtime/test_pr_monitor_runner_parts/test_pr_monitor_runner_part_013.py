@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_mock
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentRunError
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -27,6 +29,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -320,6 +323,415 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
         "hosted": True,
         "log_level": "warning",
     } in captured
+
+
+@pytest.mark.unit
+async def test_monitor_agent_hosted_terminal_head_gates_synced_delta_before_accepting(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """PRRT_kwDOSJAM6s6QSGqD: hosted pushed heads must pass local policy gates."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    previous_head = "a" * 40
+    terminal_head = "b" * 40
+    changed_paths = ("pyproject.toml", "uv.lock")
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter._queued.append(
+        AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair",
+            stderr="",
+            terminal_head_sha=terminal_head,
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # git fetch
+    cmd.queue_result(stdout=f"{terminal_head}\n")  # git rev-parse FETCH_HEAD
+    cmd.queue_result()  # git reset --hard
+    cmd.queue_result(stdout="M\0pyproject.toml\0M\0uv.lock\0")  # hosted delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    supply_chain_calls: list[tuple[str, ...]] = []
+    protected_calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> None:
+        supply_chain_calls.append(tuple(kwargs["changed_paths"]))  # type: ignore[arg-type]
+
+    async def _hosted_terminal_head_protected_scope_violations(
+        _runner: object,
+        **kwargs: object,
+    ) -> list[object]:
+        protected_calls.append(
+            (
+                str(kwargs["base_ref"]),
+                str(kwargs["terminal_head_sha"]),
+                tuple(kwargs["changed_paths"]),  # type: ignore[arg-type]
+            )
+        )
+        return []
+
+    runner._refresh_supply_chain_policy_before_push = (  # type: ignore[method-assign]
+        _refresh_supply_chain_policy_before_push
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_hosted_terminal_head_protected_scope_violations",
+        side_effect=_hosted_terminal_head_protected_scope_violations,
+        create=True,
+    )
+    state = SimpleNamespace(last_push_sha=previous_head)
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=_write_compose_file(tmp_path),
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=["agent evidence"],
+        operation_start_head=previous_head,
+        state=state,
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: hosted repair"
+    assert supply_chain_calls == [changed_paths]
+    assert protected_calls == [(previous_head, terminal_head, changed_paths)]
+    assert state.last_push_sha == terminal_head
+
+
+@pytest.mark.unit
+async def test_monitor_agent_hosted_terminal_head_policy_block_keeps_previous_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    previous_head = "a" * 40
+    terminal_head = "b" * 40
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter._queued.append(
+        AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair",
+            stderr="",
+            terminal_head_sha=terminal_head,
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # git fetch
+    cmd.queue_result(stdout=f"{terminal_head}\n")  # git rev-parse FETCH_HEAD
+    cmd.queue_result()  # git reset --hard
+    cmd.queue_result(stdout="M\0.github/workflows/ci.yml\0")  # hosted delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _refresh_supply_chain_policy_before_push(**_kwargs: object) -> None:
+        return None
+
+    async def _hosted_terminal_head_protected_scope_violations(
+        _runner: object,
+        **_kwargs: object,
+    ) -> list[object]:
+        return [
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            )
+        ]
+
+    runner._refresh_supply_chain_policy_before_push = (  # type: ignore[method-assign]
+        _refresh_supply_chain_policy_before_push
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_hosted_terminal_head_protected_scope_violations",
+        side_effect=_hosted_terminal_head_protected_scope_violations,
+        create=True,
+    )
+    state = SimpleNamespace(last_push_sha=previous_head)
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            operation_start_head=previous_head,
+            state=state,
+        )
+
+    assert "agent changed protected quality-gate file" in str(raised.value)
+    assert state.last_push_sha == previous_head
+
+
+@pytest.mark.unit
+async def test_monitor_agent_hosted_terminal_head_supply_chain_block_keeps_previous_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    previous_head = "a" * 40
+    terminal_head = "b" * 40
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter._queued.append(
+        AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair",
+            stderr="",
+            terminal_head_sha=terminal_head,
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # git fetch
+    cmd.queue_result(stdout=f"{terminal_head}\n")  # git rev-parse FETCH_HEAD
+    cmd.queue_result()  # git reset --hard
+    cmd.queue_result(stdout="M\0uv.lock\0")  # hosted delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _refresh_supply_chain_policy_before_push(**_kwargs: object) -> str:
+        return "Supply-chain policy blocked PR monitor publication: LOCKFILE_CHANGED"
+
+    async def _hosted_terminal_head_protected_scope_violations(
+        _runner: object,
+        **_kwargs: object,
+    ) -> list[object]:
+        pytest.fail("protected-scope gate must not run after supply-chain block")
+
+    runner._refresh_supply_chain_policy_before_push = (  # type: ignore[method-assign]
+        _refresh_supply_chain_policy_before_push
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_hosted_terminal_head_protected_scope_violations",
+        side_effect=_hosted_terminal_head_protected_scope_violations,
+        create=True,
+    )
+    state = SimpleNamespace(last_push_sha=previous_head)
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            operation_start_head=previous_head,
+            state=state,
+        )
+
+    assert "LOCKFILE_CHANGED" in str(raised.value)
+    assert state.last_push_sha == previous_head
+
+
+@pytest.mark.unit
+async def test_monitor_agent_hosted_terminal_head_delta_unavailable_fails_closed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    previous_head = "a" * 40
+    terminal_head = "b" * 40
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter._queued.append(
+        AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair",
+            stderr="",
+            terminal_head_sha=terminal_head,
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result()  # git fetch
+    cmd.queue_result(stdout=f"{terminal_head}\n")  # git rev-parse FETCH_HEAD
+    cmd.queue_result()  # git reset --hard
+    cmd.queue_result(returncode=1, stderr="fatal: bad revision")  # hosted delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = SimpleNamespace(last_push_sha=previous_head)
+
+    with pytest.raises(AgentRunError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            operation_start_head=previous_head,
+            state=state,
+        )
+
+    assert raised.value.reason_code == "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+    assert state.last_push_sha == previous_head
+
+
+@pytest.mark.unit
+async def test_monitor_agent_hosted_terminal_head_uses_current_head_when_start_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    current_head = "c" * 40
+    terminal_head = "d" * 40
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter._queued.append(
+        AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair",
+            stderr="",
+            terminal_head_sha=terminal_head,
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(stdout=f"{current_head}\n")  # git rev-parse HEAD
+    cmd.queue_result()  # git fetch
+    cmd.queue_result(stdout=f"{terminal_head}\n")  # git rev-parse FETCH_HEAD
+    cmd.queue_result()  # git reset --hard
+    cmd.queue_result(stdout="M\0src/app.py\0")  # hosted delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    supply_chain_calls: list[tuple[str, ...]] = []
+    protected_calls: list[str] = []
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> None:
+        supply_chain_calls.append(tuple(kwargs["changed_paths"]))  # type: ignore[arg-type]
+
+    async def _hosted_terminal_head_protected_scope_violations(
+        _runner: object,
+        **kwargs: object,
+    ) -> list[object]:
+        protected_calls.append(str(kwargs["base_ref"]))
+        return []
+
+    runner._refresh_supply_chain_policy_before_push = (  # type: ignore[method-assign]
+        _refresh_supply_chain_policy_before_push
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_hosted_terminal_head_protected_scope_violations",
+        side_effect=_hosted_terminal_head_protected_scope_violations,
+        create=True,
+    )
+
+    await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=_write_compose_file(tmp_path),
+        prompt="fix the comment",
+        log_source="recovery",
+        operation_start_head=None,
+    )
+
+    assert supply_chain_calls == [("src/app.py",)]
+    assert protected_calls == [current_head]
+
+
+@pytest.mark.unit
+async def test_hosted_terminal_head_protected_scope_violations_use_committed_delta(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    calls: list[tuple[str, tuple[str, ...], tuple[str, ...], tuple[object, ...]]] = []
+    expected_violation = QualityGateViolation(
+        path=".github/workflows/ci.yml",
+        protected_pattern=".github/**",
+    )
+
+    async def _protected_file_diffs_for_committed_paths(
+        _cmd: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append(
+            (
+                str(kwargs["base_ref"]),
+                tuple(kwargs["changed_paths"]),  # type: ignore[arg-type]
+                tuple(kwargs["owned_paths"]),  # type: ignore[arg-type]
+                (),
+            )
+        )
+        return {}
+
+    def _find_protected_quality_gate_changes(**kwargs: object) -> list[QualityGateViolation]:
+        base_ref, changed_paths, owned_paths, _grants = calls.pop()
+        calls.append(
+            (
+                base_ref,
+                changed_paths,
+                owned_paths,
+                tuple(kwargs["operator_granted_paths"]),  # type: ignore[arg-type]
+            )
+        )
+        return [expected_violation]
+
+    async def _active_operator_grant_specs(_workspace_id: str) -> tuple[str, ...]:
+        return ("grant",)
+
+    runner._active_operator_grant_specs = _active_operator_grant_specs  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "protected_file_diffs_for_committed_paths",
+        side_effect=_protected_file_diffs_for_committed_paths,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.find_protected_quality_gate_changes",
+        side_effect=_find_protected_quality_gate_changes,
+    )
+
+    violations = await agent_service_recovery._hosted_terminal_head_protected_scope_violations(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / "worktrees" / workspace_id,
+        base_ref="a" * 40,
+        terminal_head_sha="b" * 40,
+        changed_paths=(".github/workflows/ci.yml",),
+    )
+
+    assert violations == [expected_violation]
+    assert calls == [
+        (
+            "a" * 40,
+            (".github/workflows/ci.yml",),
+            (),
+            ("grant",),
+        )
+    ]
 
 
 @pytest.mark.unit
