@@ -499,6 +499,9 @@ async def _run_hosted_monitor_handoff_profile_setup(
         return repaired is True
 
     try:
+        # Hosted setup is delegated over HTTP. The hosted runner owns container
+        # and worktree repair before phase execution; local mirror repair is
+        # still required after success for subsequent local monitor sync.
         setup_result = await validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,

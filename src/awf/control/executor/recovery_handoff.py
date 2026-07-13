@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from awf.adapters.base import AgentAdapter, AgentDefaults
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
@@ -58,7 +60,7 @@ async def handle_recovery_pr_handoff_after_validation(
             await self._clear_rebase_recovery_staleness(
                 workspace_id=workspace_id,
             )
-        except Exception:
+        except SQLAlchemyError:
             _log.exception(
                 "executor.rebase_recovery_staleness_clear_failed",
                 workspace_id=workspace_id,
@@ -79,7 +81,7 @@ async def handle_recovery_pr_handoff_after_validation(
                 target_head_sha=validate_only_target_head_sha,
                 workspace_head_sha=successful_validation_workspace_head_sha,
             )
-        except Exception:
+        except SQLAlchemyError:
             _log.exception(
                 "executor.validate_only_recovery_target_head_sha_update_failed",
                 workspace_id=workspace_id,

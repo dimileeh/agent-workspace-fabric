@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
@@ -525,7 +526,7 @@ async def test_validate_only_recovery_target_head_update_failure_is_non_fatal(
                 ),
             )
         )
-        raise RuntimeError("target-head metadata store unavailable")
+        raise SQLAlchemyError("target-head metadata store unavailable")
 
     monkeypatch.setattr(
         executor,

@@ -141,6 +141,12 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            if self._deps.adapter.is_hosted and state is not None:
+                hosted_pr_identity = await _hosted_pr_identity_for_workspace(
+                    self,
+                    workspace_id,
+                    state=state,
+                )
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
