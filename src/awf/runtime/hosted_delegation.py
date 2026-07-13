@@ -42,7 +42,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -1252,13 +1252,33 @@ def _normalize_operation_url(raw_url: str, *, base_url: str) -> str:
     parsed = urlsplit(raw_url)
     if parsed.scheme or parsed.netloc:
         base = urlsplit(base_url)
-        if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+        try:
+            same_origin = _url_origin(parsed) == _url_origin(base)
+        except ValueError as exc:
+            raise HostedDelegationProtocolError(
+                "hosted delegation operation_url origin mismatch"
+            ) from exc
+        if not same_origin:
             raise HostedDelegationProtocolError("hosted delegation operation_url origin mismatch")
         return raw_url
     if not raw_url.startswith("/"):
         raise HostedDelegationProtocolError("hosted delegation operation_url must be absolute path")
     base = urlsplit(base_url)
     return urlunsplit((base.scheme, base.netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _url_origin(parsed: SplitResult) -> tuple[str, str, int | None]:
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("origin cannot include userinfo")
+    hostname = parsed.hostname or ""
+    return parsed.scheme, hostname, _effective_url_port(parsed)
+
+
+def _effective_url_port(parsed: SplitResult) -> int | None:
+    port = parsed.port
+    if port is not None:
+        return port
+    return {"https": 443, "http": 80}.get(parsed.scheme)
 
 
 def _join_url(base_url: str, path: str) -> str:
