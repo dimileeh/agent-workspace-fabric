@@ -556,6 +556,7 @@ async def _run_pre_push_validation_fix_pass(
         _MonitorAgentServiceRecoverySupersededError,
         _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
+        _MonitorPolicyBlockedError,
     ):
         raise
     except ComposeExecCleanupError as exc:
