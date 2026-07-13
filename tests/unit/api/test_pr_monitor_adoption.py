@@ -325,6 +325,83 @@ async def test_adopt_pr_rejects_hosted_execution_when_worker_delegation_unconfig
 
 
 @pytest.mark.unit
+async def test_adopt_pr_hosted_existing_adoption_bypasses_delegation_preflight(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured_settings = Settings(
+        _env_file=None,
+        api_token="secret",
+        work_dir=str(tmp_path / "awf-state"),
+        hosted_delegation_base_url="https://hosted.example.test",
+        hosted_delegation_bearer_token="api-visible-token",
+    )
+    missing_settings = Settings(
+        _env_file=None,
+        api_token="secret",
+        work_dir=str(tmp_path / "awf-state"),
+    )
+    current_settings = {"value": configured_settings}
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    app.dependency_overrides[get_settings] = lambda: current_settings["value"]
+    fetcher = _MetadataFetcher(_metadata())
+    app.state.pr_adoption_metadata_fetcher = fetcher
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+                "execution": {"mode": "hosted"},
+            },
+        )
+        current_settings["value"] = missing_settings
+        retry = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+                "execution": {"mode": "hosted"},
+            },
+        )
+        conflict = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": True,
+                "execution": {"mode": "hosted"},
+            },
+        )
+
+    assert first.status_code == 202
+    first_body = first.json()
+    assert first_body["attached_existing"] is False
+    assert retry.status_code == 202
+    assert retry.json()["attached_existing"] is True
+    assert retry.json()["workspace_id"] == first_body["workspace_id"]
+    assert conflict.status_code == 409
+    conflict_body = conflict.json()
+    assert conflict_body["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+    assert conflict_body["detail"] == {
+        "workspace_id": first_body["workspace_id"],
+        "existing_auto_merge": False,
+        "requested_auto_merge": True,
+    }
+    assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+
+@pytest.mark.unit
 async def test_adopt_pr_accepts_full_pr_url_idempotently(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
     engine: AsyncEngine,
