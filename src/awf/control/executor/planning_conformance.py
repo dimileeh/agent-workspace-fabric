@@ -305,12 +305,13 @@ async def _run_post_validation_conformance_check(
         hosted_pr_identity=hosted_pr_identity,
         profile=profile,
     )
-    if getattr(adapter, "is_hosted", False) and compare_result.terminal_head_sha:
+    terminal_head_sha = getattr(compare_result, "terminal_head_sha", None)
+    if getattr(adapter, "is_hosted", False) and terminal_head_sha:
         sync_result = await _sync_hosted_validation_fix_head(
             self,
             worktree_path=worktree_path,
             hosted_pr_identity=hosted_pr_identity,
-            terminal_head_sha=compare_result.terminal_head_sha,
+            terminal_head_sha=terminal_head_sha,
         )
         if not sync_result.ok:
             reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
@@ -324,7 +325,7 @@ async def _run_post_validation_conformance_check(
                 details={
                     "hosted_terminal_head_sync": {
                         "validation_run_id": validation_run_id,
-                        "terminal_head_sha": compare_result.terminal_head_sha,
+                        "terminal_head_sha": terminal_head_sha,
                         "returncode": sync_result.returncode,
                         "stdout": redact_audit_text(sync_result.stdout, limit=400),
                         "stderr": redact_audit_text(sync_result.stderr, limit=400),
