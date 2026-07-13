@@ -312,7 +312,7 @@ async def run_validation_and_fix_cycle(
             await self._update_subphase(workspace_id, "validation")
             validation_runner = self._validation
             validation_run_kwargs: dict[str, Any] = {}
-            if pr_adoption_is_hosted(ws.task_policy):
+            if pr_adoption_is_hosted(getattr(ws, "task_policy", None)):
                 validation_runner = getattr(self, "_hosted_validation", None)
                 if validation_runner is None:
                     raise RuntimeError(

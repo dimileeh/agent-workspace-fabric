@@ -800,17 +800,19 @@ async def _cleanup_and_fail_stale_active_execution(
         )
         return
 
-    cleanup = await self._runtime_cleaner.cleanup(
-        workspace_id=candidate.workspace_id,
-        repo_url=candidate.repo_url,
-        compose_project_name=candidate.compose_project_name,
-        compose_file_path=(
+    cleanup_kwargs: dict[str, Any] = {
+        "workspace_id": candidate.workspace_id,
+        "repo_url": candidate.repo_url,
+        "compose_project_name": candidate.compose_project_name,
+        "compose_file_path": (
             Path(candidate.compose_file_path) if candidate.compose_file_path else None
         ),
-        remove_volumes=True,
-        remove_worktree=False,
-        skip_compose=pr_adoption_is_hosted(candidate.task_policy),
-    )
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    if pr_adoption_is_hosted(candidate.task_policy):
+        cleanup_kwargs["skip_compose"] = True
+    cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
     if not cleanup.ok:
         await self._record_stale_active_execution_cleanup_failed(
             candidate,
