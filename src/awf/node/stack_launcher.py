@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from awf.common.git_auth import apply_bitbucket_agent_git_auth
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_images import CompanionImageBuilder
@@ -60,6 +61,7 @@ _HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES = {
     "BITBUCKET_API_TOKEN": "BITBUCKET_API_TOKEN",
     "BITBUCKET_EMAIL": "BITBUCKET_EMAIL",
 }
+_HOSTED_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
 _HOSTED_COMPANION_SOURCE_SCHEMA = "hosted_companion_source.v1"
 _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
@@ -601,11 +603,14 @@ def _hosted_secret_lease_placeholder_resolution(
         return None
 
     env: dict[str, str] = {}
+    lease_env_count = 0
     providers: list[str] = []
     targets: list[str] = []
     mounts: list[AuthMount] = []
     satisfied_legacy_targets: set[str] = set()
     satisfied_legacy_providers: set[str] = set()
+    profile_presets_git_askpass = "GIT_ASKPASS" in profile.runtime.environment
+    bitbucket_git_token_rendered = False
     mount_count = 0
     skipped_unresolved_count = 0
 
@@ -638,8 +643,12 @@ def _hosted_secret_lease_placeholder_resolution(
                 )
                 continue
             for target, source_name in pairs:
-                if target not in env:
+                injected = target not in env
+                if injected:
                     env[target] = hosted_env_secret_alias_placeholder(source_name)
+                    lease_env_count += 1
+                    if provider == "bitbucket" and target == "BITBUCKET_API_TOKEN":
+                        bitbucket_git_token_rendered = True
                 _append_unique_hosted_secret_value(targets, target)
             _append_unique_hosted_secret_value(providers, provider)
             if provider == "github":
@@ -667,17 +676,29 @@ def _hosted_secret_lease_placeholder_resolution(
             satisfied_legacy_targets.add(secret.target)
             continue
 
+    if (
+        bitbucket_git_token_rendered
+        and "GIT_ASKPASS" not in env
+        and not profile_presets_git_askpass
+        and not any(mount.target == _HOSTED_BITBUCKET_ASKPASS_TARGET for mount in mounts)
+    ):
+        mount_count += 1
+        _append_hosted_auth_placeholder_mounts(mounts, (_HOSTED_BITBUCKET_ASKPASS_TARGET,))
+        apply_bitbucket_agent_git_auth(env, askpass_path=_HOSTED_BITBUCKET_ASKPASS_TARGET)
+
     if not env and mount_count == 0 and not skipped_unresolved_count:
         return None
 
     metadata: dict[str, object] = {
         "schema": "secret_lease_mount_metadata.v1",
         "mount_plan": "profile_declared_secret_leases",
-        "env_count": len(env),
+        "env_count": lease_env_count,
         "mount_count": mount_count,
         "providers": providers,
         "targets": targets,
     }
+    if len(env) != lease_env_count:
+        metadata["total_env_count"] = len(env)
     if skipped_unresolved_count:
         metadata["skipped_unresolved_count"] = skipped_unresolved_count
     return LocalSecretLeaseResolution(

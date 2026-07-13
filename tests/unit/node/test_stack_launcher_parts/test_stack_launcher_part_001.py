@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.common.git_auth import bitbucket_agent_git_config_entries
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -581,6 +582,108 @@ async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_
         "BITBUCKET_EMAIL",
     ]
     assert paths.secret_lease_mount_metadata["skipped_unresolved_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_hosted_bitbucket_askpass_wiring() -> None:
+    """Hosted bitbucket token leases keep the agent git auth wiring local Compose uses."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-bitbucket",
+            "secrets": [
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    spec = compose.render_specs[0]
+    env = dict(spec.agent_environment)
+    assert env["BITBUCKET_API_TOKEN"]
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    bitbucket_git_entries = bitbucket_agent_git_config_entries()
+    for index, (key, value) in enumerate(bitbucket_git_entries):
+        assert env[f"GIT_CONFIG_KEY_{index}"] == key
+        assert env[f"GIT_CONFIG_VALUE_{index}"] == value
+    assert env["GIT_CONFIG_COUNT"] == str(len(bitbucket_git_entries))
+
+    askpass_mount = next(
+        mount for mount in spec.auth_mounts if mount.target == "/run/awf/secrets/bb-askpass.sh"
+    )
+    assert askpass_mount.source.startswith("/run/awf/hosted-auth-placeholders/")
+    assert askpass_mount.mode == "ro"
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert (
+        paths.secret_lease_mount_metadata["total_env_count"]
+        == 1 + 2 + (2 * len(bitbucket_git_entries)) + 1
+    )
+    assert paths.secret_lease_mount_metadata["total_env_count"] > 1
+    assert paths.secret_lease_mount_metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_profile_git_askpass_for_bitbucket() -> None:
+    """Hosted bitbucket leases do not override a profile-owned askpass command."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-bitbucket-profile-askpass",
+            "runtime": {"environment": {"GIT_ASKPASS": "/profile/askpass.sh"}},
+            "secrets": [
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    spec = compose.render_specs[0]
+    env = dict(spec.agent_environment)
+    assert env["GIT_ASKPASS"] == "/profile/askpass.sh"
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert not any(mount.target == "/run/awf/secrets/bb-askpass.sh" for mount in spec.auth_mounts)
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert paths.secret_lease_mount_metadata["mount_count"] == 0
 
 
 @pytest.mark.unit
