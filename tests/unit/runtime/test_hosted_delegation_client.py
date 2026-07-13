@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ from awf.adapters.runtime_executor import AgentRuntimeExecRequest
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import (
     HostedAgentRuntimeExecutor,
     HostedDelegationConfig,
@@ -252,6 +254,99 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
         "owned_paths": ["src/**"],
         "expected_head_sha": "a" * 40,
     }
+
+
+@pytest.mark.unit
+async def test_agent_delegation_posts_profile_and_rendered_stack_metadata(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      API_TOKEN: literal-service-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+  agent:
+    image: awf-agent-runtime:latest
+    environment:
+      NPM_TOKEN: literal-agent-secret
+    volumes:
+      - /home/user/.codex:/home/agent/.codex:ro
+volumes: {}
+networks:
+  awf_net:
+    name: awf-ws-hosted-net
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "returncode": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "terminal_head_sha": "a" * 40,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-agent",
+            "runtime": {"environment": {"API_TOKEN": "literal-profile-secret"}},
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request(
+                profile=profile,
+                compose_project="awf_ws_hosted",
+                compose_file=compose_file,
+            )
+        )
+
+    assert seen["body"]["profile"]["name"] == "hosted-agent"
+    assert seen["body"]["profile"]["runtime"]["environment"]["API_TOKEN"] == "${API_TOKEN}"
+    rendered_stack = seen["body"]["rendered_stack"]
+    assert rendered_stack["schema"] == "hosted_validation_rendered_stack.v1"
+    assert rendered_stack["compose_project"] == "awf_ws_hosted"
+    assert rendered_stack["compose_file_path"] == str(compose_file)
+    assert set(rendered_stack["services"]) == {"backend"}
+    backend = rendered_stack["services"]["backend"]
+    assert backend["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "API_TOKEN": "${API_TOKEN}",
+    }
+    assert backend["depends_on"] == {"postgres": {"condition": "service_healthy"}}
+    assert rendered_stack["networks"] == {"awf_net": {"name": "awf-ws-hosted-net"}}
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "literal-profile-secret" not in body_blob
+    assert "literal-service-secret" not in body_blob
+    assert "literal-agent-secret" not in body_blob
+    assert "/home/user/.codex" not in body_blob
 
 
 @pytest.mark.unit

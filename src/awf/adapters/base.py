@@ -522,7 +522,6 @@ class AgentAdapter(ABC):
         written to the sinks after ``execute()`` returns, preserving the prior
         buffered-output contract for non-streaming executors.
         """
-        del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
         # Parse the rendered compose file once in a worker thread. The helpers
@@ -661,6 +660,8 @@ class AgentAdapter(ABC):
             env_passthrough_aliases=env_passthrough_aliases,
             file_auth_mount_targets=file_auth_mount_targets,
             profile_env=profile_env,
+            compose_project=compose_project,
+            compose_file=compose_file,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
             repo_url=_hosted_identity_str(hosted_pr_identity, "repo_url"),

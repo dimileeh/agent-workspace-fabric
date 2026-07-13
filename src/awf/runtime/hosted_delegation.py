@@ -667,6 +667,14 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     pr_identity = _agent_pr_identity_payload(request)
     if pr_identity:
         payload["pr_identity"] = pr_identity
+    if request.profile is not None:
+        payload["profile"] = _hosted_validation_profile_payload(request.profile)
+    if request.compose_project is not None and request.compose_file is not None:
+        _hosted_validation_attach_rendered_stack(
+            payload,
+            compose_project=request.compose_project,
+            compose_file=request.compose_file,
+        )
     return payload
 
 
