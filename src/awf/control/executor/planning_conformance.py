@@ -252,6 +252,7 @@ async def _run_post_validation_conformance_check(
     handoff: _PlanningValidationHandoff,
     validation_run_id: str,
     base_commit: str,
+    hosted_pr_identity: dict[str, Any] | None = None,
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
@@ -295,6 +296,8 @@ async def _run_post_validation_conformance_check(
         ),
         model=model,
         workspace_id=workspace.id,
+        hosted_pr_identity=hosted_pr_identity,
+        profile=profile,
     )
     after_compare = await self._changed_paths(worktree_path)
     committed_compare = (

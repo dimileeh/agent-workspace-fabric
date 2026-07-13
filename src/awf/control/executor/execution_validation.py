@@ -587,6 +587,7 @@ async def run_validation_and_fix_cycle(
                         *,
                         _handoff: _PlanningValidationHandoff = conformance_handoff,
                         _validation_run_id: str = validation_run_id,
+                        _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
                         _conformance_scope_baseline: Any = conformance_scope_baseline,
                     ) -> Any:
                         return await self._run_post_validation_conformance_check(
@@ -600,6 +601,7 @@ async def run_validation_and_fix_cycle(
                             handoff=_handoff,
                             validation_run_id=_validation_run_id,
                             base_commit=base_commit,
+                            hosted_pr_identity=_hosted_pr_identity,
                             conformance_scope_baseline=_conformance_scope_baseline,
                         )
 
