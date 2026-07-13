@@ -77,6 +77,55 @@ def _deposit_planning_artifacts_best_effort(
     )
 
 
+def _deposit_validation_planning_artifacts(
+    self: Any,
+    *,
+    profile: Any,
+    workspace_id: str,
+    worktree_path: Path,
+) -> None:
+    _deposit_planning_artifacts_best_effort(
+        self,
+        profile=profile,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
+
+
+async def _mark_failed_preserving_validation_planning_artifacts(
+    self: Any,
+    *,
+    artifact_profile: Any,
+    artifact_workspace_id: str,
+    artifact_worktree_path: Path,
+    **mark_kwargs: Any,
+) -> None:
+    _deposit_validation_planning_artifacts(
+        self,
+        profile=artifact_profile,
+        workspace_id=artifact_workspace_id,
+        worktree_path=artifact_worktree_path,
+    )
+    await self._mark_failed(**mark_kwargs)
+
+
+async def _enter_blocked_preserving_validation_planning_artifacts(
+    self: Any,
+    *,
+    artifact_profile: Any,
+    artifact_workspace_id: str,
+    artifact_worktree_path: Path,
+    **block_kwargs: Any,
+) -> None:
+    _deposit_validation_planning_artifacts(
+        self,
+        profile=artifact_profile,
+        workspace_id=artifact_workspace_id,
+        worktree_path=artifact_worktree_path,
+    )
+    await self.enter_blocked_for_protected_violation(**block_kwargs)
+
+
 async def handle_agent_planning_result(
     self: Any,
     *,

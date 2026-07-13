@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import execution_validation as executor_execution_validation
@@ -86,9 +87,10 @@ async def test_hosted_post_validation_conformance_receives_pr_identity_and_profi
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
-        async def run(self, **kwargs: object) -> SimpleNamespace:
+        async def run(self, **kwargs: object) -> AgentRunResult:
             self.calls.append(kwargs)
-            return SimpleNamespace(
+            return AgentRunResult(
+                returncode=0,
                 stdout='{"status":"satisfied","summary":"hosted PR validated","gaps":[]}',
                 stderr="",
             )

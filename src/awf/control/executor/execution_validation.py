@@ -172,22 +172,13 @@ async def run_validation_and_fix_cycle(
             "expected_head_sha": rebase_recovery_result.head_sha,
         }
 
-    def _deposit_planning_artifacts_if_required() -> None:
-        # Best-effort deposit for terminal paths that do not already pass through
-        # one of the preserving helpers below. In particular, when the workspace
-        # reaches a callback-terminal status during validation,
-        # ``_finish_validation_callback_if_terminal`` returns True and this
-        # cycle returns stop=True before the normal validation-success deposit.
-        # The console keys its artifact refetch on ``updated_at``; depositing
-        # before the caller observes the terminal status orders artifact
-        # availability ahead of the polling signal. Idempotent and gated on
-        # ``planning.required``.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+    _deposit_planning_artifacts_if_required = partial(
+        _planning_artifacts._deposit_validation_planning_artifacts,
+        self,
+        profile=profile,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
 
     if not await self._transition_if_current(
         workspace_id,
@@ -204,37 +195,22 @@ async def run_validation_and_fix_cycle(
         )
 
     async def _mark_failed_preserving_planning_artifacts(**mark_kwargs: Any) -> None:
-        # Deposit the worktree plan + conformance report into the served
-        # artifact dir BEFORE publishing the terminal FAILED status. The console
-        # keys its artifact refetch on the workspace ``updated_at``
-        # (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps
-        # ``updated_at`` when it publishes FAILED, but the filesystem deposit
-        # does not touch the row. Marking FAILED first would let a poll observe
-        # the terminal status in the window before the post-cycle deposit (in
-        # ``execution_flow``), record an empty artifact list, then never refetch
-        # — hiding the Plan/Validation controls on the preserved-FAILED
-        # workspace. Depositing here orders artifact availability ahead of the
-        # polling signal. Best-effort, idempotent, gated on ``planning.required``.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
+        await _planning_artifacts._mark_failed_preserving_validation_planning_artifacts(
             self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
+            artifact_profile=profile,
+            artifact_workspace_id=workspace_id,
+            artifact_worktree_path=worktree_path,
+            **mark_kwargs,
         )
-        await self._mark_failed(**mark_kwargs)
 
     async def _enter_blocked_preserving_planning_artifacts(**block_kwargs: Any) -> None:
-        # Same artifact-ordering rationale as the FAILED path above: deposit the
-        # plan + conformance report BEFORE the block transition bumps
-        # ``updated_at`` (the console's artifact refetch key). A protected
-        # quality-gate violation pauses for an operator instead of failing.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
+        await _planning_artifacts._enter_blocked_preserving_validation_planning_artifacts(
             self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
+            artifact_profile=profile,
+            artifact_workspace_id=workspace_id,
+            artifact_worktree_path=worktree_path,
+            **block_kwargs,
         )
-        await self.enter_blocked_for_protected_violation(**block_kwargs)
 
     validation_commands = [
         step.command.command
