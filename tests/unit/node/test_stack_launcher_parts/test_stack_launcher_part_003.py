@@ -475,8 +475,9 @@ async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hosted render-only stacks preserve file-auth targets without local sources."""
-    adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", adc_target)
+    hosted_adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+    core_adc_target = "/core/adc/should-not-leak.json"
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", core_adc_target)
     compose = _RecordingCompose()
     auth_mount_resolver = _FailingAuthMountResolver()
     launcher = ComposeStackLauncher(
@@ -488,6 +489,11 @@ async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted",
+            "runtime": {
+                "environment": {
+                    "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+                },
+            },
             "secrets": [
                 {
                     "name": "openai",
@@ -530,9 +536,10 @@ async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets
         "/home/agent/.codex",
         "/home/agent/.claude",
         "/home/agent/.ssh",
-        adc_target,
+        hosted_adc_target,
     ):
         assert target in targets
+    assert core_adc_target not in targets
     placeholder_sources = [
         mount.source for mount in auth_mounts if mount.target != str(layout.mirror_path)
     ]

@@ -379,15 +379,19 @@ def test_hosted_env_secret_alias_pairs_ignores_unknown_provider() -> None:
 def test_hosted_dynamic_file_auth_mount_targets_accept_only_absolute_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hosted ADC file targets are included only when they resolve to a container path."""
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/var/run/gcp/application.json")
+    """Hosted ADC file targets preserve metadata without Core-local env resolution."""
+    hosted_adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/core/adc/should-not-leak.json")
 
     assert stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(
         (("GOOGLE_APPLICATION_CREDENTIALS", "${GOOGLE_APPLICATION_CREDENTIALS}"),)
-    ) == ("/var/run/gcp/application.json",)
+    ) == (hosted_adc_target,)
     assert stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(
         (("GOOGLE_APPLICATION_CREDENTIALS", "/profile/gcp/application.json"),)
     ) == ("/profile/gcp/application.json",)
+    assert stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(
+        (("GOOGLE_APPLICATION_CREDENTIALS", "$GOOGLE_APPLICATION_CREDENTIALS"),)
+    ) == (hosted_adc_target,)
     assert stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(()) == ()
     assert (
         stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(
@@ -396,10 +400,9 @@ def test_hosted_dynamic_file_auth_mount_targets_accept_only_absolute_targets(
         == ()
     )
 
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "relative.json")
     assert (
         stack_launcher_mod._hosted_dynamic_file_auth_mount_targets(
-            (("GOOGLE_APPLICATION_CREDENTIALS", "$GOOGLE_APPLICATION_CREDENTIALS"),)
+            (("GOOGLE_APPLICATION_CREDENTIALS", "relative.json"),)
         )
         == ()
     )

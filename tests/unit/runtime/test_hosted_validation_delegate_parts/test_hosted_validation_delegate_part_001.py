@@ -117,8 +117,9 @@ async def test_hosted_validation_requests_include_agent_auth_context(
     monkeypatch.setenv("AWF_GITHUB_TOKEN", "github-secret-value")
     monkeypatch.setenv(
         "GOOGLE_APPLICATION_CREDENTIALS",
-        "/home/agent/.config/gcloud/application_default_credentials.json",
+        "/core/adc/should-not-leak.json",
     )
+    hosted_adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         """
@@ -133,7 +134,7 @@ services:
     volumes:
       - /home/user/.ssh:/home/agent/.ssh:ro
       - /home/user/.codex:/home/agent/.codex:ro
-      - /host/adc.json:/home/agent/.config/gcloud/application_default_credentials.json:ro
+      - /run/awf/hosted-auth-placeholders/home__agent__.config__gcloud__application_default_credentials.json:/home/agent/.config/gcloud/application_default_credentials.json:ro
   backend:
     image: backend:latest
 """.lstrip(),
@@ -220,14 +221,15 @@ services:
     assert agent_auth["file_auth_mount_targets"] == [
         "/home/agent/.ssh",
         "/home/agent/.codex",
-        "/home/agent/.config/gcloud/application_default_credentials.json",
+        hosted_adc_target,
     ]
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "npm-secret-value" not in body_blob
     assert "github-secret-value" not in body_blob
     assert "/home/user/.ssh" not in body_blob
     assert "/home/user/.codex" not in body_blob
-    assert "/host/adc.json" not in body_blob
+    assert "/core/adc/should-not-leak.json" not in body_blob
+    assert "/run/awf/hosted-auth-placeholders" not in body_blob
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in agent_auth["env_passthrough_names"]
 
 

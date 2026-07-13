@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -78,6 +77,9 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.ssh",
 )
 _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
+_HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET = (
+    "/home/agent/.config/gcloud/application_default_credentials.json"
+)
 
 
 @dataclass(frozen=True)
@@ -821,11 +823,11 @@ def _hosted_google_application_credentials_target(
         f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
         f"${_GOOGLE_APPLICATION_CREDENTIALS}",
     ):
-        target = os.environ.get(_GOOGLE_APPLICATION_CREDENTIALS, "")
-    elif "$" in raw:
+        # Hosted render-only cannot resolve executor-local ADC paths from Core.
+        return _HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET
+    if "$" in raw:
         return None
-    else:
-        target = raw
+    target = raw
     if not target.startswith("/"):
         return None
     return target
