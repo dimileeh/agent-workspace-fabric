@@ -1029,6 +1029,7 @@ async def run_validation_and_fix_cycle(
                     model=run_model,
                     workspace_id=workspace_id,
                     hosted_pr_identity=_hosted_pr_identity,
+                    profile=profile,
                 )
 
             async def _finish_fix_recovery_failure(

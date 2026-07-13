@@ -504,6 +504,7 @@ async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
     )
 
     assert not result.stop
+    assert adapter.run.await_args.kwargs["profile"] is profile
     assert adapter.run.await_args.kwargs["hosted_pr_identity"]["head_ref"] == "awf/pr-764"
     assert adapter.run.await_args.kwargs["hosted_pr_identity"]["expected_head_sha"] == initial_head
     assert runner.run.await_count == 3
