@@ -11,6 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
+import awf.profiles.compose as compose_helpers
+import awf.profiles.compose_auth_env as compose_auth_env
 from awf.adapters.runtime_executor import AgentRuntimeExecRequest
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -48,6 +50,7 @@ _URL_WITH_USERINFO_PATTERN = re.compile(
     r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<userinfo>[^/?#\s@]+)@"
 )
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
+_HOSTED_AGENT_AUTH_SCHEMA = "hosted_validation_agent_auth.v1"
 _HOSTED_RENDERED_STACK_SCHEMA = "hosted_validation_rendered_stack.v1"
 _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
 _HOSTED_PHASE_COMMAND_FIELDS = ("setup", "pre_agent", "post_agent", "validate", "cleanup")
@@ -170,6 +173,7 @@ def _hosted_validation_attach_rendered_stack(
     *,
     compose_project: str,
     compose_file: Path,
+    include_agent_auth_context: bool = False,
 ) -> None:
     rendered_stack = _hosted_validation_rendered_stack_payload(
         compose_project=compose_project,
@@ -177,6 +181,72 @@ def _hosted_validation_attach_rendered_stack(
     )
     if rendered_stack is not None:
         payload["rendered_stack"] = rendered_stack
+    if include_agent_auth_context:
+        agent_auth = _hosted_validation_agent_auth_payload(compose_file=compose_file)
+        if agent_auth is not None:
+            payload["agent_auth"] = agent_auth
+
+
+def _hosted_validation_agent_auth_payload(
+    *,
+    compose_file: Path,
+) -> dict[str, Any] | None:
+    """Return secret-free agent auth context for hosted validation jobs."""
+    compose_env = compose_helpers._try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return None
+
+    env_passthrough_aliases = compose_helpers.hosted_profile_env_passthrough_aliases(
+        compose_file,
+        compose_env=compose_env,
+    )
+    env_passthrough_names = _hosted_validation_agent_auth_env_passthrough_names(
+        compose_file=compose_file,
+        compose_env=compose_env,
+        env_passthrough_aliases=env_passthrough_aliases,
+    )
+    file_auth_mount_targets = compose_helpers.hosted_file_auth_mount_targets(
+        compose_file,
+        compose_env=compose_env,
+    )
+    if not env_passthrough_names and not env_passthrough_aliases and not file_auth_mount_targets:
+        return None
+    return {
+        "schema": _HOSTED_AGENT_AUTH_SCHEMA,
+        "env_passthrough_names": list(env_passthrough_names),
+        "env_passthrough_aliases": [
+            {"target": target, "source": source} for target, source in env_passthrough_aliases
+        ],
+        "file_auth_mount_targets": list(file_auth_mount_targets),
+    }
+
+
+def _hosted_validation_agent_auth_env_passthrough_names(
+    *,
+    compose_file: Path,
+    compose_env: Mapping[str, str],
+    env_passthrough_aliases: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    names = tuple(
+        name
+        for name in compose_helpers.hosted_profile_env_passthrough_names(
+            compose_file,
+            compose_env=compose_env,
+        )
+        if name not in compose_auth_env._HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+    )
+    existing_names = set(names)
+    alias_targets = {target for target, _source in env_passthrough_aliases}
+    alias_sources = {source for _target, source in env_passthrough_aliases}
+    github_token_names = compose_helpers.hosted_github_token_passthrough_names(
+        compose_file,
+        compose_env=compose_env,
+    )
+    return names + tuple(
+        name
+        for name in github_token_names
+        if name not in existing_names and name not in alias_targets and name not in alias_sources
+    )
 
 
 def _hosted_validation_rendered_stack_services(services: object) -> dict[str, Any]:

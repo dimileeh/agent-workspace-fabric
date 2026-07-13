@@ -187,6 +187,132 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("request_kind", ["phases", "probe", "coverage"])
+async def test_hosted_validation_requests_include_agent_auth_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request_kind: str,
+) -> None:
+    """Hosted validation requests carry safe agent auth metadata."""
+    monkeypatch.setenv("NPM_TOKEN", "npm-secret-value")
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "github-secret-value")
+    monkeypatch.setenv(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "/home/agent/.config/gcloud/application_default_credentials.json",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent-runtime:latest
+    environment:
+      NPM_TOKEN: ${NPM_TOKEN}
+      GH_TOKEN: ${AWF_GITHUB_TOKEN}
+      GITHUB_TOKEN: ${AWF_GITHUB_TOKEN}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}
+    volumes:
+      - /home/user/.ssh:/home/agent/.ssh:ro
+      - /home/user/.codex:/home/agent/.codex:ro
+      - /host/adc.json:/home/agent/.config/gcloud/application_default_credentials.json:ro
+  backend:
+    image: backend:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            body = json.loads(request.content)
+            seen["body"] = body
+            operation_id = f"{request_kind}_1"
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": operation_id,
+                    "workspace_id": "ws_hosted",
+                    "operation_url": f"/v1/operations/{operation_id}",
+                },
+            )
+        if request.method == "GET" and request.url.path == f"/v1/operations/{request_kind}_1":
+            payload: dict[str, Any] = {
+                "operation_id": f"{request_kind}_1",
+                "workspace_id": "ws_hosted",
+                "state": "succeeded",
+            }
+            if request_kind == "probe":
+                payload["validate_toolchain_probe"] = {
+                    "missing": [],
+                    "probe_errored": False,
+                    "probe_ran": True,
+                }
+            elif request_kind == "coverage":
+                payload["coverage"] = {
+                    "provider": "python",
+                    "percent": 99.5,
+                    "minimum_percent": 99.0,
+                    "enforce": True,
+                    "status": "passed",
+                    "reason_code": "COVERAGE_OK",
+                }
+            else:
+                payload["commands"] = []
+            return httpx.Response(200, json=payload)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        if request_kind == "probe":
+            await delegate.probe_validate_command_tools(
+                workspace_id="ws_hosted",
+                compose_project="awf_ws_hosted",
+                compose_file=compose_file,
+                profile=WorkspaceProfile(name="hosted-probe-test"),
+            )
+        elif request_kind == "coverage":
+            await delegate.run_profile_coverage(
+                workspace_id="ws_hosted",
+                compose_project="awf_ws_hosted",
+                compose_file=compose_file,
+                profile=WorkspaceProfile(name="hosted-coverage-test"),
+            )
+        else:
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="awf_ws_hosted",
+                compose_file=compose_file,
+                profile=WorkspaceProfile(name="hosted-validation-test"),
+                phase_names=("validate",),
+                include_coverage=False,
+            )
+
+    agent_auth = seen["body"]["agent_auth"]
+    assert agent_auth["schema"] == "hosted_validation_agent_auth.v1"
+    assert agent_auth["env_passthrough_names"] == ["NPM_TOKEN"]
+    assert agent_auth["env_passthrough_aliases"] == [
+        {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
+        {"target": "GITHUB_TOKEN", "source": "AWF_GITHUB_TOKEN"},
+    ]
+    assert agent_auth["file_auth_mount_targets"] == [
+        "/home/agent/.ssh",
+        "/home/agent/.codex",
+        "/home/agent/.config/gcloud/application_default_credentials.json",
+    ]
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "npm-secret-value" not in body_blob
+    assert "github-secret-value" not in body_blob
+    assert "/home/user/.ssh" not in body_blob
+    assert "/home/user/.codex" not in body_blob
+    assert "/host/adc.json" not in body_blob
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in agent_auth["env_passthrough_names"]
+
+
+@pytest.mark.unit
 async def test_hosted_validation_posts_rendered_stack_metadata(
     tmp_path: Path,
 ) -> None:
