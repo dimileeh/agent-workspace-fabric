@@ -20,6 +20,9 @@ from typing import Any
 from awf.adapters.base import (
     AgentAdapter,
 )
+from awf.common.audit import (
+    redact_audit_text,
+)
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
@@ -31,6 +34,9 @@ from awf.control.executor.helpers import (
     _digest_text,
     _read_text_if_present,
     _validation_evidence_json,
+)
+from awf.control.executor.hosted_validation_sync import (
+    _sync_hosted_validation_fix_head,
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
@@ -299,6 +305,32 @@ async def _run_post_validation_conformance_check(
         hosted_pr_identity=hosted_pr_identity,
         profile=profile,
     )
+    if getattr(adapter, "is_hosted", False) and compare_result.terminal_head_sha:
+        sync_result = await _sync_hosted_validation_fix_head(
+            self,
+            worktree_path=worktree_path,
+            hosted_pr_identity=hosted_pr_identity,
+            terminal_head_sha=compare_result.terminal_head_sha,
+        )
+        if not sync_result.ok:
+            reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+            detail = sync_result.stderr or sync_result.stdout or reason_code
+            return _PlanningRunFailure(
+                message=(
+                    "hosted post-validation conformance terminal head sync failed: "
+                    f"{redact_audit_text(detail, limit=400)}"
+                ),
+                reason_code=reason_code,
+                details={
+                    "hosted_terminal_head_sync": {
+                        "validation_run_id": validation_run_id,
+                        "terminal_head_sha": compare_result.terminal_head_sha,
+                        "returncode": sync_result.returncode,
+                        "stdout": redact_audit_text(sync_result.stdout, limit=400),
+                        "stderr": redact_audit_text(sync_result.stderr, limit=400),
+                    },
+                },
+            )
     after_compare = await self._changed_paths(worktree_path)
     committed_compare = (
         await self._committed_paths_since(worktree_path, before_compare_head)
