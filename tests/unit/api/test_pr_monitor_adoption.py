@@ -325,7 +325,7 @@ async def test_adopt_pr_rejects_hosted_execution_when_worker_delegation_unconfig
 
 
 @pytest.mark.unit
-async def test_adopt_pr_hosted_existing_adoption_bypasses_delegation_preflight(
+async def test_adopt_pr_hosted_existing_adoption_requires_delegation_preflight(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -362,6 +362,16 @@ async def test_adopt_pr_hosted_existing_adoption_bypasses_delegation_preflight(
                 "execution": {"mode": "hosted"},
             },
         )
+        conflict = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": True,
+                "execution": {"mode": "hosted"},
+            },
+        )
         current_settings["value"] = missing_settings
         retry = await client.post(
             "/v1/workspaces/adopt-pr",
@@ -373,23 +383,10 @@ async def test_adopt_pr_hosted_existing_adoption_bypasses_delegation_preflight(
                 "execution": {"mode": "hosted"},
             },
         )
-        conflict = await client.post(
-            "/v1/workspaces/adopt-pr",
-            headers={"Authorization": "Bearer secret"},
-            json={
-                "repo_slug": "dimileeh/aira-web",
-                "pr_number": 277,
-                "auto_merge": True,
-                "execution": {"mode": "hosted"},
-            },
-        )
 
     assert first.status_code == 202
     first_body = first.json()
     assert first_body["attached_existing"] is False
-    assert retry.status_code == 202
-    assert retry.json()["attached_existing"] is True
-    assert retry.json()["workspace_id"] == first_body["workspace_id"]
     assert conflict.status_code == 409
     conflict_body = conflict.json()
     assert conflict_body["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
@@ -397,6 +394,15 @@ async def test_adopt_pr_hosted_existing_adoption_bypasses_delegation_preflight(
         "workspace_id": first_body["workspace_id"],
         "existing_auto_merge": False,
         "requested_auto_merge": True,
+    }
+    assert retry.status_code == 409
+    retry_body = retry.json()
+    assert retry_body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"
+    assert retry_body["detail"] == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
     }
     assert fetcher.calls == [("dimileeh/aira-web", 277)]
 

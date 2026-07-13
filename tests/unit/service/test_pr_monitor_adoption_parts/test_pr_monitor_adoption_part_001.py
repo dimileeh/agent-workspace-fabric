@@ -331,6 +331,57 @@ class TestPullRequestMonitorAdoptionServicePart001:
             }
 
     @pytest.mark.unit
+    async def test_hosted_execution_policy_requires_delegation_before_replay_attach(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        configured_settings = Settings(
+            _env_file=None,
+            hosted_delegation_base_url="https://hosted.example.test",
+            hosted_delegation_bearer_token="hosted-token",
+        )
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+                settings=configured_settings,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    execution={"mode": "hosted"},
+                )
+            )
+            await session.commit()
+
+        replay_fetcher = _MetadataFetcher(_metadata(head_ref="feature/should-not-fetch"))
+        async with factory() as session:
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=replay_fetcher,
+                    settings=Settings(_env_file=None),
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        execution={"mode": "hosted"},
+                    )
+                )
+
+        assert first.workspace_id.startswith("ws_")
+        assert excinfo.value.error_code == "HOSTED_DELEGATION_NOT_CONFIGURED"
+        assert excinfo.value.detail == {
+            "missing": [
+                "AWF_HOSTED_DELEGATION_BASE_URL",
+                "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+            ],
+        }
+        assert replay_fetcher.calls == []
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    @pytest.mark.unit
     async def test_hosted_execution_policy_accepts_service_visible_token_env(
         self,
         factory: async_sessionmaker[AsyncSession],

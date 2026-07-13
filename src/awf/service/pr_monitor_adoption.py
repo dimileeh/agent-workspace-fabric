@@ -146,6 +146,7 @@ class PullRequestMonitorAdoptionService:
         request: PullRequestMonitorAdoptionRequest,
     ) -> PullRequestMonitorAdoptionResponse:
         repo, pr_number = _normalize_request_identity(request)
+        _raise_if_hosted_delegation_unconfigured(request, self._settings)
         idempotency_key = pr_adoption_idempotency_key(
             repo_slug=repo.slug(),
             pr_number=pr_number,
@@ -180,7 +181,6 @@ class PullRequestMonitorAdoptionService:
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
 
-        _raise_if_hosted_delegation_unconfigured(request, self._settings)
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
             self._session,
