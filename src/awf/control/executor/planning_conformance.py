@@ -19,6 +19,8 @@ from typing import Any
 
 from awf.adapters.base import (
     AgentAdapter,
+    AgentRunError,
+    AgentRunResult,
 )
 from awf.common.audit import (
     redact_audit_text,
@@ -36,6 +38,7 @@ from awf.control.executor.helpers import (
     _validation_evidence_json,
 )
 from awf.control.executor.hosted_validation_sync import (
+    _hosted_agent_error_terminal_head_sha,
     _sync_hosted_validation_fix_head,
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
@@ -289,22 +292,37 @@ async def _run_post_validation_conformance_check(
     agent_plan_path = agent_artifact_path(handoff.plan_path)
     agent_report_path = agent_artifact_path(handoff.report_path)
     await self._update_subphase(workspace.id, "conformance")
-    compare_result = await adapter.run(
-        compose_project=compose_project,
-        compose_file=compose_file,
-        prompt=build_conformance_prompt(
-            task_prompt=workspace.task_prompt,
-            plan_path=agent_plan_path,
-            report_path=agent_report_path,
-            iteration=handoff.iteration + 1,
-            validation_evidence=evidence,
-            awf_validation_commands=awf_validation_commands,
-        ),
-        model=model,
-        workspace_id=workspace.id,
-        hosted_pr_identity=hosted_pr_identity,
-        profile=profile,
-    )
+    try:
+        compare_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_conformance_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=agent_plan_path,
+                report_path=agent_report_path,
+                iteration=handoff.iteration + 1,
+                validation_evidence=evidence,
+                awf_validation_commands=awf_validation_commands,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+            hosted_pr_identity=hosted_pr_identity,
+            profile=profile,
+        )
+    except AgentRunError as exc:
+        terminal_head_sha = (
+            _hosted_agent_error_terminal_head_sha(exc)
+            if getattr(adapter, "is_hosted", False)
+            else None
+        )
+        if terminal_head_sha is None:
+            raise
+        compare_result = AgentRunResult(
+            returncode=exc.result.returncode,
+            stdout=exc.result.stdout,
+            stderr=exc.result.stderr,
+            terminal_head_sha=terminal_head_sha,
+        )
     terminal_head_sha = getattr(compare_result, "terminal_head_sha", None)
     if getattr(adapter, "is_hosted", False):
         if not terminal_head_sha:

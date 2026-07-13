@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from awf.adapters.base import AgentRunResult
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.control.executor.planning_conformance import (
@@ -25,12 +25,31 @@ class _HostedConformanceAdapter:
     name = AgentRuntime.codex
     is_hosted = True
 
-    def __init__(self, *, terminal_head_sha: str | None, order: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        terminal_head_sha: str | None,
+        order: list[str],
+        raise_nonzero: bool = False,
+    ) -> None:
         self.terminal_head_sha = terminal_head_sha
         self.order = order
+        self.raise_nonzero = raise_nonzero
 
     async def run(self, **_kwargs: Any) -> AgentRunResult:
         self.order.append("adapter")
+        if self.raise_nonzero:
+            details = (
+                {"terminal_head_sha": self.terminal_head_sha}
+                if self.terminal_head_sha is not None
+                else None
+            )
+            raise AgentRunError(
+                agent=self.name,
+                result=CommandResult(returncode=2, stdout="", stderr="conformance failed"),
+                reason_code="AGENT_CLI_FAILED",
+                details=details,
+            )
         return AgentRunResult(
             returncode=0,
             stdout="",
@@ -211,6 +230,63 @@ async def test_hosted_post_validation_conformance_syncs_terminal_head_before_sco
             terminal_head_sha,
         ]
     ]
+
+
+@pytest.mark.unit
+async def test_hosted_post_validation_conformance_syncs_terminal_head_after_nonzero_exit(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    report_path = Path("docs/awf-plans/ws_hosted.conformance.json")
+    terminal_head_sha = "b" * 40
+    context = _HostedConformanceContext(report_path=report_path, order=order)
+    context._runner = _HostedSyncRunner(
+        context=context,
+        worktree_path=worktree_path,
+        report_path=report_path,
+        terminal_head_sha=terminal_head_sha,
+    )
+    adapter = _HostedConformanceAdapter(
+        terminal_head_sha=terminal_head_sha,
+        order=order,
+        raise_nonzero=True,
+    )
+
+    failure = await _run_post_validation_conformance_check(
+        context,
+        adapter=adapter,
+        workspace=SimpleNamespace(id="ws_hosted", task_prompt="finish the plan"),
+        profile=WorkspaceProfile(name="hosted-conformance"),
+        compose_project="awf_ws_hosted",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model="gpt-5",
+        handoff=_handoff(report_path),
+        validation_run_id="val_hosted",
+        base_commit="a" * 40,
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:dimileeh/agent-workspace-fabric.git",
+            "head_ref": "awf/ws_hosted",
+        },
+        conformance_scope_baseline=_PostValidationConformanceScopeBaseline(
+            before_compare=set(),
+            before_compare_head="a" * 40,
+            before_dirty_digests={},
+        ),
+    )
+
+    assert failure is None
+    assert order[:5] == [
+        "adapter",
+        "sync-fetch",
+        "sync-rev-parse",
+        "sync-reset",
+        "changed-paths",
+    ]
+    assert context.recorded_reports
+    assert context.recorded_reports[0].summary == "remote terminal report"
 
 
 @pytest.mark.unit
