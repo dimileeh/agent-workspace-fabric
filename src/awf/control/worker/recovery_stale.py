@@ -461,6 +461,8 @@ async def _recover_hosted_pr_adoption_active_execution(
                 return True
             if not pr_adoption_is_hosted(ws.task_policy):
                 return False
+            if ws.execution_claimed_by is None and ws.execution_claim_expires_at is None:
+                return True
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return True
             if not ws.pr_url:
@@ -495,6 +497,12 @@ async def _recover_hosted_pr_adoption_active_execution(
             return True
         if not pr_adoption_is_hosted(ws.task_policy):
             return False
+        if (
+            candidate.status == WorkspaceStatus.ready
+            and ws.execution_claimed_by is None
+            and ws.execution_claim_expires_at is None
+        ):
+            return True
         claim_cutoff = datetime.now(UTC)
         if not _execution_claim_is_stale(ws, claim_cutoff):
             return True

@@ -296,6 +296,76 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
         assert salvage_events == []
 
     @pytest.mark.unit
+    async def test_queued_hosted_pr_adoption_ready_with_pr_url_without_execution_claim_stays_ready(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "queued-hosted-pr-adoption-ready",
+            task_policy=task_policy,
+        )
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.pr_url = "https://github.com/example/repo/pull/779"
+            ws.pr_number = 779
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert inspector.calls == []
+        assert executor.resume_calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            salvage_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert runtime_events == []
+        assert salvage_events == []
+        assert not any(
+            event.reason_code == "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE" for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_hosted_pr_adoption_with_cross_status_setup_evidence_attaches_monitor(
         self,
         session_factory: async_sessionmaker[AsyncSession],
