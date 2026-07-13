@@ -158,6 +158,13 @@ async def run_validation_and_fix_cycle(
         if pr_adoption_is_hosted(getattr(ws, "task_policy", None))
         else None
     )
+    if hosted_pr_identity is not None and rebase_recovery_result is not None:
+        # Rebase recovery has already pushed the hosted PR head; the workspace
+        # row may still carry the stale pre-rebase monitor/adoption head.
+        hosted_pr_identity = {
+            **hosted_pr_identity,
+            "expected_head_sha": rebase_recovery_result.head_sha,
+        }
 
     def _deposit_planning_artifacts_if_required() -> None:
         # Best-effort deposit for terminal paths that do not already pass through
