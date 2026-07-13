@@ -314,10 +314,15 @@ class ComposeStackLauncher:
                 ),
             )
         else:
+            companion_service = (
+                _hosted_companion_service_from_materialized
+                if use_hosted_secret_placeholders
+                else companion_service_from_materialized
+            )
             companions = tuple(
                 await asyncio.gather(
                     *(
-                        asyncio.to_thread(companion_service_from_materialized, companion)
+                        asyncio.to_thread(companion_service, companion)
                         for companion in request.companions
                     )
                 )
@@ -508,6 +513,29 @@ def _stack_secret_metadata(
         metadata.update(dict(secret_lease_resolution.metadata))
     metadata.update(companion_secret_metadata)
     return metadata
+
+
+def _hosted_companion_service_from_materialized(
+    companion: MaterializedCompanionService,
+) -> CompanionService:
+    """Render companion env-secret placeholders without consulting local env."""
+    if not companion.spec.environment_secrets:
+        return companion_service_from_materialized(companion)
+    placeholder_env = {
+        secret.value_from: hosted_env_secret_alias_placeholder(secret.value_from)
+        for secret in companion.spec.environment_secrets
+    }
+    service = companion_service_from_materialized(companion, host_env=placeholder_env)
+    source_placeholders = {
+        secret.target: f"${{{secret.value_from}}}" for secret in companion.spec.environment_secrets
+    }
+    return replace(
+        service,
+        environment=tuple(
+            (target, source_placeholders.get(target, value))
+            for target, value in service.environment
+        ),
+    )
 
 
 def _hosted_secret_lease_placeholder_resolution(

@@ -5,6 +5,11 @@ from __future__ import annotations
 import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
+from awf.node.companion_services import (
+    CompanionEnvironmentSecretRef,
+    MaterializedCompanionService,
+    WorkspaceCompanionSpec,
+)
 from awf.node.compose_manager import AuthMount
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
@@ -67,6 +72,74 @@ async def test_compose_stack_launcher_render_without_profile_secrets_returns_pla
     assert len(compose.render_specs) == 1
     assert compose.render_specs[0].auth_mounts == (
         AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
+    )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_companion_env_secret_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted render keeps companion env secret source names without local env resolution."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPTIONAL_TOKEN_SOURCE", raising=False)
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            environment_secrets=(
+                CompanionEnvironmentSecretRef(
+                    target="AIRA_API_KEY",
+                    value_from="ANTHROPIC_API_KEY",
+                ),
+                CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    value_from="OPTIONAL_TOKEN_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+        layout=_layout(),
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="hosted-companion-secrets"),
+            companions=(companion,),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert paths is not None
+    assert compose.specs == []
+    assert len(compose.render_specs) == 1
+    rendered = compose.render_specs[0].companions[0]
+    assert rendered.environment == (
+        ("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),
+        ("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE}"),
+    )
+    assert paths.secret_lease_mount_metadata["companion_env_secret_count"] == 2
+    assert paths.secret_lease_mount_metadata["companion_env_secrets"] == (
+        {
+            "companion": "backend",
+            "target": "AIRA_API_KEY",
+            "provider": "env",
+            "source": "ANTHROPIC_API_KEY",
+            "required": True,
+        },
+        {
+            "companion": "backend",
+            "target": "OPTIONAL_TOKEN",
+            "provider": "env",
+            "source": "OPTIONAL_TOKEN_SOURCE",
+            "required": False,
+        },
     )
 
 
