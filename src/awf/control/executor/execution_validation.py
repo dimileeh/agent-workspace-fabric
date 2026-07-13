@@ -324,19 +324,46 @@ async def run_validation_and_fix_cycle(
                 profile=profile,
                 worktree_path=worktree_path,
             )
+        validation_runner = self._validation
+        validation_run_kwargs: dict[str, Any] = {}
+        if hosted_pr_identity is not None:
+            validation_runner = getattr(self, "_hosted_validation", None)
+            if validation_runner is None:
+                message = (
+                    "hosted PR adoption validation failed: no hosted validation runner configured"
+                )
+                await self._finish_validation_run(
+                    validation_run_id,
+                    status="failed",
+                    reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                )
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                    error_message=message,
+                )
+                await _mark_failed_preserving_planning_artifacts(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=message,
+                    reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
+                )
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=(
+                        successful_validation_workspace_head_sha
+                    ),
+                )
+            validation_run_kwargs["pr_identity"] = hosted_pr_identity
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
         try:
             await self._update_subphase(workspace_id, "validation")
-            validation_runner = self._validation
-            validation_run_kwargs: dict[str, Any] = {}
-            if hosted_pr_identity is not None:
-                validation_runner = getattr(self, "_hosted_validation", None)
-                if validation_runner is None:
-                    raise RuntimeError(
-                        "hosted validation runner is not configured for hosted PR adoption"
-                    )
-                validation_run_kwargs["pr_identity"] = hosted_pr_identity
             val_result = await validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
