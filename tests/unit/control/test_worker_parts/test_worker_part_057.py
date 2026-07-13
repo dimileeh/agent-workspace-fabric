@@ -567,18 +567,10 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
         assert len(salvage_events) == 1
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "pr_url",
-        [
-            None,
-            "https://github.com/example/repo/pull/not-a-number",
-        ],
-    )
-    async def test_stale_hosted_pr_adoption_without_attachable_pr_falls_back_to_runtime_failure(
+    async def test_stale_hosted_pr_adoption_without_pr_url_fails_without_runtime_inspection(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
-        pr_url: str | None,
     ) -> None:
         task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
         workspace_id = await _create_active_execution(
@@ -593,7 +585,78 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002:
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
             assert ws is not None
-            ws.pr_url = pr_url
+            ws.pr_url = None
+            ws.pr_number = None
+            ws.execution_claimed_by = "hosted-worker-before-restart"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert inspector.calls == []
+        assert executor.resume_calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "no pr_url is persisted" in ws.failure_message
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "HOSTED_PR_ADOPTION_PR_URL_MISSING"
+            for event in events
+        )
+        assert not any(
+            event.event_type == "workspace.runtime_stranded_detected" for event in events
+        )
+
+    @pytest.mark.unit
+    async def test_stale_hosted_pr_adoption_without_pr_number_falls_back_to_runtime_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "hosted-pr-adoption-stale-without-pr-number",
+            WorkspaceStatus.running,
+            persist_compose_project=False,
+            task_policy=task_policy,
+            node_id="node-a",
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/not-a-number"
             ws.pr_number = None
             ws.execution_claimed_by = "hosted-worker-before-restart"
             ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)

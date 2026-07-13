@@ -113,6 +113,7 @@ from awf.service.workspace_runtime_health import (
 )
 
 _HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE = "HOSTED_PR_ADOPTION_PR_URL_MISSING"
 
 
 async def _maybe_recover_stale_active_executions(self: Any) -> None:
@@ -523,9 +524,11 @@ async def _recover_hosted_pr_adoption_active_execution(
                 "worker.hosted_pr_adoption_stale_active_pr_missing",
                 workspace_id=candidate.workspace_id,
                 status=candidate.status.value,
-                reason_code="HOSTED_PR_ADOPTION_PR_URL_MISSING",
+                reason_code=_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE,
             )
-            return False
+            await _fail_hosted_pr_adoption_pr_url_missing_after_restart(repo, ws, candidate)
+            await session.commit()
+            return True
         if ws.pr_number is None:
             ws.pr_number = _extract_pr_number(ws.pr_url)
         if ws.pr_number is None:
@@ -614,11 +617,47 @@ async def _fail_hosted_pr_adoption_setup_incomplete_after_restart(
         "hosted monitor handoff setup did not complete before worker restart; "
         "hosted PR adoption does not have a local Compose runtime to recover"
     )
+    await _fail_hosted_pr_adoption_after_restart(
+        repo,
+        ws,
+        candidate,
+        reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        message=message,
+    )
+
+
+async def _fail_hosted_pr_adoption_pr_url_missing_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+) -> None:
+    message = (
+        "hosted PR adoption cannot attach a PR monitor after worker restart because "
+        "no pr_url is persisted; hosted PR adoption does not have a local Compose "
+        "runtime to recover"
+    )
+    await _fail_hosted_pr_adoption_after_restart(
+        repo,
+        ws,
+        candidate,
+        reason_code=_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE,
+        message=message,
+    )
+
+
+async def _fail_hosted_pr_adoption_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+    *,
+    reason_code: str,
+    message: str,
+) -> None:
     previous_claim = _workspace_claim_snapshot(ws)
     claim_cutoff = datetime.now(UTC)
     payload = {
         "source": "hosted_pr_adoption",
-        "reason_code": _HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        "reason_code": reason_code,
         "failure_reason": FailureReason.infrastructure_failure.value,
         "message": message,
         "previous_claim": previous_claim,
@@ -629,7 +668,7 @@ async def _fail_hosted_pr_adoption_setup_incomplete_after_restart(
         candidate.workspace_id,
         from_status=candidate.status,
         to=WorkspaceStatus.failed,
-        reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        reason_code=reason_code,
         payload=payload,
         extra_conditions=_claim_recheck_conditions(candidate.status, claim_cutoff),
     )
