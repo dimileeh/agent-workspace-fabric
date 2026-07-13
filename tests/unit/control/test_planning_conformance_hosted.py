@@ -66,11 +66,13 @@ class _HostedSyncRunner:
         worktree_path: Path,
         report_path: Path,
         terminal_head_sha: str,
+        report_text: str | None = None,
     ) -> None:
         self.context = context
         self.worktree_path = worktree_path
         self.report_path = report_path
         self.terminal_head_sha = terminal_head_sha
+        self.report_text = report_text
         self.calls: list[list[str]] = []
 
     async def run(
@@ -93,7 +95,8 @@ class _HostedSyncRunner:
             report = self.worktree_path / self.report_path
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(
-                (
+                self.report_text
+                or (
                     '{"status": "satisfied", "summary": "remote terminal report", '
                     '"reason_code": "CONFORMANCE_SATISFIED", "gaps": []}'
                 ),
@@ -230,6 +233,62 @@ async def test_hosted_post_validation_conformance_syncs_terminal_head_before_sco
             terminal_head_sha,
         ]
     ]
+
+
+@pytest.mark.unit
+async def test_hosted_post_validation_conformance_terminal_head_updates_pr_identity(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    report_path = Path("docs/awf-plans/ws_hosted.conformance.json")
+    initial_head_sha = "a" * 40
+    terminal_head_sha = "b" * 40
+    context = _HostedConformanceContext(report_path=report_path, order=order)
+    context._runner = _HostedSyncRunner(
+        context=context,
+        worktree_path=worktree_path,
+        report_path=report_path,
+        terminal_head_sha=terminal_head_sha,
+        report_text=(
+            '{"status": "needs_iteration", "summary": "still missing test evidence", '
+            '"reason_code": "CONFORMANCE_UNSATISFIED", "gaps": ["missing test evidence"]}'
+        ),
+    )
+    adapter = _HostedConformanceAdapter(
+        terminal_head_sha=terminal_head_sha,
+        order=order,
+    )
+    hosted_pr_identity = {
+        "head_repo_url": "git@github.com:dimileeh/agent-workspace-fabric.git",
+        "head_ref": "awf/ws_hosted",
+        "expected_head_sha": initial_head_sha,
+    }
+
+    failure = await _run_post_validation_conformance_check(
+        context,
+        adapter=adapter,
+        workspace=SimpleNamespace(id="ws_hosted", task_prompt="finish the plan"),
+        profile=WorkspaceProfile(name="hosted-conformance"),
+        compose_project="awf_ws_hosted",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model="gpt-5",
+        handoff=_handoff(report_path),
+        validation_run_id="val_hosted",
+        base_commit=initial_head_sha,
+        hosted_pr_identity=hosted_pr_identity,
+        conformance_scope_baseline=_PostValidationConformanceScopeBaseline(
+            before_compare=set(),
+            before_compare_head=initial_head_sha,
+            before_dirty_digests={},
+        ),
+    )
+
+    assert failure is not None
+    assert failure.reason_code == "PLAN_CONFORMANCE_UNSATISFIED"
+    assert hosted_pr_identity["expected_head_sha"] == terminal_head_sha
 
 
 @pytest.mark.unit

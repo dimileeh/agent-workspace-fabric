@@ -370,6 +370,10 @@ async def _run_post_validation_conformance_check(
                         },
                     },
                 )
+            if hosted_pr_identity is not None:
+                hosted_pr_identity["expected_head_sha"] = (
+                    sync_result.stdout.strip() or terminal_head_sha
+                )
     if compare_result.returncode != 0:
         output = compare_result.stderr.strip() or compare_result.stdout.strip() or "<no output>"
         return _PlanningRunFailure(
