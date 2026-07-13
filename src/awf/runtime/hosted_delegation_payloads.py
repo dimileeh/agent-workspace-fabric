@@ -107,7 +107,7 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
         value = getattr(request, key)
         if value is not None:
             if key in _HOSTED_PR_IDENTITY_URL_FIELDS and isinstance(value, str):
-                value = _strip_url_userinfo(value)
+                value = _strip_pr_identity_url_credentials(value)
             identity[key] = value
     if request.owned_paths:
         identity["owned_paths"] = list(request.owned_paths)
@@ -119,7 +119,7 @@ def _hosted_pr_identity_payload(identity: Mapping[str, Any]) -> dict[str, Any]:
     for key in _HOSTED_PR_IDENTITY_URL_FIELDS:
         value = payload.get(key)
         if isinstance(value, str):
-            payload[key] = _strip_url_userinfo(value)
+            payload[key] = _strip_pr_identity_url_credentials(value)
     return payload
 
 
@@ -302,26 +302,20 @@ def _hosted_validation_sanitize_compose_value(value: object) -> Any:
     return value
 
 
-def _strip_url_userinfo(value: str) -> str:
+def _strip_pr_identity_url_credentials(value: str) -> str:
     parsed = urlsplit(value)
-    if not parsed.scheme or "@" not in parsed.netloc:
+    authority = parsed.netloc
+    if parsed.scheme and "@" in authority:
+        userinfo, _, host = authority.rpartition("@")
+        if parsed.scheme.lower() in {"ssh", "git+ssh"}:
+            username, password_separator, _ = userinfo.partition(":")
+            if password_separator:
+                authority = f"{username}@{host}" if username else host
+        else:
+            authority = host
+    if authority == parsed.netloc and not (parsed.query or parsed.fragment):
         return value
-    userinfo, _, authority = parsed.netloc.rpartition("@")
-    if parsed.scheme.lower() in {"ssh", "git+ssh"}:
-        username, password_separator, _ = userinfo.partition(":")
-        if not password_separator:
-            return value
-        if username:
-            authority = f"{username}@{authority}"
-    return urlunsplit(
-        (
-            parsed.scheme,
-            authority,
-            parsed.path,
-            parsed.query,
-            parsed.fragment,
-        )
-    )
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
 def _hosted_validation_profile_payload(

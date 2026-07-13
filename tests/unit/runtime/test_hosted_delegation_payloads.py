@@ -239,6 +239,22 @@ def test_hosted_pr_identity_strips_ssh_password_without_username() -> None:
 
 
 @pytest.mark.unit
+def test_hosted_pr_identity_strips_query_and_fragment_credentials() -> None:
+    """Hosted PR identity never sends query or fragment URL credentials."""
+    payload = _hosted_pr_identity_payload(
+        {
+            "repo_url": "https://github.com/org/repo.git?token=literal-secret",
+            "head_repo_url": "https://github.com/fork/repo.git#access_token=other-secret",
+        }
+    )
+
+    assert payload == {
+        "repo_url": "https://github.com/org/repo.git",
+        "head_repo_url": "https://github.com/fork/repo.git",
+    }
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_redacts_env_url_query_credentials() -> None:
     """Neutral hosted env names must not carry URL query or fragment credentials."""
     profile = WorkspaceProfile.model_validate(
