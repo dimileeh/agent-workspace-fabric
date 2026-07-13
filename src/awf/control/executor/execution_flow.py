@@ -31,7 +31,10 @@ from awf.control.executor.agent_service_recovery import (
     _build_agent_service_recovery_callbacks,
     _run_agent_task_with_service_recovery,
 )
-from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+from awf.control.executor.constants import (
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PR_MONITOR_SETUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
@@ -393,11 +396,16 @@ async def execute(
                 setup_missing_message = (
                     "hosted profile setup failed: no hosted validation runner configured"
                 )
+                setup_missing_reason_code = (
+                    "MONITOR_RECOVERY_SETUP_FAILED"
+                    if recovery is not None
+                    else PR_MONITOR_SETUP_FAILED_REASON_CODE
+                )
                 if recovery is not None:
                     await self._finish_active_recovery_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.failed,
-                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                        reason_code=setup_missing_reason_code,
                         error_message=setup_missing_message,
                     )
                 await self._mark_failed(
@@ -405,7 +413,7 @@ async def execute(
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.infrastructure_failure,
                     message=setup_missing_message,
-                    reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                    reason_code=setup_missing_reason_code,
                 )
                 return
             setup_run_kwargs = {
