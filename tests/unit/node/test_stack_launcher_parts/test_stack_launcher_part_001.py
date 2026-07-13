@@ -599,6 +599,15 @@ async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_
         ),
         (
             {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
                 "name": "bitbucket-unsupported",
                 "kind": "env",
                 "target": "BB_TOKEN",

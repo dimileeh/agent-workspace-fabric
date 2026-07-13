@@ -643,7 +643,7 @@ def _hosted_env_secret_alias_pairs(
 ) -> tuple[tuple[str, str], ...] | None:
     """Return hosted target/source aliases matching local provider lease rules."""
     if provider == "env":
-        source_name = _hosted_env_secret_source_name(secret.ref, fallback=secret.target)
+        source_name = _hosted_env_secret_source_name(secret.ref)
         if source_name is None:
             return None
         return ((secret.target, source_name),)
@@ -661,11 +661,11 @@ def _hosted_env_secret_alias_pairs(
     return None
 
 
-def _hosted_env_secret_source_name(ref: str | None, *, fallback: str) -> str | None:
+def _hosted_env_secret_source_name(ref: str | None) -> str | None:
     raw = (ref or "").strip()
     if raw.startswith("env/"):
         raw = raw[len("env/") :]
-    candidate = raw or fallback
+    candidate = raw
     if not _HOSTED_RENDER_ENV_REF_RE.fullmatch(candidate):
         return None
     return candidate
