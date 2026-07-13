@@ -239,6 +239,51 @@ def test_hosted_pr_identity_strips_ssh_password_without_username() -> None:
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_redacts_env_url_query_credentials() -> None:
+    """Neutral hosted env names must not carry URL query or fragment credentials."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-env-url-query-credentials",
+            "runtime": {
+                "environment": {
+                    "SERVICE_URL": "https://example.test/api?token=qcred-lit",
+                    "CALLBACK_URL": "https://example.test/cb#password=fcred-lit",
+                    "PUBLIC_URL": "https://example.test/api?next=/ready",
+                    "REPOSITORY_URL": "ssh://git@github.com/org/repo.git",
+                },
+            },
+            "services": [
+                {
+                    "name": "worker",
+                    "image": "worker:latest",
+                    "environment": {
+                        "WEBHOOK_URL": "https://hooks.example.test/run?access_key=service-key",
+                        "DOCS_URL": "https://docs.example.test/public",
+                    },
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "SERVICE_URL": "${SERVICE_URL}",
+        "CALLBACK_URL": "${CALLBACK_URL}",
+        "PUBLIC_URL": "https://example.test/api?next=/ready",
+        "REPOSITORY_URL": "ssh://git@github.com/org/repo.git",
+    }
+    assert payload["services"][0]["environment"] == {
+        "WEBHOOK_URL": "${WEBHOOK_URL}",
+        "DOCS_URL": "https://docs.example.test/public",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "qcred-lit" not in body
+    assert "fcred-lit" not in body
+    assert "service-key" not in body
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("profile_payload", "expected_path", "secret_value"),
     [

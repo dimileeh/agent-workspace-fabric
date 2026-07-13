@@ -47,9 +47,6 @@ _HOSTED_COMMAND_BEARER_PATTERN = re.compile(
     r"(?:\bAuthorization\s*:\s*)?\bBearer\s+[A-Za-z0-9._~+/=-]{8,}",
     re.IGNORECASE,
 )
-_URL_WITH_USERINFO_PATTERN = re.compile(
-    r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<userinfo>[^/?#\s@]+)@"
-)
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
 _HOSTED_AGENT_AUTH_SCHEMA = "hosted_validation_agent_auth.v1"
 _HOSTED_RENDERED_STACK_SCHEMA = "hosted_validation_rendered_stack.v1"
@@ -558,10 +555,4 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
 
 
 def _hosted_validation_value_has_url_credentials(value: str) -> bool:
-    for match in _URL_WITH_USERINFO_PATTERN.finditer(value):
-        scheme = match.group("scheme").lower()
-        userinfo = match.group("userinfo")
-        if scheme in {"ssh", "git+ssh"} and userinfo == "git":
-            continue
-        return True
-    return False
+    return compose_helpers._value_has_url_userinfo(value)
