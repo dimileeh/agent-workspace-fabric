@@ -273,24 +273,24 @@ def _hosted_validation_profile_payload(
     if isinstance(services, list):
         for service in services:
             _hosted_validation_sanitize_environment_container(service)
-    _hosted_validation_reject_secret_bearing_commands(payload)
+    _hosted_validation_reject_secret_bearing_fields(payload)
     return payload
 
 
-def _hosted_validation_reject_secret_bearing_commands(payload: Mapping[str, Any]) -> None:
+def _hosted_validation_reject_secret_bearing_fields(payload: Mapping[str, Any]) -> None:
     secret_paths = [
         path
-        for path, value in _hosted_validation_command_fields(payload)
+        for path, value in _hosted_validation_secret_checked_fields(payload)
         if _hosted_validation_command_value_is_secret(value)
     ]
     if secret_paths:
         joined_paths = ", ".join(secret_paths)
-        raise ValueError(
-            f"hosted profile payload contains secret-bearing command fields: {joined_paths}"
-        )
+        raise ValueError(f"hosted profile payload contains secret-bearing fields: {joined_paths}")
 
 
-def _hosted_validation_command_fields(payload: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
+def _hosted_validation_secret_checked_fields(
+    payload: Mapping[str, Any],
+) -> Iterator[tuple[str, str]]:
     phases = payload.get("phases")
     if isinstance(phases, Mapping):
         for field in _HOSTED_PHASE_COMMAND_FIELDS:
@@ -321,6 +321,11 @@ def _hosted_validation_command_fields(payload: Mapping[str, Any]) -> Iterator[tu
                 yield from _hosted_validation_direct_command_field(
                     healthcheck,
                     f"validation.healthchecks[{index}].command",
+                )
+                yield from _hosted_validation_direct_command_field(
+                    healthcheck,
+                    f"validation.healthchecks[{index}].url",
+                    field="url",
                 )
 
     services = payload.get("services")

@@ -359,6 +359,31 @@ def test_hosted_validation_profile_payload_rejects_secret_bearing_command_fields
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_rejects_secret_bearing_healthcheck_url() -> None:
+    """Hosted HTTP healthcheck URLs must not carry credentials to the control plane."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-secret-healthcheck-url",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "app",
+                        "url": "https://user:literal-health-url-secret@example.test/health",
+                    },
+                ],
+            },
+        }
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        _hosted_validation_profile_payload(profile)
+
+    message = str(excinfo.value)
+    assert "validation.healthchecks[0].url" in message
+    assert "literal-health-url-secret" not in message
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_preserves_safe_command_fields() -> None:
     """Non-secret command fields stay available to the hosted validator."""
     profile = WorkspaceProfile.model_validate(
@@ -381,7 +406,10 @@ def test_hosted_validation_profile_payload_preserves_safe_command_fields() -> No
                 "pre_validation_refresh": ["python scripts/refresh_fixtures.py"],
             },
             "validation": {
-                "healthchecks": [{"name": "app", "command": "curl -fsS http://app:8000/health"}],
+                "healthchecks": [
+                    {"name": "app", "command": "curl -fsS http://app:8000/health"},
+                    {"name": "worker", "url": "https://worker.example.test/health"},
+                ],
                 "coverage": {
                     "minimum_percent": 1,
                     "command": "pytest tests/unit/runtime --cov=awf.runtime",
@@ -407,6 +435,7 @@ def test_hosted_validation_profile_payload_preserves_safe_command_fields() -> No
     assert payload["validation"]["healthchecks"][0]["command"] == (
         "curl -fsS http://app:8000/health"
     )
+    assert payload["validation"]["healthchecks"][1]["url"] == "https://worker.example.test/health"
     assert payload["validation"]["coverage"]["command"]["command"] == (
         "pytest tests/unit/runtime --cov=awf.runtime"
     )
