@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
@@ -11,6 +13,7 @@ from awf.node.companion_services import (
     WorkspaceCompanionSpec,
 )
 from awf.node.compose_manager import AuthMount
+from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from tests.unit.node.test_stack_launcher_parts._helpers import (
@@ -141,6 +144,67 @@ async def test_compose_stack_launcher_render_preserves_companion_env_secret_plac
             "required": False,
         },
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_attaches_portable_companion_source_metadata(
+    tmp_path: Path,
+) -> None:
+    """Hosted render carries Git/build metadata instead of only Core-local paths."""
+    companion_root = tmp_path / "backend"
+    (companion_root / "services" / "api").mkdir(parents=True)
+    (companion_root / "config").mkdir()
+    (companion_root / "fixtures").mkdir()
+    (companion_root / "docker").mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="ssh://git:source-token@github.com/example/backend.git",
+            base_branch="development",
+            build_context="services/api",
+            dockerfile="docker/Dockerfile",
+            env_file="config/dev.env",
+            volumes=(("./fixtures", "/fixtures"), ("cache_data", "/cache")),
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+        commit_sha="abc123def456",
+    )
+
+    await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="hosted-companion-source"),
+            companions=(companion,),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    rendered = compose.render_specs[0].companions[0]
+    assert rendered.build_context == str(companion_root / "services" / "api")
+    assert rendered.source_metadata == {
+        "schema": "hosted_companion_source.v1",
+        "name": "backend",
+        "repo_url": "ssh://git@github.com/example/backend.git",
+        "base_branch": "development",
+        "commit_sha": "abc123def456",
+        "build_context": "services/api",
+        "dockerfile": "docker/Dockerfile",
+        "env_file": "config/dev.env",
+        "volumes": (
+            {"source": "./fixtures", "target": "/fixtures"},
+            {"source": "cache_data", "target": "/cache"},
+        ),
+    }
 
 
 @pytest.mark.unit

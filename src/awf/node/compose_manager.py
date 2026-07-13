@@ -180,9 +180,13 @@ class CompanionService:
     secret_metadata: Mapping[str, Any] = field(default_factory=dict)
     """Non-secret metadata about companion env secret resolution."""
 
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
+    """Non-secret portable source metadata for hosted companion reconstruction."""
+
     def __post_init__(self) -> None:
         """Freeze secret metadata so rendered stack records remain immutable."""
         object.__setattr__(self, "secret_metadata", frozen_mapping(self.secret_metadata))
+        object.__setattr__(self, "source_metadata", frozen_mapping(self.source_metadata))
 
 
 @dataclass(frozen=True)
@@ -337,6 +341,7 @@ class ComposeManager:
                 "command": c.command,
                 "volumes": list(c.volumes),
                 "privileged": False,
+                "source_metadata": c.source_metadata,
             }
             for c in spec.companions
         ]
@@ -1120,6 +1125,7 @@ class ComposeManager:
             "command": service.command,
             "volumes": list(service.volumes),
             "privileged": service.privileged,
+            "source_metadata": {},
         }
 
     def _named_volumes_for(self, services: list[dict[str, object]]) -> list[str]:
