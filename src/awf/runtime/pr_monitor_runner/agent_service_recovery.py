@@ -188,6 +188,11 @@ async def _run_monitor_agent_with_service_recovery(
                     ),
                     reason_code="HOSTED_REMOTE_HEAD_MISSING",
                 )
+            append_command_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
             synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
                 self,
                 workspace_id=workspace_id,
@@ -198,7 +203,12 @@ async def _run_monitor_agent_with_service_recovery(
             )
             if state is not None:
                 state.last_push_sha = synced_head_sha
-        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        else:
+            append_command_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         return cast(AgentRunResult, result)
 
 

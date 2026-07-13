@@ -505,6 +505,44 @@ async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
 
 
 @pytest.mark.unit
+async def test_hosted_agent_success_includes_result_output_in_terminal_head_gate_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    adapter = _HostedAdapterWithTerminalHead(sha.upper())
+    context = _monitor_context_with_adapter(adapter)
+    command_evidence = ["previous evidence"]
+    captured_command_evidence: list[tuple[str, ...]] = []
+
+    async def _capture_sync(*_args: object, **kwargs: object) -> str:
+        captured_command_evidence.append(tuple(kwargs["command_evidence"]))
+        return sha
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _capture_sync,
+    )
+
+    result = await _run_monitor_agent_with_service_recovery(
+        context,
+        workspace_id="ws_hosted",
+        compose_project="awf_ws_hosted",
+        compose_file=Path("/tmp/missing-compose.yml"),
+        prompt="fix review",
+        log_source="monitor",
+        command_evidence=command_evidence,
+    )
+
+    assert result.terminal_head_sha == sha.upper()
+    assert captured_command_evidence == [("previous evidence", "AWF-VERDICT: FIXED: remote repair")]
+    assert command_evidence == [
+        "previous evidence",
+        "AWF-VERDICT: FIXED: remote repair",
+    ]
+
+
+@pytest.mark.unit
 async def test_hosted_agent_error_syncs_terminal_head_before_reraising(
     tmp_path: Path,
 ) -> None:
