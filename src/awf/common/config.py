@@ -626,6 +626,8 @@ class Settings(BaseSettings):
             raise ValueError("hosted_delegation_base_url must be an HTTPS URL")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("hosted_delegation_base_url must not include credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("hosted_delegation_base_url must not include query or fragment")
         return normalized
 
     @field_validator(
