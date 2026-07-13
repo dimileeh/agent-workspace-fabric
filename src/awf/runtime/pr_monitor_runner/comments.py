@@ -277,6 +277,8 @@ async def _invoke_cli_for_verdict_result(
     result_stdout = ""
     cli_failed = False
     command_evidence: list[str] = []
+    if state is not None:
+        state.hosted_terminal_head_advanced = False
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
     worktree_path = runner._worktrees_root / workspace_id
@@ -386,7 +388,7 @@ async def _invoke_cli_for_verdict_result(
             returncode=agent_run_err.result.returncode,
         )
 
-    if committed_dirty_changes:
+    if committed_dirty_changes or (state is not None and state.hosted_terminal_head_advanced):
         parsed = _parse_verdict_result(result_stdout)
         return VerdictResult(verdict="fix_committed", reason=parsed.reason)
     if cli_failed:

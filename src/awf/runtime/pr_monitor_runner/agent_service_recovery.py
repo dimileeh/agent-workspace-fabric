@@ -135,7 +135,11 @@ async def _run_monitor_agent_with_service_recovery(
                         operation_start_head=operation_start_head,
                     )
                     if state is not None:
-                        state.last_push_sha = synced_head_sha
+                        _record_hosted_terminal_head_sync(
+                            state,
+                            synced_head_sha=synced_head_sha,
+                            operation_start_head=operation_start_head,
+                        )
             recovered = await _recover_monitor_agent_service_after_error(
                 self,
                 workspace_id=workspace_id,
@@ -209,7 +213,11 @@ async def _run_monitor_agent_with_service_recovery(
                 operation_start_head=operation_start_head,
             )
             if state is not None:
-                state.last_push_sha = synced_head_sha
+                _record_hosted_terminal_head_sync(
+                    state,
+                    synced_head_sha=synced_head_sha,
+                    operation_start_head=operation_start_head,
+                )
         else:
             append_command_evidence(
                 command_evidence,
@@ -217,6 +225,18 @@ async def _run_monitor_agent_with_service_recovery(
                 stderr=result.stderr,
             )
         return cast(AgentRunResult, result)
+
+
+def _record_hosted_terminal_head_sync(
+    state: Any,
+    *,
+    synced_head_sha: str,
+    operation_start_head: str | None,
+) -> None:
+    state.last_push_sha = synced_head_sha
+    start_head = _nonblank_str(operation_start_head)
+    if start_head is not None and synced_head_sha.lower() != start_head.lower():
+        state.hosted_terminal_head_advanced = True
 
 
 async def _hosted_pr_identity_for_workspace(

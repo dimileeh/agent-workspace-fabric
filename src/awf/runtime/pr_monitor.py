@@ -174,6 +174,12 @@ class MonitorState:
 
     iter_count: int = 0
     last_push_sha: str | None = None  # SHA at the time of last push
+    hosted_terminal_head_advanced: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     sync_base_no_progress_signature: str | None = None
     sync_base_no_progress_count: int = 0
     # thread/comment id → one of:
