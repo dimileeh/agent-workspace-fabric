@@ -55,7 +55,7 @@ from awf.adapters.runtime_executor import (
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.common.logging import get_logger
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileCoverage, WorkspaceProfile
 from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_COMMAND,
     ALEMBIC_MIGRATION_POLICY_PHASE,
@@ -73,6 +73,7 @@ from awf.runtime.hosted_delegation_payloads import (
 from awf.runtime.hosted_delegation_payloads import (
     _hosted_validation_sanitize_secret_refs as _hosted_validation_sanitize_secret_refs,
 )
+from awf.runtime.validation_coverage import _coverage_reason_code, _coverage_status
 from awf.runtime.validation_setup import (
     PROFILE_PREFLIGHT_PHASE,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
@@ -475,6 +476,7 @@ class HostedValidationDelegate:
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
             expected_commands=expected_commands,
+            coverage_policy=profile.validation.coverage if include_coverage else None,
         )
 
     async def run_profile_coverage(
@@ -537,6 +539,7 @@ class HostedValidationDelegate:
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
             command_result_required=profile.validation.coverage.command is not None,
+            coverage_policy=profile.validation.coverage,
         )
 
     async def _run_operation(
@@ -794,6 +797,7 @@ def _validation_result_from_terminal(
     artifacts_dir: Path,
     max_output_bytes: int,
     expected_commands: tuple[_HostedValidationExpectedCommand, ...],
+    coverage_policy: ProfileCoverage | None = None,
 ) -> ValidationResult:
     state = _operation_state(payload)
     if "commands" not in payload:
@@ -848,6 +852,7 @@ def _validation_result_from_terminal(
             coverage_payload,
             artifacts_dir=artifacts_dir,
             max_output_bytes=max_output_bytes,
+            coverage_policy=coverage_policy,
         )
         if isinstance(coverage_payload, Mapping)
         else None
@@ -982,6 +987,7 @@ def _coverage_result_from_payload(
     artifacts_dir: Path,
     max_output_bytes: int,
     command_result_required: bool = False,
+    coverage_policy: ProfileCoverage | None = None,
 ) -> ValidationCoverageResult:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
@@ -999,16 +1005,39 @@ def _coverage_result_from_payload(
         if isinstance(command_result_payload, Mapping)
         else None
     )
-    enforce = bool(payload.get("enforce", False))
+    payload_enforce = bool(payload.get("enforce", False))
+    payload_minimum_percent = _float_field(payload, "minimum_percent")
+    minimum_percent = (
+        coverage_policy.minimum_percent if coverage_policy is not None else payload_minimum_percent
+    )
+    enforce = coverage_policy.enforce if coverage_policy is not None else payload_enforce
+    payload_status = _coverage_status_from_payload(payload, enforce=payload_enforce)
     status = _coverage_status_from_payload(payload, enforce=enforce)
+    percent = _optional_float(payload.get("percent"))
+    reason_code = _str_field(payload, "reason_code")
+    if coverage_policy is not None:
+        policy_reason_code = _coverage_reason_code(
+            percent=percent,
+            minimum_percent=minimum_percent,
+            command_result=command_result,
+        )
+        if policy_reason_code != "COVERAGE_OK":
+            reason_code = policy_reason_code
+            status = _coverage_status(reason_code=policy_reason_code, enforce=enforce)
+        elif reason_code != "COVERAGE_OK":
+            status = _coverage_status(reason_code=reason_code, enforce=enforce)
+        elif payload_status not in {"passed", "reported"}:
+            status = "failed" if enforce else payload_status
+        else:
+            status = "passed"
     gaps = payload.get("gaps", [])
     return ValidationCoverageResult(
         provider=_str_field(payload, "provider"),
-        percent=_optional_float(payload.get("percent")),
-        minimum_percent=_float_field(payload, "minimum_percent"),
+        percent=percent,
+        minimum_percent=minimum_percent,
         enforce=enforce,
         status=status,
-        reason_code=_str_field(payload, "reason_code"),
+        reason_code=reason_code,
         command_result=command_result,
         gaps=gaps if isinstance(gaps, list) else [],
     )
