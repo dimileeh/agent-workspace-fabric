@@ -414,12 +414,89 @@ class TestSuccess:
         assert len(launcher.render_requests) == 1
         request = launcher.render_requests[0]
         assert [companion.spec.name for companion in request.companions] == ["cache"]
+        assert request.companion_graph_prevalidated is True
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name is None
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted_companion/compose.yml"
+
+    @pytest.mark.unit
+    async def test_hosted_pr_adoption_rejects_invalid_companion_graph_before_materializing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _NeverRenderStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                raise AssertionError("invalid hosted companion graph should fail before render")
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        _git(["update-ref", "refs/pull/279/head", "HEAD"], origin_repo)
+        launcher = _NeverRenderStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted invalid companion",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                resolved_profile={
+                    "name": "hosted-colliding-companion",
+                    "services": [{"name": "backend", "image": "redis:7-alpine"}],
+                },
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 279,
+                        "head_ref": "feature/invalid-companion",
+                        "execution": {"mode": "hosted"},
+                    },
+                    "companions": [
+                        {
+                            "name": "backend",
+                            "repo_url": str(origin_repo),
+                        }
+                    ],
+                },
+                remote_push_branch="feature/invalid-companion",
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        with pytest.raises(ProfileResolutionError) as raised:
+            await provisioner.provision(workspace_id)
+
+        assert raised.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
+        companion_worktree = (
+            git_manager.work_dir / "worktrees" / f"{workspace_id}__companion__backend"
+        )
+        assert not companion_worktree.exists()
+        assert launcher.render_requests == []
+        assert launcher.launch_requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
 
     @pytest.mark.unit
     async def test_hosted_pr_adoption_dind_profile_keeps_reservation_local_demand_zero(

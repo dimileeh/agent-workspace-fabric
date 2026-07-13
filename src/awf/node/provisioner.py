@@ -312,6 +312,15 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+                validate_companion_service_graph(
+                    profile_services=profile_services(
+                        profile,
+                        base_path=layout.worktree_path,
+                    ),
+                    companions=companion_specs,
+                    docker_mode=profile.docker.mode,
+                )
+                companion_graph_prevalidated = True
             if self._stack_launcher is not None and hosted_pr_adoption:
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
@@ -324,18 +333,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         layout=layout,
                         profile=profile,
                         companions=materialized_companions,
+                        companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
             elif self._stack_launcher is not None:
-                validate_companion_service_graph(
-                    profile_services=profile_services(
-                        profile,
-                        base_path=layout.worktree_path,
-                    ),
-                    companions=companion_specs,
-                    docker_mode=profile.docker.mode,
-                )
-                companion_graph_prevalidated = True
                 try:
                     await self._check_companion_host_ports(
                         task_policy=ws.task_policy,
