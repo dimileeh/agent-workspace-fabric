@@ -19,6 +19,7 @@ from awf.adapters.provider_failures import (
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
@@ -203,7 +204,16 @@ async def _sync_hosted_worktree_to_terminal_head(
         )
     git_env = git_env_without_object_lookup_overrides()
     fetch = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "fetch", "--no-tags", repo_url, head_ref],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "--no-tags",
+            repo_url,
+            head_ref,
+        ],
         env=git_env,
     )
     if not fetch.ok:
@@ -213,7 +223,14 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
         )
     rev_parse = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
         env=git_env,
     )
     fetched_sha = str(rev_parse.stdout).strip()
@@ -231,7 +248,15 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
         )
     reset = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "reset", "--hard", fetched_sha],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "reset",
+            "--hard",
+            fetched_sha,
+        ],
         env=git_env,
     )
     if not reset.ok:

@@ -9,6 +9,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.control.executor.monitor_handoff import _hosted_handoff_pr_identity
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
@@ -121,6 +122,7 @@ def _monitor_context_with_adapter(adapter: object) -> SimpleNamespace:
 async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: Path) -> None:
     sha = "b" * 40
     runner = _Runner(fetched_sha=sha)
+    worktree_path = tmp_path / "ws_hosted"
 
     await _sync_hosted_worktree_to_terminal_head(
         _runner_context(tmp_path, runner),
@@ -135,15 +137,31 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
     assert runner.calls == [
         [
             "git",
+            *git_safe_directory_config_args(worktree_path),
             "-C",
-            str(tmp_path / "ws_hosted"),
+            str(worktree_path),
             "fetch",
             "--no-tags",
             "git@github.com:dimileeh/aira-web.git",
             "feature/ready",
         ],
-        ["git", "-C", str(tmp_path / "ws_hosted"), "rev-parse", "FETCH_HEAD"],
-        ["git", "-C", str(tmp_path / "ws_hosted"), "reset", "--hard", sha],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "FETCH_HEAD",
+        ],
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "reset",
+            "--hard",
+            sha,
+        ],
     ]
 
 
@@ -182,6 +200,7 @@ async def test_sync_hosted_worktree_accepts_uppercase_terminal_head_sha(
 ) -> None:
     sha = "abcdef0123456789abcdef0123456789abcdef01"
     runner = _Runner(fetched_sha=sha)
+    worktree_path = tmp_path / "ws_hosted"
 
     await _sync_hosted_worktree_to_terminal_head(
         _runner_context(tmp_path, runner),
@@ -195,8 +214,9 @@ async def test_sync_hosted_worktree_accepts_uppercase_terminal_head_sha(
 
     assert runner.calls[-1] == [
         "git",
+        *git_safe_directory_config_args(worktree_path),
         "-C",
-        str(tmp_path / "ws_hosted"),
+        str(worktree_path),
         "reset",
         "--hard",
         sha,
