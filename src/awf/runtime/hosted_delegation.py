@@ -46,6 +46,7 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+import yaml
 
 from awf.adapters.runtime_executor import (
     _HOSTED_TIMEOUT_RETURN_CODE,
@@ -56,6 +57,7 @@ from awf.adapters.runtime_executor import (
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.alembic_validation import (
@@ -106,6 +108,7 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
 }
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
 _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
+_HOSTED_RENDERED_STACK_SCHEMA = "hosted_validation_rendered_stack.v1"
 _log = get_logger(__name__)
 
 
@@ -402,19 +405,24 @@ class HostedValidationDelegate:
         pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidateToolProbeResult:
         """Delegate the post-setup validate-command toolchain probe to the host."""
-        del compose_project, compose_file
+        payload: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "profile": _hosted_validation_profile_payload(profile),
+            "phase_names": [],
+            "run_healthchecks": False,
+            "include_coverage": False,
+            "probe": "validate_toolchain",
+            "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
+        }
+        _hosted_validation_attach_rendered_stack(
+            payload,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
-            payload={
-                "workspace_id": workspace_id,
-                "profile": _hosted_validation_profile_payload(profile),
-                "phase_names": [],
-                "run_healthchecks": False,
-                "include_coverage": False,
-                "probe": "validate_toolchain",
-                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
-            },
+            payload=payload,
             poll_response_max_bytes=_response_json_max_bytes(self._config.max_output_bytes),
         )
         return _validate_tool_probe_result_from_terminal(terminal)
@@ -434,25 +442,30 @@ class HostedValidationDelegate:
     ) -> ValidationResult:
         """Delegate selected profile phases to the hosting control plane."""
 
-        del compose_project, compose_file
         expected_commands = _hosted_validation_expected_commands(
             profile,
             phase_names,
             run_healthchecks=run_healthchecks,
         )
         expected_command_count = len(expected_commands)
+        payload: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "profile": _hosted_validation_profile_payload(profile),
+            "phase_names": list(phase_names),
+            "run_healthchecks": run_healthchecks,
+            "worktree_path": str(worktree_path) if worktree_path is not None else None,
+            "include_coverage": include_coverage,
+            "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
+        }
+        _hosted_validation_attach_rendered_stack(
+            payload,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
-            payload={
-                "workspace_id": workspace_id,
-                "profile": _hosted_validation_profile_payload(profile),
-                "phase_names": list(phase_names),
-                "run_healthchecks": run_healthchecks,
-                "worktree_path": str(worktree_path) if worktree_path is not None else None,
-                "include_coverage": include_coverage,
-                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
-            },
+            payload=payload,
             poll_response_max_bytes=_response_json_max_bytes(
                 self._config.max_output_bytes,
                 output_slots=_hosted_validation_poll_output_slots(
@@ -483,22 +496,27 @@ class HostedValidationDelegate:
     ) -> ValidationCoverageResult | None:
         """Delegate a hosted coverage-only operation."""
 
-        del compose_project, compose_file
+        payload: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "profile": _hosted_validation_profile_payload(
+                profile,
+                omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
+            ),
+            "phase_names": [phase],
+            "run_healthchecks": False,
+            "include_coverage": True,
+            "parallel_worker_cpu_limit": parallel_worker_cpu_limit,
+            "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
+        }
+        _hosted_validation_attach_rendered_stack(
+            payload,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
-            payload={
-                "workspace_id": workspace_id,
-                "profile": _hosted_validation_profile_payload(
-                    profile,
-                    omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
-                ),
-                "phase_names": [phase],
-                "run_healthchecks": False,
-                "include_coverage": True,
-                "parallel_worker_cpu_limit": parallel_worker_cpu_limit,
-                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
-            },
+            payload=payload,
             poll_response_max_bytes=_response_json_max_bytes(
                 self._config.max_output_bytes,
                 output_slots=1,
@@ -681,6 +699,118 @@ def _hosted_pr_identity_payload(identity: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, str):
             payload[key] = _strip_url_userinfo(value)
     return payload
+
+
+def _hosted_validation_rendered_stack_payload(
+    *,
+    compose_project: str,
+    compose_file: Path,
+) -> dict[str, Any] | None:
+    """Return sanitized rendered compose stack metadata for hosted validation."""
+    try:
+        if not compose_file.is_file():
+            return None
+        raw_compose = compose_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        _log.warning(
+            "hosted_validation.rendered_stack_unavailable",
+            compose_file=str(compose_file),
+            error=redact_secrets(str(exc))[:1000],
+        )
+        return None
+
+    try:
+        parsed = yaml.safe_load(raw_compose) or {}
+    except yaml.YAMLError as exc:
+        _log.warning(
+            "hosted_validation.rendered_stack_malformed",
+            compose_file=str(compose_file),
+            error=redact_secrets(str(exc))[:1000],
+        )
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+
+    rendered_stack: dict[str, Any] = {
+        "schema": _HOSTED_RENDERED_STACK_SCHEMA,
+        "compose_project": compose_project,
+        "compose_file_path": str(compose_file),
+        "services": _hosted_validation_rendered_stack_services(parsed.get("services")),
+    }
+    for key in ("volumes", "networks"):
+        value = parsed.get(key)
+        if isinstance(value, Mapping):
+            rendered_stack[key] = _hosted_validation_sanitize_compose_value(value)
+    return rendered_stack
+
+
+def _hosted_validation_attach_rendered_stack(
+    payload: dict[str, Any],
+    *,
+    compose_project: str,
+    compose_file: Path,
+) -> None:
+    rendered_stack = _hosted_validation_rendered_stack_payload(
+        compose_project=compose_project,
+        compose_file=compose_file,
+    )
+    if rendered_stack is not None:
+        payload["rendered_stack"] = rendered_stack
+
+
+def _hosted_validation_rendered_stack_services(services: object) -> dict[str, Any]:
+    """Return sanitized non-agent services from a rendered compose document."""
+    if not isinstance(services, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    for name, service in services.items():
+        service_name = str(name)
+        if service_name == "agent" or not isinstance(service, Mapping):
+            continue
+        payload[service_name] = _hosted_validation_sanitize_compose_service(service)
+    return payload
+
+
+def _hosted_validation_sanitize_compose_service(service: Mapping[str, object]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in service.items():
+        field = str(key)
+        if field == "environment":
+            payload[field] = _hosted_validation_sanitize_compose_environment(value)
+            continue
+        payload[field] = _hosted_validation_sanitize_compose_value(value)
+    return payload
+
+
+def _hosted_validation_sanitize_compose_environment(environment: object) -> Any:
+    if isinstance(environment, Mapping):
+        return {
+            str(name): _hosted_validation_env_value(str(name), value)
+            for name, value in environment.items()
+        }
+    if isinstance(environment, list):
+        sanitized: list[Any] = []
+        for item in environment:
+            if isinstance(item, str) and "=" in item:
+                name, _, value = item.partition("=")
+                sanitized.append(f"{name}={_hosted_validation_env_value(name, value)}")
+                continue
+            sanitized.append(_hosted_validation_sanitize_compose_value(item))
+        return sanitized
+    return _hosted_validation_sanitize_compose_value(environment)
+
+
+def _hosted_validation_sanitize_compose_value(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _hosted_validation_sanitize_compose_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_hosted_validation_sanitize_compose_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return value
 
 
 def _strip_url_userinfo(value: str) -> str:
