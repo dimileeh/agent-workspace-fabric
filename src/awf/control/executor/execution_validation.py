@@ -158,6 +158,12 @@ async def run_validation_and_fix_cycle(
         if pr_adoption_is_hosted(getattr(ws, "task_policy", None))
         else None
     )
+    hosted_pr_adoption_validate_only_recovery = (
+        hosted_pr_identity is not None
+        and recovery is not None
+        and recovery.get("source") == "hosted_pr_adoption"
+        and recovery.get("recovery_mode") == "validate_only"
+    )
     if hosted_pr_identity is not None and rebase_recovery_result is not None:
         # Rebase recovery has already pushed the hosted PR head; the workspace
         # row may still carry the stale pre-rebase monitor/adoption head.
@@ -603,6 +609,9 @@ async def run_validation_and_fix_cycle(
                             base_commit=base_commit,
                             hosted_pr_identity=_hosted_pr_identity,
                             conformance_scope_baseline=_conformance_scope_baseline,
+                            require_hosted_terminal_head=(
+                                not hosted_pr_adoption_validate_only_recovery
+                            ),
                         )
 
                     async def _finish_conformance_recovery_failure(

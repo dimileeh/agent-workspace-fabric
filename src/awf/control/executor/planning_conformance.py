@@ -263,6 +263,7 @@ async def _run_post_validation_conformance_check(
     base_commit: str,
     hosted_pr_identity: dict[str, Any] | None = None,
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
+    require_hosted_terminal_head: bool = True,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy. ``profile`` is still needed
@@ -325,7 +326,7 @@ async def _run_post_validation_conformance_check(
         )
     terminal_head_sha = getattr(compare_result, "terminal_head_sha", None)
     if getattr(adapter, "is_hosted", False):
-        if not terminal_head_sha:
+        if not terminal_head_sha and require_hosted_terminal_head:
             reason_code = "HOSTED_REMOTE_HEAD_MISSING"
             detail = "hosted conformance run completed without terminal_head_sha"
             return _PlanningRunFailure(
@@ -341,31 +342,32 @@ async def _run_post_validation_conformance_check(
                     },
                 },
             )
-        sync_result = await _sync_hosted_validation_fix_head(
-            self,
-            worktree_path=worktree_path,
-            hosted_pr_identity=hosted_pr_identity,
-            terminal_head_sha=terminal_head_sha,
-        )
-        if not sync_result.ok:
-            reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
-            detail = sync_result.stderr or sync_result.stdout or reason_code
-            return _PlanningRunFailure(
-                message=(
-                    "hosted post-validation conformance terminal head sync failed: "
-                    f"{redact_audit_text(detail, limit=400)}"
-                ),
-                reason_code=reason_code,
-                details={
-                    "hosted_terminal_head_sync": {
-                        "validation_run_id": validation_run_id,
-                        "terminal_head_sha": terminal_head_sha,
-                        "returncode": sync_result.returncode,
-                        "stdout": redact_audit_text(sync_result.stdout, limit=400),
-                        "stderr": redact_audit_text(sync_result.stderr, limit=400),
-                    },
-                },
+        if terminal_head_sha:
+            sync_result = await _sync_hosted_validation_fix_head(
+                self,
+                worktree_path=worktree_path,
+                hosted_pr_identity=hosted_pr_identity,
+                terminal_head_sha=terminal_head_sha,
             )
+            if not sync_result.ok:
+                reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+                detail = sync_result.stderr or sync_result.stdout or reason_code
+                return _PlanningRunFailure(
+                    message=(
+                        "hosted post-validation conformance terminal head sync failed: "
+                        f"{redact_audit_text(detail, limit=400)}"
+                    ),
+                    reason_code=reason_code,
+                    details={
+                        "hosted_terminal_head_sync": {
+                            "validation_run_id": validation_run_id,
+                            "terminal_head_sha": terminal_head_sha,
+                            "returncode": sync_result.returncode,
+                            "stdout": redact_audit_text(sync_result.stdout, limit=400),
+                            "stderr": redact_audit_text(sync_result.stderr, limit=400),
+                        },
+                    },
+                )
     after_compare = await self._changed_paths(worktree_path)
     committed_compare = (
         await self._committed_paths_since(worktree_path, before_compare_head)
