@@ -459,9 +459,14 @@ async def _recover_hosted_pr_adoption_active_execution(
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return True
-            return pr_adoption_is_hosted(ws.task_policy)
+            if not pr_adoption_is_hosted(ws.task_policy):
+                return False
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return True
+            if not ws.pr_url:
+                return True
 
-    if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+    if candidate.status not in (*_ACTIVE_EXECUTION_STATUSES, WorkspaceStatus.ready):
         return False
     if not pr_adoption_is_hosted(candidate.task_policy):
         return False
