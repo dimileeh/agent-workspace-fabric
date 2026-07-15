@@ -863,10 +863,160 @@ def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
     body = json.dumps(payload, sort_keys=True)
     assert '"idle_seconds": null' in body
     assert '"wall_seconds": 7200.0' in body
+    assert payload["cli_args"] == []
     assert "/home/agent/.codex" not in body
     assert "/home/agent/.ssh" not in body
     assert "/home/agent/.gemini" not in body
     assert "application_default_credentials.json" not in body
+    assert "/home/agent" not in body
+
+
+@pytest.mark.unit
+def test_agent_start_payload_matches_cloud_agent_run_dto(tmp_path: Path) -> None:
+    """Full agent-start JSON matches Cloud AgentRunStartRequest Phase 1 shape.
+
+    Local adapters still supply argv, idle timeout, lifecycle phases, Postgres
+    passwords, and file-auth mount paths. Hosted agent Jobs reject those; Core
+    already runs setup/pre/post/cleanup and generated_setup via validation Jobs.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: awf
+      POSTGRES_DB: awf
+      POSTGRES_PASSWORD: literal-postgres-password
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      API_TOKEN: literal-service-secret
+  agent:
+    image: awf-agent-runtime:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-agent-start-contract",
+            "docker": {"mode": "none"},
+            "runtime": {
+                "environment": {
+                    "OLLAMA_HOST": "http://ollama:11434",
+                    "DATABASE_URL": (
+                        "postgresql+asyncpg://awf:literal-db-secret@postgres:5432/awf"
+                    ),
+                }
+            },
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "environment": {
+                        "POSTGRES_USER": "awf",
+                        "POSTGRES_DB": "awf",
+                        "POSTGRES_PASSWORD": "literal-postgres-password",
+                    },
+                }
+            ],
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "pre_agent": ["echo pre"],
+                "post_agent": ["echo post"],
+                "validate": ["pytest -q"],
+                "cleanup": ["echo cleanup"],
+            },
+            "database": {
+                "generated_setup": ["alembic upgrade head"],
+                "pre_validation_refresh": ["echo refresh"],
+            },
+            "security": {"egress": {"mode": "restricted"}},
+        }
+    )
+    request = AgentRuntimeExecRequest(
+        workspace_id="ws_hosted",
+        agent_runtime=AgentRuntime.codex,
+        cli_args=("codex", "exec", "-"),
+        prompt_stdin=b"repair prompt",
+        log_source="monitor.repair",
+        model="gpt-5",
+        effort="high",
+        env_passthrough_names=("CODEX_API_KEY",),
+        env_passthrough_aliases=(("GH_TOKEN", "AWF_GITHUB_TOKEN"),),
+        file_auth_mount_targets=("/home/agent/.codex", "/home/agent/.ssh"),
+        profile_env=(("AWF_TASK", "repair"),),
+        wall_timeout_seconds=7200.0,
+        idle_timeout_seconds=3600.0,
+        profile=profile,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        pr_number=277,
+        base_ref="development",
+        head_ref="feature/ready",
+    )
+
+    payload = _agent_start_payload(request)
+
+    assert payload["cli_args"] == []
+    assert payload["timeouts"] == {"wall_seconds": 7200.0, "idle_seconds": None}
+    assert payload["file_auth_mount_targets"] == []
+    assert payload["model"] == "gpt-5"
+    assert payload["effort"] == "high"
+    assert payload["env_passthrough_names"] == ["CODEX_API_KEY"]
+    assert payload["env_passthrough_aliases"] == [
+        {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
+    ]
+    assert payload["profile_env"] == [{"name": "AWF_TASK", "value": "repair"}]
+    assert payload["pr_identity"]["pr_number"] == 277
+    assert payload["profile"]["docker"]["mode"] == "compose"
+    assert payload["profile"]["security"]["egress"]["mode"] == "restricted"
+    assert payload["profile"]["phases"] == {
+        "setup": [],
+        "pre_agent": [],
+        "post_agent": [],
+        "validate": [
+            {"command": "pytest -q", "timeout_seconds": None, "required": True},
+        ],
+        "cleanup": [],
+    }
+    assert payload["profile"]["database"]["generated_setup"] == []
+    assert payload["profile"]["database"]["pre_validation_refresh"] == [
+        {"command": "echo refresh", "timeout_seconds": None, "required": True},
+    ]
+    assert payload["profile"]["runtime"]["environment"] == {
+        "OLLAMA_HOST": "http://ollama:11434",
+        "DATABASE_URL": "postgresql+asyncpg://awf@postgres:5432/awf",
+    }
+    assert payload["profile"]["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    postgres = payload["rendered_stack"]["services"]["postgres"]
+    assert postgres["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    backend = payload["rendered_stack"]["services"]["backend"]
+    assert backend["environment"] == {"PUBLIC_URL": "http://backend:8000"}
+    body = json.dumps(payload, sort_keys=True)
+    assert '"cli_args": []' in body
+    assert '"idle_seconds": null' in body
+    assert "literal-postgres-password" not in body
+    assert "literal-db-secret" not in body
+    assert "literal-service-secret" not in body
+    assert "POSTGRES_PASSWORD" not in body
+    assert "API_TOKEN" not in body
+    assert "codex" not in payload["cli_args"]
+    assert "uv sync" not in body
+    assert "alembic upgrade head" not in body
+    assert "/home/agent/.codex" not in body
+    assert "/home/agent/.ssh" not in body
     assert "/home/agent" not in body
 
 

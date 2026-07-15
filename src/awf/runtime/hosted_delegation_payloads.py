@@ -100,7 +100,8 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "workspace_id": request.workspace_id,
         "agent_runtime": request.agent_runtime.value,
-        "cli_args": list(request.cli_args),
+        # Cloud agent Jobs reject local argv; prompt/stdin carries the task.
+        "cli_args": [],
         "prompt_stdin_base64": base64.b64encode(request.prompt_stdin).decode("ascii"),
         "log_source": request.log_source,
         "model": request.model,
@@ -122,14 +123,31 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     if pr_identity:
         payload["pr_identity"] = pr_identity
     if request.profile is not None:
-        payload["profile"] = _hosted_validation_profile_payload(request.profile)
+        payload["profile"] = _hosted_agent_start_profile_payload(request.profile)
     if request.compose_project is not None and request.compose_file is not None:
         _hosted_validation_attach_rendered_stack(
             payload,
             compose_project=request.compose_project,
             compose_file=request.compose_file,
+            omit_credential_env_keys=True,
         )
     return payload
+
+
+def _hosted_agent_start_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
+    """Sanitize profile for agent-run Jobs.
+
+    Cloud rejects lifecycle phases and ``database.generated_setup`` on agent
+    Jobs because Core already delegates those via validation Jobs. Clear them
+    before shared sanitize/secret checks; keep ``phases.validate`` and policies.
+    """
+    agent_profile = profile.model_copy(deep=True)
+    agent_profile.phases.setup = []
+    agent_profile.phases.pre_agent = []
+    agent_profile.phases.post_agent = []
+    agent_profile.phases.cleanup = []
+    agent_profile.database.generated_setup = []
+    return _hosted_validation_profile_payload(agent_profile)
 
 
 def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
@@ -169,14 +187,12 @@ def _hosted_validation_rendered_stack_payload(
     compose_file: Path,
     omit_credential_env_keys: bool = False,
 ) -> dict[str, Any] | None:
-    """Return sanitized rendered compose stack metadata for hosted validation.
+    """Return sanitized rendered compose stack metadata for hosted payloads.
 
-    When ``omit_credential_env_keys`` is true (validation-run path), credential-
-    named env entries, secret-valued entries (including safe-named URL/DSN
-    credentials), and plain ``${NAME}`` refs on URL/DSN keys are dropped so Cloud
-    ``ValidationRunStartRequest`` accepts the payload. Agent-run callers keep the
-    default false so sidecars retain safe ``${NAME}`` placeholders the host can
-    resolve.
+    When ``omit_credential_env_keys`` is true (validation-run and agent-start
+    paths), credential-named env entries, secret-valued entries (including
+    safe-named URL/DSN credentials), and plain ``${NAME}`` refs on URL/DSN keys
+    are dropped so Cloud request DTOs accept the payload.
     """
     try:
         if not compose_file.is_file():
