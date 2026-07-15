@@ -110,7 +110,7 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             {"target": target, "source": source}
             for target, source in request.env_passthrough_aliases
         ],
-        "file_auth_mount_targets": [],
+        "file_auth_mount_targets": list(request.file_auth_mount_targets),
         "profile_env": [{"name": name, "value": value} for name, value in request.profile_env],
         "timeouts": {
             "wall_seconds": request.wall_timeout_seconds,
