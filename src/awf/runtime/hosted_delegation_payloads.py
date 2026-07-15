@@ -661,14 +661,9 @@ def _hosted_validation_operator_arm_literal_is_secret(arm: str) -> bool:
                     remainder.startswith(operator) for operator in _COMPOSE_INTERPOLATION_OPERATORS
                 ):
                     return False
-    return (
-        _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
-        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(stripped))
-        or _hosted_validation_value_has_url_credentials(stripped)
-        or "-----BEGIN " in stripped
-        or "\n" in stripped
-        or _hosted_validation_command_has_secret_assignment(stripped)
-    )
+    return _hosted_validation_value_has_encoded_secret_or_provider_ref(
+        stripped
+    ) or _hosted_validation_command_has_secret_assignment(stripped)
 
 
 def _hosted_validation_should_omit_environment_entry(
@@ -1119,20 +1114,25 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     stripped = value.strip()
     if not stripped or _ENV_REFERENCE_PATTERN.fullmatch(stripped):
         return False
-    return (
-        _hosted_validation_env_key_is_credential(name)
-        or _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
-        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(stripped))
-        or _hosted_validation_value_has_url_credentials(stripped)
-        or "-----BEGIN " in stripped
-        or "\n" in stripped
-    )
+    return _hosted_validation_env_key_is_credential(
+        name
+    ) or _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
 
 
 def _hosted_validation_value_has_encoded_secret_or_provider_ref(value: str) -> bool:
-    """True when raw or URL-decoded variants match secret/provider-ref patterns."""
+    """True when raw or URL-decoded variants look like secret material.
+
+    Scans known tokens, provider refs, bearer headers, credentialed URLs, PEM
+    headers, and multiline payloads so percent-encoded forms cannot bypass omit
+    / redaction checks that already catch the decoded equivalents.
+    """
     return any(
-        bool(_SECRET_VALUE_PATTERN.search(variant)) or bool(_PROVIDER_REF_PATTERN.search(variant))
+        bool(_SECRET_VALUE_PATTERN.search(variant))
+        or bool(_PROVIDER_REF_PATTERN.search(variant))
+        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(variant))
+        or _hosted_validation_value_has_url_credentials(variant)
+        or "-----BEGIN " in variant
+        or "\n" in variant
         for variant in compose_helpers._url_component_variants(value)
     )
 

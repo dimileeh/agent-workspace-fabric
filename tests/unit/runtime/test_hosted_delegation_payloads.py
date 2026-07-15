@@ -868,6 +868,64 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_url_encoded_bearer_and_credential_url_env(
+    tmp_path: Path,
+) -> None:
+    """Omit mode must decode URL variants before bearer/URL/PEM env checks.
+
+    Percent-encoded bearer headers and userinfo URLs must not survive when the
+    same raw material is already dropped under safe-named keys.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app:latest
+    environment:
+      PUBLIC_HEADER: Authorization%3A%20Bearer%20opaqueBearerToken123456
+      PUBLIC_LINK: https%3A%2F%2Fuser%3Apw%40svc.example
+      PUBLIC_PEM: -----BEGIN%20PRIVATE%20KEY-----%0Amaterial%0A-----END%20PRIVATE%20KEY-----
+      KEEP_BARE: Bearer $PUBLIC_HOST
+      SAFE_URL: http://app:8000
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HEADER=Authorization%3A%20Bearer%20listBearerToken123456
+      - PUBLIC_LINK=https%3A%2F%2Flistuser%3Apw%40svc.example
+      - KEEP_LIST=Bearer $PUBLIC_HOST
+      - SAFE_URL=http://worker:9000
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["app"]["environment"] == {
+        "KEEP_BARE": "Bearer $PUBLIC_HOST",
+        "SAFE_URL": "http://app:8000",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "KEEP_LIST=Bearer $PUBLIC_HOST",
+        "SAFE_URL=http://worker:9000",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_HEADER" not in body
+    assert "PUBLIC_LINK" not in body
+    assert "PUBLIC_PEM" not in body
+    assert "opaqueBearerToken123456" not in body
+    assert "listBearerToken123456" not in body
+    assert "user%3Apw" not in body
+    assert "listuser%3Apw" not in body
+    assert "PRIVATE%20KEY" not in body
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_omits_exact_client_password_env_names() -> None:
     """Profile env sanitize omits exact client password names treated as command secrets."""
     profile = WorkspaceProfile.model_validate(
