@@ -1381,6 +1381,95 @@ async def test_hosted_run_profile_phases_resolves_env_file_from_worktree(
 
 
 @pytest.mark.unit
+async def test_hosted_probe_validate_command_tools_resolves_env_file_from_worktree(
+    tmp_path: Path,
+) -> None:
+    """Toolchain probe must use the same worktree env_file base as phases.
+
+    Probe omits credentials via omit_credential_env_keys; without profile_base_path
+    a worktree-only POSTGRES_PASSWORD declaration is missed and trust is not
+    injected, leaving the hosted sidecar unable to start passwordless.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "postgres.env").write_text(
+        "POSTGRES_PASSWORD=worktree-probe-env-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_dir = tmp_path / "compose-project"
+    compose_dir.mkdir()
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/probe_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/probe_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "validate_toolchain_probe": {
+                        "missing": [],
+                        "probe_errored": False,
+                        "probe_ran": True,
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-pg-probe-worktree-env-file",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "env_file": "postgres.env",
+                    "environment": {"POSTGRES_USER": "awf"},
+                }
+            ],
+            "phases": {"validate": ["ruff check src/awf"]},
+        }
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path / "artifacts",
+            client=client,
+        )
+        await delegate.probe_validate_command_tools(
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree,
+        )
+
+    assert seen["body"]["probe"] == "validate_toolchain"
+    assert seen["body"]["profile"]["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(seen["body"], sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "worktree-probe-env-secret" not in body
+
+
+@pytest.mark.unit
 async def test_hosted_run_profile_coverage_resolves_env_file_from_worktree(
     tmp_path: Path,
 ) -> None:

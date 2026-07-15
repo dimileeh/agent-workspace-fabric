@@ -387,6 +387,7 @@ async def execute(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                worktree_path=worktree_path,
             )
         setup_validation_runner = self._validation
         setup_run_kwargs: dict[str, Any] = {}

@@ -397,14 +397,18 @@ class HostedValidationDelegate:
         compose_project: str,
         compose_file: Path,
         profile: WorkspaceProfile,
+        worktree_path: Path | None = None,
         pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidateToolProbeResult:
         """Delegate the post-setup validate-command toolchain probe to the host."""
+        # Same env_file base as run_profile_phases/coverage: repo-relative paths
+        # resolve from the worktree so Postgres trust injection matches.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
             "profile": _hosted_validation_profile_payload(
                 profile,
                 compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
             ),
             "phase_names": [],
             "run_healthchecks": False,

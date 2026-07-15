@@ -430,6 +430,8 @@ class ValidationRunner:
         compose_project: str,
         compose_file: Path,
         profile: WorkspaceProfile,
+        worktree_path: Path | None = None,
+        pr_identity: object | None = None,
     ) -> ValidateToolProbeResult:
         """Check each ``validate`` command's executable resolves on PATH.
 
@@ -443,7 +445,11 @@ class ValidationRunner:
         always-exit-0 in-container exec via the tracked compose-exec path, so a
         non-zero return / timeout / ``OSError`` is classified as a probe-infra
         error (``probe_errored``) and never mis-reported as a profile gap.
+
+        ``worktree_path`` / ``pr_identity`` are accepted for HostedValidationDelegate
+        signature parity; local compose-exec probing does not use them.
         """
+        del worktree_path, pr_identity
         targets = validate_command_probe_targets(profile)
         if not targets:
             return ValidateToolProbeResult()

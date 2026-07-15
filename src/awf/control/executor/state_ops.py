@@ -624,6 +624,7 @@ async def _blocked_resume_setup_phase_names(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    worktree_path: Path | None = None,
 ) -> tuple[str, ...]:
     """Return the profile-setup phase set for a *directive* blocked-resume (#743).
 
@@ -644,6 +645,7 @@ async def _blocked_resume_setup_phase_names(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
     )
     if env_probe.probe_ran and not env_probe.probe_errored and not env_probe.missing:
         _log.info("executor.blocked_resume_setup_skipped_env_healthy", workspace_id=workspace_id)
