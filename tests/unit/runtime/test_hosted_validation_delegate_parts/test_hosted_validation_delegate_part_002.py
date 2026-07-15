@@ -747,6 +747,7 @@ services:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
