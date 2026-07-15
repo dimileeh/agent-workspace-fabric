@@ -13,15 +13,17 @@ from awf.adapters.runtime_executor import AgentRuntimeExecRequest
 from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import HostedValidationDelegate
-from awf.runtime.hosted_delegation_payloads import (
+from awf.runtime.hosted_delegation_payload_volumes import (
     _HOSTED_KUBERNETES_LABEL_MAX_LENGTH,
     _HOSTED_VOLUME_HASH_LENGTHS,
-    _agent_start_payload,
     _hosted_validation_disambiguated_compose_volume_name,
     _hosted_validation_normalized_compose_volume_name,
+    _hosted_validation_sanitize_rendered_stack_volumes,
+)
+from awf.runtime.hosted_delegation_payloads import (
+    _agent_start_payload,
     _hosted_validation_profile_payload,
     _hosted_validation_rendered_stack_payload,
-    _hosted_validation_sanitize_rendered_stack_volumes,
     _hosted_validation_secret_checked_fields,
     _hosted_validation_url_has_query_or_fragment_credentials,
 )
