@@ -537,7 +537,12 @@ def _hosted_validation_env_file_declares_postgres_password(
 
 
 def _hosted_validation_env_key_is_credential(name: str) -> bool:
-    return bool(_SECRET_ENV_NAME_PATTERN.search(name))
+    # Exact client password names (PGPASSWORD, MYSQL_PWD) lack a separator before
+    # PASSWORD/PWD, so the pattern alone misses them; mirror command-assignment keys.
+    normalized = name.upper().replace("-", "_")
+    return normalized in _HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS or bool(
+        _SECRET_ENV_NAME_PATTERN.search(name)
+    )
 
 
 def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
@@ -1300,10 +1305,7 @@ def _hosted_validation_command_has_secret_assignment(value: str) -> bool:
 
 
 def _hosted_validation_command_assignment_key_is_secret(key: str) -> bool:
-    normalized = key.upper().replace("-", "_")
-    return normalized in _HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS or bool(
-        _SECRET_ENV_NAME_PATTERN.search(key)
-    )
+    return _hosted_validation_env_key_is_credential(key)
 
 
 def _hosted_validation_command_assignment_value_is_reference(value: str) -> bool:
@@ -1483,7 +1485,7 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     if not stripped or _ENV_REFERENCE_PATTERN.fullmatch(stripped):
         return False
     return (
-        bool(_SECRET_ENV_NAME_PATTERN.search(name))
+        _hosted_validation_env_key_is_credential(name)
         or bool(_SECRET_VALUE_PATTERN.search(stripped))
         or _hosted_validation_value_has_url_credentials(stripped)
         or "-----BEGIN " in stripped

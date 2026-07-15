@@ -770,6 +770,80 @@ networks:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_drops_exact_client_password_env_names(tmp_path: Path) -> None:
+    """Omit mode drops PGPASSWORD/MYSQL_PWD even though they lack a separator before PWD."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      PGPASSWORD: ${PGPASSWORD}
+      MYSQL_PWD: literal-mysql-client-secret
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:9000
+      - PGPASSWORD=literal-pg-client-secret
+      - MYSQL_PWD=${MYSQL_PWD}
+  agent:
+    image: awf-agent-runtime:latest
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:9000",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PGPASSWORD" not in body
+    assert "MYSQL_PWD" not in body
+    assert "literal-mysql-client-secret" not in body
+    assert "literal-pg-client-secret" not in body
+    assert "${PGPASSWORD}" not in body
+    assert "${MYSQL_PWD}" not in body
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_omits_exact_client_password_env_names() -> None:
+    """Profile env sanitize omits exact client password names treated as command secrets."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-client-password-env",
+            "runtime": {
+                "environment": {
+                    "PUBLIC_URL": "http://backend:8000",
+                    "PGPASSWORD": "${PGPASSWORD}",
+                    "MYSQL_PWD": "literal-mysql-client-secret",
+                },
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "PGPASSWORD" not in body
+    assert "MYSQL_PWD" not in body
+    assert "literal-mysql-client-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_sanitizes_non_collection_environment(tmp_path: Path) -> None:
     """Unexpected Compose environment shapes are redacted as plain values."""
     compose_file = tmp_path / "compose.yml"
