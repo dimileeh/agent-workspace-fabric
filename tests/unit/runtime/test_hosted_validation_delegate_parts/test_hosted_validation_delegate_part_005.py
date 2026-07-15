@@ -718,6 +718,78 @@ def test_hosted_profile_env_redacts_provider_ref_values() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("runtime_env", "service_env", "expected_runtime", "expected_service", "leaks"),
+    [
+        (
+            {
+                "PUBLIC_URL": "http://runtime:8000",
+                "PUBLIC_CERT": ("https://svc?cert=plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert"),
+                "SERVICE_REF": "env%3A%2F%2FPGPASSWORD",
+                "KEEP_REF": "${PUBLIC_HOST}",
+            },
+            {
+                "PUBLIC_REF": (
+                    "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.awf%2Fsecrets%2Fgithub.default"
+                ),
+                "REDIS_URL": "redis://cache:6379/0",
+            },
+            {
+                "PUBLIC_URL": "http://runtime:8000",
+                "PUBLIC_CERT": "${PUBLIC_CERT}",
+                "SERVICE_REF": "${SERVICE_REF}",
+                "KEEP_REF": "${PUBLIC_HOST}",
+            },
+            {
+                "PUBLIC_REF": "${PUBLIC_REF}",
+                "REDIS_URL": "redis://cache:6379/0",
+            },
+            (
+                "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert",
+                "env%3A%2F%2FPGPASSWORD",
+                "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.awf%2Fsecrets%2Fgithub.default",
+                "/home/user/.pgcert",
+                "/home/user/.awf/secrets/",
+            ),
+        ),
+    ],
+)
+def test_hosted_profile_env_redacts_url_encoded_provider_ref_values(
+    runtime_env: dict[str, str],
+    service_env: dict[str, str],
+    expected_runtime: dict[str, str],
+    expected_service: dict[str, str],
+    leaks: tuple[str, ...],
+) -> None:
+    """Profile env must decode URL-component variants before accepting values.
+
+    Encoded provider refs must not ship in hosted profile JSON even when the
+    env name is non-credential and the Postgres fast-path does not apply.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-encoded-provider-ref-env",
+            "runtime": {"environment": runtime_env},
+            "services": [
+                {
+                    "name": "worker",
+                    "image": "worker:latest",
+                    "environment": service_env,
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == expected_runtime
+    assert payload["services"][0]["environment"] == expected_service
+    body = json.dumps(payload, sort_keys=True)
+    for leak in leaks:
+        assert leak not in body
+
+
+@pytest.mark.unit
 def test_hosted_profile_env_omits_compose_operator_arm_literal_secrets() -> None:
     """Profile env sanitize must omit Compose default/alternate arms with secrets.
 

@@ -634,6 +634,81 @@ services:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env_map", "env_list", "leaks"),
+    [
+        (
+            {
+                "PUBLIC_URL": "http://backend:8000",
+                "PUBLIC_CERT": ("https://svc?cert=plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert"),
+                "SERVICE_REF": "env%3A%2F%2FPGPASSWORD",
+                "ALREADY_REF": "${PUBLIC_HOST}",
+            },
+            [
+                "PUBLIC_URL=http://worker:8000",
+                "PUBLIC_REF=plain-file%3A%2F%2F%2Fhome%2Fuser%2F.awf%2Fsecrets%2Fgithub.default",
+                "REDIS_URL=redis://cache:6379/0",
+            ],
+            (
+                "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert",
+                "env%3A%2F%2FPGPASSWORD",
+                "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.awf%2Fsecrets%2Fgithub.default",
+                "/home/user/.pgcert",
+                "/home/user/.awf/secrets/",
+            ),
+        ),
+    ],
+)
+def test_rendered_stack_omit_mode_drops_url_encoded_provider_ref_env(
+    tmp_path: Path,
+    env_map: dict[str, str],
+    env_list: list[str],
+    leaks: tuple[str, ...],
+) -> None:
+    """Omit mode must decode URL-component variants before accepting env values.
+
+    Raw ``_PROVIDER_REF_PATTERN`` misses ``env%3A%2F%2F…`` / ``plain-file%3A%2F%2F…``;
+    generic env sanitization must match the Postgres decoded-variant scan.
+    """
+    list_yaml = "\n".join(f"      - {item}" for item in env_list)
+    map_yaml = "\n".join(f"      {name}: {value}" for name, value in env_map.items())
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    environment:
+{map_yaml}
+  worker:
+    image: worker:latest
+    environment:
+{list_yaml}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    for leak in leaks:
+        assert leak not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_omit_mode_drops_safe_named_credential_refs(
     tmp_path: Path,
 ) -> None:

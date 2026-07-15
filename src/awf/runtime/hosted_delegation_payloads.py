@@ -656,8 +656,7 @@ def _hosted_validation_operator_arm_literal_is_secret(arm: str) -> bool:
                 ):
                     return False
     return (
-        bool(_SECRET_VALUE_PATTERN.search(stripped))
-        or bool(_PROVIDER_REF_PATTERN.search(stripped))
+        _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
         or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(stripped))
         or _hosted_validation_value_has_url_credentials(stripped)
         or "-----BEGIN " in stripped
@@ -1375,11 +1374,7 @@ def _hosted_validation_sanitize_environment_container(
             if (
                 _hosted_validation_url_has_query_or_fragment_credentials(passwordless)
                 or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless)
-                or any(
-                    bool(_SECRET_VALUE_PATTERN.search(variant))
-                    or bool(_PROVIDER_REF_PATTERN.search(variant))
-                    for variant in compose_helpers._url_component_variants(passwordless)
-                )
+                or _hosted_validation_value_has_encoded_secret_or_provider_ref(passwordless)
             ):
                 continue
             sanitized[name_str] = passwordless
@@ -1478,11 +1473,18 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
         return False
     return (
         _hosted_validation_env_key_is_credential(name)
-        or bool(_SECRET_VALUE_PATTERN.search(stripped))
-        or bool(_PROVIDER_REF_PATTERN.search(stripped))
+        or _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
         or _hosted_validation_value_has_url_credentials(stripped)
         or "-----BEGIN " in stripped
         or "\n" in stripped
+    )
+
+
+def _hosted_validation_value_has_encoded_secret_or_provider_ref(value: str) -> bool:
+    """True when raw or URL-decoded variants match secret/provider-ref patterns."""
+    return any(
+        bool(_SECRET_VALUE_PATTERN.search(variant)) or bool(_PROVIDER_REF_PATTERN.search(variant))
+        for variant in compose_helpers._url_component_variants(value)
     )
 
 
