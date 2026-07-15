@@ -164,13 +164,21 @@ services:
       - type: volume
         source: cache_data
         target: /cache-long
+      - type: volume
+        src: cache_data
+        target: /cache-src-long
       - source: other_data
         target: /other-long
+      - src: other_data
+        target: /other-src-long
       - source: ./host-cache-long
         target: /host-long
       - type: bind
         source: bind_data
         target: /bind
+      - type: bind
+        src: bind_data
+        target: /bind-src
 volumes:
   cache_data:
     labels:
@@ -195,9 +203,12 @@ volumes:
         "./host-cache:/cache-host",
         "${HOST_CACHE}:/cache-env",
         {"type": "volume", "source": "cache-data", "target": "/cache-long"},
+        {"type": "volume", "src": "cache-data", "target": "/cache-src-long"},
         {"source": "other-data", "target": "/other-long"},
+        {"src": "other-data", "target": "/other-src-long"},
         {"source": "./host-cache-long", "target": "/host-long"},
         {"type": "bind", "source": "bind_data", "target": "/bind"},
+        {"type": "bind", "src": "bind_data", "target": "/bind-src"},
     ]
 
 

@@ -522,7 +522,7 @@ def _hosted_validation_sanitize_compose_volume_mapping(
     payload: dict[str, Any] = {}
     for key, value in volume.items():
         field = str(key)
-        if field == "source" and source is not None:
+        if field in {"source", "src"} and source is not None and value == source:
             payload[field] = _hosted_validation_sanitize_compose_value(
                 volume_translations.get(source, source)
             )
@@ -555,6 +555,8 @@ def _hosted_validation_compose_mapping_named_volume_source(
     ):
         return None
     source = volume.get("source")
+    if not isinstance(source, str) or not source:
+        source = volume.get("src")
     if not isinstance(source, str) or not source:
         return None
     if _hosted_validation_compose_volume_source_is_host_path(source):
