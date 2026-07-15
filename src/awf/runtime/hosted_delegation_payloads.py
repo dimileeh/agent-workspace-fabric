@@ -497,6 +497,11 @@ def _hosted_validation_sanitize_compose_environment(
         if inject_postgres_trust:
             sanitized_list.append("POSTGRES_HOST_AUTH_METHOD=trust")
         return sanitized_list
+    # ``environment: null`` (and other non-mapping/non-list shapes) still places an
+    # ``environment`` key on the service payload, so the missing-key trust fallback
+    # in ``_hosted_validation_sanitize_compose_service`` never runs. Inject here.
+    if inject_postgres_trust:
+        return {"POSTGRES_HOST_AUTH_METHOD": "trust"}
     return _hosted_validation_sanitize_compose_value(environment)
 
 
