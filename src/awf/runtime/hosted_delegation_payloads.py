@@ -39,13 +39,10 @@ _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
 )
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
-# Compose interpolations (full-value or embedded): bare ``${NAME}`` / ``$NAME``
-# and operator forms ``${NAME:-...}`` / ``${NAME-...}`` / ``${NAME:?...}`` /
-# ``${NAME?...}`` / ``${NAME:+...}`` / ``${NAME+...}`` (Compose syntax).
-_ENV_REFERENCE_SOURCE_PATTERN = re.compile(
-    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?::?[-+?][^}]*)?\}|"
-    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
-)
+# Compose interpolation name token (no anchors) for scanning nested ``${...}``.
+_COMPOSE_INTERPOLATION_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Longer Compose operators first so ``:-`` / ``:?`` / ``:+`` win over ``-`` / ``?`` / ``+``.
+_COMPOSE_INTERPOLATION_OPERATORS = (":-", "-", ":+", "+", ":?", "?")
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
     rf"^(?:{TOKEN_ASSIGNMENT_KEY_PATTERN})$|"
@@ -465,30 +462,89 @@ def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
     return bool(_SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN.search(name))
 
 
+def _hosted_validation_braced_expression_end(value: str, open_brace_index: int) -> int | None:
+    """Return the index of the ``}`` that closes a Compose ``${...}`` at ``open_brace_index``.
+
+    Tracks nesting so expressions such as ``${OUTER:-${INNER}}`` close on the
+    outer brace rather than the first inner ``}``.
+    """
+    depth = 1
+    index = open_brace_index + 1
+    while index < len(value):
+        if value[index] == "$" and index + 1 < len(value) and value[index + 1] == "{":
+            depth += 1
+            index += 2
+            continue
+        if value[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
 def _hosted_validation_env_reference_source_name(value: str) -> str | None:
     """Return the env var name referenced by a Compose interpolation value.
 
     Recognizes bare ``${NAME}`` / ``$NAME`` and Compose operator forms
     (``${NAME:-default}``, ``${NAME:?error}``, ``${NAME:+alt}``, and the
-    non-colon variants). Returns ``None`` when the value is not a single
+    non-colon variants), including nested defaults such as
+    ``${NAME:-${OTHER}}``. Returns ``None`` when the value is not a single
     full-value interpolation expression.
     """
-    match = _ENV_REFERENCE_SOURCE_PATTERN.fullmatch(value.strip())
-    if match is None:
-        return None
-    return match.group("braced") or match.group("plain")
+    stripped = value.strip()
+    if stripped.startswith("${"):
+        end = _hosted_validation_braced_expression_end(stripped, 1)
+        if end is None or end != len(stripped) - 1:
+            return None
+        name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(stripped, 2)
+        if name_match is None or name_match.end() > end:
+            return None
+        return name_match.group(0)
+    if stripped.startswith("$"):
+        name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(stripped, 1)
+        if name_match is None or name_match.end() != len(stripped):
+            return None
+        return name_match.group(0)
+    return None
 
 
 def _hosted_validation_env_reference_source_names(value: str) -> Iterator[str]:
     """Yield env var names referenced by Compose interpolations in ``value``.
 
     Finds full-value and embedded forms (``Bearer ${API_TOKEN}``,
-    ``prefix-${PASSWORD}``, ``${NAME:-default}``, bare ``$NAME``).
+    ``prefix-${PASSWORD}``, ``${NAME:-default}``, bare ``$NAME``), and
+    recursively inspects nested Compose default/alternate/error arms such as
+    ``${PUBLIC_URL:-${API_TOKEN}}``.
     """
-    for match in _ENV_REFERENCE_SOURCE_PATTERN.finditer(value):
-        source_name = match.group("braced") or match.group("plain")
-        if source_name is not None:
-            yield source_name
+    index = 0
+    while index < len(value):
+        dollar = value.find("$", index)
+        if dollar < 0:
+            return
+        if dollar + 1 < len(value) and value[dollar + 1] == "{":
+            end = _hosted_validation_braced_expression_end(value, dollar + 1)
+            if end is None:
+                index = dollar + 1
+                continue
+            name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(value, dollar + 2)
+            if name_match is not None and name_match.end() <= end:
+                yield name_match.group(0)
+                remainder = value[name_match.end() : end]
+                for operator in _COMPOSE_INTERPOLATION_OPERATORS:
+                    if remainder.startswith(operator):
+                        yield from _hosted_validation_env_reference_source_names(
+                            remainder[len(operator) :]
+                        )
+                        break
+            index = end + 1
+            continue
+        name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(value, dollar + 1)
+        if name_match is not None:
+            yield name_match.group(0)
+            index = name_match.end()
+            continue
+        index = dollar + 1
 
 
 def _hosted_validation_should_omit_environment_entry(

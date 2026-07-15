@@ -645,6 +645,62 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_nested_compose_credential_defaults(
+    tmp_path: Path,
+) -> None:
+    """Omit mode must inspect nested Compose defaults for credential sources.
+
+    Forms like ``${PUBLIC_URL:-${API_TOKEN}}`` keep a benign outer name while
+    the default arm still embeds a credential interpolation. A scanner that
+    stops at the first ``}`` would leave ``${API_TOKEN}`` in hosted payloads.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-${API_TOKEN}}
+      KEEP_REF: ${PUBLIC_HOST:-localhost}
+      NESTED_SAFE: ${PUBLIC_HOST:-${FALLBACK_HOST}}
+  worker:
+    image: worker:latest
+    environment:
+      - CACHE_HOST=${CACHE_HOST:-${POSTGRES_PASSWORD}}
+      - SERVICE_ENDPOINT=${SERVICE_HOST:+${SERVICE_API_KEY}}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_REF": "${PUBLIC_HOST:-localhost}",
+        "NESTED_SAFE": "${PUBLIC_HOST:-${FALLBACK_HOST}}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_URL" not in body
+    assert "CACHE_HOST" not in body
+    assert "SERVICE_ENDPOINT" not in body
+    assert "${API_TOKEN}" not in body
+    assert "API_TOKEN" not in body
+    assert "${POSTGRES_PASSWORD}" not in body
+    assert "POSTGRES_PASSWORD" not in body
+    assert "${SERVICE_API_KEY}" not in body
+    assert "SERVICE_API_KEY" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_list_env_omits_credential_keys_postgres_trust(
     tmp_path: Path,
 ) -> None:
