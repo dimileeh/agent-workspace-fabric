@@ -642,6 +642,84 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_postgres_password_file_omits_and_sets_trust(
+    tmp_path: Path,
+) -> None:
+    """Docker-secret POSTGRES_PASSWORD_FILE must inject trust in omit mode.
+
+    The official Postgres entrypoint treats POSTGRES_PASSWORD_FILE as the
+    password source. Omit mode strips it as a credential key; without trust
+    injection the sidecar starts with neither a password nor trust auth.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_USER: awf
+      POSTGRES_DB: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD_FILE" not in body
+    assert "/run/secrets/postgres_password" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_list_env_postgres_password_file_omits_and_sets_trust(
+    tmp_path: Path,
+) -> None:
+    """List-shaped POSTGRES_PASSWORD_FILE still injects trust in omit mode."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_USER=awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert isinstance(environment, list)
+    assert environment == [
+        "POSTGRES_USER=awf",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD_FILE" not in body
+    assert "/run/secrets/postgres_password" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_omit_mode_drops_nested_compose_credential_defaults(
     tmp_path: Path,
 ) -> None:
@@ -1108,6 +1186,72 @@ services:
     body = json.dumps(payload, sort_keys=True)
     assert "POSTGRES_PASSWORD" not in body
     assert "literal-env-file-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_env_file_postgres_password_file_injects_trust(
+    tmp_path: Path,
+) -> None:
+    """Env_file POSTGRES_PASSWORD_FILE must inject trust before omit drops it."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD_FILE" not in body
+    assert "/run/secrets/postgres_password" not in body
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_postgres_password_file_sets_trust() -> None:
+    """Profile services declaring POSTGRES_PASSWORD_FILE also receive trust."""
+    payload = _hosted_validation_profile_payload(
+        WorkspaceProfile.model_validate(
+            {
+                "name": "hosted-pg-password-file",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "environment": {
+                            "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_password",
+                            "POSTGRES_USER": "awf",
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert payload["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD_FILE" not in body
+    assert "/run/secrets/postgres_password" not in body
 
 
 @pytest.mark.unit

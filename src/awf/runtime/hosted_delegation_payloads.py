@@ -486,14 +486,26 @@ def _hosted_validation_compose_image_repository_name(image: str) -> str:
     return without_digest.rsplit("/", 1)[-1].lower()
 
 
+_POSTGRES_PASSWORD_DECLARATION_NAMES = frozenset(
+    {
+        # Official Docker Postgres entrypoint accepts either a literal password
+        # or the Docker-secret *_FILE form as the password source.
+        "POSTGRES_PASSWORD",
+        "POSTGRES_PASSWORD_FILE",
+    }
+)
+
+
 def _hosted_validation_environment_declares_postgres_password(environment: object) -> bool:
     if isinstance(environment, Mapping):
-        return any(str(name) == "POSTGRES_PASSWORD" for name in environment)
+        return any(str(name) in _POSTGRES_PASSWORD_DECLARATION_NAMES for name in environment)
     if isinstance(environment, list):
         for item in environment:
             if not isinstance(item, str):
                 continue
-            if item == "POSTGRES_PASSWORD" or item.startswith("POSTGRES_PASSWORD="):
+            if item in _POSTGRES_PASSWORD_DECLARATION_NAMES or any(
+                item.startswith(f"{name}=") for name in _POSTGRES_PASSWORD_DECLARATION_NAMES
+            ):
                 return True
     return False
 
@@ -503,10 +515,11 @@ def _hosted_validation_env_file_declares_postgres_password(
     *,
     compose_dir: Path | None,
 ) -> bool:
-    """Whether a Compose service env_file declares POSTGRES_PASSWORD.
+    """Whether a Compose service env_file declares a Postgres password source.
 
-    Scan assignment keys only: full ``compose_env_file_values`` raises on unset
-    required interpolations and would miss a sibling ``POSTGRES_PASSWORD``.
+    Detects ``POSTGRES_PASSWORD`` and ``POSTGRES_PASSWORD_FILE``. Scan assignment
+    keys only: full ``compose_env_file_values`` raises on unset required
+    interpolations and would miss a sibling password declaration.
     """
     for env_file_path in compose_service_env_file_paths(env_file, compose_dir=compose_dir):
         try:
@@ -518,7 +531,7 @@ def _hosted_validation_env_file_declares_postgres_password(
             if not stripped or stripped.startswith("#"):
                 continue
             match = _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN.match(line)
-            if match is not None and match.group("key") == "POSTGRES_PASSWORD":
+            if match is not None and match.group("key") in _POSTGRES_PASSWORD_DECLARATION_NAMES:
                 return True
     return False
 
@@ -1355,7 +1368,8 @@ def _hosted_validation_sanitize_environment_container(
     After rewrite, omit when query/fragment still carry credential fields, or when the
     rewritten URL still has credential-source interpolations / secret operator arms
     (path or benign-named query). Postgres-like services that declared
-    ``POSTGRES_PASSWORD`` also receive ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    ``POSTGRES_PASSWORD`` or ``POSTGRES_PASSWORD_FILE`` also receive
+    ``POSTGRES_HOST_AUTH_METHOD=trust``.
     """
     if not isinstance(container, dict):
         return
