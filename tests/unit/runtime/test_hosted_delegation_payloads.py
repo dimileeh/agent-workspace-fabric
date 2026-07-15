@@ -405,7 +405,7 @@ def test_rendered_stack_payload_redacts_token_volume_key_before_translation(
     token_name: str,
     translated_token_name: str,
 ) -> None:
-    """Token-shaped top-level volume keys must be redacted before normalization."""
+    """Token-shaped volume keys must redact to a DNS-safe hosted placeholder."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         f"""
@@ -424,8 +424,10 @@ volumes:
     )
 
     assert payload is not None
-    assert payload["volumes"] == {"<redacted>": {}}
+    assert payload["volumes"] == {"redacted": {}}
+    _assert_dns1123_label(next(iter(payload["volumes"])))
     body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
     assert token_name not in body
     assert translated_token_name not in body
 
@@ -443,7 +445,7 @@ def test_rendered_stack_payload_redacts_token_explicit_volume_name_before_transl
     token_name: str,
     translated_token_name: str,
 ) -> None:
-    """Token-shaped explicit volume names must be redacted before normalization."""
+    """Token-shaped explicit names must redact to a DNS-safe hosted placeholder."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         f"""
@@ -465,8 +467,10 @@ volumes:
     )
 
     assert payload is not None
-    assert payload["volumes"] == {"cache": {"name": "<redacted>"}}
+    assert payload["volumes"] == {"cache": {"name": "redacted"}}
+    _assert_dns1123_label(payload["volumes"]["cache"]["name"])
     body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
     assert token_name not in body
     assert translated_token_name not in body
 
@@ -475,7 +479,7 @@ volumes:
 def test_rendered_stack_payload_redacts_token_service_volume_sources_before_translation(
     tmp_path: Path,
 ) -> None:
-    """Token-shaped service volume sources must be redacted before normalization."""
+    """Token-shaped service volume sources redact to DNS-safe hosted placeholders."""
     short_token_name = "ghp_volumeSecretToken123456"
     short_translated_name = "ghp-volumesecrettoken123456"
     source_token_name = "AIzaVolumeSecretToken123456"
@@ -507,11 +511,19 @@ services:
 
     assert payload is not None
     assert payload["services"]["backend"]["volumes"] == [
-        "<redacted>:/cache-short",
-        {"type": "volume", "source": "<redacted>", "target": "/cache-source"},
-        {"type": "volume", "src": "<redacted>", "target": "/cache-src"},
+        "redacted:/cache-short",
+        {"type": "volume", "source": "redacted", "target": "/cache-source"},
+        {"type": "volume", "src": "redacted", "target": "/cache-src"},
     ]
+    for volume in payload["services"]["backend"]["volumes"]:
+        source = (
+            volume.partition(":")[0]
+            if isinstance(volume, str)
+            else volume["source" if "source" in volume else "src"]
+        )
+        _assert_dns1123_label(source)
     body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
     for secret in (
         short_token_name,
         short_translated_name,

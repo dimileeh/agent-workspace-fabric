@@ -64,6 +64,7 @@ _HOSTED_VOLUME_INVALID_RUN_PATTERN = re.compile(r"[^a-z0-9-]+")
 _HOSTED_VOLUME_HYPHEN_RUN_PATTERN = re.compile(r"-+")
 _HOSTED_VOLUME_HASH_LENGTHS = (10, 12, 16, 20, 24, 32)
 _HOSTED_KUBERNETES_LABEL_MAX_LENGTH = 63
+_HOSTED_REDACTED_VOLUME_NAME = "redacted"
 _log = get_logger(__name__)
 
 
@@ -480,8 +481,12 @@ def _hosted_validation_sanitize_compose_volume_name(
 ) -> str:
     sanitized_original = redact_secrets(name)
     if sanitized_original != name:
-        return sanitized_original
-    return redact_secrets(volume_translations.get(name, name))
+        return _HOSTED_REDACTED_VOLUME_NAME
+    translated_name = volume_translations.get(name, name)
+    sanitized_translated = redact_secrets(translated_name)
+    if sanitized_translated != translated_name:
+        return _HOSTED_REDACTED_VOLUME_NAME
+    return sanitized_translated
 
 
 def _hosted_validation_sanitize_compose_service_volumes(
