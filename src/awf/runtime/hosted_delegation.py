@@ -444,12 +444,15 @@ class HostedValidationDelegate:
             run_healthchecks=run_healthchecks,
         )
         expected_command_count = len(expected_commands)
+        # Hosted Jobs use their own /workspace/repo checkout; never send a
+        # Core-local filesystem path (Cloud rejects non-null worktree_path).
+        del worktree_path
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
             "profile": _hosted_validation_profile_payload(profile),
             "phase_names": list(phase_names),
             "run_healthchecks": run_healthchecks,
-            "worktree_path": str(worktree_path) if worktree_path is not None else None,
+            "worktree_path": None,
             "include_coverage": include_coverage,
             "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
         }
