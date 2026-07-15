@@ -22,6 +22,7 @@ from awf.runtime.hosted_delegation_payloads import (
     _hosted_validation_profile_payload,
     _hosted_validation_rendered_stack_payload,
     _hosted_validation_sanitize_rendered_stack_volumes,
+    _hosted_validation_secret_checked_fields,
     _hosted_validation_url_has_query_or_fragment_credentials,
 )
 from tests.unit.runtime.test_hosted_validation_delegate import _config
@@ -368,3 +369,53 @@ def test_hosted_volume_helpers_reject_aliasing_collisions() -> None:
             original_name=original_name,
             used_names=used_names,
         )
+
+
+@pytest.mark.unit
+def test_hosted_secret_field_scan_skips_non_container_optional_sections() -> None:
+    """Non-mapping/list optional sections are skipped without yielding command fields."""
+    assert (
+        list(
+            _hosted_validation_secret_checked_fields(
+                {
+                    "phases": "not-a-mapping",
+                    "database": ["not-a-mapping"],
+                    "validation": "not-a-mapping",
+                    "services": {"name": "not-a-list"},
+                }
+            )
+        )
+        == []
+    )
+    assert (
+        list(
+            _hosted_validation_secret_checked_fields(
+                {
+                    "validation": {
+                        "coverage": "not-a-mapping",
+                        "healthchecks": {"name": "not-a-list"},
+                    }
+                }
+            )
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_hosted_profile_payload_skips_non_list_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defensive skip when model_dump yields a non-list services container."""
+    profile = WorkspaceProfile(name="hosted-non-list-services")
+    original_dump = WorkspaceProfile.model_dump
+
+    def _dump_with_dict_services(self: WorkspaceProfile, *args: object, **kwargs: object) -> dict:
+        payload = original_dump(self, *args, **kwargs)
+        payload["services"] = {"broken": True}
+        return payload
+
+    monkeypatch.setattr(WorkspaceProfile, "model_dump", _dump_with_dict_services)
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["name"] == "hosted-non-list-services"
+    assert payload["services"] == {"broken": True}
