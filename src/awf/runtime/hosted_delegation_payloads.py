@@ -112,9 +112,10 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
         ],
         "file_auth_mount_targets": [],
         "profile_env": [{"name": name, "value": value} for name, value in request.profile_env],
+        # Hosted Jobs enforce wall deadlines only; Cloud rejects non-null idle.
         "timeouts": {
             "wall_seconds": request.wall_timeout_seconds,
-            "idle_seconds": request.idle_timeout_seconds,
+            "idle_seconds": None,
         },
     }
     pr_identity = _agent_pr_identity_payload(request)

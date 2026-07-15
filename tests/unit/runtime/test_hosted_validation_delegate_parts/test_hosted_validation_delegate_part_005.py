@@ -819,11 +819,15 @@ def test_hosted_validation_profile_payload_preserves_empty_services() -> None:
 
 @pytest.mark.unit
 def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
-    """Repair-agent hosted start payloads never forward file auth mounts.
+    """Repair-agent hosted start payloads match the Cloud agent-run DTO.
 
     AWF Cloud rejects every non-empty ``file_auth_mount_targets`` on both
     validation and agent-run request DTOs; hosted provider auth is env-secret
     ref based. Preserve passthrough names/aliases only.
+
+    Cloud also rejects any non-null ``timeouts.idle_seconds`` because hosted
+    Jobs enforce only wall deadlines. Adapter defaults still supply local
+    idle=3600 and wall=7200; hosted JSON must clear idle and keep wall.
     """
     request = AgentRuntimeExecRequest(
         workspace_id="ws_hosted",
@@ -841,6 +845,8 @@ def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
             "/home/agent/.gemini",
             "/home/agent/.config/gcloud/application_default_credentials.json",
         ),
+        wall_timeout_seconds=7200.0,
+        idle_timeout_seconds=3600.0,
     )
 
     payload = _agent_start_payload(request)
@@ -850,7 +856,13 @@ def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
     assert payload["env_passthrough_aliases"] == [
         {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
     ]
+    assert payload["timeouts"] == {
+        "wall_seconds": 7200.0,
+        "idle_seconds": None,
+    }
     body = json.dumps(payload, sort_keys=True)
+    assert '"idle_seconds": null' in body
+    assert '"wall_seconds": 7200.0' in body
     assert "/home/agent/.codex" not in body
     assert "/home/agent/.ssh" not in body
     assert "/home/agent/.gemini" not in body
