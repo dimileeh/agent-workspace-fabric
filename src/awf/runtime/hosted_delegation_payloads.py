@@ -821,7 +821,6 @@ def _hosted_validation_compose_volume_name_translations(
                 used_names=used_names,
             )
         previous_original = used_names.get(translated_name)
-        # Disambiguation never returns a name already in ``used_names``.
         if previous_original is not None and previous_original != name:  # pragma: no cover
             raise ValueError("hosted rendered stack volume name collision")
         translations[name] = translated_name
@@ -946,7 +945,6 @@ def _hosted_validation_disambiguated_compose_volume_name(
     for hash_length in _HOSTED_VOLUME_HASH_LENGTHS:
         suffix = f"-{digest[:hash_length]}"
         max_prefix_length = _HOSTED_KUBERNETES_LABEL_MAX_LENGTH - len(suffix)
-        # Hash suffixes stay under the DNS-1123 label max for every configured length.
         if max_prefix_length <= 0:  # pragma: no cover
             continue
         prefix = normalized_base[:max_prefix_length].rstrip("-") or "volume"
@@ -1184,7 +1182,6 @@ def _hosted_validation_profile_payload(
     services = payload.get("services")
     if isinstance(services, list):
         for service in services:
-            # WorkspaceProfile services always model-dump as dicts.
             if not isinstance(service, dict):  # pragma: no cover
                 continue
             inject_postgres_trust = _hosted_validation_environment_declares_postgres_password(
