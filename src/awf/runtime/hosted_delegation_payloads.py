@@ -85,7 +85,7 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             {"target": target, "source": source}
             for target, source in request.env_passthrough_aliases
         ],
-        "file_auth_mount_targets": list(request.file_auth_mount_targets),
+        "file_auth_mount_targets": [],
         "profile_env": [{"name": name, "value": value} for name, value in request.profile_env],
         "timeouts": {
             "wall_seconds": request.wall_timeout_seconds,
@@ -226,11 +226,7 @@ def _hosted_validation_agent_auth_payload(
         compose_env=compose_env,
         env_passthrough_aliases=env_passthrough_aliases,
     )
-    file_auth_mount_targets = compose_helpers.hosted_file_auth_mount_targets(
-        compose_file,
-        compose_env=compose_env,
-    )
-    if not env_passthrough_names and not env_passthrough_aliases and not file_auth_mount_targets:
+    if not env_passthrough_names and not env_passthrough_aliases:
         return None
     return {
         "schema": _HOSTED_AGENT_AUTH_SCHEMA,
@@ -238,7 +234,7 @@ def _hosted_validation_agent_auth_payload(
         "env_passthrough_aliases": [
             {"target": target, "source": source} for target, source in env_passthrough_aliases
         ],
-        "file_auth_mount_targets": list(file_auth_mount_targets),
+        "file_auth_mount_targets": [],
     }
 
 
@@ -296,10 +292,18 @@ def _hosted_validation_sanitize_compose_service(
     volume_translations: Mapping[str, str],
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
+    image = service.get("image")
+    source_environment = service.get("environment")
+    inject_postgres_trust = _hosted_validation_compose_image_is_postgres_like(
+        image
+    ) and _hosted_validation_environment_declares_postgres_password(source_environment)
     for key, value in service.items():
         field = str(key)
         if field == "environment":
-            payload[field] = _hosted_validation_sanitize_compose_environment(value)
+            payload[field] = _hosted_validation_sanitize_compose_environment(
+                value,
+                inject_postgres_trust=inject_postgres_trust,
+            )
             continue
         if field == "volumes":
             payload[field] = _hosted_validation_sanitize_compose_service_volumes(
@@ -309,6 +313,78 @@ def _hosted_validation_sanitize_compose_service(
             continue
         payload[field] = _hosted_validation_sanitize_compose_value(value)
     return payload
+
+
+def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
+    if not isinstance(image, str) or not image.strip():
+        return False
+    repository = _hosted_validation_compose_image_repository_name(image)
+    return repository == "postgres" or repository.startswith("postgres-")
+
+
+def _hosted_validation_compose_image_repository_name(image: str) -> str:
+    without_digest = image.split("@", 1)[0]
+    if ":" in without_digest:
+        name_part, maybe_tag = without_digest.rsplit(":", 1)
+        if "/" not in maybe_tag:
+            without_digest = name_part
+    return without_digest.rsplit("/", 1)[-1].lower()
+
+
+def _hosted_validation_environment_declares_postgres_password(environment: object) -> bool:
+    if isinstance(environment, Mapping):
+        return any(str(name) == "POSTGRES_PASSWORD" for name in environment)
+    if isinstance(environment, list):
+        for item in environment:
+            if not isinstance(item, str):
+                continue
+            if item == "POSTGRES_PASSWORD" or item.startswith("POSTGRES_PASSWORD="):
+                return True
+    return False
+
+
+def _hosted_validation_env_key_is_credential(name: str) -> bool:
+    return bool(_SECRET_ENV_NAME_PATTERN.search(name))
+
+
+def _hosted_validation_sanitize_compose_environment(
+    environment: object,
+    *,
+    inject_postgres_trust: bool = False,
+) -> Any:
+    if isinstance(environment, Mapping):
+        sanitized = {
+            str(name): _hosted_validation_env_value(str(name), value)
+            for name, value in environment.items()
+            if not _hosted_validation_env_key_is_credential(str(name))
+        }
+        if inject_postgres_trust:
+            sanitized["POSTGRES_HOST_AUTH_METHOD"] = "trust"
+        return sanitized
+    if isinstance(environment, list):
+        sanitized_list: list[Any] = []
+        for item in environment:
+            if isinstance(item, str) and "=" in item:
+                name, _, value = item.partition("=")
+                if _hosted_validation_env_key_is_credential(name):
+                    continue
+                if inject_postgres_trust and name == "POSTGRES_HOST_AUTH_METHOD":
+                    continue
+                sanitized_list.append(f"{name}={_hosted_validation_env_value(name, value)}")
+                continue
+            if isinstance(item, str) and _hosted_validation_env_key_is_credential(item):
+                continue
+            if (
+                inject_postgres_trust
+                and isinstance(item, str)
+                and item == "POSTGRES_HOST_AUTH_METHOD"
+            ):
+                continue
+            sanitized_list.append(_hosted_validation_sanitize_compose_value(item))
+        if inject_postgres_trust:
+            sanitized_list.append("POSTGRES_HOST_AUTH_METHOD=trust")
+        return sanitized_list
+    return _hosted_validation_sanitize_compose_value(environment)
 
 
 def _hosted_validation_compose_volume_name_translations(
@@ -659,24 +735,6 @@ def _hosted_validation_compose_volume_source_is_host_path(source: str) -> bool:
     return (
         source.startswith(("/", ".", "~", "$")) or "/" in source or "\\" in source or ":" in source
     )
-
-
-def _hosted_validation_sanitize_compose_environment(environment: object) -> Any:
-    if isinstance(environment, Mapping):
-        return {
-            str(name): _hosted_validation_env_value(str(name), value)
-            for name, value in environment.items()
-        }
-    if isinstance(environment, list):
-        sanitized: list[Any] = []
-        for item in environment:
-            if isinstance(item, str) and "=" in item:
-                name, _, value = item.partition("=")
-                sanitized.append(f"{name}={_hosted_validation_env_value(name, value)}")
-                continue
-            sanitized.append(_hosted_validation_sanitize_compose_value(item))
-        return sanitized
-    return _hosted_validation_sanitize_compose_value(environment)
 
 
 def _hosted_validation_sanitize_compose_value(value: object) -> Any:

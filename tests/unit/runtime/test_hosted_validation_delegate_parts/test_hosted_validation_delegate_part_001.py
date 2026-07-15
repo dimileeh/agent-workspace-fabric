@@ -218,16 +218,15 @@ services:
         {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
         {"target": "GITHUB_TOKEN", "source": "AWF_GITHUB_TOKEN"},
     ]
-    assert agent_auth["file_auth_mount_targets"] == [
-        "/home/agent/.ssh",
-        "/home/agent/.codex",
-        hosted_adc_target,
-    ]
+    assert agent_auth["file_auth_mount_targets"] == []
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "npm-secret-value" not in body_blob
     assert "github-secret-value" not in body_blob
     assert "/home/user/.ssh" not in body_blob
     assert "/home/user/.codex" not in body_blob
+    assert "/home/agent/.ssh" not in body_blob
+    assert "/home/agent/.codex" not in body_blob
+    assert hosted_adc_target not in body_blob
     assert "/core/adc/should-not-leak.json" not in body_blob
     assert "/run/awf/hosted-auth-placeholders" not in body_blob
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in agent_auth["env_passthrough_names"]
@@ -326,8 +325,8 @@ networks:
     assert backend["build"] == {"context": "/host/backend", "dockerfile": "Dockerfile"}
     assert backend["environment"] == {
         "PUBLIC_URL": "http://backend:8000",
-        "API_TOKEN": "${API_TOKEN}",
     }
+    assert "API_TOKEN" not in backend["environment"]
     assert backend["depends_on"] == {"postgres": {"condition": "service_healthy"}}
     assert rendered_stack["networks"] == {"awf_net": {"name": "awf-ws-hosted-net"}}
     body_blob = json.dumps(seen["body"], sort_keys=True)
