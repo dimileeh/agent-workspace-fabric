@@ -147,9 +147,10 @@ def _hosted_validation_rendered_stack_payload(
     """Return sanitized rendered compose stack metadata for hosted validation.
 
     When ``omit_credential_env_keys`` is true (validation-run path), credential-
-    named env entries are dropped so Cloud ``ValidationRunStartRequest`` accepts
-    the payload. Agent-run callers keep the default false so sidecars retain
-    safe ``${NAME}`` placeholders the host can resolve.
+    named env entries and secret-valued entries (including safe-named URL/DSN
+    credentials) are dropped so Cloud ``ValidationRunStartRequest`` accepts the
+    payload. Agent-run callers keep the default false so sidecars retain safe
+    ``${NAME}`` placeholders the host can resolve.
     """
     try:
         if not compose_file.is_file():
@@ -392,6 +393,27 @@ def _hosted_validation_env_key_is_credential(name: str) -> bool:
     return bool(_SECRET_ENV_NAME_PATTERN.search(name))
 
 
+def _hosted_validation_should_omit_environment_entry(
+    name: str,
+    value: object,
+    *,
+    omit_credential_env_keys: bool,
+) -> bool:
+    """Return whether validation omit mode should drop this Compose env entry.
+
+    Credential-*named* keys are dropped so Cloud does not see ``${TOKEN}``-style
+    references. Secret-*valued* entries (URL userinfo, known tokens, PEMs, etc.)
+    are also dropped: leaving them would redact them to ``${NAME}`` (including
+    safe-looking names such as ``DATABASE_URL``) and recreate the same rejection
+    class.
+    """
+    if not omit_credential_env_keys:
+        return False
+    return _hosted_validation_env_key_is_credential(name) or _hosted_validation_env_value_is_secret(
+        name, str(value)
+    )
+
+
 def _hosted_validation_sanitize_compose_environment(
     environment: object,
     *,
@@ -402,8 +424,10 @@ def _hosted_validation_sanitize_compose_environment(
         sanitized = {
             str(name): _hosted_validation_env_value(str(name), value)
             for name, value in environment.items()
-            if not (
-                omit_credential_env_keys and _hosted_validation_env_key_is_credential(str(name))
+            if not _hosted_validation_should_omit_environment_entry(
+                str(name),
+                value,
+                omit_credential_env_keys=omit_credential_env_keys,
             )
         }
         if inject_postgres_trust:
@@ -414,7 +438,11 @@ def _hosted_validation_sanitize_compose_environment(
         for item in environment:
             if isinstance(item, str) and "=" in item:
                 name, _, value = item.partition("=")
-                if omit_credential_env_keys and _hosted_validation_env_key_is_credential(name):
+                if _hosted_validation_should_omit_environment_entry(
+                    name,
+                    value,
+                    omit_credential_env_keys=omit_credential_env_keys,
+                ):
                     continue
                 if inject_postgres_trust and name == "POSTGRES_HOST_AUTH_METHOD":
                     continue

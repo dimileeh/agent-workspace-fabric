@@ -351,6 +351,57 @@ volumes:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_secret_valued_safe_named_env(
+    tmp_path: Path,
+) -> None:
+    """Validation omit mode drops secret values even when the env name looks safe."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      DATABASE_URL: postgresql://user:literal-url-secret@postgres/awf
+      APP_DSN: postgresql://user:literal-dsn-secret@postgres/awf
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - DATABASE_URL=postgresql://user:list-url-secret@postgres/awf
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+    assert "literal-url-secret" not in body
+    assert "literal-dsn-secret" not in body
+    assert "list-url-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_volume_normalization_keeps_payload_secret_free(
     tmp_path: Path,
 ) -> None:
@@ -382,13 +433,14 @@ volumes:
     assert payload is not None
     assert payload["volumes"] == {"postgres-data": {}}
     assert payload["services"]["postgres"]["environment"] == {
-        "DATABASE_URL": "${DATABASE_URL}",
         "PUBLIC_URL": "http://postgres:5432",
         "POSTGRES_HOST_AUTH_METHOD": "trust",
     }
     body = json.dumps(payload, sort_keys=True)
     assert "POSTGRES_PASSWORD" not in body
     assert "${POSTGRES_PASSWORD}" not in body
+    assert "DATABASE_URL" not in body
+    assert "${DATABASE_URL}" not in body
     assert "literal-postgres-secret" not in body
     assert "literal-url-secret" not in body
     assert "user:literal-url-secret" not in body
@@ -752,7 +804,6 @@ networks:
     assert set(payload["services"]) == {"backend", "worker"}
     assert payload["services"]["backend"]["environment"] == [
         "PUBLIC_URL=http://backend:8000",
-        "DATABASE_URL=${DATABASE_URL}",
         "NO_EQUALS_ENTRY",
         7,
     ]
@@ -761,6 +812,8 @@ networks:
     body = json.dumps(payload, sort_keys=True)
     assert "API_TOKEN" not in body
     assert "WORKER_PASSWORD" not in body
+    assert "DATABASE_URL" not in body
+    assert "${DATABASE_URL}" not in body
     assert "literal-service-secret" not in body
     assert "literal-worker-secret" not in body
     assert "literal-agent-secret" not in body
