@@ -54,8 +54,9 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # Safe-looking connection env names that commonly hold DB credentials (URL/DSN).
-# Used only for omit-mode plain ``${NAME}`` refs — not for treating non-secret
-# literals under these keys as secret values.
+# Used for omit-mode plain ``${NAME}`` refs and bare list pass-through slots
+# (``environment: [DATABASE_URL]``) — not for treating non-secret literals under
+# these keys as secret values.
 _SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN = re.compile(
     r"(?:^|[_-])(?:DATABASE[_-]?(?:URL|URI)|POSTGRES[_-]?(?:URL|URI))"
     r"(?:[_-]|$)|(?:^|[_-])DSN(?:[_-]|$)",
@@ -562,7 +563,10 @@ def _hosted_validation_sanitize_compose_environment(
             if (
                 isinstance(item, str)
                 and omit_credential_env_keys
-                and (_hosted_validation_env_key_is_credential(item))
+                and (
+                    _hosted_validation_env_key_is_credential(item)
+                    or _hosted_validation_env_key_is_safe_named_credential(item)
+                )
             ):
                 continue
             if (

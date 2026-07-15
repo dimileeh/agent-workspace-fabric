@@ -450,6 +450,44 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_bare_passthrough_slots(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops bare list URL/DSN pass-through slots, not only secret-named ones."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HOST
+      - API_TOKEN
+      - DATABASE_URL
+      - APP_DSN
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_HOST",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "API_TOKEN" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_omit_mode_drops_credential_source_refs_under_safe_targets(
     tmp_path: Path,
 ) -> None:
