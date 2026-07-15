@@ -1554,12 +1554,25 @@ def test_hosted_profile_passwordless_postgres_omits_raw_secret_tokens(
             "plain-file:///home/user/.pgcert",
         ),
         (
+            # Encoded :// must still be rejected; raw pattern scan alone misses it.
+            "postgresql://postgres@postgres/db?sslrootcert=plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert",
+            "plain-file%3A%2F%2F%2Fhome%2Fuser%2F.pgcert",
+        ),
+        (
             "postgresql://awf@postgres:5432/awf?note=env://PGPASSWORD",
             "env://PGPASSWORD",
         ),
         (
+            "postgresql://awf@postgres:5432/awf?note=env%3A%2F%2FPGPASSWORD",
+            "env%3A%2F%2FPGPASSWORD",
+        ),
+        (
             "postgresql+asyncpg://awf@postgres:5432/awf#keyring://codex/default",
             "keyring://codex/default",
+        ),
+        (
+            "postgresql+asyncpg://awf@postgres:5432/awf#keyring%3A%2F%2Fcodex%2Fdefault",
+            "keyring%3A%2F%2Fcodex%2Fdefault",
         ),
     ],
 )
