@@ -777,6 +777,8 @@ networks:
         "postgres-bis:tag",
         "ghcr.io/org/postgres-custom:16",
         "library/postgres:16",
+        "${POSTGRES_IMAGE:-postgres:16}",
+        "${POSTGRES_IMAGE:-${FALLBACK_IMAGE:-ghcr.io/org/postgres-custom:16}}",
     ],
 )
 def test_rendered_stack_omits_postgres_password_and_sets_trust(
@@ -789,7 +791,7 @@ def test_rendered_stack_omits_postgres_password_and_sets_trust(
         f"""
 services:
   postgres:
-    image: {image}
+    image: "{image}"
     environment:
       POSTGRES_PASSWORD: literal-postgres-secret
       POSTGRES_USER: awf

@@ -24,6 +24,7 @@ from awf.common.token_patterns import (
     compile_provider_ref_re,
 )
 from awf.profiles.models import WorkspaceProfile
+from awf.service.environment import compose_expand_value
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -318,8 +319,30 @@ def _hosted_validation_sanitize_compose_service(
 def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
     if not isinstance(image, str) or not image.strip():
         return False
-    repository = _hosted_validation_compose_image_repository_name(image)
-    return repository == "postgres" or repository.startswith("postgres-")
+    for candidate in _hosted_validation_compose_image_candidates(image):
+        repository = _hosted_validation_compose_image_repository_name(candidate)
+        if repository == "postgres" or repository.startswith("postgres-"):
+            return True
+    return False
+
+
+def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
+    """Return raw and Compose-expanded image strings for postgres detection.
+
+    Hosted sanitization reads compose YAML before interpolation. Expressions such
+    as ``${POSTGRES_IMAGE:-postgres:16}`` must still be recognized as Postgres so
+    password redaction can inject ``POSTGRES_HOST_AUTH_METHOD=trust``. Expand with
+    an empty environ so ``:-`` / ``-`` defaults are visible when the override is
+    unset.
+    """
+    stripped = image.strip()
+    candidates = [stripped]
+    if "$" not in stripped:
+        return (stripped,)
+    expanded = compose_expand_value(stripped, environ={}).strip()
+    if expanded and expanded != stripped:
+        candidates.append(expanded)
+    return tuple(candidates)
 
 
 def _hosted_validation_compose_image_repository_name(image: str) -> str:
