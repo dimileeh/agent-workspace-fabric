@@ -120,7 +120,8 @@ services:
     volumes:
       - postgres_data:/ignored-agent-mount
 volumes:
-  postgres_data: {}
+  postgres_data:
+    name: awf-ws_hosted-postgres_data
 """.lstrip(),
         encoding="utf-8",
     )
@@ -134,7 +135,7 @@ volumes:
     assert payload["schema"] == "hosted_validation_rendered_stack.v1"
     assert payload["compose_project"] == "awf_ws_hosted"
     assert payload["compose_file_path"] == str(compose_file)
-    assert payload["volumes"] == {"postgres-data": {}}
+    assert payload["volumes"] == {"postgres-data": {"name": "awf-ws-hosted-postgres-data"}}
     assert payload["services"] == {
         "postgres": {
             "image": "postgres:16",

@@ -353,8 +353,11 @@ def _hosted_validation_compose_volume_names(
 ) -> Iterator[str]:
     volumes = compose.get("volumes")
     if isinstance(volumes, Mapping):
-        for name in volumes:
+        for name, volume in volumes.items():
             yield str(name)
+            explicit_name = _hosted_validation_compose_volume_declaration_explicit_name(volume)
+            if explicit_name is not None:
+                yield explicit_name
 
     services = compose.get("services")
     if not isinstance(services, Mapping):
@@ -380,6 +383,17 @@ def _hosted_validation_compose_service_volume_names(
             source = None
         if source is not None:
             yield source
+
+
+def _hosted_validation_compose_volume_declaration_explicit_name(
+    volume: object,
+) -> str | None:
+    if not isinstance(volume, Mapping):
+        return None
+    name = volume.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    return name
 
 
 def _hosted_validation_dns1123_label_is_valid(value: str) -> bool:
@@ -426,7 +440,29 @@ def _hosted_validation_sanitize_rendered_stack_volumes(
         translated_name = volume_translations.get(volume_name, volume_name)
         if translated_name in payload:
             raise ValueError("hosted rendered stack volume declaration collision")
-        payload[translated_name] = _hosted_validation_sanitize_compose_value(value)
+        payload[translated_name] = _hosted_validation_sanitize_rendered_stack_volume(
+            value,
+            volume_translations=volume_translations,
+        )
+    return payload
+
+
+def _hosted_validation_sanitize_rendered_stack_volume(
+    volume: object,
+    *,
+    volume_translations: Mapping[str, str],
+) -> Any:
+    if not isinstance(volume, Mapping):
+        return _hosted_validation_sanitize_compose_value(volume)
+    payload: dict[str, Any] = {}
+    for key, value in volume.items():
+        field = str(key)
+        if field == "name" and isinstance(value, str):
+            payload[field] = _hosted_validation_sanitize_compose_value(
+                volume_translations.get(value, value)
+            )
+            continue
+        payload[field] = _hosted_validation_sanitize_compose_value(value)
     return payload
 
 
