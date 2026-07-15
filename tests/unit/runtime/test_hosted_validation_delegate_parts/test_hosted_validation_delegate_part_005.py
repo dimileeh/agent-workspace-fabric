@@ -1305,3 +1305,64 @@ def test_hosted_profile_passwordless_postgres_omits_query_fragment_credentials(
     assert "userinfo-pw" not in body
     assert "DATABASE_URL" not in body
     assert "${DATABASE_URL}" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("database_url", "rewritten", "leak"),
+    [
+        (
+            "postgresql://${POSTGRES_PASSWORD}@postgres:5432/awf",
+            "postgresql://postgres:5432/awf",
+            "${POSTGRES_PASSWORD}",
+        ),
+        (
+            "postgresql+asyncpg://%24%7BPOSTGRES_PASSWORD%7D@postgres:5432/awf",
+            "postgresql+asyncpg://postgres:5432/awf",
+            "POSTGRES_PASSWORD",
+        ),
+        (
+            "postgresql://ghp_exampleusernameonlytoken12@postgres:5432/awf",
+            "postgresql://postgres:5432/awf",
+            "ghp_exampleusernameonlytoken12",
+        ),
+        (
+            "postgres://${DATABASE_URL}@postgres:5432/awf",
+            "postgres://postgres:5432/awf",
+            "${DATABASE_URL}",
+        ),
+        (
+            "postgresql://env%3A%2F%2Fpg_secret_ref@postgres:5432/awf",
+            "postgresql://postgres:5432/awf",
+            "env://pg_secret_ref",
+        ),
+    ],
+)
+def test_hosted_profile_passwordless_postgres_strips_username_only_credentials(
+    database_url: str,
+    rewritten: str,
+    leak: str,
+) -> None:
+    """Username-only Postgres URLs must strip credential userinfo before shipping."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-pg-url-userinfo-creds",
+            "runtime": {
+                "environment": {
+                    "DATABASE_URL": database_url,
+                    "KEEP_OPEN": "postgresql://awf@postgres:5432/awf",
+                    "OLLAMA_HOST": "http://ollama.profile:11434",
+                }
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "DATABASE_URL": rewritten,
+        "KEEP_OPEN": "postgresql://awf@postgres:5432/awf",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert leak not in body

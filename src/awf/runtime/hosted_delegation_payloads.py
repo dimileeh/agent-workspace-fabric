@@ -31,17 +31,12 @@ from awf.service.environment import (
 )
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Compose env-file assignment keys only (no value expansion). Key/export prefix
-# mirrors awf.service.environment._COMPOSE_ENV_LINE_PATTERN; delimiter also
-# accepts ``:`` per Compose env-file syntax (KEY=VALUE and KEY: VALUE).
 _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
     r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(?P<value>.*)$"
 )
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
-# Compose interpolation name token (no anchors) for scanning nested ``${...}``.
 _COMPOSE_INTERPOLATION_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# Longer Compose operators first so ``:-`` / ``:?`` / ``:+`` win over ``-`` / ``?`` / ``+``.
 _COMPOSE_INTERPOLATION_OPERATORS = (":-", "-", ":+", "+", ":?", "?")
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
@@ -50,11 +45,6 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     r"PASSWORD|PASSWD|SECRET|CREDENTIALS?)(?:[_-]|$)",
     re.IGNORECASE,
 )
-# Safe-looking connection env names that commonly hold DB credentials (URL/DSN).
-# Used for omit-mode plain ``${NAME}`` refs on these keys, refs *to* these names
-# under otherwise-safe targets, and bare list pass-through slots
-# (``environment: [DATABASE_URL]``) — not for treating non-secret literals under
-# these keys as secret values.
 _SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN = re.compile(
     r"(?:^|[_-])(?:DATABASE[_-]?(?:URL|URI)|POSTGRES[_-]?(?:URL|URI))"
     r"(?:[_-]|$)|(?:^|[_-])DSN(?:[_-]|$)",
@@ -453,9 +443,6 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
     if "$" not in stripped:
         return tuple(candidates)
     try:
-        # Empty environ resolves ``:-`` / ``-`` defaults for postgres detection.
-        # Required ``:?`` / ``?`` forms raise without the worker env; keep the raw
-        # image string rather than aborting hosted stack sanitization.
         expanded = compose_expand_value(stripped, environ={}).strip()
     except ComposeEnvInterpolationError:
         return tuple(candidates)
@@ -777,9 +764,6 @@ def _hosted_validation_sanitize_compose_environment(
         if inject_postgres_trust:
             sanitized_list.append("POSTGRES_HOST_AUTH_METHOD=trust")
         return sanitized_list
-    # ``environment: null`` (and other non-mapping/non-list shapes) still places an
-    # ``environment`` key on the service payload, so the missing-key trust fallback
-    # in ``_hosted_validation_sanitize_compose_service`` never runs. Inject here.
     if inject_postgres_trust:
         return {"POSTGRES_HOST_AUTH_METHOD": "trust"}
     return _hosted_validation_sanitize_compose_value(environment)
@@ -1170,8 +1154,7 @@ def _hosted_validation_profile_payload(
     omit_runtime_environment: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
-    # Hosted Kubernetes validation Jobs do not resolve Core-local secret
-    # declarations; Cloud rejects any non-empty profile.secrets.
+    # Cloud rejects non-empty profile.secrets (no Core-local secret resolution).
     payload["secrets"] = []
     if omit_runtime_environment:
         _hosted_validation_omit_environment_entries(
@@ -1440,9 +1423,9 @@ def _hosted_validation_should_omit_profile_environment_entry(name: str, text: st
 def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
     """Return a Postgres URL with password removed, else ``None`` if not Postgres.
 
-    Username-only or host-only Postgres URLs are returned unchanged so Cloud sees
-    safe literals instead of ``${NAME}`` stubs. Non-Postgres values return ``None``
-    so the caller continues ordinary omit/redact handling.
+    Username-only URLs stay only when userinfo has no credential refs/secrets;
+    otherwise userinfo is stripped to host-only. Host-only URLs stay unchanged.
+    Non-Postgres values return ``None`` for ordinary omit/redact handling.
     """
     stripped = value.strip()
     try:
@@ -1458,9 +1441,24 @@ def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
     userinfo, _, host = authority.rpartition("@")
     username, password_separator, _password = userinfo.partition(":")
     if not password_separator:
+        if _hosted_validation_postgres_userinfo_has_credentials(userinfo):
+            return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
         return stripped
     new_authority = f"{username}@{host}" if username else host
     return urlunsplit((parsed.scheme, new_authority, parsed.path, parsed.query, parsed.fragment))
+
+
+def _hosted_validation_postgres_userinfo_has_credentials(userinfo: str) -> bool:
+    return any(
+        bool(_SECRET_VALUE_PATTERN.search(component))
+        or bool(_PROVIDER_REF_PATTERN.search(component))
+        or any(
+            _hosted_validation_env_key_is_credential(source_name)
+            or _hosted_validation_env_key_is_safe_named_credential(source_name)
+            for source_name in _hosted_validation_env_reference_source_names(component)
+        )
+        for component in compose_helpers._url_component_variants(userinfo)
+    )
 
 
 def _hosted_validation_url_has_query_or_fragment_credentials(value: str) -> bool:
