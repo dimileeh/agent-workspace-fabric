@@ -574,6 +574,66 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_provider_ref_valued_env(
+    tmp_path: Path,
+) -> None:
+    """Omit mode must drop safe-named env whose value is a provider reference.
+
+    Command/operator-arm checks already treat ``_PROVIDER_REF_PATTERN`` as
+    secret-bearing. Env values such as ``PUBLIC_REF=plain-file://…`` or
+    ``SERVICE_REF=env://API_TOKEN`` must not leak credential refs or local auth
+    paths into the hosted rendered-stack JSON.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      PUBLIC_REF: plain-file:///home/user/.awf/secrets/codex.default
+      SERVICE_REF: env://API_TOKEN
+      KEYRING_REF: keyring://codex/default
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - PUBLIC_REF=plain-file:///home/user/.awf/secrets/github.default
+      - SERVICE_REF=env://OPENAI_API_KEY
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_REF" not in body
+    assert "SERVICE_REF" not in body
+    assert "KEYRING_REF" not in body
+    assert "plain-file://" not in body
+    assert "env://API_TOKEN" not in body
+    assert "env://OPENAI_API_KEY" not in body
+    assert "keyring://codex/default" not in body
+    assert "/home/user/.awf/secrets/" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_omit_mode_drops_safe_named_credential_refs(
     tmp_path: Path,
 ) -> None:

@@ -664,6 +664,60 @@ def test_hosted_validation_sanitizers_ignore_malformed_optional_containers() -> 
 
 
 @pytest.mark.unit
+def test_hosted_profile_env_redacts_provider_ref_values() -> None:
+    """Profile env must not serialize raw provider refs for safe-named keys.
+
+    Mirrors rendered-stack omit mode: ``PUBLIC_REF=plain-file://…`` and
+    ``SERVICE_REF=env://API_TOKEN`` are credential references even when the
+    env name itself is non-credential. They must not appear in hosted profile JSON.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-provider-ref-env",
+            "runtime": {
+                "environment": {
+                    "PUBLIC_URL": "http://runtime:8000",
+                    "PUBLIC_REF": "plain-file:///home/user/.awf/secrets/codex.default",
+                    "SERVICE_REF": "env://API_TOKEN",
+                    "KEYRING_REF": "keyring://codex/default",
+                    "KEEP_REF": "${PUBLIC_HOST}",
+                },
+            },
+            "services": [
+                {
+                    "name": "worker",
+                    "image": "worker:latest",
+                    "environment": {
+                        "PUBLIC_REF": "plain-file:///home/user/.awf/secrets/github.default",
+                        "SERVICE_REF": "env://OPENAI_API_KEY",
+                        "REDIS_URL": "redis://cache:6379/0",
+                    },
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    runtime_env = payload["runtime"]["environment"]
+    assert runtime_env["PUBLIC_URL"] == "http://runtime:8000"
+    assert runtime_env["KEEP_REF"] == "${PUBLIC_HOST}"
+    assert runtime_env["PUBLIC_REF"] == "${PUBLIC_REF}"
+    assert runtime_env["SERVICE_REF"] == "${SERVICE_REF}"
+    assert runtime_env["KEYRING_REF"] == "${KEYRING_REF}"
+    service_env = payload["services"][0]["environment"]
+    assert service_env["REDIS_URL"] == "redis://cache:6379/0"
+    assert service_env["PUBLIC_REF"] == "${PUBLIC_REF}"
+    assert service_env["SERVICE_REF"] == "${SERVICE_REF}"
+    body = json.dumps(payload, sort_keys=True)
+    assert "plain-file://" not in body
+    assert "env://API_TOKEN" not in body
+    assert "env://OPENAI_API_KEY" not in body
+    assert "keyring://codex/default" not in body
+    assert "/home/user/.awf/secrets/" not in body
+
+
+@pytest.mark.unit
 def test_hosted_profile_env_omits_compose_operator_arm_literal_secrets() -> None:
     """Profile env sanitize must omit Compose default/alternate arms with secrets.
 
