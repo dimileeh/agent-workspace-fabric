@@ -760,13 +760,12 @@ def test_hosted_validation_profile_payload_preserves_empty_services() -> None:
 
 
 @pytest.mark.unit
-def test_agent_start_payload_preserves_file_auth_mount_targets() -> None:
-    """Hosted /v1/agent-runs forward secret-free file auth mount targets.
+def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
+    """Repair-agent hosted start payloads never forward file auth mounts.
 
-    Adapters populate ``file_auth_mount_targets`` as container paths only (no
-    host sources or credential contents). Clearing those for agent-run start
-    would leave hosted Gemini/ADC repair agents without a credential signal;
-    validation ``agent_auth`` keeps mounts empty separately.
+    AWF Cloud rejects every non-empty ``file_auth_mount_targets`` on both
+    validation and agent-run request DTOs; hosted provider auth is env-secret
+    ref based. Preserve passthrough names/aliases only.
     """
     request = AgentRuntimeExecRequest(
         workspace_id="ws_hosted",
@@ -779,6 +778,8 @@ def test_agent_start_payload_preserves_file_auth_mount_targets() -> None:
         env_passthrough_names=("CODEX_API_KEY", "NPM_TOKEN"),
         env_passthrough_aliases=(("GH_TOKEN", "AWF_GITHUB_TOKEN"),),
         file_auth_mount_targets=(
+            "/home/agent/.codex",
+            "/home/agent/.ssh",
             "/home/agent/.gemini",
             "/home/agent/.config/gcloud/application_default_credentials.json",
         ),
@@ -786,16 +787,17 @@ def test_agent_start_payload_preserves_file_auth_mount_targets() -> None:
 
     payload = _agent_start_payload(request)
 
-    assert payload["file_auth_mount_targets"] == [
-        "/home/agent/.gemini",
-        "/home/agent/.config/gcloud/application_default_credentials.json",
-    ]
+    assert payload["file_auth_mount_targets"] == []
     assert payload["env_passthrough_names"] == ["CODEX_API_KEY", "NPM_TOKEN"]
     assert payload["env_passthrough_aliases"] == [
         {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
     ]
     body = json.dumps(payload, sort_keys=True)
-    assert "/host/" not in body
+    assert "/home/agent/.codex" not in body
+    assert "/home/agent/.ssh" not in body
+    assert "/home/agent/.gemini" not in body
+    assert "application_default_credentials.json" not in body
+    assert "/home/agent" not in body
 
 
 @pytest.mark.unit
