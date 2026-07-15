@@ -248,7 +248,13 @@ def _hosted_validation_maybe_translate_docker_mode_none_to_compose(
     *,
     rendered_stack: Mapping[str, Any],
 ) -> None:
-    """Hosted JSON: Core ``docker.mode=none`` + sidecars → advertise ``compose``."""
+    """Hosted JSON: Core ``docker.mode=none`` + rendered sidecars → ``compose``.
+
+    Base the translation on sanitized ``rendered_stack.services`` (non-agent
+    only). Task-policy companions are rendered into compose but are not part of
+    ``profile.services``; requiring profile services would leave mode ``none``
+    and cause Cloud to skip those sidecars.
+    """
     profile = payload.get("profile")
     if not isinstance(profile, dict):
         return
@@ -257,9 +263,6 @@ def _hosted_validation_maybe_translate_docker_mode_none_to_compose(
         return
     stack_services = rendered_stack.get("services")
     if not isinstance(stack_services, Mapping) or not stack_services:
-        return
-    profile_services = profile.get("services")
-    if not isinstance(profile_services, list) or not profile_services:
         return
     docker["mode"] = "compose"
 

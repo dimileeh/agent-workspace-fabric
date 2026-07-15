@@ -125,6 +125,42 @@ services:
 
 
 @pytest.mark.unit
+def test_hosted_profile_docker_mode_none_becomes_compose_for_rendered_only_sidecars(
+    tmp_path: Path,
+) -> None:
+    """Companion sidecars live in the rendered stack, not profile.services."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+""".lstrip(),
+        encoding="utf-8",
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-mode-none-companions",
+            "docker": {"mode": "none"},
+            "services": [],
+        }
+    )
+    payload: dict[str, Any] = {
+        "profile": _hosted_validation_profile_payload(profile),
+    }
+
+    _hosted_validation_attach_rendered_stack(
+        payload,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload["profile"]["docker"]["mode"] == "compose"
+    assert "postgres" in payload["rendered_stack"]["services"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("docker_mode", "profile_services", "compose_body", "expected_mode"),
     [
@@ -133,12 +169,6 @@ services:
             [{"name": "postgres", "image": "postgres:16"}],
             "services:\n  postgres:\n    image: postgres:16\n",
             "dind",
-        ),
-        (
-            "none",
-            [],
-            "services:\n  postgres:\n    image: postgres:16\n",
-            "none",
         ),
         (
             "none",
@@ -155,7 +185,7 @@ def test_hosted_profile_docker_mode_none_not_converted_without_sidecars(
     compose_body: str,
     expected_mode: str,
 ) -> None:
-    """Never convert dind, empty stacks, or profiles without services."""
+    """Never convert dind or stacks with no non-agent rendered services."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(compose_body, encoding="utf-8")
     profile = WorkspaceProfile.model_validate(
