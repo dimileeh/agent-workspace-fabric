@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,13 @@ from awf.runtime.hosted_delegation_payloads import (
     _hosted_validation_profile_payload,
     _hosted_validation_rendered_stack_payload,
 )
+
+_DNS1123_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def _assert_dns1123_label(value: str) -> None:
+    assert len(value) <= 63
+    assert _DNS1123_LABEL_PATTERN.fullmatch(value) is not None
 
 
 @pytest.mark.unit
@@ -92,6 +100,280 @@ volumes:
     assert payload is not None
     assert payload["services"] == {}
     assert payload["volumes"] == {"pgdata": {}}
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_normalizes_postgres_data_named_volume(
+    tmp_path: Path,
+) -> None:
+    """Hosted rendered stacks use DNS-1123 volume names for the GKE failure case."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  agent:
+    image: awf-agent-runtime:latest
+    volumes:
+      - postgres_data:/ignored-agent-mount
+volumes:
+  postgres_data: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["schema"] == "hosted_validation_rendered_stack.v1"
+    assert payload["compose_project"] == "awf_ws_hosted"
+    assert payload["compose_file_path"] == str(compose_file)
+    assert payload["volumes"] == {"postgres-data": {}}
+    assert payload["services"] == {
+        "postgres": {
+            "image": "postgres:16",
+            "volumes": ["postgres-data:/var/lib/postgresql/data"],
+        }
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "postgres_data" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_uses_one_volume_translation_for_supported_shapes(
+    tmp_path: Path,
+) -> None:
+    """Top-level declarations and supported service refs cannot diverge."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - cache_data:/cache
+      - ./host-cache:/cache-host
+      - ${HOST_CACHE}:/cache-env
+      - type: volume
+        source: cache_data
+        target: /cache-long
+      - source: other_data
+        target: /other-long
+      - source: ./host-cache-long
+        target: /host-long
+      - type: bind
+        source: bind_data
+        target: /bind
+volumes:
+  cache_data:
+    labels:
+      purpose: cache
+  other_data: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["volumes"] == {
+        "cache-data": {"labels": {"purpose": "cache"}},
+        "other-data": {},
+    }
+    assert payload["services"]["backend"]["volumes"] == [
+        "cache-data:/cache",
+        "./host-cache:/cache-host",
+        "${HOST_CACHE}:/cache-env",
+        {"type": "volume", "source": "cache-data", "target": "/cache-long"},
+        {"source": "other-data", "target": "/other-long"},
+        {"source": "./host-cache-long", "target": "/host-long"},
+        {"type": "bind", "source": "bind_data", "target": "/bind"},
+    ]
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_preserves_valid_dns1123_named_volume(
+    tmp_path: Path,
+) -> None:
+    """Already valid hosted volume labels stay stable."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - type: volume
+        source: pg-data
+        target: /backup
+volumes:
+  pg-data: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["volumes"] == {"pg-data": {}}
+    assert payload["services"]["postgres"]["volumes"] == [
+        "pg-data:/var/lib/postgresql/data",
+        {"type": "volume", "source": "pg-data", "target": "/backup"},
+    ]
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_disambiguates_volume_normalization_collisions(
+    tmp_path: Path,
+) -> None:
+    """Distinct Compose volume names must not alias after hosted normalization."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  underscore:
+    image: postgres:16
+    volumes:
+      - pg_data:/data-underscore
+  dot:
+    image: postgres:16
+    volumes:
+      - pg.data:/data-dot
+  valid:
+    image: postgres:16
+    volumes:
+      - pg-data:/data-valid
+volumes:
+  pg_data: {}
+  pg.data: {}
+  pg-data: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    first = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+    second = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first == second
+    translated_names = set(first["volumes"])
+    assert len(translated_names) == 3
+    assert "pg-data" in translated_names
+    for name in translated_names:
+        _assert_dns1123_label(name)
+
+    underscore_source = first["services"]["underscore"]["volumes"][0].partition(":")[0]
+    dot_source = first["services"]["dot"]["volumes"][0].partition(":")[0]
+    valid_source = first["services"]["valid"]["volumes"][0].partition(":")[0]
+    assert valid_source == "pg-data"
+    assert {underscore_source, dot_source, valid_source} == translated_names
+    assert len({underscore_source, dot_source, valid_source}) == 3
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_disambiguates_long_volume_names(tmp_path: Path) -> None:
+    """Long names are bounded without silently aliasing shared prefixes."""
+    first_volume = f"shared_{'x' * 80}_alpha"
+    second_volume = f"shared_{'x' * 80}_bravo"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  first:
+    image: postgres:16
+    volumes:
+      - {first_volume}:/data-first
+  second:
+    image: postgres:16
+    volumes:
+      - {second_volume}:/data-second
+volumes:
+  {first_volume}: {{}}
+  {second_volume}: {{}}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    translated_names = set(payload["volumes"])
+    assert len(translated_names) == 2
+    for name in translated_names:
+        _assert_dns1123_label(name)
+    first_source = payload["services"]["first"]["volumes"][0].partition(":")[0]
+    second_source = payload["services"]["second"]["volumes"][0].partition(":")[0]
+    assert first_source in translated_names
+    assert second_source in translated_names
+    assert first_source != second_source
+    body = json.dumps(payload, sort_keys=True)
+    assert first_volume not in body
+    assert second_volume not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_volume_normalization_keeps_payload_secret_free(
+    tmp_path: Path,
+) -> None:
+    """Volume-specific rewriting must still route service values through redaction."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      DATABASE_URL: postgresql://user:literal-url-secret@postgres/awf
+      PUBLIC_URL: http://postgres:5432
+volumes:
+  postgres_data: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["volumes"] == {"postgres-data": {}}
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+        "DATABASE_URL": "${DATABASE_URL}",
+        "PUBLIC_URL": "http://postgres:5432",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "literal-postgres-secret" not in body
+    assert "literal-url-secret" not in body
+    assert "user:literal-url-secret" not in body
+    assert "postgres_data" not in body
 
 
 @pytest.mark.unit

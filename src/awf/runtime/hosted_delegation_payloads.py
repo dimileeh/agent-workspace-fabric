@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,11 @@ _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_IN
 _HOSTED_PHASE_COMMAND_FIELDS = ("setup", "pre_agent", "post_agent", "validate", "cleanup")
 _HOSTED_DATABASE_COMMAND_FIELDS = ("generated_setup", "pre_validation_refresh")
 _HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS = frozenset({"MYSQL_PWD", "PGPASSWORD"})
+_HOSTED_DNS1123_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_HOSTED_VOLUME_INVALID_RUN_PATTERN = re.compile(r"[^a-z0-9-]+")
+_HOSTED_VOLUME_HYPHEN_RUN_PATTERN = re.compile(r"-+")
+_HOSTED_VOLUME_HASH_LENGTHS = (10, 12, 16, 20, 24, 32)
+_HOSTED_KUBERNETES_LABEL_MAX_LENGTH = 63
 _log = get_logger(__name__)
 
 
@@ -153,16 +160,25 @@ def _hosted_validation_rendered_stack_payload(
     if not isinstance(parsed, Mapping):
         return None
 
+    volume_translations = _hosted_validation_compose_volume_name_translations(parsed)
     rendered_stack: dict[str, Any] = {
         "schema": _HOSTED_RENDERED_STACK_SCHEMA,
         "compose_project": compose_project,
         "compose_file_path": str(compose_file),
-        "services": _hosted_validation_rendered_stack_services(parsed.get("services")),
+        "services": _hosted_validation_rendered_stack_services(
+            parsed.get("services"),
+            volume_translations=volume_translations,
+        ),
     }
-    for key in ("volumes", "networks"):
-        value = parsed.get(key)
-        if isinstance(value, Mapping):
-            rendered_stack[key] = _hosted_validation_sanitize_compose_value(value)
+    volumes = parsed.get("volumes")
+    if isinstance(volumes, Mapping):
+        rendered_stack["volumes"] = _hosted_validation_sanitize_rendered_stack_volumes(
+            volumes,
+            volume_translations=volume_translations,
+        )
+    networks = parsed.get("networks")
+    if isinstance(networks, Mapping):
+        rendered_stack["networks"] = _hosted_validation_sanitize_compose_value(networks)
     return rendered_stack
 
 
@@ -247,7 +263,11 @@ def _hosted_validation_agent_auth_env_passthrough_names(
     )
 
 
-def _hosted_validation_rendered_stack_services(services: object) -> dict[str, Any]:
+def _hosted_validation_rendered_stack_services(
+    services: object,
+    *,
+    volume_translations: Mapping[str, str],
+) -> dict[str, Any]:
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
         return {}
@@ -256,19 +276,260 @@ def _hosted_validation_rendered_stack_services(services: object) -> dict[str, An
         service_name = str(name)
         if service_name == "agent" or not isinstance(service, Mapping):
             continue
-        payload[service_name] = _hosted_validation_sanitize_compose_service(service)
+        payload[service_name] = _hosted_validation_sanitize_compose_service(
+            service,
+            volume_translations=volume_translations,
+        )
     return payload
 
 
-def _hosted_validation_sanitize_compose_service(service: Mapping[str, object]) -> dict[str, Any]:
+def _hosted_validation_sanitize_compose_service(
+    service: Mapping[str, object],
+    *,
+    volume_translations: Mapping[str, str],
+) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for key, value in service.items():
         field = str(key)
         if field == "environment":
             payload[field] = _hosted_validation_sanitize_compose_environment(value)
             continue
+        if field == "volumes":
+            payload[field] = _hosted_validation_sanitize_compose_service_volumes(
+                value,
+                volume_translations=volume_translations,
+            )
+            continue
         payload[field] = _hosted_validation_sanitize_compose_value(value)
     return payload
+
+
+def _hosted_validation_compose_volume_name_translations(
+    compose: Mapping[object, object],
+) -> dict[str, str]:
+    volume_names = set(_hosted_validation_compose_volume_names(compose))
+    if not volume_names:
+        return {}
+
+    normalized_names = {
+        name: _hosted_validation_normalized_compose_volume_name(name) for name in volume_names
+    }
+    candidates = {
+        name: _hosted_validation_bounded_compose_volume_name(normalized_name)
+        for name, normalized_name in normalized_names.items()
+    }
+    candidate_counts = Counter(candidates.values())
+    translations: dict[str, str] = {}
+    used_names: dict[str, str] = {}
+
+    for name in sorted(volume_names):
+        if _hosted_validation_dns1123_label_is_valid(name):
+            translations[name] = name
+            used_names[name] = name
+
+    for name in sorted(volume_names):
+        if name in translations:
+            continue
+        candidate = candidates[name]
+        if candidate_counts[candidate] == 1 and candidate not in used_names:
+            translated_name = candidate
+        else:
+            translated_name = _hosted_validation_disambiguated_compose_volume_name(
+                normalized_base=normalized_names[name],
+                original_name=name,
+                used_names=used_names,
+            )
+        previous_original = used_names.get(translated_name)
+        if previous_original is not None and previous_original != name:
+            raise ValueError("hosted rendered stack volume name collision")
+        translations[name] = translated_name
+        used_names[translated_name] = name
+
+    return translations
+
+
+def _hosted_validation_compose_volume_names(
+    compose: Mapping[object, object],
+) -> Iterator[str]:
+    volumes = compose.get("volumes")
+    if isinstance(volumes, Mapping):
+        for name in volumes:
+            yield str(name)
+
+    services = compose.get("services")
+    if not isinstance(services, Mapping):
+        return
+    for name, service in services.items():
+        if str(name) == "agent" or not isinstance(service, Mapping):
+            continue
+        yield from _hosted_validation_compose_service_volume_names(service)
+
+
+def _hosted_validation_compose_service_volume_names(
+    service: Mapping[object, object],
+) -> Iterator[str]:
+    volumes = service.get("volumes")
+    if not isinstance(volumes, list):
+        return
+    for volume in volumes:
+        if isinstance(volume, str):
+            source = _hosted_validation_compose_short_named_volume_source(volume)
+        elif isinstance(volume, Mapping):
+            source = _hosted_validation_compose_mapping_named_volume_source(volume)
+        else:
+            source = None
+        if source is not None:
+            yield source
+
+
+def _hosted_validation_dns1123_label_is_valid(value: str) -> bool:
+    return _HOSTED_DNS1123_LABEL_PATTERN.fullmatch(value) is not None
+
+
+def _hosted_validation_normalized_compose_volume_name(value: str) -> str:
+    normalized = _HOSTED_VOLUME_INVALID_RUN_PATTERN.sub("-", value.lower())
+    normalized = _HOSTED_VOLUME_HYPHEN_RUN_PATTERN.sub("-", normalized).strip("-")
+    return normalized or "volume"
+
+
+def _hosted_validation_bounded_compose_volume_name(value: str) -> str:
+    return value[:_HOSTED_KUBERNETES_LABEL_MAX_LENGTH].rstrip("-") or "volume"
+
+
+def _hosted_validation_disambiguated_compose_volume_name(
+    *,
+    normalized_base: str,
+    original_name: str,
+    used_names: Mapping[str, str],
+) -> str:
+    digest = hashlib.sha256(original_name.encode("utf-8")).hexdigest()
+    for hash_length in _HOSTED_VOLUME_HASH_LENGTHS:
+        suffix = f"-{digest[:hash_length]}"
+        max_prefix_length = _HOSTED_KUBERNETES_LABEL_MAX_LENGTH - len(suffix)
+        if max_prefix_length <= 0:
+            continue
+        prefix = normalized_base[:max_prefix_length].rstrip("-") or "volume"
+        candidate = f"{prefix}{suffix}"
+        if _hosted_validation_dns1123_label_is_valid(candidate) and candidate not in used_names:
+            return candidate
+    raise ValueError("hosted rendered stack volume name collision")
+
+
+def _hosted_validation_sanitize_rendered_stack_volumes(
+    volumes: Mapping[object, object],
+    *,
+    volume_translations: Mapping[str, str],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for name, value in volumes.items():
+        volume_name = str(name)
+        translated_name = volume_translations.get(volume_name, volume_name)
+        if translated_name in payload:
+            raise ValueError("hosted rendered stack volume declaration collision")
+        payload[translated_name] = _hosted_validation_sanitize_compose_value(value)
+    return payload
+
+
+def _hosted_validation_sanitize_compose_service_volumes(
+    volumes: object,
+    *,
+    volume_translations: Mapping[str, str],
+) -> Any:
+    if not isinstance(volumes, list):
+        return _hosted_validation_sanitize_compose_value(volumes)
+    return [
+        _hosted_validation_sanitize_compose_service_volume(
+            volume,
+            volume_translations=volume_translations,
+        )
+        for volume in volumes
+    ]
+
+
+def _hosted_validation_sanitize_compose_service_volume(
+    volume: object,
+    *,
+    volume_translations: Mapping[str, str],
+) -> Any:
+    if isinstance(volume, str):
+        return _hosted_validation_sanitize_compose_short_volume(
+            volume,
+            volume_translations=volume_translations,
+        )
+    if isinstance(volume, Mapping):
+        return _hosted_validation_sanitize_compose_volume_mapping(
+            volume,
+            volume_translations=volume_translations,
+        )
+    return _hosted_validation_sanitize_compose_value(volume)
+
+
+def _hosted_validation_sanitize_compose_short_volume(
+    volume: str,
+    *,
+    volume_translations: Mapping[str, str],
+) -> str:
+    source = _hosted_validation_compose_short_named_volume_source(volume)
+    if source is None:
+        return redact_secrets(volume)
+    translated_source = volume_translations.get(source, source)
+    _source, _separator, remainder = volume.partition(":")
+    return redact_secrets(f"{translated_source}:{remainder}")
+
+
+def _hosted_validation_sanitize_compose_volume_mapping(
+    volume: Mapping[object, object],
+    *,
+    volume_translations: Mapping[str, str],
+) -> dict[str, Any]:
+    source = _hosted_validation_compose_mapping_named_volume_source(volume)
+    payload: dict[str, Any] = {}
+    for key, value in volume.items():
+        field = str(key)
+        if field == "source" and source is not None:
+            payload[field] = _hosted_validation_sanitize_compose_value(
+                volume_translations.get(source, source)
+            )
+            continue
+        payload[field] = _hosted_validation_sanitize_compose_value(value)
+    return payload
+
+
+def _hosted_validation_compose_short_named_volume_source(volume: str) -> str | None:
+    if _hosted_validation_compose_short_volume_is_windows_path(volume):
+        return None
+    source, separator, remainder = volume.partition(":")
+    if not separator or not source or not remainder.startswith("/"):
+        return None
+    if _hosted_validation_compose_volume_source_is_host_path(source):
+        return None
+    return source
+
+
+def _hosted_validation_compose_short_volume_is_windows_path(volume: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", volume))
+
+
+def _hosted_validation_compose_mapping_named_volume_source(
+    volume: Mapping[object, object],
+) -> str | None:
+    type_value = volume.get("type")
+    if type_value is not None and (
+        not isinstance(type_value, str) or type_value.lower() != "volume"
+    ):
+        return None
+    source = volume.get("source")
+    if not isinstance(source, str) or not source:
+        return None
+    if _hosted_validation_compose_volume_source_is_host_path(source):
+        return None
+    return source
+
+
+def _hosted_validation_compose_volume_source_is_host_path(source: str) -> bool:
+    return (
+        source.startswith(("/", ".", "~", "$")) or "/" in source or "\\" in source or ":" in source
+    )
 
 
 def _hosted_validation_sanitize_compose_environment(environment: object) -> Any:
