@@ -1094,3 +1094,52 @@ def test_hosted_profile_passwordless_postgres_url_edges() -> None:
     body = json.dumps(payload, sort_keys=True)
     assert "literal-only-secret" not in body
     assert "not-postgres" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("database_url", "secret"),
+    [
+        (
+            "postgresql://awf:userinfo-pw@postgres:5432/awf?sslpassword=query-pg-secret",
+            "query-pg-secret",
+        ),
+        (
+            "postgresql+asyncpg://awf@postgres:5432/awf#password=fragment-pg-secret",
+            "fragment-pg-secret",
+        ),
+        (
+            "postgres://postgres:5432/awf?sslpassword=host-only-query-secret",
+            "host-only-query-secret",
+        ),
+    ],
+)
+def test_hosted_profile_passwordless_postgres_omits_query_fragment_credentials(
+    database_url: str,
+    secret: str,
+) -> None:
+    """Passwordless Postgres rewrite must not preserve query/fragment secrets."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-pg-url-query-creds",
+            "runtime": {
+                "environment": {
+                    "DATABASE_URL": database_url,
+                    "KEEP_OPEN": "postgresql://awf@postgres:5432/awf?sslmode=require",
+                    "OLLAMA_HOST": "http://ollama.profile:11434",
+                }
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "KEEP_OPEN": "postgresql://awf@postgres:5432/awf?sslmode=require",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert secret not in body
+    assert "userinfo-pw" not in body
+    assert "DATABASE_URL" not in body
+    assert "${DATABASE_URL}" not in body

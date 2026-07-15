@@ -1364,7 +1364,9 @@ def _hosted_validation_sanitize_environment_container(
 
     Credential-named keys are omitted (never ``${NAME}`` stubs). Postgres URLs keep
     username/host/port/path with the password stripped. Safe literals are preserved.
-    Postgres-like services that declared ``POSTGRES_PASSWORD`` also receive
+    Postgres URLs whose query or fragment still carry credential fields after the
+    passwordless rewrite are omitted (never shipped, never stubbed). Postgres-like
+    services that declared ``POSTGRES_PASSWORD`` also receive
     ``POSTGRES_HOST_AUTH_METHOD=trust``.
     """
     if not isinstance(container, dict):
@@ -1380,6 +1382,11 @@ def _hosted_validation_sanitize_environment_container(
             continue
         passwordless = _hosted_validation_passwordless_postgres_url(text)
         if passwordless is not None:
+            # Passwordless rewrite preserves query/fragment; omit when those still
+            # carry credentials so we neither leak secrets nor emit Cloud-rejected
+            # ``${NAME}`` DB stubs.
+            if _hosted_validation_url_has_query_or_fragment_credentials(passwordless):
+                continue
             sanitized[name_str] = passwordless
             continue
         if _hosted_validation_should_omit_profile_environment_entry(name_str, text):
@@ -1437,6 +1444,19 @@ def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
         return stripped
     new_authority = f"{username}@{host}" if username else host
     return urlunsplit((parsed.scheme, new_authority, parsed.path, parsed.query, parsed.fragment))
+
+
+def _hosted_validation_url_has_query_or_fragment_credentials(value: str) -> bool:
+    """Return whether URL query or fragment carries secret credential fields."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return any(
+        compose_helpers._url_component_has_secret_credential_field(component)
+        for raw_component in (parsed.query, parsed.fragment)
+        for component in compose_helpers._url_component_variants(raw_component)
+    )
 
 
 def _hosted_validation_env_value(name: str, value: object) -> str:
