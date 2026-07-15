@@ -414,6 +414,7 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
@@ -461,6 +462,7 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
@@ -514,6 +516,7 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,

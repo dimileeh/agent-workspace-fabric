@@ -142,8 +142,15 @@ def _hosted_validation_rendered_stack_payload(
     *,
     compose_project: str,
     compose_file: Path,
+    omit_credential_env_keys: bool = False,
 ) -> dict[str, Any] | None:
-    """Return sanitized rendered compose stack metadata for hosted validation."""
+    """Return sanitized rendered compose stack metadata for hosted validation.
+
+    When ``omit_credential_env_keys`` is true (validation-run path), credential-
+    named env entries are dropped so Cloud ``ValidationRunStartRequest`` accepts
+    the payload. Agent-run callers keep the default false so sidecars retain
+    safe ``${NAME}`` placeholders the host can resolve.
+    """
     try:
         if not compose_file.is_file():
             return None
@@ -176,6 +183,7 @@ def _hosted_validation_rendered_stack_payload(
         "services": _hosted_validation_rendered_stack_services(
             parsed.get("services"),
             volume_translations=volume_translations,
+            omit_credential_env_keys=omit_credential_env_keys,
         ),
     }
     volumes = parsed.get("volumes")
@@ -196,10 +204,12 @@ def _hosted_validation_attach_rendered_stack(
     compose_project: str,
     compose_file: Path,
     include_agent_auth_context: bool = False,
+    omit_credential_env_keys: bool = False,
 ) -> None:
     rendered_stack = _hosted_validation_rendered_stack_payload(
         compose_project=compose_project,
         compose_file=compose_file,
+        omit_credential_env_keys=omit_credential_env_keys,
     )
     if rendered_stack is not None:
         payload["rendered_stack"] = rendered_stack
@@ -271,6 +281,7 @@ def _hosted_validation_rendered_stack_services(
     services: object,
     *,
     volume_translations: Mapping[str, str],
+    omit_credential_env_keys: bool = False,
 ) -> dict[str, Any]:
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
@@ -283,6 +294,7 @@ def _hosted_validation_rendered_stack_services(
         payload[service_name] = _hosted_validation_sanitize_compose_service(
             service,
             volume_translations=volume_translations,
+            omit_credential_env_keys=omit_credential_env_keys,
         )
     return payload
 
@@ -291,19 +303,23 @@ def _hosted_validation_sanitize_compose_service(
     service: Mapping[str, object],
     *,
     volume_translations: Mapping[str, str],
+    omit_credential_env_keys: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     image = service.get("image")
     source_environment = service.get("environment")
-    inject_postgres_trust = _hosted_validation_compose_image_is_postgres_like(
-        image
-    ) and _hosted_validation_environment_declares_postgres_password(source_environment)
+    inject_postgres_trust = (
+        omit_credential_env_keys
+        and _hosted_validation_compose_image_is_postgres_like(image)
+        and _hosted_validation_environment_declares_postgres_password(source_environment)
+    )
     for key, value in service.items():
         field = str(key)
         if field == "environment":
             payload[field] = _hosted_validation_sanitize_compose_environment(
                 value,
                 inject_postgres_trust=inject_postgres_trust,
+                omit_credential_env_keys=omit_credential_env_keys,
             )
             continue
         if field == "volumes":
@@ -374,12 +390,15 @@ def _hosted_validation_sanitize_compose_environment(
     environment: object,
     *,
     inject_postgres_trust: bool = False,
+    omit_credential_env_keys: bool = False,
 ) -> Any:
     if isinstance(environment, Mapping):
         sanitized = {
             str(name): _hosted_validation_env_value(str(name), value)
             for name, value in environment.items()
-            if not _hosted_validation_env_key_is_credential(str(name))
+            if not (
+                omit_credential_env_keys and _hosted_validation_env_key_is_credential(str(name))
+            )
         }
         if inject_postgres_trust:
             sanitized["POSTGRES_HOST_AUTH_METHOD"] = "trust"
@@ -389,13 +408,17 @@ def _hosted_validation_sanitize_compose_environment(
         for item in environment:
             if isinstance(item, str) and "=" in item:
                 name, _, value = item.partition("=")
-                if _hosted_validation_env_key_is_credential(name):
+                if omit_credential_env_keys and _hosted_validation_env_key_is_credential(name):
                     continue
                 if inject_postgres_trust and name == "POSTGRES_HOST_AUTH_METHOD":
                     continue
                 sanitized_list.append(f"{name}={_hosted_validation_env_value(name, value)}")
                 continue
-            if isinstance(item, str) and _hosted_validation_env_key_is_credential(item):
+            if (
+                isinstance(item, str)
+                and omit_credential_env_keys
+                and (_hosted_validation_env_key_is_credential(item))
+            ):
                 continue
             if (
                 inject_postgres_trust

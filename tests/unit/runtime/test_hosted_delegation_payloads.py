@@ -380,6 +380,7 @@ volumes:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
@@ -713,6 +714,54 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_preserves_credential_placeholders_by_default(
+    tmp_path: Path,
+) -> None:
+    """Agent-run path keeps safe ${NAME} placeholders for sidecar credentials."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      API_TOKEN: literal-service-secret
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+  agent:
+    image: awf-agent-runtime:latest
+    environment:
+      NPM_TOKEN: literal-agent-secret
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "API_TOKEN": "${API_TOKEN}",
+    }
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+        "POSTGRES_USER": "awf",
+    }
+    assert "POSTGRES_HOST_AUTH_METHOD" not in payload["services"]["postgres"]["environment"]
+    body = json.dumps(payload, sort_keys=True)
+    assert "literal-service-secret" not in body
+    assert "literal-postgres-secret" not in body
+    assert "literal-agent-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_sanitizes_list_environment(tmp_path: Path) -> None:
     """List-form Compose environments preserve shape while removing secrets."""
     compose_file = tmp_path / "compose.yml"
@@ -748,6 +797,7 @@ networks:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
@@ -804,6 +854,7 @@ services:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
@@ -844,6 +895,7 @@ services:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
@@ -885,6 +937,7 @@ services:
     payload = _hosted_validation_rendered_stack_payload(
         compose_project="awf_ws_hosted",
         compose_file=compose_file,
+        omit_credential_env_keys=True,
     )
 
     assert payload is not None
