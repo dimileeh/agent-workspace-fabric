@@ -450,12 +450,15 @@ class HostedValidationDelegate:
         expected_command_count = len(expected_commands)
         # Hosted Jobs use their own /workspace/repo checkout; never send a
         # Core-local filesystem path (Cloud rejects non-null worktree_path).
-        del worktree_path
+        # Repo-relative profile env_file paths still resolve from the worktree
+        # (same base as profile_services), while compose_dir stays for .env image
+        # interpolation.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
             "profile": _hosted_validation_profile_payload(
                 profile,
                 compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
             ),
             "phase_names": list(phase_names),
             "run_healthchecks": run_healthchecks,

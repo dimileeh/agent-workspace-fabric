@@ -1152,6 +1152,7 @@ def _hosted_validation_profile_payload(
     *,
     omit_runtime_environment: frozenset[str] = frozenset(),
     compose_dir: Path | None = None,
+    profile_base_path: Path | None = None,
 ) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
     # Cloud rejects non-empty profile.secrets (no Core-local secret resolution).
@@ -1163,6 +1164,7 @@ def _hosted_validation_profile_payload(
         )
     _hosted_validation_sanitize_environment_container(payload.get("runtime"))
     services = payload.get("services")
+    env_file_base = profile_base_path if profile_base_path is not None else compose_dir
     if isinstance(services, list):
         for service in services:
             if not isinstance(service, dict):  # pragma: no cover
@@ -1173,7 +1175,7 @@ def _hosted_validation_profile_payload(
                 )
                 or _hosted_validation_env_file_declares_postgres_password(
                     service.get("env_file"),
-                    compose_dir=compose_dir,
+                    compose_dir=env_file_base,
                 )
             ) and _hosted_validation_compose_image_is_postgres_like(
                 service.get("image"),
