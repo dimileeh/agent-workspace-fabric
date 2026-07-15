@@ -1075,6 +1075,65 @@ services:
 
 
 @pytest.mark.unit
+def test_agent_start_payload_resolves_env_file_from_worktree(tmp_path: Path) -> None:
+    """Repair-agent profile must use the same worktree env_file base as validation.
+
+    When compose lives outside the checkout, a worktree-only POSTGRES_PASSWORD
+    env_file is invisible to compose_dir scanning. Without profile_base_path the
+    agent-start profile omits POSTGRES_HOST_AUTH_METHOD=trust even though
+    validation/probe/coverage inject it for the same workspace.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "postgres.env").write_text(
+        "POSTGRES_PASSWORD=worktree-agent-env-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_dir = tmp_path / "compose-project"
+    compose_dir.mkdir()
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-agent-worktree-env-file",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "env_file": "postgres.env",
+                    "environment": {"POSTGRES_USER": "awf"},
+                }
+            ],
+            "phases": {"validate": ["pytest -q"]},
+        }
+    )
+    request = AgentRuntimeExecRequest(
+        workspace_id="ws_hosted",
+        agent_runtime=AgentRuntime.codex,
+        cli_args=("codex", "exec", "-"),
+        prompt_stdin=b"repair prompt",
+        log_source="monitor.repair",
+        model="gpt-5",
+        effort="high",
+        profile=profile,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        worktree_path=worktree,
+    )
+
+    payload = _agent_start_payload(request)
+
+    assert payload["profile"]["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "worktree-agent-env-secret" not in body
+
+
+@pytest.mark.unit
 def test_hosted_validation_agent_auth_file_targets_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

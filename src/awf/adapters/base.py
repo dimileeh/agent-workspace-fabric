@@ -350,6 +350,7 @@ class AgentAdapter(ABC):
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
         profile: WorkspaceProfile | None = None,
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -381,6 +382,7 @@ class AgentAdapter(ABC):
                 log_source=log_source,
                 hosted_pr_identity=hosted_pr_identity,
                 profile=profile,
+                worktree_path=worktree_path,
             )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
@@ -506,6 +508,7 @@ class AgentAdapter(ABC):
         log_source: str,
         hosted_pr_identity: dict[str, Any] | None,
         profile: WorkspaceProfile | None,
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         """Delegate agent CLI execution to the injected runtime executor.
 
@@ -667,6 +670,7 @@ class AgentAdapter(ABC):
             profile=profile,
             compose_project=compose_project,
             compose_file=compose_file,
+            worktree_path=worktree_path,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
             repo_url=_hosted_identity_str(hosted_pr_identity, "repo_url"),

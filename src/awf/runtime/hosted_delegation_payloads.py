@@ -93,7 +93,6 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "workspace_id": request.workspace_id,
         "agent_runtime": request.agent_runtime.value,
-        # Cloud agent Jobs reject local argv; prompt/stdin carries the task.
         "cli_args": [],
         "prompt_stdin_base64": base64.b64encode(request.prompt_stdin).decode("ascii"),
         "log_source": request.log_source,
@@ -106,7 +105,6 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
         ],
         "file_auth_mount_targets": [],
         "profile_env": [{"name": name, "value": value} for name, value in request.profile_env],
-        # Hosted Jobs enforce wall deadlines only; Cloud rejects non-null idle.
         "timeouts": {
             "wall_seconds": request.wall_timeout_seconds,
             "idle_seconds": None,
@@ -116,9 +114,16 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     if pr_identity:
         payload["pr_identity"] = pr_identity
     if request.profile is not None:
-        payload["profile"] = _hosted_agent_start_profile_payload(
-            request.profile,
+        agent_profile = request.profile.model_copy(deep=True)
+        agent_profile.phases.setup = []
+        agent_profile.phases.pre_agent = []
+        agent_profile.phases.post_agent = []
+        agent_profile.phases.cleanup = []
+        agent_profile.database.generated_setup = []
+        payload["profile"] = _hosted_validation_profile_payload(
+            agent_profile,
             compose_dir=(request.compose_file.parent if request.compose_file is not None else None),
+            profile_base_path=request.worktree_path,
         )
     if request.compose_project is not None and request.compose_file is not None:
         _hosted_validation_attach_rendered_stack(
@@ -128,21 +133,6 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             omit_credential_env_keys=True,
         )
     return payload
-
-
-def _hosted_agent_start_profile_payload(
-    profile: WorkspaceProfile,
-    *,
-    compose_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Sanitize profile for agent-run Jobs (clear lifecycle phases / generated_setup)."""
-    agent_profile = profile.model_copy(deep=True)
-    agent_profile.phases.setup = []
-    agent_profile.phases.pre_agent = []
-    agent_profile.phases.post_agent = []
-    agent_profile.phases.cleanup = []
-    agent_profile.database.generated_setup = []
-    return _hosted_validation_profile_payload(agent_profile, compose_dir=compose_dir)
 
 
 def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
