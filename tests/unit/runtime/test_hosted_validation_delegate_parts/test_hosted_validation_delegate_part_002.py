@@ -890,6 +890,42 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_env_file_password_survives_sibling_interpolation_error(
+    tmp_path: Path,
+) -> None:
+    """Password keys must be detected even when a sibling line needs unset env."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=literal-env-file-secret\nOTHER=${OTHER:?set OTHER}\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-env-file-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_postgres_password_injects_trust(
     tmp_path: Path,
 ) -> None:

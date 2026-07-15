@@ -27,11 +27,15 @@ from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
 from awf.service.environment import (
     ComposeEnvInterpolationError,
-    compose_env_file_values,
     compose_expand_value,
 )
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Compose env-file assignment keys only (no value expansion) — must stay aligned
+# with awf.service.environment._COMPOSE_ENV_LINE_PATTERN.
+_COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$"
+)
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
@@ -411,14 +415,26 @@ def _hosted_validation_env_file_declares_postgres_password(
     *,
     compose_dir: Path | None,
 ) -> bool:
-    """Return whether a Compose service env_file declares POSTGRES_PASSWORD."""
+    """Return whether a Compose service env_file declares POSTGRES_PASSWORD.
+
+    Scan assignment keys without expanding values. Full
+    ``compose_env_file_values`` parsing raises on required interpolations that
+    are unset in the Core process env (e.g. ``OTHER=${OTHER:?set OTHER}``);
+    skipping the whole file would miss a sibling ``POSTGRES_PASSWORD`` and leave
+    omit-mode payloads without ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    """
     for env_file_path in compose_service_env_file_paths(env_file, compose_dir=compose_dir):
         try:
-            values = compose_env_file_values(env_file_path)
-        except (OSError, UnicodeDecodeError, ValueError):
+            text = env_file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
-        if "POSTGRES_PASSWORD" in values:
-            return True
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN.match(line)
+            if match is not None and match.group("key") == "POSTGRES_PASSWORD":
+                return True
     return False
 
 
