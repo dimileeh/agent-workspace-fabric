@@ -1255,6 +1255,45 @@ def test_hosted_validation_profile_payload_postgres_password_file_sets_trust() -
 
 
 @pytest.mark.unit
+def test_hosted_validation_profile_payload_env_file_postgres_password_sets_trust(
+    tmp_path: Path,
+) -> None:
+    """Password declared only via profile env_file must still inject trust.
+
+    Rendered-stack sanitization already scans env_file; profile.services must
+    match so hosted sidecar env stays consistent across both payload halves.
+    """
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=env-file-only-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-pg-env-file-password",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "env_file": "postgres.env",
+                    "environment": {"POSTGRES_USER": "awf"},
+                }
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, compose_dir=tmp_path)
+
+    assert payload["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "env-file-only-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_null_environment_still_injects_trust(
     tmp_path: Path,
 ) -> None:

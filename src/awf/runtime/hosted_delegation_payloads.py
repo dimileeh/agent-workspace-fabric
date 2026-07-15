@@ -1167,8 +1167,14 @@ def _hosted_validation_profile_payload(
         for service in services:
             if not isinstance(service, dict):  # pragma: no cover
                 continue
-            inject_postgres_trust = _hosted_validation_environment_declares_postgres_password(
-                service.get("environment")
+            inject_postgres_trust = (
+                _hosted_validation_environment_declares_postgres_password(
+                    service.get("environment")
+                )
+                or _hosted_validation_env_file_declares_postgres_password(
+                    service.get("env_file"),
+                    compose_dir=compose_dir,
+                )
             ) and _hosted_validation_compose_image_is_postgres_like(
                 service.get("image"),
                 compose_dir=compose_dir,
