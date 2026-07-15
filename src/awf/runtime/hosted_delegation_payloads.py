@@ -39,12 +39,12 @@ _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
 )
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
-# Full-value Compose interpolations: bare ``${NAME}`` / ``$NAME`` and operator
-# forms ``${NAME:-...}`` / ``${NAME-...}`` / ``${NAME:?...}`` / ``${NAME?...}`` /
-# ``${NAME:+...}`` / ``${NAME+...}`` (Compose interpolation syntax).
+# Compose interpolations (full-value or embedded): bare ``${NAME}`` / ``$NAME``
+# and operator forms ``${NAME:-...}`` / ``${NAME-...}`` / ``${NAME:?...}`` /
+# ``${NAME?...}`` / ``${NAME:+...}`` / ``${NAME+...}`` (Compose syntax).
 _ENV_REFERENCE_SOURCE_PATTERN = re.compile(
-    r"^\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?::?[-+?].*)?\}$|"
-    r"^\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)$"
+    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?::?[-+?][^}]*)?\}|"
+    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
 )
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
@@ -477,6 +477,18 @@ def _hosted_validation_env_reference_source_name(value: str) -> str | None:
     return match.group("braced") or match.group("plain")
 
 
+def _hosted_validation_env_reference_source_names(value: str) -> Iterator[str]:
+    """Yield env var names referenced by Compose interpolations in ``value``.
+
+    Finds full-value and embedded forms (``Bearer ${API_TOKEN}``,
+    ``prefix-${PASSWORD}``, ``${NAME:-default}``, bare ``$NAME``).
+    """
+    for match in _ENV_REFERENCE_SOURCE_PATTERN.finditer(value):
+        source_name = match.group("braced") or match.group("plain")
+        if source_name is not None:
+            yield source_name
+
+
 def _hosted_validation_should_omit_environment_entry(
     name: str,
     value: object,
@@ -492,9 +504,10 @@ def _hosted_validation_should_omit_environment_entry(
     class. Plain ``${NAME}`` refs on URL/DSN keys are dropped for the same reason
     — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
     Credential-*source* refs under otherwise-safe target names
-    (``PUBLIC_URL: ${POSTGRES_PASSWORD}`` / ``${POSTGRES_PASSWORD:-}``) are
-    omitted so the credential name never reaches Cloud even when the target
-    key looks benign.
+    (``PUBLIC_URL: ${POSTGRES_PASSWORD}``, ``Bearer ${API_TOKEN}``,
+    ``prefix-${POSTGRES_PASSWORD}``) are omitted so the credential name never
+    reaches Cloud even when embedded in surrounding text or the target key
+    looks benign.
     """
     if not omit_credential_env_keys:
         return False
@@ -503,9 +516,12 @@ def _hosted_validation_should_omit_environment_entry(
         name, text
     ):
         return True
-    source_name = _hosted_validation_env_reference_source_name(text)
-    if source_name is not None and _hosted_validation_env_key_is_credential(source_name):
+    if any(
+        _hosted_validation_env_key_is_credential(source_name)
+        for source_name in _hosted_validation_env_reference_source_names(text)
+    ):
         return True
+    source_name = _hosted_validation_env_reference_source_name(text)
     return _hosted_validation_env_key_is_safe_named_credential(name) and source_name is not None
 
 
