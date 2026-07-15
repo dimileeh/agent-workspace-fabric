@@ -1100,7 +1100,8 @@ def _hosted_validation_url_has_path_query_or_fragment_credentials(value: str) ->
 
     Used after passwordless Postgres rewrite where ``user@host`` userinfo must
     stay allowed: scan non-userinfo components (including decoded variants) so
-    path fields like ``/db;password=...`` cannot bypass omit.
+    path fields like ``/db;password=...`` and nested credentialed URLs cannot
+    bypass omit. Authority userinfo is intentionally out of scope here.
     """
     try:
         parsed = urlsplit(value)
@@ -1108,6 +1109,7 @@ def _hosted_validation_url_has_path_query_or_fragment_credentials(value: str) ->
         return False
     return any(
         compose_helpers._url_component_has_secret_credential_field(component)
+        or compose_helpers._value_has_url_userinfo(component)
         for raw_component in (parsed.path, parsed.query, parsed.fragment)
         for component in compose_helpers._url_component_variants(raw_component)
     )
@@ -1141,7 +1143,9 @@ def _hosted_validation_value_has_encoded_secret_or_provider_ref(
     / redaction checks that already catch the decoded equivalents.
 
     Pass ``include_url_userinfo=False`` after a passwordless Postgres rewrite so
-    intentional ``user@host`` DSNs are kept while tokens/refs/bearers/PEMs still omit.
+    intentional ``user@host`` authority is kept while tokens/refs/bearers/PEMs
+    still omit. Nested credentialed URLs in path/query/fragment are handled by
+    ``_hosted_validation_url_has_path_query_or_fragment_credentials``.
     """
     for variant in compose_helpers._url_component_variants(value):
         if (

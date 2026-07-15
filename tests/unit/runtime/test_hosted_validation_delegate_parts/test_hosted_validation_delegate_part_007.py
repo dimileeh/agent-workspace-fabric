@@ -238,6 +238,20 @@ def test_hosted_profile_passwordless_postgres_url_edges() -> None:
             "postgresql+asyncpg://awf@postgres:5432/awf;sslpassword=path-pg-secret",
             "path-pg-secret",
         ),
+        # Nested basic-auth URLs in path/fragment must omit even with userinfo
+        # exemption on the Postgres authority (include_url_userinfo=False).
+        (
+            "postgresql://postgres@postgres/db/https://user:nested-path-pw@svc",
+            "nested-path-pw",
+        ),
+        (
+            "postgresql://postgres@postgres/db/https%3A%2F%2Fuser%3Anested-enc-pw%40svc",
+            "nested-enc-pw",
+        ),
+        (
+            "postgresql://awf@postgres:5432/awf#https%3A%2F%2Fuser%3Anested-frag-pw%40svc",
+            "nested-frag-pw",
+        ),
     ],
 )
 def test_hosted_profile_passwordless_postgres_omits_query_fragment_credentials(
