@@ -437,10 +437,13 @@ def _hosted_validation_sanitize_rendered_stack_volumes(
     payload: dict[str, Any] = {}
     for name, value in volumes.items():
         volume_name = str(name)
-        translated_name = volume_translations.get(volume_name, volume_name)
-        if translated_name in payload:
+        sanitized_name = _hosted_validation_sanitize_compose_volume_name(
+            volume_name,
+            volume_translations=volume_translations,
+        )
+        if sanitized_name in payload:
             raise ValueError("hosted rendered stack volume declaration collision")
-        payload[translated_name] = _hosted_validation_sanitize_rendered_stack_volume(
+        payload[sanitized_name] = _hosted_validation_sanitize_rendered_stack_volume(
             value,
             volume_translations=volume_translations,
         )

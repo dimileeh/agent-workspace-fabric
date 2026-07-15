@@ -398,6 +398,44 @@ volumes:
         ("AIzaVolumeSecretToken123456", "aizavolumesecrettoken123456"),
     ],
 )
+def test_rendered_stack_payload_redacts_token_volume_key_before_translation(
+    tmp_path: Path,
+    token_name: str,
+    translated_token_name: str,
+) -> None:
+    """Token-shaped top-level volume keys must be redacted before normalization."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+volumes:
+  {token_name}: {{}}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["volumes"] == {"<redacted>": {}}
+    body = json.dumps(payload, sort_keys=True)
+    assert token_name not in body
+    assert translated_token_name not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("token_name", "translated_token_name"),
+    [
+        ("ghp_volumeSecretToken123456", "ghp-volumesecrettoken123456"),
+        ("AIzaVolumeSecretToken123456", "aizavolumesecrettoken123456"),
+    ],
+)
 def test_rendered_stack_payload_redacts_token_explicit_volume_name_before_translation(
     tmp_path: Path,
     token_name: str,
