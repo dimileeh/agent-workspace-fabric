@@ -1378,6 +1378,7 @@ def _hosted_validation_sanitize_environment_container(
                 _hosted_validation_url_has_query_or_fragment_credentials(passwordless)
                 or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless)
                 or _SECRET_VALUE_PATTERN.search(passwordless)
+                or _PROVIDER_REF_PATTERN.search(passwordless)
             ):
                 continue
             sanitized[name_str] = passwordless

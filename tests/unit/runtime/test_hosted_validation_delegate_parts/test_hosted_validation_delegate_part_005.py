@@ -1543,3 +1543,51 @@ def test_hosted_profile_passwordless_postgres_omits_raw_secret_tokens(
     assert secret not in body
     assert "DATABASE_URL" not in body
     assert "${DATABASE_URL}" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("database_url", "leak"),
+    [
+        (
+            "postgresql://postgres@postgres/db?sslrootcert=plain-file:///home/user/.pgcert",
+            "plain-file:///home/user/.pgcert",
+        ),
+        (
+            "postgresql://awf@postgres:5432/awf?note=env://PGPASSWORD",
+            "env://PGPASSWORD",
+        ),
+        (
+            "postgresql+asyncpg://awf@postgres:5432/awf#keyring://codex/default",
+            "keyring://codex/default",
+        ),
+    ],
+)
+def test_hosted_profile_passwordless_postgres_omits_provider_refs(
+    database_url: str,
+    leak: str,
+) -> None:
+    """Passwordless keep-path must still reject provider credential refs."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-pg-url-provider-ref",
+            "runtime": {
+                "environment": {
+                    "DATABASE_URL": database_url,
+                    "KEEP_OPEN": "postgresql://awf@postgres:5432/awf?sslmode=require",
+                    "OLLAMA_HOST": "http://ollama.profile:11434",
+                }
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "KEEP_OPEN": "postgresql://awf@postgres:5432/awf?sslmode=require",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert leak not in body
+    assert "DATABASE_URL" not in body
+    assert "${DATABASE_URL}" not in body
