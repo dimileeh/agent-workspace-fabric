@@ -161,6 +161,7 @@ services:
     image: backend:latest
     volumes:
       - cache_data:/cache
+      - cache_data:${CACHE_DIR}
       - ./host-cache:/cache-host
       - ${HOST_CACHE}:/cache-env
       - type: volume
@@ -202,6 +203,7 @@ volumes:
     }
     assert payload["services"]["backend"]["volumes"] == [
         "cache-data:/cache",
+        "cache-data:${CACHE_DIR}",
         "./host-cache:/cache-host",
         "${HOST_CACHE}:/cache-env",
         {"type": "volume", "source": "cache-data", "target": "/cache-long"},

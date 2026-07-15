@@ -57,6 +57,9 @@ _HOSTED_PHASE_COMMAND_FIELDS = ("setup", "pre_agent", "post_agent", "validate", 
 _HOSTED_DATABASE_COMMAND_FIELDS = ("generated_setup", "pre_validation_refresh")
 _HOSTED_COMMAND_SECRET_ASSIGNMENT_KEYS = frozenset({"MYSQL_PWD", "PGPASSWORD"})
 _HOSTED_DNS1123_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_HOSTED_COMPOSE_INTERPOLATED_TARGET_PATTERN = re.compile(
+    r"^\$(?:\{[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)"
+)
 _HOSTED_VOLUME_INVALID_RUN_PATTERN = re.compile(r"[^a-z0-9-]+")
 _HOSTED_VOLUME_HYPHEN_RUN_PATTERN = re.compile(r"-+")
 _HOSTED_VOLUME_HASH_LENGTHS = (10, 12, 16, 20, 24, 32)
@@ -554,7 +557,11 @@ def _hosted_validation_compose_short_named_volume_source(volume: str) -> str | N
     if _hosted_validation_compose_short_volume_is_windows_path(volume):
         return None
     source, separator, remainder = volume.partition(":")
-    if not separator or not source or not remainder.startswith("/"):
+    if (
+        not separator
+        or not source
+        or not _hosted_validation_compose_short_volume_has_container_target(remainder)
+    ):
         return None
     if _hosted_validation_compose_volume_source_is_host_path(source):
         return None
@@ -563,6 +570,10 @@ def _hosted_validation_compose_short_named_volume_source(volume: str) -> str | N
 
 def _hosted_validation_compose_short_volume_is_windows_path(volume: str) -> bool:
     return bool(re.match(r"^[A-Za-z]:[\\/]", volume))
+
+
+def _hosted_validation_compose_short_volume_has_container_target(target: str) -> bool:
+    return target.startswith("/") or bool(_HOSTED_COMPOSE_INTERPOLATED_TARGET_PATTERN.match(target))
 
 
 def _hosted_validation_compose_mapping_named_volume_source(
