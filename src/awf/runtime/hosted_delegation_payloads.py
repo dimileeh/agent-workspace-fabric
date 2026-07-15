@@ -532,14 +532,13 @@ def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
 
 
 def _hosted_validation_braced_expression_end(value: str, open_brace_index: int) -> int | None:
-    """Return the index of the ``}`` that closes a Compose ``${...}`` at ``open_brace_index``.
-
-    Tracks nesting so expressions such as ``${OUTER:-${INNER}}`` close on the
-    outer brace rather than the first inner ``}``.
-    """
+    """Index of the ``}`` closing ``${...}`` at ``open_brace_index`` (nested-aware)."""
     depth = 1
     index = open_brace_index + 1
     while index < len(value):
+        if value[index] == "$" and index + 1 < len(value) and value[index + 1] == "$":
+            index += 2
+            continue
         if value[index] == "$" and index + 1 < len(value) and value[index + 1] == "{":
             depth += 1
             index += 2
@@ -553,16 +552,15 @@ def _hosted_validation_braced_expression_end(value: str, open_brace_index: int) 
 
 
 def _hosted_validation_compose_interpolation_operator_arms(value: str) -> Iterator[str]:
-    """Yield Compose operator/default/alternate/error arm texts in ``value``.
-
-    Walks braced interpolations with nesting so ``${OUTER:-${INNER:-lit}}``
-    yields both the outer arm ``${INNER:-lit}`` and the nested arm ``lit``.
-    """
+    """Yield Compose ``:-``/``-``/``:+``/``+``/``:?``/``?`` arm texts (nested-aware)."""
     index = 0
     while index < len(value):
         dollar = value.find("$", index)
         if dollar < 0:
             return
+        if dollar + 1 < len(value) and value[dollar + 1] == "$":
+            index = dollar + 2
+            continue
         if dollar + 1 < len(value) and value[dollar + 1] == "{":
             end = _hosted_validation_braced_expression_end(value, dollar + 1)
             if end is None:
@@ -583,14 +581,7 @@ def _hosted_validation_compose_interpolation_operator_arms(value: str) -> Iterat
 
 
 def _hosted_validation_env_reference_source_name(value: str) -> str | None:
-    """Return the env var name referenced by a Compose interpolation value.
-
-    Recognizes bare ``${NAME}`` / ``$NAME`` and Compose operator forms
-    (``${NAME:-default}``, ``${NAME:?error}``, ``${NAME:+alt}``, and the
-    non-colon variants), including nested defaults such as
-    ``${NAME:-${OTHER}}``. Returns ``None`` when the value is not a single
-    full-value interpolation expression.
-    """
+    """Env var name when ``value`` is a single full-value Compose interpolation."""
     stripped = value.strip()
     if stripped.startswith("${"):
         end = _hosted_validation_braced_expression_end(stripped, 1)
@@ -609,18 +600,15 @@ def _hosted_validation_env_reference_source_name(value: str) -> str | None:
 
 
 def _hosted_validation_env_reference_source_names(value: str) -> Iterator[str]:
-    """Yield env var names referenced by Compose interpolations in ``value``.
-
-    Finds full-value and embedded forms (``Bearer ${API_TOKEN}``,
-    ``prefix-${PASSWORD}``, ``${NAME:-default}``, bare ``$NAME``), and
-    recursively inspects nested Compose default/alternate/error arms such as
-    ``${PUBLIC_URL:-${API_TOKEN}}``.
-    """
+    """Yield env names from Compose interpolations in ``value`` (nested arms too)."""
     index = 0
     while index < len(value):
         dollar = value.find("$", index)
         if dollar < 0:
             return
+        if dollar + 1 < len(value) and value[dollar + 1] == "$":
+            index = dollar + 2
+            continue
         if dollar + 1 < len(value) and value[dollar + 1] == "{":
             end = _hosted_validation_braced_expression_end(value, dollar + 1)
             if end is None:
@@ -647,12 +635,8 @@ def _hosted_validation_env_reference_source_names(value: str) -> Iterator[str]:
 
 
 def _hosted_validation_operator_arm_literal_is_secret(arm: str) -> bool:
-    """Return whether a Compose operator arm holds a secret-valued literal.
+    """True when a Compose operator arm holds a secret-valued literal (not a pure ref)."""
 
-    Pure env references are ignored here — credential-*source* scanning covers
-    those. Literal URL userinfo, known tokens, PEMs, bearer headers, and
-    secret-key assignments in default/alternate/error arms must still be omitted.
-    """
     stripped = arm.strip()
     if not stripped:
         return False

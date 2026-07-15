@@ -309,6 +309,55 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_preserves_escaped_compose_dollar_templates(
+    tmp_path: Path,
+) -> None:
+    """Compose ``$$`` escapes are literal dollars, not credential-source refs.
+
+    ``$${API_TOKEN}`` / ``$$API_TOKEN`` expand to literal ``${API_TOKEN}`` /
+    ``$API_TOKEN`` without interpolation. Omit mode must keep those entries.
+    A third ``$`` after an escape (``$$${API_TOKEN}``) is a real reference and
+    must still be omitted.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app:latest
+    environment:
+      KEEP_ESCAPED_BRACE: $${API_TOKEN}
+      KEEP_ESCAPED_BARE: $$API_TOKEN
+      KEEP_ESCAPED_EMBEDDED: prefix-$${API_TOKEN}-suffix
+      KEEP_ESCAPED_DEFAULT_ARM: ${PUBLIC_HOST:-$${API_TOKEN}}
+      OMIT_AFTER_ESCAPE: $$${API_TOKEN}
+      OMIT_REAL_BRACE: ${API_TOKEN}
+      SAFE_URL: http://app:8000
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["app"]["environment"]
+    assert environment == {
+        "KEEP_ESCAPED_BRACE": "$${API_TOKEN}",
+        "KEEP_ESCAPED_BARE": "$$API_TOKEN",
+        "KEEP_ESCAPED_EMBEDDED": "prefix-$${API_TOKEN}-suffix",
+        "KEEP_ESCAPED_DEFAULT_ARM": "${PUBLIC_HOST:-$${API_TOKEN}}",
+        "SAFE_URL": "http://app:8000",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "OMIT_AFTER_ESCAPE" not in body
+    assert "OMIT_REAL_BRACE" not in body
+
+
+@pytest.mark.unit
 def test_hosted_profile_keeps_invalid_ipv6_postgres_urls_untouched() -> None:
     """urlsplit ValueError on invalid IPv6 authority must not abort profile sanitize."""
     invalid = "postgresql://[::1/db"
