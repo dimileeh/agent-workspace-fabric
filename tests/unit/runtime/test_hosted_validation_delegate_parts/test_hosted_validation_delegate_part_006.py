@@ -137,8 +137,10 @@ def test_rendered_stack_partial_image_arm_not_treated_as_postgres(
     """Partial Compose default arms must not classify an app image as Postgres.
 
     Tag/registry fragments such as ``${TAG:-postgres}`` are not whole-image
-    defaults; treating them as image candidates would drop app DB passwords and
-    inject ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    defaults; treating them as image candidates risks misclassifying the app
+    image and injecting ``POSTGRES_HOST_AUTH_METHOD=trust``. Credential-named
+    values are intentionally omitted in hosted mode regardless of image
+    classification.
     """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
