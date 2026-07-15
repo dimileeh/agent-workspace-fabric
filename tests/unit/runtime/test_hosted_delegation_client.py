@@ -359,7 +359,7 @@ networks:
         )
 
     assert seen["body"]["profile"]["name"] == "hosted-agent"
-    assert seen["body"]["profile"]["runtime"]["environment"]["API_TOKEN"] == "${API_TOKEN}"
+    assert "API_TOKEN" not in seen["body"]["profile"]["runtime"]["environment"]
     rendered_stack = seen["body"]["rendered_stack"]
     assert rendered_stack["schema"] == "hosted_validation_rendered_stack.v1"
     assert rendered_stack["compose_project"] == "awf_ws_hosted"

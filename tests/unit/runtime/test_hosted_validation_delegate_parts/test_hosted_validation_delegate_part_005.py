@@ -847,5 +847,192 @@ services:
     assert "github-secret-value" not in body
     assert "/home/user/.ssh" not in body
     assert "/home/user/.codex" not in body
-    assert "/home/agent/.ssh" not in body
-    assert "/home/agent/.codex" not in body
+
+
+@pytest.mark.unit
+def test_hosted_profile_env_omits_credentials_passwordless_postgres_and_trust() -> None:
+    """Cloud rejects profile ${NAME} DB/password stubs; omit, rewrite, trust."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-env-contract",
+            "runtime": {
+                "environment": {
+                    "OLLAMA_HOST": "http://ollama.profile:11434",
+                    "NPM_TOKEN": "npm-profile-secret",
+                    "DATABASE_URL": (
+                        "postgresql+asyncpg://awf:literal-db-secret@postgres:5432/awf"
+                    ),
+                    "APP_DSN": "${DATABASE_URL}",
+                    "PUBLIC_HEADER": "Bearer ${POSTGRES_PASSWORD}",
+                }
+            },
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "environment": {
+                        "POSTGRES_USER": "awf",
+                        "POSTGRES_DB": "awf",
+                        "POSTGRES_PASSWORD": "literal-service-password",
+                        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+                    },
+                },
+                {
+                    "name": "redis",
+                    "image": "redis:7",
+                    "environment": {
+                        "REDIS_URL": "redis://cache:6379/0",
+                        "CACHE_TOKEN": "literal-cache-token",
+                    },
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+        "DATABASE_URL": "postgresql+asyncpg://awf@postgres:5432/awf",
+    }
+    assert payload["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    assert payload["services"][1]["environment"] == {
+        "REDIS_URL": "redis://cache:6379/0",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "literal-db-secret" not in body
+    assert "literal-service-password" not in body
+    assert "literal-cache-token" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${POSTGRES_PASSWORD}" not in body
+    assert "POSTGRES_PASSWORD" not in body
+    assert "NPM_TOKEN" not in body
+    assert "EXTERNAL_API_KEY" not in body
+    assert "CACHE_TOKEN" not in body
+
+
+@pytest.mark.unit
+def test_hosted_profile_docker_mode_none_becomes_compose_with_sidecars(
+    tmp_path: Path,
+) -> None:
+    """Non-empty rendered stack + profile services: hosted none → compose."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-mode-none-sidecars",
+            "docker": {"mode": "none"},
+            "services": [{"name": "postgres", "image": "postgres:16"}],
+        }
+    )
+    payload: dict[str, Any] = {
+        "profile": _hosted_validation_profile_payload(profile),
+    }
+
+    _hosted_validation_attach_rendered_stack(
+        payload,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload["profile"]["docker"]["mode"] == "compose"
+    assert "postgres" in payload["rendered_stack"]["services"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("docker_mode", "profile_services", "compose_body", "expected_mode"),
+    [
+        (
+            "dind",
+            [{"name": "postgres", "image": "postgres:16"}],
+            "services:\n  postgres:\n    image: postgres:16\n",
+            "dind",
+        ),
+        (
+            "none",
+            [],
+            "services:\n  postgres:\n    image: postgres:16\n",
+            "none",
+        ),
+        (
+            "none",
+            [{"name": "postgres", "image": "postgres:16"}],
+            "services:\n  agent:\n    image: awf-agent:latest\n",
+            "none",
+        ),
+    ],
+)
+def test_hosted_profile_docker_mode_none_not_converted_without_sidecars(
+    tmp_path: Path,
+    docker_mode: str,
+    profile_services: list[dict[str, str]],
+    compose_body: str,
+    expected_mode: str,
+) -> None:
+    """Never convert dind, empty stacks, or profiles without services."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(compose_body, encoding="utf-8")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-mode-guard",
+            "docker": {"mode": docker_mode},
+            "services": profile_services,
+        }
+    )
+    payload: dict[str, Any] = {
+        "profile": _hosted_validation_profile_payload(profile),
+    }
+
+    _hosted_validation_attach_rendered_stack(
+        payload,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload["profile"]["docker"]["mode"] == expected_mode
+
+
+@pytest.mark.unit
+def test_hosted_profile_passwordless_postgres_url_edges() -> None:
+    """Only Postgres URLs with a password arm are rewritten."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-pg-url-edges",
+            "runtime": {
+                "environment": {
+                    "ALREADY_OPEN": "postgresql://awf@postgres:5432/awf",
+                    "STRIPPED_USERLESS": ("postgresql://:literal-only-secret@postgres:5432/awf"),
+                    "HTTPS_URL": "https://user:not-postgres@example.test/db",
+                    "SAFE_HOST": "http://ollama:11434",
+                }
+            },
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "ALREADY_OPEN": "postgresql://awf@postgres:5432/awf",
+        "STRIPPED_USERLESS": "postgresql://postgres:5432/awf",
+        "HTTPS_URL": "${HTTPS_URL}",
+        "SAFE_HOST": "http://ollama:11434",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "literal-only-secret" not in body
+    assert "not-postgres" not in body

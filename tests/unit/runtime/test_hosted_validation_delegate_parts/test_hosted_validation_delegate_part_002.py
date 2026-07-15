@@ -249,7 +249,6 @@ async def test_hosted_validation_sanitizes_literal_runtime_environment_secrets(
     assert "npm-profile-secret" not in body_blob
     assert "pkg-token" not in body_blob
     assert seen["body"]["profile"]["runtime"]["environment"] == {
-        "NPM_TOKEN": "${NPM_TOKEN}",
         "OLLAMA_HOST": "http://ollama.profile:11434",
         "PIP_INDEX_URL": "${PIP_INDEX_URL}",
     }
@@ -301,9 +300,8 @@ async def test_hosted_validation_sanitizes_literal_service_environment_secrets(
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "literal-service-secret" not in body_blob
     assert seen["body"]["profile"]["services"][0]["environment"] == {
-        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
         "POSTGRES_USER": "awf",
-        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
     }
 
 
@@ -448,13 +446,10 @@ async def test_hosted_validation_omits_postgres_password_secret_declarations(
     assert "literal-service-password-secret" not in body_blob
     assert profile["runtime"]["environment"] == {
         "POSTGRES_USER": "awf",
-        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
-        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
     }
     assert profile["services"][0]["environment"] == {
         "POSTGRES_USER": "awf",
-        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
-        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
     }
 
 
@@ -492,7 +487,6 @@ def test_hosted_validation_profile_payload_clears_secret_declarations() -> None:
 
     assert payload["secrets"] == []
     assert payload["runtime"]["environment"] == {
-        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
         "POSTGRES_USER": "awf",
     }
 

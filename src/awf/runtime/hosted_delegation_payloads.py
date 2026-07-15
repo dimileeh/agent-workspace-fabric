@@ -240,10 +240,40 @@ def _hosted_validation_attach_rendered_stack(
     )
     if rendered_stack is not None:
         payload["rendered_stack"] = rendered_stack
+        _hosted_validation_maybe_translate_docker_mode_none_to_compose(
+            payload,
+            rendered_stack=rendered_stack,
+        )
     if include_agent_auth_context:
         agent_auth = _hosted_validation_agent_auth_payload(compose_file=compose_file)
         if agent_auth is not None:
             payload["agent_auth"] = agent_auth
+
+
+def _hosted_validation_maybe_translate_docker_mode_none_to_compose(
+    payload: Mapping[str, Any],
+    *,
+    rendered_stack: Mapping[str, Any],
+) -> None:
+    """Advertise hosted compose mode when Core ``none`` still carries sidecars.
+
+    Cloud ignores rendered sidecars when ``profile.docker.mode`` is ``none``. Core
+    allows ``none`` plus profile services; translating only that hosted JSON to
+    ``compose`` keeps DinD, empty stacks, and service-free profiles unchanged.
+    """
+    profile = payload.get("profile")
+    if not isinstance(profile, dict):
+        return
+    docker = profile.get("docker")
+    if not isinstance(docker, dict) or docker.get("mode") != "none":
+        return
+    stack_services = rendered_stack.get("services")
+    if not isinstance(stack_services, Mapping) or not stack_services:
+        return
+    profile_services = profile.get("services")
+    if not isinstance(profile_services, list) or not profile_services:
+        return
+    docker["mode"] = "compose"
 
 
 def _hosted_validation_agent_auth_payload(
@@ -1135,7 +1165,15 @@ def _hosted_validation_profile_payload(
     services = payload.get("services")
     if isinstance(services, list):
         for service in services:
-            _hosted_validation_sanitize_environment_container(service)
+            if not isinstance(service, dict):
+                continue
+            inject_postgres_trust = _hosted_validation_environment_declares_postgres_password(
+                service.get("environment")
+            ) and _hosted_validation_compose_image_is_postgres_like(service.get("image"))
+            _hosted_validation_sanitize_environment_container(
+                service,
+                inject_postgres_trust=inject_postgres_trust,
+            )
     _hosted_validation_reject_secret_bearing_fields(payload)
     return payload
 
@@ -1317,16 +1355,77 @@ def _hosted_validation_omit_environment_entries(
         environment.pop(name, None)
 
 
-def _hosted_validation_sanitize_environment_container(container: object) -> None:
+def _hosted_validation_sanitize_environment_container(
+    container: object,
+    *,
+    inject_postgres_trust: bool = False,
+) -> None:
+    """Sanitize hosted profile runtime/service environment for Cloud DTOs.
+
+    Credential-named keys are omitted (never ``${NAME}`` stubs). Postgres URLs keep
+    username/host/port/path with the password stripped. Safe literals are preserved.
+    Postgres-like services that declared ``POSTGRES_PASSWORD`` also receive
+    ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    """
     if not isinstance(container, dict):
         return
     environment = container.get("environment")
     if not isinstance(environment, dict):
         return
-    container["environment"] = {
-        str(name): _hosted_validation_env_value(str(name), value)
-        for name, value in environment.items()
-    }
+    sanitized: dict[str, str] = {}
+    for name, value in environment.items():
+        name_str = str(name)
+        text = str(value)
+        if _hosted_validation_env_key_is_credential(name_str):
+            continue
+        passwordless = _hosted_validation_passwordless_postgres_url(text)
+        if passwordless is not None:
+            sanitized[name_str] = passwordless
+            continue
+        if _hosted_validation_should_omit_profile_environment_entry(name_str, text):
+            continue
+        sanitized[name_str] = _hosted_validation_env_value(name_str, value)
+    if inject_postgres_trust:
+        sanitized["POSTGRES_HOST_AUTH_METHOD"] = "trust"
+    container["environment"] = sanitized
+
+
+def _hosted_validation_should_omit_profile_environment_entry(name: str, text: str) -> bool:
+    """Return whether a profile env entry would recreate Cloud rejection classes."""
+    if any(
+        _hosted_validation_env_key_is_credential(source_name)
+        or _hosted_validation_env_key_is_safe_named_credential(source_name)
+        for source_name in _hosted_validation_env_reference_source_names(text)
+    ):
+        return True
+    source_name = _hosted_validation_env_reference_source_name(text)
+    return _hosted_validation_env_key_is_safe_named_credential(name) and source_name is not None
+
+
+def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
+    """Return a Postgres URL with password removed, else ``None`` if not Postgres.
+
+    Username-only or host-only Postgres URLs are returned unchanged so Cloud sees
+    safe literals instead of ``${NAME}`` stubs. Non-Postgres values return ``None``
+    so the caller continues ordinary omit/redact handling.
+    """
+    stripped = value.strip()
+    try:
+        parsed = urlsplit(stripped)
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if not (scheme in {"postgres", "postgresql"} or scheme.startswith("postgresql+")):
+        return None
+    authority = parsed.netloc
+    if "@" not in authority:
+        return stripped
+    userinfo, _, host = authority.rpartition("@")
+    username, password_separator, _password = userinfo.partition(":")
+    if not password_separator:
+        return stripped
+    new_authority = f"{username}@{host}" if username else host
+    return urlunsplit((parsed.scheme, new_authority, parsed.path, parsed.query, parsed.fragment))
 
 
 def _hosted_validation_env_value(name: str, value: object) -> str:
