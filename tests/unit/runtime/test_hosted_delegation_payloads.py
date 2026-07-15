@@ -817,6 +817,57 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_literal_bearer_env_under_safe_names(
+    tmp_path: Path,
+) -> None:
+    """Literal bearer tokens in safe-named env must omit like command/operator arms."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: app:latest
+    environment:
+      PUBLIC_HEADER: "Authorization: Bearer opaqueBearerToken123456"
+      LOOSE_BEARER: Bearer looseBearerValue123456
+      KEEP_BARE: Bearer $PUBLIC_HOST
+      KEEP_REF: Bearer ${PUBLIC_HOST}
+      SAFE_URL: http://app:8000
+  worker:
+    image: worker:latest
+    environment:
+      - "PUBLIC_HEADER=Authorization: Bearer listBearerToken123456"
+      - KEEP_LIST=Bearer $PUBLIC_HOST
+      - SAFE_URL=http://worker:9000
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["app"]["environment"] == {
+        "KEEP_BARE": "Bearer $PUBLIC_HOST",
+        "KEEP_REF": "Bearer ${PUBLIC_HOST}",
+        "SAFE_URL": "http://app:8000",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "KEEP_LIST=Bearer $PUBLIC_HOST",
+        "SAFE_URL=http://worker:9000",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_HEADER" not in body
+    assert "LOOSE_BEARER" not in body
+    assert "opaqueBearerToken123456" not in body
+    assert "looseBearerValue123456" not in body
+    assert "listBearerToken123456" not in body
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_omits_exact_client_password_env_names() -> None:
     """Profile env sanitize omits exact client password names treated as command secrets."""
     profile = WorkspaceProfile.model_validate(

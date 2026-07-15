@@ -1476,6 +1476,7 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     return (
         _hosted_validation_env_key_is_credential(name)
         or _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
+        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(stripped))
         or _hosted_validation_value_has_url_credentials(stripped)
         or "-----BEGIN " in stripped
         or "\n" in stripped
