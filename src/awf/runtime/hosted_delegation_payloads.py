@@ -54,7 +54,8 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # Safe-looking connection env names that commonly hold DB credentials (URL/DSN).
-# Used for omit-mode plain ``${NAME}`` refs and bare list pass-through slots
+# Used for omit-mode plain ``${NAME}`` refs on these keys, refs *to* these names
+# under otherwise-safe targets, and bare list pass-through slots
 # (``environment: [DATABASE_URL]``) — not for treating non-secret literals under
 # these keys as secret values.
 _SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN = re.compile(
@@ -506,9 +507,11 @@ def _hosted_validation_should_omit_environment_entry(
     — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
     Credential-*source* refs under otherwise-safe target names
     (``PUBLIC_URL: ${POSTGRES_PASSWORD}``, ``Bearer ${API_TOKEN}``,
-    ``prefix-${POSTGRES_PASSWORD}``) are omitted so the credential name never
+    ``prefix-${POSTGRES_PASSWORD}``, ``Bearer ${DATABASE_URL}``,
+    ``prefix-${APP_DSN}``) are omitted so the credential name never
     reaches Cloud even when embedded in surrounding text or the target key
-    looks benign.
+    looks benign. Safe-named connection sources (URL/DSN) are treated like
+    generic credential sources here — not only when they are the target key.
     """
     if not omit_credential_env_keys:
         return False
@@ -519,6 +522,7 @@ def _hosted_validation_should_omit_environment_entry(
         return True
     if any(
         _hosted_validation_env_key_is_credential(source_name)
+        or _hosted_validation_env_key_is_safe_named_credential(source_name)
         for source_name in _hosted_validation_env_reference_source_names(text)
     ):
         return True

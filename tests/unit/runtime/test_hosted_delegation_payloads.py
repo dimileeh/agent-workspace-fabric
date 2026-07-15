@@ -540,6 +540,56 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_credential_source_refs(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops ${DATABASE_URL}/${APP_DSN} sources under safe target names."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_HEADER: Bearer ${DATABASE_URL}
+      SERVICE_CONFIG: prefix-${APP_DSN}
+      PUBLIC_CONN: ${DATABASE_URL}
+      KEEP_HEADER: Bearer ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HEADER=Bearer ${DATABASE_URL}
+      - SERVICE_CONFIG=prefix-${APP_DSN}
+      - PUBLIC_CONN=${DATABASE_URL}
+      - KEEP_REF=Bearer ${PUBLIC_HOST}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_HEADER": "Bearer ${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "KEEP_REF=Bearer ${PUBLIC_HOST}",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_HEADER" not in body
+    assert "SERVICE_CONFIG" not in body
+    assert "PUBLIC_CONN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_omit_mode_drops_embedded_credential_source_refs(
     tmp_path: Path,
 ) -> None:
