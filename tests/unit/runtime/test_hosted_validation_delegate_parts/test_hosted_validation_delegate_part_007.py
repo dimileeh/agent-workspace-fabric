@@ -225,13 +225,26 @@ def test_hosted_profile_passwordless_postgres_url_edges() -> None:
             "postgres://postgres:5432/awf?sslpassword=host-only-query-secret",
             "host-only-query-secret",
         ),
+        # Path / matrix-style credential fields must omit even when userinfo is kept.
+        (
+            "postgresql://awf@postgres/db;password=rawsecret",
+            "rawsecret",
+        ),
+        (
+            "postgresql://awf@postgres/db%3Bpassword%3Drawsecret",
+            "rawsecret",
+        ),
+        (
+            "postgresql+asyncpg://awf@postgres:5432/awf;sslpassword=path-pg-secret",
+            "path-pg-secret",
+        ),
     ],
 )
 def test_hosted_profile_passwordless_postgres_omits_query_fragment_credentials(
     database_url: str,
     secret: str,
 ) -> None:
-    """Passwordless Postgres rewrite must not preserve query/fragment secrets."""
+    """Passwordless Postgres rewrite must not preserve path/query/fragment secrets."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-profile-pg-url-query-creds",

@@ -1015,7 +1015,7 @@ def _hosted_validation_sanitize_environment_container(
         passwordless = _hosted_validation_passwordless_postgres_url(text)
         if passwordless is not None:
             if (
-                _hosted_validation_url_has_query_or_fragment_credentials(passwordless)
+                _hosted_validation_url_has_path_query_or_fragment_credentials(passwordless)
                 or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless)
                 # Username-only userinfo is intentional after password strip; do not
                 # treat ``user@host`` as residual secret material.
@@ -1095,15 +1095,20 @@ def _hosted_validation_postgres_userinfo_has_credentials(userinfo: str) -> bool:
     )
 
 
-def _hosted_validation_url_has_query_or_fragment_credentials(value: str) -> bool:
-    """Return whether URL query or fragment carries secret credential fields."""
+def _hosted_validation_url_has_path_query_or_fragment_credentials(value: str) -> bool:
+    """Return whether URL path, query, or fragment carries secret credential fields.
+
+    Used after passwordless Postgres rewrite where ``user@host`` userinfo must
+    stay allowed: scan non-userinfo components (including decoded variants) so
+    path fields like ``/db;password=...`` cannot bypass omit.
+    """
     try:
         parsed = urlsplit(value)
     except ValueError:
         return False
     return any(
         compose_helpers._url_component_has_secret_credential_field(component)
-        for raw_component in (parsed.query, parsed.fragment)
+        for raw_component in (parsed.path, parsed.query, parsed.fragment)
         for component in compose_helpers._url_component_variants(raw_component)
     )
 

@@ -25,7 +25,7 @@ from awf.runtime.hosted_delegation_payloads import (
     _hosted_validation_profile_payload,
     _hosted_validation_rendered_stack_payload,
     _hosted_validation_secret_checked_fields,
-    _hosted_validation_url_has_query_or_fragment_credentials,
+    _hosted_validation_url_has_path_query_or_fragment_credentials,
 )
 from tests.unit.runtime.test_hosted_validation_delegate import _config
 
@@ -421,8 +421,8 @@ def test_hosted_profile_keeps_invalid_ipv6_postgres_urls_untouched() -> None:
         "DATABASE_URL": invalid,
         "KEEP": "ok",
     }
-    assert _hosted_validation_url_has_query_or_fragment_credentials(invalid) is False
-    assert _hosted_validation_url_has_query_or_fragment_credentials("http://[bad") is False
+    assert _hosted_validation_url_has_path_query_or_fragment_credentials(invalid) is False
+    assert _hosted_validation_url_has_path_query_or_fragment_credentials("http://[bad") is False
 
 
 @pytest.mark.unit
