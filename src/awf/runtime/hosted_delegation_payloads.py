@@ -1367,11 +1367,11 @@ def _hosted_validation_sanitize_environment_container(
 
     Credential-named keys are omitted (never ``${NAME}`` stubs). Postgres URLs keep
     username/host/port/path with the password stripped. Safe literals are preserved.
-    After rewrite, omit when query/fragment still carry credential fields, or when the
+    After rewrite, omit when query/fragment still carry credential fields, when the
     rewritten URL still has credential-source interpolations / secret operator arms
-    (path or benign-named query). Postgres-like services that declared
-    ``POSTGRES_PASSWORD`` or ``POSTGRES_PASSWORD_FILE`` also receive
-    ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    (path or benign-named query), or when a known secret token remains in any
+    component. Postgres-like services that declared ``POSTGRES_PASSWORD`` or
+    ``POSTGRES_PASSWORD_FILE`` also receive ``POSTGRES_HOST_AUTH_METHOD=trust``.
     """
     if not isinstance(container, dict):
         return
@@ -1386,9 +1386,11 @@ def _hosted_validation_sanitize_environment_container(
             continue
         passwordless = _hosted_validation_passwordless_postgres_url(text)
         if passwordless is not None:
-            if _hosted_validation_url_has_query_or_fragment_credentials(
-                passwordless
-            ) or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless):
+            if (
+                _hosted_validation_url_has_query_or_fragment_credentials(passwordless)
+                or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless)
+                or _SECRET_VALUE_PATTERN.search(passwordless)
+            ):
                 continue
             sanitized[name_str] = passwordless
             continue
