@@ -11,9 +11,11 @@ import pytest
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payloads import (
     _hosted_pr_identity_payload,
+    _hosted_validation_attach_rendered_stack,
     _hosted_validation_omit_environment_entries,
     _hosted_validation_profile_payload,
     _hosted_validation_rendered_stack_payload,
+    _hosted_validation_secret_checked_fields,
 )
 
 _DNS1123_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
@@ -563,6 +565,66 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_handles_unusual_volume_shapes(tmp_path: Path) -> None:
+    """Rendered stack metadata preserves odd Compose volume shapes without raw leaks."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    volumes: not-a-list
+  worker:
+    image: worker:latest
+    volumes:
+      - 42
+      - 'C:\\host\\cache:/windows'
+      - cache
+      - cache:relative
+      - type: volume
+        target: /missing-source
+      - source: ./host-cache
+        target: /host
+      - source: named_data
+        target: /named
+      - type: bind
+        source: bind_data
+        target: /bind
+  agent:
+    image: awf-agent-runtime:latest
+volumes:
+  odd_bool: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    envelope: dict[str, object] = {}
+
+    _hosted_validation_attach_rendered_stack(
+        envelope,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        include_agent_auth_context=True,
+    )
+
+    assert set(envelope) == {"rendered_stack"}
+    stack = envelope["rendered_stack"]
+    assert isinstance(stack, dict)
+    assert "agent_auth" not in envelope
+    assert stack["volumes"] == {"odd-bool": True}
+    assert stack["services"]["backend"]["volumes"] == "not-a-list"
+    assert stack["services"]["worker"]["volumes"] == [
+        42,
+        r"C:\host\cache:/windows",
+        "cache",
+        "cache:relative",
+        {"type": "volume", "target": "/missing-source"},
+        {"source": "./host-cache", "target": "/host"},
+        {"source": "named-data", "target": "/named"},
+        {"type": "bind", "source": "bind_data", "target": "/bind"},
+    ]
+
+
+@pytest.mark.unit
 def test_hosted_profile_environment_omit_ignores_unexpected_container_shapes() -> None:
     """Coverage profile env omission only mutates dict environment containers."""
     list_container: list[object] = []
@@ -880,6 +942,32 @@ def test_hosted_validation_profile_payload_rejects_secret_bearing_healthcheck_ur
     message = str(excinfo.value)
     assert "validation.healthchecks[0].url" in message
     assert "literal-health-url-secret" not in message
+
+
+@pytest.mark.unit
+def test_hosted_validation_secret_field_scan_ignores_malformed_optional_sections() -> None:
+    """Malformed optional command sections are ignored while safe fields remain visible."""
+    payload = {
+        "phases": {"setup": "pytest -q"},
+        "database": {"generated_setup": object()},
+        "validation": {
+            "coverage": {"command": "pytest --cov"},
+            "healthchecks": [
+                {"name": "missing-command"},
+                "not-a-healthcheck",
+                {"name": "app", "url": "https://app.example.test/health"},
+            ],
+        },
+        "services": [
+            "not-a-service",
+            {"name": "worker", "command": "python -m worker"},
+        ],
+    }
+
+    assert list(_hosted_validation_secret_checked_fields(payload)) == [
+        ("validation.healthchecks[2].url", "https://app.example.test/health"),
+        ("services[1].command", "python -m worker"),
+    ]
 
 
 @pytest.mark.unit
