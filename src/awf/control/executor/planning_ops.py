@@ -786,6 +786,8 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            profile=profile,
+            worktree_path=worktree_path,
         )
         append_command_evidence(
             command_evidence,
@@ -878,6 +880,8 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            profile=profile,
+            worktree_path=worktree_path,
         )
         append_command_evidence(
             command_evidence,
@@ -985,6 +989,8 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            profile=profile,
+            worktree_path=worktree_path,
         )
         append_command_evidence(
             command_evidence,
@@ -1032,6 +1038,8 @@ async def _run_agent_task_with_optional_planning(
                 ),
                 model=model,
                 workspace_id=workspace.id,
+                profile=profile,
+                worktree_path=worktree_path,
             )
             append_command_evidence(
                 command_evidence,

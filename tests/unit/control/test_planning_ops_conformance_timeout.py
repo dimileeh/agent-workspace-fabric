@@ -37,11 +37,13 @@ class _StdoutTimeoutAdapter:
     def __init__(self, *, satisfied_stdout: str) -> None:
         self._satisfied_stdout = satisfied_stdout
         self.prompts: list[str] = []
+        self.worktree_paths: list[object] = []
 
     async def run(self, **kwargs: object) -> SimpleNamespace:
         prompt = kwargs.get("prompt")
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
+        self.worktree_paths.append(kwargs.get("worktree_path"))
         if len(self.prompts) == 3:
             raise AgentRunError(
                 agent=AgentRuntime.codex,
@@ -55,6 +57,17 @@ class _StdoutTimeoutAdapter:
         if len(self.prompts) == 1:
             return SimpleNamespace(stdout="plan written", stderr="")
         return SimpleNamespace(stdout="implementation", stderr="")
+
+
+class _CaptureWorktreeAdapter:
+    """Capture worktree_path forwarded on every adapter.run call."""
+
+    def __init__(self) -> None:
+        self.worktree_paths: list[object] = []
+
+    async def run(self, **kwargs: object) -> SimpleNamespace:
+        self.worktree_paths.append(kwargs.get("worktree_path"))
+        return SimpleNamespace(stdout="ok", stderr="")
 
 
 @pytest.mark.unit
@@ -105,3 +118,40 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
     assert len(adapter.prompts) == 3
     assert all("/workspace/docs/awf-plans/ws_stdout.md" in prompt for prompt in adapter.prompts)
     assert "/workspace/docs/awf-plans/ws_stdout.json" in adapter.prompts[2]
+    # Hosted agent-start env_file scanning needs the checkout path on every
+    # create-path run (plan / execute / conformance), not only later fix paths.
+    assert adapter.worktree_paths == [worktree, worktree, worktree]
+
+
+@pytest.mark.unit
+async def test_optional_planning_forwards_worktree_path_when_planning_not_required(
+    tmp_path: Path,
+) -> None:
+    """No-planning create-path runs must forward worktree_path to adapter.run."""
+    worktree = tmp_path / "worktree"
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "no-planning-worktree",
+            "planning": {"required": False},
+        }
+    )
+    adapter = _CaptureWorktreeAdapter()
+
+    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(  # type: ignore[arg-type]
+            id="ws_no_plan",
+            task_prompt="do it",
+            task_tag=None,
+            task_policy=None,
+        ),
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert result is None
+    assert adapter.worktree_paths == [worktree]
