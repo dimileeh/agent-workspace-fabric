@@ -11,6 +11,7 @@ import pytest
 
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import HostedValidationDelegate
+from awf.runtime.hosted_delegation_payloads import _hosted_validation_profile_payload
 from tests.unit.runtime.test_hosted_validation_delegate import (
     _config,
     _profile_with_runtime_secret,
@@ -345,14 +346,149 @@ async def test_hosted_validation_strips_profile_secret_refs(tmp_path: Path) -> N
         )
 
     body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert seen["body"]["profile"]["secrets"] == []
+    assert "codex-default" not in body_blob
+    assert "/run/awf/secrets/codex-default" not in body_blob
+    assert "local-file" not in body_blob
     assert "local-file:///home/user/.awf/secrets/codex.default" not in body_blob
-    assert seen["body"]["profile"]["secrets"] == [
+    assert "/home/user/.awf/secrets/codex.default" not in body_blob
+
+
+def _profile_with_postgres_password_secret() -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
         {
-            "name": "codex-default",
-            "target": "/run/awf/secrets/codex-default",
-            "kind": "mount",
-            "mode": "ro",
-            "required": True,
-            "provider": "local-file",
+            "name": "hosted-pg-secret-declaration-test",
+            "secrets": [
+                {
+                    "name": "postgres-password",
+                    "target": "AWF_POSTGRES_PASSWORD",
+                    "kind": "env",
+                    "mode": "ro",
+                    "required": True,
+                    "provider": "env",
+                    "ref": "env/AWF_POSTGRES_PASSWORD_TOKEN_ghp_exampleTokenMaterial12",
+                }
+            ],
+            "runtime": {
+                "environment": {
+                    "POSTGRES_USER": "awf",
+                    "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+                    "POSTGRES_PASSWORD": "literal-postgres-password-secret",
+                }
+            },
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "environment": {
+                        "POSTGRES_USER": "awf",
+                        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+                        "POSTGRES_PASSWORD": "literal-service-password-secret",
+                    },
+                }
+            ],
         }
-    ]
+    )
+
+
+@pytest.mark.unit
+async def test_hosted_validation_omits_postgres_password_secret_declarations(
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=_profile_with_postgres_password_secret(),
+            phase_names=("validate",),
+        )
+
+    profile = seen["body"]["profile"]
+    assert profile["secrets"] == []
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "postgres-password" not in body_blob
+    assert "AWF_POSTGRES_PASSWORD" not in body_blob
+    assert "AWF_POSTGRES_PASSWORD_TOKEN_ghp_exampleTokenMaterial12" not in body_blob
+    assert "ghp_exampleTokenMaterial12" not in body_blob
+    assert "literal-postgres-password-secret" not in body_blob
+    assert "literal-service-password-secret" not in body_blob
+    assert profile["runtime"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+    }
+    assert profile["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+    }
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_clears_secret_declarations() -> None:
+    payload = _hosted_validation_profile_payload(
+        WorkspaceProfile.model_validate(
+            {
+                "name": "hosted-helper-secrets-cleared",
+                "secrets": [
+                    {
+                        "name": "postgres-password",
+                        "target": "AWF_POSTGRES_PASSWORD",
+                        "kind": "env",
+                        "provider": "env",
+                        "ref": "env/AWF_POSTGRES_PASSWORD",
+                    },
+                    {
+                        "name": "codex-default",
+                        "target": "/run/awf/secrets/codex-default",
+                        "kind": "mount",
+                        "provider": "local-file",
+                        "ref": "local-file:///home/user/.awf/secrets/codex.default",
+                    },
+                ],
+                "runtime": {
+                    "environment": {
+                        "POSTGRES_PASSWORD": "literal-helper-password",
+                        "POSTGRES_USER": "awf",
+                    }
+                },
+            }
+        )
+    )
+
+    assert payload["secrets"] == []
+    assert payload["runtime"]["environment"] == {
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+        "POSTGRES_USER": "awf",
+    }
