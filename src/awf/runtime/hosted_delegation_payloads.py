@@ -131,6 +131,7 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             compose_project=request.compose_project,
             compose_file=request.compose_file,
             omit_credential_env_keys=True,
+            env_file_base_path=request.worktree_path,
         )
     return payload
 
@@ -171,6 +172,7 @@ def _hosted_validation_rendered_stack_payload(
     compose_project: str,
     compose_file: Path,
     omit_credential_env_keys: bool = False,
+    env_file_base_path: Path | None = None,
 ) -> dict[str, Any] | None:
     """Sanitized rendered compose stack; omit mode drops credential env for Cloud DTOs."""
     try:
@@ -207,6 +209,7 @@ def _hosted_validation_rendered_stack_payload(
             volume_translations=volume_translations,
             omit_credential_env_keys=omit_credential_env_keys,
             compose_dir=compose_file.parent,
+            env_file_base_path=env_file_base_path,
         ),
     }
     volumes = parsed.get("volumes")
@@ -228,11 +231,13 @@ def _hosted_validation_attach_rendered_stack(
     compose_file: Path,
     include_agent_auth_context: bool = False,
     omit_credential_env_keys: bool = False,
+    env_file_base_path: Path | None = None,
 ) -> None:
     rendered_stack = _hosted_validation_rendered_stack_payload(
         compose_project=compose_project,
         compose_file=compose_file,
         omit_credential_env_keys=omit_credential_env_keys,
+        env_file_base_path=env_file_base_path,
     )
     if rendered_stack is not None:
         payload["rendered_stack"] = rendered_stack
@@ -331,6 +336,7 @@ def _hosted_validation_rendered_stack_services(
     volume_translations: Mapping[str, str],
     omit_credential_env_keys: bool = False,
     compose_dir: Path | None = None,
+    env_file_base_path: Path | None = None,
 ) -> dict[str, Any]:
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
@@ -345,6 +351,7 @@ def _hosted_validation_rendered_stack_services(
             volume_translations=volume_translations,
             omit_credential_env_keys=omit_credential_env_keys,
             compose_dir=compose_dir,
+            env_file_base_path=env_file_base_path,
         )
     return payload
 
@@ -355,17 +362,22 @@ def _hosted_validation_sanitize_compose_service(
     volume_translations: Mapping[str, str],
     omit_credential_env_keys: bool = False,
     compose_dir: Path | None = None,
+    env_file_base_path: Path | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     image = service.get("image")
     source_environment = service.get("environment")
+    # Match profile payload: repo-relative env_file paths resolve from the
+    # worktree when provided; compose_dir remains the Docker-relative fallback
+    # and the base for compose ``.env`` image interpolation.
+    env_file_base = env_file_base_path if env_file_base_path is not None else compose_dir
     inject_postgres_trust = (
         omit_credential_env_keys
         and (
             _hosted_validation_environment_declares_postgres_password(source_environment)
             or _hosted_validation_env_file_declares_postgres_password(
                 service.get("env_file"),
-                compose_dir=compose_dir,
+                compose_dir=env_file_base,
             )
         )
         and _hosted_validation_compose_image_is_postgres_like(

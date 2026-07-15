@@ -1670,3 +1670,152 @@ services:
 
     assert payload is not None
     assert "environment" not in payload["services"]["postgres"]
+
+
+@pytest.mark.unit
+def test_rendered_stack_resolves_env_file_from_worktree_base(
+    tmp_path: Path,
+) -> None:
+    """Rendered stack must use the same worktree env_file base as profile.
+
+    When compose lives outside the checkout and POSTGRES_PASSWORD is only in a
+    worktree-relative env_file, compose_dir scanning misses it. Without
+    env_file_base_path the rendered Postgres service omits the password without
+    trust while profile.services (profile_base_path=worktree) injects trust —
+    inconsistent sidecar env in the same hosted request.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "postgres.env").write_text(
+        "POSTGRES_PASSWORD=worktree-rendered-stack-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_dir = tmp_path / "compose-project"
+    compose_dir.mkdir()
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file: postgres.env
+    environment:
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    without_base = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+    assert without_base is not None
+    assert without_base["services"]["postgres"]["environment"] == {"POSTGRES_USER": "awf"}
+
+    with_base = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+        env_file_base_path=worktree,
+    )
+    assert with_base is not None
+    assert with_base["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(with_base, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "worktree-rendered-stack-secret" not in body
+
+
+@pytest.mark.unit
+async def test_hosted_run_profile_phases_rendered_stack_uses_worktree_env_file(
+    tmp_path: Path,
+) -> None:
+    """Phase payload must keep profile and rendered_stack trust injection aligned."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "postgres.env").write_text(
+        "POSTGRES_PASSWORD=worktree-stack-align-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_dir = tmp_path / "compose-project"
+    compose_dir.mkdir()
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file: postgres.env
+    environment:
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_align_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_align_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_align_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_align_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-pg-stack-worktree-env-file",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "env_file": "postgres.env",
+                    "environment": {"POSTGRES_USER": "awf"},
+                }
+            ],
+        }
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path / "artifacts",
+            client=client,
+        )
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=compose_file,
+            profile=profile,
+            phase_names=("validate",),
+            worktree_path=worktree,
+            include_coverage=False,
+        )
+
+    expected_env = {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    assert seen["body"]["profile"]["services"][0]["environment"] == expected_env
+    assert seen["body"]["rendered_stack"]["services"]["postgres"]["environment"] == expected_env
+    body = json.dumps(seen["body"], sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "worktree-stack-align-secret" not in body
