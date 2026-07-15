@@ -402,6 +402,54 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_credential_refs(
+    tmp_path: Path,
+) -> None:
+    """Validation omit mode drops ${DATABASE_URL}-style refs on URL/DSN keys."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      DATABASE_URL: ${DATABASE_URL}
+      APP_DSN: ${APP_DSN}
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_volume_normalization_keeps_payload_secret_free(
     tmp_path: Path,
 ) -> None:

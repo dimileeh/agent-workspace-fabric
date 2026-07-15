@@ -45,6 +45,14 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     r"PASSWORD|PASSWD|SECRET|CREDENTIALS?)(?:[_-]|$)",
     re.IGNORECASE,
 )
+# Safe-looking connection env names that commonly hold DB credentials (URL/DSN).
+# Used only for omit-mode plain ``${NAME}`` refs — not for treating non-secret
+# literals under these keys as secret values.
+_SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN = re.compile(
+    r"(?:^|[_-])(?:DATABASE[_-]?(?:URL|URI)|POSTGRES[_-]?(?:URL|URI))"
+    r"(?:[_-]|$)|(?:^|[_-])DSN(?:[_-]|$)",
+    re.IGNORECASE,
+)
 _SECRET_VALUE_PATTERN = compile_known_token_re(match_truncated_provider_tokens=False)
 _PROVIDER_REF_PATTERN = compile_provider_ref_re()
 _HOSTED_COMMAND_ASSIGNMENT_PATTERN = re.compile(
@@ -156,10 +164,11 @@ def _hosted_validation_rendered_stack_payload(
     """Return sanitized rendered compose stack metadata for hosted validation.
 
     When ``omit_credential_env_keys`` is true (validation-run path), credential-
-    named env entries and secret-valued entries (including safe-named URL/DSN
-    credentials) are dropped so Cloud ``ValidationRunStartRequest`` accepts the
-    payload. Agent-run callers keep the default false so sidecars retain safe
-    ``${NAME}`` placeholders the host can resolve.
+    named env entries, secret-valued entries (including safe-named URL/DSN
+    credentials), and plain ``${NAME}`` refs on URL/DSN keys are dropped so Cloud
+    ``ValidationRunStartRequest`` accepts the payload. Agent-run callers keep the
+    default false so sidecars retain safe ``${NAME}`` placeholders the host can
+    resolve.
     """
     try:
         if not compose_file.is_file():
@@ -442,6 +451,10 @@ def _hosted_validation_env_key_is_credential(name: str) -> bool:
     return bool(_SECRET_ENV_NAME_PATTERN.search(name))
 
 
+def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
+    return bool(_SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN.search(name))
+
+
 def _hosted_validation_should_omit_environment_entry(
     name: str,
     value: object,
@@ -454,12 +467,18 @@ def _hosted_validation_should_omit_environment_entry(
     references. Secret-*valued* entries (URL userinfo, known tokens, PEMs, etc.)
     are also dropped: leaving them would redact them to ``${NAME}`` (including
     safe-looking names such as ``DATABASE_URL``) and recreate the same rejection
-    class.
+    class. Plain ``${NAME}`` refs on URL/DSN keys are dropped for the same reason
+    — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
     """
     if not omit_credential_env_keys:
         return False
-    return _hosted_validation_env_key_is_credential(name) or _hosted_validation_env_value_is_secret(
-        name, str(value)
+    text = str(value)
+    if _hosted_validation_env_key_is_credential(name) or _hosted_validation_env_value_is_secret(
+        name, text
+    ):
+        return True
+    return _hosted_validation_env_key_is_safe_named_credential(name) and bool(
+        _ENV_REFERENCE_PATTERN.fullmatch(text.strip())
     )
 
 
