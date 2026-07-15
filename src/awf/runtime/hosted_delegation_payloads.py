@@ -31,10 +31,11 @@ from awf.service.environment import (
 )
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Compose env-file assignment keys only (no value expansion) — must stay aligned
-# with awf.service.environment._COMPOSE_ENV_LINE_PATTERN.
+# Compose env-file assignment keys only (no value expansion). Key/export prefix
+# mirrors awf.service.environment._COMPOSE_ENV_LINE_PATTERN; delimiter also
+# accepts ``:`` per Compose env-file syntax (KEY=VALUE and KEY: VALUE).
 _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
-    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$"
+    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(?P<value>.*)$"
 )
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
