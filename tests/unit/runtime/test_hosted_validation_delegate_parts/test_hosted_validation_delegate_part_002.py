@@ -1039,12 +1039,16 @@ services:
 
 @pytest.mark.unit
 def test_rendered_stack_unreadable_env_file_does_not_inject_trust(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Unreadable env_file must not abort sanitization or invent trust mode."""
+    """Unreadable env_file must not abort sanitization or invent trust mode.
+
+    Force a reader failure instead of chmod(0o000): root bypasses mode bits, so
+    a permission-only fixture can still parse POSTGRES_PASSWORD and inject trust.
+    """
     env_file = tmp_path / "postgres.env"
     env_file.write_text("POSTGRES_PASSWORD=secret\n", encoding="utf-8")
-    env_file.chmod(0o000)
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         """
@@ -1056,14 +1060,20 @@ services:
         encoding="utf-8",
     )
 
-    try:
-        payload = _hosted_validation_rendered_stack_payload(
-            compose_project="awf_ws_hosted",
-            compose_file=compose_file,
-            omit_credential_env_keys=True,
-        )
-    finally:
-        env_file.chmod(0o600)
+    original_read_text = Path.read_text
+
+    def _raise_for_env_file(self: Path, *args: object, **kwargs: object) -> str:
+        if self == env_file:
+            raise PermissionError(13, "Permission denied", str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_env_file)
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
 
     assert payload is not None
     assert "environment" not in payload["services"]["postgres"]
