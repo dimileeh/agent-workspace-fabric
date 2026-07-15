@@ -433,6 +433,63 @@ volumes:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_disambiguates_redacted_top_level_volume_keys(
+    tmp_path: Path,
+) -> None:
+    """Multiple secret-shaped top-level volume keys must not collide."""
+    first_token_name = "ghp_volumeSecretToken123456"
+    first_translated_name = "ghp-volumesecrettoken123456"
+    second_token_name = "gho_volumeSecretToken123456"
+    second_translated_name = "gho-volumesecrettoken123456"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - {first_token_name}:/cache-first
+      - type: volume
+        source: {second_token_name}
+        target: /cache-second
+volumes:
+  {first_token_name}: {{}}
+  {second_token_name}: {{}}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    redacted_volume_names = set(payload["volumes"])
+    assert len(redacted_volume_names) == 2
+    assert all(
+        name == "redacted" or re.fullmatch(r"redacted-[0-9]+", name)
+        for name in redacted_volume_names
+    )
+    for name in redacted_volume_names:
+        _assert_dns1123_label(name)
+    backend_volumes = payload["services"]["backend"]["volumes"]
+    assert {
+        backend_volumes[0].partition(":")[0],
+        backend_volumes[1]["source"],
+    } == redacted_volume_names
+    body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
+    for secret in (
+        first_token_name,
+        first_translated_name,
+        second_token_name,
+        second_translated_name,
+    ):
+        assert secret not in body
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("token_name", "translated_token_name"),
     [

@@ -65,6 +65,9 @@ _HOSTED_VOLUME_HYPHEN_RUN_PATTERN = re.compile(r"-+")
 _HOSTED_VOLUME_HASH_LENGTHS = (10, 12, 16, 20, 24, 32)
 _HOSTED_KUBERNETES_LABEL_MAX_LENGTH = 63
 _HOSTED_REDACTED_VOLUME_NAME = "redacted"
+_HOSTED_REDACTED_VOLUME_NAME_PATTERN = re.compile(
+    rf"^{_HOSTED_REDACTED_VOLUME_NAME}(?:-(?:[2-9]|[1-9][0-9]+))?$"
+)
 _log = get_logger(__name__)
 
 
@@ -349,7 +352,59 @@ def _hosted_validation_compose_volume_name_translations(
         translations[name] = translated_name
         used_names[translated_name] = name
 
-    return translations
+    return _hosted_validation_redacted_top_level_volume_translations(
+        compose,
+        translations=translations,
+    )
+
+
+def _hosted_validation_redacted_top_level_volume_translations(
+    compose: Mapping[object, object],
+    *,
+    translations: Mapping[str, str],
+) -> dict[str, str]:
+    volumes = compose.get("volumes")
+    if not isinstance(volumes, Mapping):
+        return dict(translations)
+
+    top_level_names = [str(name) for name in volumes]
+    redacted_names = {
+        name
+        for name in top_level_names
+        if _hosted_validation_compose_volume_name_needs_redaction(
+            name,
+            translated_name=translations.get(name, name),
+        )
+    }
+    used_names = {
+        translations.get(name, name) for name in top_level_names if name not in redacted_names
+    }
+    if (
+        not redacted_names
+        or len(redacted_names) == 1
+        and _HOSTED_REDACTED_VOLUME_NAME not in used_names
+    ):
+        return dict(translations)
+
+    payload = dict(translations)
+    for name in sorted(redacted_names):
+        placeholder = _hosted_validation_next_redacted_volume_name(used_names)
+        payload[name] = placeholder
+        used_names.add(placeholder)
+    return payload
+
+
+def _hosted_validation_next_redacted_volume_name(used_names: set[str]) -> str:
+    index = 1
+    while True:
+        candidate = (
+            _HOSTED_REDACTED_VOLUME_NAME
+            if index == 1
+            else f"{_HOSTED_REDACTED_VOLUME_NAME}-{index}"
+        )
+        if candidate not in used_names:
+            return candidate
+        index += 1
 
 
 def _hosted_validation_compose_volume_names(
@@ -479,14 +534,23 @@ def _hosted_validation_sanitize_compose_volume_name(
     *,
     volume_translations: Mapping[str, str],
 ) -> str:
-    sanitized_original = redact_secrets(name)
-    if sanitized_original != name:
-        return _HOSTED_REDACTED_VOLUME_NAME
     translated_name = volume_translations.get(name, name)
-    sanitized_translated = redact_secrets(translated_name)
-    if sanitized_translated != translated_name:
+    if _hosted_validation_compose_volume_name_needs_redaction(
+        name,
+        translated_name=translated_name,
+    ):
+        if _HOSTED_REDACTED_VOLUME_NAME_PATTERN.fullmatch(translated_name):
+            return translated_name
         return _HOSTED_REDACTED_VOLUME_NAME
-    return sanitized_translated
+    return translated_name
+
+
+def _hosted_validation_compose_volume_name_needs_redaction(
+    name: str,
+    *,
+    translated_name: str,
+) -> bool:
+    return redact_secrets(name) != name or redact_secrets(translated_name) != translated_name
 
 
 def _hosted_validation_sanitize_compose_service_volumes(
