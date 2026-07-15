@@ -116,7 +116,10 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     if pr_identity:
         payload["pr_identity"] = pr_identity
     if request.profile is not None:
-        payload["profile"] = _hosted_agent_start_profile_payload(request.profile)
+        payload["profile"] = _hosted_agent_start_profile_payload(
+            request.profile,
+            compose_dir=(request.compose_file.parent if request.compose_file is not None else None),
+        )
     if request.compose_project is not None and request.compose_file is not None:
         _hosted_validation_attach_rendered_stack(
             payload,
@@ -127,20 +130,19 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     return payload
 
 
-def _hosted_agent_start_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
-    """Sanitize profile for agent-run Jobs.
-
-    Cloud rejects lifecycle phases and ``database.generated_setup`` on agent
-    Jobs because Core already delegates those via validation Jobs. Clear them
-    before shared sanitize/secret checks; keep ``phases.validate`` and policies.
-    """
+def _hosted_agent_start_profile_payload(
+    profile: WorkspaceProfile,
+    *,
+    compose_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Sanitize profile for agent-run Jobs (clear lifecycle phases / generated_setup)."""
     agent_profile = profile.model_copy(deep=True)
     agent_profile.phases.setup = []
     agent_profile.phases.pre_agent = []
     agent_profile.phases.post_agent = []
     agent_profile.phases.cleanup = []
     agent_profile.database.generated_setup = []
-    return _hosted_validation_profile_payload(agent_profile)
+    return _hosted_validation_profile_payload(agent_profile, compose_dir=compose_dir)
 
 
 def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
@@ -180,11 +182,7 @@ def _hosted_validation_rendered_stack_payload(
     compose_file: Path,
     omit_credential_env_keys: bool = False,
 ) -> dict[str, Any] | None:
-    """Sanitized rendered compose stack metadata for hosted payloads.
-
-    Omit mode drops credential-named/secret-valued env and plain ``${NAME}``
-    URL/DSN refs so Cloud request DTOs accept the payload.
-    """
+    """Sanitized rendered compose stack; omit mode drops credential env for Cloud DTOs."""
     try:
         if not compose_file.is_file():
             return None
@@ -263,12 +261,7 @@ def _hosted_validation_maybe_translate_docker_mode_none_to_compose(
     *,
     rendered_stack: Mapping[str, Any],
 ) -> None:
-    """Advertise hosted compose mode when Core ``none`` still carries sidecars.
-
-    Cloud ignores rendered sidecars when ``profile.docker.mode`` is ``none``. Core
-    allows ``none`` plus profile services; translating only that hosted JSON to
-    ``compose`` keeps DinD, empty stacks, and service-free profiles unchanged.
-    """
+    """Hosted JSON: Core ``docker.mode=none`` + sidecars → advertise ``compose``."""
     profile = payload.get("profile")
     if not isinstance(profile, dict):
         return
@@ -1158,6 +1151,7 @@ def _hosted_validation_profile_payload(
     profile: WorkspaceProfile,
     *,
     omit_runtime_environment: frozenset[str] = frozenset(),
+    compose_dir: Path | None = None,
 ) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
     # Cloud rejects non-empty profile.secrets (no Core-local secret resolution).
@@ -1175,7 +1169,10 @@ def _hosted_validation_profile_payload(
                 continue
             inject_postgres_trust = _hosted_validation_environment_declares_postgres_password(
                 service.get("environment")
-            ) and _hosted_validation_compose_image_is_postgres_like(service.get("image"))
+            ) and _hosted_validation_compose_image_is_postgres_like(
+                service.get("image"),
+                compose_dir=compose_dir,
+            )
             _hosted_validation_sanitize_environment_container(
                 service,
                 inject_postgres_trust=inject_postgres_trust,
@@ -1363,16 +1360,7 @@ def _hosted_validation_sanitize_environment_container(
     *,
     inject_postgres_trust: bool = False,
 ) -> None:
-    """Sanitize hosted profile runtime/service environment for Cloud DTOs.
-
-    Credential-named keys are omitted (never ``${NAME}`` stubs). Postgres URLs keep
-    username/host/port/path with the password stripped. Safe literals are preserved.
-    After rewrite, omit when query/fragment still carry credential fields, when the
-    rewritten URL still has credential-source interpolations / secret operator arms
-    (path or benign-named query), or when a known secret token remains in any
-    component. Postgres-like services that declared ``POSTGRES_PASSWORD`` or
-    ``POSTGRES_PASSWORD_FILE`` also receive ``POSTGRES_HOST_AUTH_METHOD=trust``.
-    """
+    """Sanitize profile runtime/service env for Cloud; inject Postgres trust when asked."""
     if not isinstance(container, dict):
         return
     environment = container.get("environment")
@@ -1403,7 +1391,7 @@ def _hosted_validation_sanitize_environment_container(
 
 
 def _hosted_validation_should_omit_profile_environment_entry(name: str, text: str) -> bool:
-    """Omit profile env entries with credential-source refs or secret operator arms."""
+    """Omit profile env with credential-source refs or secret operator arms."""
     if any(
         _hosted_validation_env_key_is_credential(source_name)
         or _hosted_validation_env_key_is_safe_named_credential(source_name)

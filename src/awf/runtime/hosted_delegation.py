@@ -402,7 +402,10 @@ class HostedValidationDelegate:
         """Delegate the post-setup validate-command toolchain probe to the host."""
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
-            "profile": _hosted_validation_profile_payload(profile),
+            "profile": _hosted_validation_profile_payload(
+                profile,
+                compose_dir=compose_file.parent,
+            ),
             "phase_names": [],
             "run_healthchecks": False,
             "include_coverage": False,
@@ -450,7 +453,10 @@ class HostedValidationDelegate:
         del worktree_path
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
-            "profile": _hosted_validation_profile_payload(profile),
+            "profile": _hosted_validation_profile_payload(
+                profile,
+                compose_dir=compose_file.parent,
+            ),
             "phase_names": list(phase_names),
             "run_healthchecks": run_healthchecks,
             "worktree_path": None,
@@ -504,6 +510,7 @@ class HostedValidationDelegate:
             "profile": _hosted_validation_profile_payload(
                 profile,
                 omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
+                compose_dir=compose_file.parent,
             ),
             "phase_names": [phase],
             "run_healthchecks": False,

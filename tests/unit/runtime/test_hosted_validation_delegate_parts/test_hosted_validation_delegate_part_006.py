@@ -593,3 +593,42 @@ services:
     body = json.dumps(payload, sort_keys=True)
     assert "POSTGRES_PASSWORD" not in body
     assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
+def test_hosted_profile_direct_image_interpolation_uses_compose_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile postgres trust must resolve ``${POSTGRES_IMAGE}`` via compose-dir ``.env``.
+
+    Without compose_dir, the same request's profile.services omit POSTGRES_PASSWORD
+    but skip trust while rendered_stack injects it — inconsistent sidecar env.
+    """
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+    (tmp_path / ".env").write_text("POSTGRES_IMAGE=pgvector/pgvector:pg18\n", encoding="utf-8")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-profile-compose-dotenv-image",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "${POSTGRES_IMAGE}",
+                    "environment": {
+                        "POSTGRES_PASSWORD": "literal-postgres-secret",
+                        "POSTGRES_USER": "awf",
+                    },
+                }
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile, compose_dir=tmp_path)
+
+    assert payload["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
