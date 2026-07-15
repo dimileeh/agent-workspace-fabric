@@ -11,7 +11,10 @@ import pytest
 
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import HostedValidationDelegate
-from awf.runtime.hosted_delegation_payloads import _hosted_validation_profile_payload
+from awf.runtime.hosted_delegation_payloads import (
+    _hosted_validation_profile_payload,
+    _hosted_validation_rendered_stack_payload,
+)
 from tests.unit.runtime.test_hosted_validation_delegate import (
     _config,
     _profile_with_runtime_secret,
@@ -492,3 +495,50 @@ def test_hosted_validation_profile_payload_clears_secret_declarations() -> None:
         "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
         "POSTGRES_USER": "awf",
     }
+
+
+@pytest.mark.unit
+def test_rendered_stack_required_image_interpolation_does_not_abort(
+    tmp_path: Path,
+) -> None:
+    """Required ``:?`` image forms must not abort omit-credential sanitization."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: "${APP_IMAGE:?must set APP_IMAGE}"
+    environment:
+      PUBLIC_URL: http://app:8000
+      API_TOKEN: literal-api-token
+  postgres:
+    image: "${POSTGRES_IMAGE:?must set POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["app"]["image"] == "${APP_IMAGE:?must set APP_IMAGE}"
+    assert payload["services"]["app"]["environment"] == {
+        "PUBLIC_URL": "http://app:8000",
+    }
+    # Unexpanded required image is not treated as postgres-like, so trust is
+    # not injected; credential keys are still omitted.
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "API_TOKEN" not in body
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-api-token" not in body
+    assert "literal-postgres-secret" not in body
+    assert "POSTGRES_HOST_AUTH_METHOD" not in body

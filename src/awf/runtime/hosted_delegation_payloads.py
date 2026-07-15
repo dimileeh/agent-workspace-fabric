@@ -24,7 +24,7 @@ from awf.common.token_patterns import (
     compile_provider_ref_re,
 )
 from awf.profiles.models import WorkspaceProfile
-from awf.service.environment import compose_expand_value
+from awf.service.environment import ComposeEnvInterpolationError, compose_expand_value
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -310,8 +310,8 @@ def _hosted_validation_sanitize_compose_service(
     source_environment = service.get("environment")
     inject_postgres_trust = (
         omit_credential_env_keys
-        and _hosted_validation_compose_image_is_postgres_like(image)
         and _hosted_validation_environment_declares_postgres_password(source_environment)
+        and _hosted_validation_compose_image_is_postgres_like(image)
     )
     for key, value in service.items():
         field = str(key)
@@ -355,7 +355,13 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
     candidates = [stripped]
     if "$" not in stripped:
         return (stripped,)
-    expanded = compose_expand_value(stripped, environ={}).strip()
+    try:
+        # Empty environ resolves ``:-`` / ``-`` defaults for postgres detection.
+        # Required ``:?`` / ``?`` forms raise without the worker env; keep the raw
+        # image string rather than aborting hosted stack sanitization.
+        expanded = compose_expand_value(stripped, environ={}).strip()
+    except ComposeEnvInterpolationError:
+        return (stripped,)
     if expanded and expanded != stripped:
         candidates.append(expanded)
     return tuple(candidates)
