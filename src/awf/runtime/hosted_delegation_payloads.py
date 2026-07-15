@@ -1017,7 +1017,12 @@ def _hosted_validation_sanitize_environment_container(
             if (
                 _hosted_validation_url_has_query_or_fragment_credentials(passwordless)
                 or _hosted_validation_should_omit_profile_environment_entry(name_str, passwordless)
-                or _hosted_validation_value_has_encoded_secret_or_provider_ref(passwordless)
+                # Username-only userinfo is intentional after password strip; do not
+                # treat ``user@host`` as residual secret material.
+                or _hosted_validation_value_has_encoded_secret_or_provider_ref(
+                    passwordless,
+                    include_url_userinfo=False,
+                )
             ):
                 continue
             sanitized[name_str] = passwordless
@@ -1119,22 +1124,32 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     ) or _hosted_validation_value_has_encoded_secret_or_provider_ref(stripped)
 
 
-def _hosted_validation_value_has_encoded_secret_or_provider_ref(value: str) -> bool:
+def _hosted_validation_value_has_encoded_secret_or_provider_ref(
+    value: str,
+    *,
+    include_url_userinfo: bool = True,
+) -> bool:
     """True when raw or URL-decoded variants look like secret material.
 
     Scans known tokens, provider refs, bearer headers, credentialed URLs, PEM
     headers, and multiline payloads so percent-encoded forms cannot bypass omit
     / redaction checks that already catch the decoded equivalents.
+
+    Pass ``include_url_userinfo=False`` after a passwordless Postgres rewrite so
+    intentional ``user@host`` DSNs are kept while tokens/refs/bearers/PEMs still omit.
     """
-    return any(
-        bool(_SECRET_VALUE_PATTERN.search(variant))
-        or bool(_PROVIDER_REF_PATTERN.search(variant))
-        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(variant))
-        or _hosted_validation_value_has_url_credentials(variant)
-        or "-----BEGIN " in variant
-        or "\n" in variant
-        for variant in compose_helpers._url_component_variants(value)
-    )
+    for variant in compose_helpers._url_component_variants(value):
+        if (
+            bool(_SECRET_VALUE_PATTERN.search(variant))
+            or bool(_PROVIDER_REF_PATTERN.search(variant))
+            or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(variant))
+            or "-----BEGIN " in variant
+            or "\n" in variant
+        ):
+            return True
+        if include_url_userinfo and _hosted_validation_value_has_url_credentials(variant):
+            return True
+    return False
 
 
 def _hosted_validation_value_has_url_credentials(value: str) -> bool:
