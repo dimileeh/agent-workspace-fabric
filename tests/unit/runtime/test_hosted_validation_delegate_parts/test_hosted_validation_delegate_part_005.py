@@ -664,6 +664,64 @@ def test_hosted_validation_sanitizers_ignore_malformed_optional_containers() -> 
 
 
 @pytest.mark.unit
+def test_hosted_profile_env_omits_compose_operator_arm_literal_secrets() -> None:
+    """Profile env sanitize must omit Compose default/alternate arms with secrets.
+
+    Mirrored from rendered-stack omit mode: safe target names such as
+    ``CONFIG=${CONFIG:-password=…}`` must not keep credential material in the
+    hosted profile block — inspect operator arms, not only credential source names.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-operator-arm-secrets",
+            "runtime": {
+                "environment": {
+                    "PUBLIC_URL": "${PUBLIC_URL:-postgresql://user:pw@postgres/db}",
+                    "NESTED_URL": (
+                        "${OUTER:-${INNER:-postgresql://agent:nested-secret@postgres/db}}"
+                    ),
+                    "CONFIG": "${CONFIG:-password=supersecretvalue123}",
+                    "TOKEN_DEFAULT": (
+                        "${TOKEN_DEFAULT:-sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123}"
+                    ),
+                    "KEEP_REF": "${PUBLIC_HOST:-localhost}",
+                },
+            },
+            "services": [
+                {
+                    "name": "worker",
+                    "image": "worker:latest",
+                    "environment": {
+                        "CACHE_URL": "${CACHE_URL:-postgresql://cache:cache-pw@postgres/cache}",
+                        "REDIS_URL": "redis://cache:6379/0",
+                    },
+                },
+            ],
+        }
+    )
+
+    payload = _hosted_validation_profile_payload(profile)
+
+    assert payload["runtime"]["environment"] == {
+        "KEEP_REF": "${PUBLIC_HOST:-localhost}",
+    }
+    assert payload["services"][0]["environment"] == {
+        "REDIS_URL": "redis://cache:6379/0",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "user:pw" not in body
+    assert "nested-secret" not in body
+    assert "supersecretvalue123" not in body
+    assert "sk-ant-api03" not in body
+    assert "cache-pw" not in body
+    assert "PUBLIC_URL" not in body
+    assert "NESTED_URL" not in body
+    assert "CONFIG" not in body
+    assert "TOKEN_DEFAULT" not in body
+    assert "CACHE_URL" not in body
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_preserves_passwordless_ssh_env_urls() -> None:
     profile = WorkspaceProfile.model_validate(
         {

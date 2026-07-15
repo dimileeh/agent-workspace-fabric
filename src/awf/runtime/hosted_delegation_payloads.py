@@ -1391,11 +1391,22 @@ def _hosted_validation_sanitize_environment_container(
 
 
 def _hosted_validation_should_omit_profile_environment_entry(name: str, text: str) -> bool:
-    """Return whether a profile env entry would recreate Cloud rejection classes."""
+    """Return whether a profile env entry would recreate Cloud rejection classes.
+
+    Mirrors rendered-stack omit mode for credential-*source* refs and Compose
+    operator arms with literal credentials
+    (``CONFIG=${CONFIG:-password=…}``, ``PUBLIC_URL=${PUBLIC_URL:-postgresql://user:pw@…}``)
+    even when the outer target name looks safe.
+    """
     if any(
         _hosted_validation_env_key_is_credential(source_name)
         or _hosted_validation_env_key_is_safe_named_credential(source_name)
         for source_name in _hosted_validation_env_reference_source_names(text)
+    ):
+        return True
+    if any(
+        _hosted_validation_operator_arm_literal_is_secret(arm)
+        for arm in _hosted_validation_compose_interpolation_operator_arms(text)
     ):
         return True
     source_name = _hosted_validation_env_reference_source_name(text)
