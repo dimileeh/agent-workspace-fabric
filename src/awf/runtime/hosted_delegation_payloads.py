@@ -423,12 +423,7 @@ def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
 
 
 def _hosted_validation_compose_image_is_whole_interpolation(image: str) -> bool:
-    """Return whether ``image`` is a single full-value ``${...}`` expression.
-
-    Partial embeddings such as ``myorg/app:${TAG:-postgres}`` or
-    ``${REGISTRY:-postgres}/app:1`` must not treat operator-arm literals as
-    standalone image refs for Postgres detection.
-    """
+    """True when ``image`` is one full-value ``${...}`` (not a partial embedding)."""
     stripped = image.strip()
     if not stripped.startswith("${"):
         return False
@@ -437,17 +432,11 @@ def _hosted_validation_compose_image_is_whole_interpolation(image: str) -> bool:
 
 
 def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
-    """Return raw and Compose-expanded image strings for postgres detection.
+    """Raw/expanded image strings for postgres detection before Compose interpolate.
 
-    Hosted sanitization reads compose YAML before interpolation. Expressions such
-    as ``${POSTGRES_IMAGE:-postgres:16}`` must still be recognized as Postgres so
-    password redaction can inject ``POSTGRES_HOST_AUTH_METHOD=trust``. Expand with
-    an empty environ so ``:-`` / ``-`` defaults are visible when the override is
-    unset. For whole-image interpolations only, also collect Compose operator-arm
-    literals (e.g. ``${IMG:-localhost:5000/postgres}``) so host:port registry
-    forms are parsed as clean image refs even when the raw expression would leave
-    a trailing ``}`` on the repository name segment. Partial arms (tag or registry
-    fragments) are ignored so an app image is not misclassified as Postgres.
+    Empty-environ expand surfaces ``:-``/``-`` defaults for trust injection. Whole
+    interpolations also collect arm literals (host:port registry forms); partial
+    arms are ignored so app images are not misclassified as Postgres.
     """
     stripped = image.strip()
     candidates = [stripped]
@@ -468,13 +457,7 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
 
 
 def _hosted_validation_compose_image_repository_name(image: str) -> str:
-    """Return the image repository name, preserving host:port registries.
-
-    A trailing ``:tag`` is stripped only when the suffix after the final colon
-    does not contain ``/``. Untagged registry ports such as
-    ``localhost:5000/postgres`` therefore keep the port and resolve to
-    repository ``postgres`` (not ``5000``).
-    """
+    """Repository leaf name; keep host:port (strip ``:tag`` only when no ``/`` in suffix)."""
     without_digest = image.split("@", 1)[0]
     colon = without_digest.rfind(":")
     if colon != -1 and "/" not in without_digest[colon + 1 :]:
@@ -1414,13 +1397,7 @@ def _hosted_validation_sanitize_environment_container(
 
 
 def _hosted_validation_should_omit_profile_environment_entry(name: str, text: str) -> bool:
-    """Return whether a profile env entry would recreate Cloud rejection classes.
-
-    Mirrors rendered-stack omit mode for credential-*source* refs and Compose
-    operator arms with literal credentials
-    (``CONFIG=${CONFIG:-password=…}``, ``PUBLIC_URL=${PUBLIC_URL:-postgresql://user:pw@…}``)
-    even when the outer target name looks safe.
-    """
+    """Omit profile env entries with credential-source refs or secret operator arms."""
     if any(
         _hosted_validation_env_key_is_credential(source_name)
         or _hosted_validation_env_key_is_safe_named_credential(source_name)
@@ -1437,11 +1414,9 @@ def _hosted_validation_should_omit_profile_environment_entry(name: str, text: st
 
 
 def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
-    """Return a Postgres URL with password removed, else ``None`` if not Postgres.
+    """Postgres URL with password removed; strip credential username-only userinfo.
 
-    Username-only URLs stay only when userinfo has no credential refs/secrets;
-    otherwise userinfo is stripped to host-only. Host-only URLs stay unchanged.
-    Non-Postgres values return ``None`` for ordinary omit/redact handling.
+    Host-only stays unchanged. Non-Postgres returns ``None`` for ordinary omit/redact.
     """
     stripped = value.strip()
     try:
