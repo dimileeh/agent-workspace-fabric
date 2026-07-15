@@ -415,6 +415,8 @@ def _hosted_validation_compose_image_is_postgres_like(
             or repository.startswith("postgres-")
             or repository == "pgvector"
             or repository.startswith("pgvector-")
+            or repository == "postgis"
+            or repository.startswith("postgis-")
         ):
             return True
     return False

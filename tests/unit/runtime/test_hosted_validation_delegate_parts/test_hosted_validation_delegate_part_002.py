@@ -596,9 +596,12 @@ services:
         "library/postgres:16",
         "pgvector/pgvector:pg18",
         "ghcr.io/org/pgvector-custom:pg16",
+        "postgis/postgis:16-3.4",
+        "ghcr.io/org/postgis-custom:16-3.4",
         "${POSTGRES_IMAGE:-postgres:16}",
         "${POSTGRES_IMAGE:-${FALLBACK_IMAGE:-ghcr.io/org/postgres-custom:16}}",
         "${POSTGRES_IMAGE:-pgvector/pgvector:pg18}",
+        "${POSTGRES_IMAGE:-postgis/postgis:16-3.4}",
     ],
 )
 def test_rendered_stack_omits_postgres_password_and_sets_trust(
