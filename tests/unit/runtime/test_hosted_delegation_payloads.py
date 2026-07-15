@@ -430,6 +430,58 @@ volumes:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_redacts_token_service_volume_sources_before_translation(
+    tmp_path: Path,
+) -> None:
+    """Token-shaped service volume sources must be redacted before normalization."""
+    short_token_name = "ghp_volumeSecretToken123456"
+    short_translated_name = "ghp-volumesecrettoken123456"
+    source_token_name = "AIzaVolumeSecretToken123456"
+    source_translated_name = "aizavolumesecrettoken123456"
+    src_token_name = "gho_volumeSecretToken123456"
+    src_translated_name = "gho-volumesecrettoken123456"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - {short_token_name}:/cache-short
+      - type: volume
+        source: {source_token_name}
+        target: /cache-source
+      - type: volume
+        src: {src_token_name}
+        target: /cache-src
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["volumes"] == [
+        "<redacted>:/cache-short",
+        {"type": "volume", "source": "<redacted>", "target": "/cache-source"},
+        {"type": "volume", "src": "<redacted>", "target": "/cache-src"},
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    for secret in (
+        short_token_name,
+        short_translated_name,
+        source_token_name,
+        source_translated_name,
+        src_token_name,
+        src_translated_name,
+    ):
+        assert secret not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_sanitizes_list_environment(tmp_path: Path) -> None:
     """List-form Compose environments preserve shape while removing secrets."""
     compose_file = tmp_path / "compose.yml"

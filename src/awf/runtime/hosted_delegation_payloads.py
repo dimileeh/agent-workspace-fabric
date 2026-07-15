@@ -520,9 +520,12 @@ def _hosted_validation_sanitize_compose_short_volume(
     source = _hosted_validation_compose_short_named_volume_source(volume)
     if source is None:
         return redact_secrets(volume)
-    translated_source = volume_translations.get(source, source)
+    sanitized_source = _hosted_validation_sanitize_compose_volume_name(
+        source,
+        volume_translations=volume_translations,
+    )
     _source, _separator, remainder = volume.partition(":")
-    return redact_secrets(f"{translated_source}:{remainder}")
+    return redact_secrets(f"{sanitized_source}:{remainder}")
 
 
 def _hosted_validation_sanitize_compose_volume_mapping(
@@ -535,8 +538,9 @@ def _hosted_validation_sanitize_compose_volume_mapping(
     for key, value in volume.items():
         field = str(key)
         if field in {"source", "src"} and source is not None and value == source:
-            payload[field] = _hosted_validation_sanitize_compose_value(
-                volume_translations.get(source, source)
+            payload[field] = _hosted_validation_sanitize_compose_volume_name(
+                source,
+                volume_translations=volume_translations,
             )
             continue
         payload[field] = _hosted_validation_sanitize_compose_value(value)
