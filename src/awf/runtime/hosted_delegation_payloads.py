@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
 from collections import Counter
 from collections.abc import Iterator, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -27,6 +29,7 @@ from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
 from awf.service.environment import (
     ComposeEnvInterpolationError,
+    compose_env_file_values,
     compose_expand_value,
 )
 
@@ -177,12 +180,10 @@ def _hosted_validation_rendered_stack_payload(
     compose_file: Path,
     omit_credential_env_keys: bool = False,
 ) -> dict[str, Any] | None:
-    """Return sanitized rendered compose stack metadata for hosted payloads.
+    """Sanitized rendered compose stack metadata for hosted payloads.
 
-    When ``omit_credential_env_keys`` is true (validation-run and agent-start
-    paths), credential-named env entries, secret-valued entries (including
-    safe-named URL/DSN credentials), and plain ``${NAME}`` refs on URL/DSN keys
-    are dropped so Cloud request DTOs accept the payload.
+    Omit mode drops credential-named/secret-valued env and plain ``${NAME}``
+    URL/DSN refs so Cloud request DTOs accept the payload.
     """
     try:
         if not compose_file.is_file():
@@ -384,7 +385,10 @@ def _hosted_validation_sanitize_compose_service(
                 compose_dir=compose_dir,
             )
         )
-        and _hosted_validation_compose_image_is_postgres_like(image)
+        and _hosted_validation_compose_image_is_postgres_like(
+            image,
+            compose_dir=compose_dir,
+        )
     )
     for key, value in service.items():
         field = str(key)
@@ -407,10 +411,17 @@ def _hosted_validation_sanitize_compose_service(
     return payload
 
 
-def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
+def _hosted_validation_compose_image_is_postgres_like(
+    image: object,
+    *,
+    compose_dir: Path | None = None,
+) -> bool:
     if not isinstance(image, str) or not image.strip():
         return False
-    for candidate in _hosted_validation_compose_image_candidates(image):
+    for candidate in _hosted_validation_compose_image_candidates(
+        image,
+        compose_dir=compose_dir,
+    ):
         repository = _hosted_validation_compose_image_repository_name(candidate)
         if (
             repository == "postgres"
@@ -431,12 +442,15 @@ def _hosted_validation_compose_image_is_whole_interpolation(image: str) -> bool:
     return end is not None and end == len(stripped) - 1
 
 
-def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
-    """Raw/expanded image strings for postgres detection before Compose interpolate.
+def _hosted_validation_compose_image_candidates(
+    image: str,
+    *,
+    compose_dir: Path | None = None,
+) -> tuple[str, ...]:
+    """Raw/expanded image strings for postgres detection.
 
-    Empty-environ expand surfaces ``:-``/``-`` defaults for trust injection. Whole
-    interpolations also collect arm literals (host:port registry forms); partial
-    arms are ignored so app images are not misclassified as Postgres.
+    Expand compose ``.env`` then ``os.environ`` (shell wins); unset still yields
+    ``:-``/``-`` defaults. Whole interpolations also collect literal operator arms.
     """
     stripped = image.strip()
     candidates = [stripped]
@@ -447,8 +461,15 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
                 candidates.append(arm_stripped)
     if "$" not in stripped:
         return tuple(candidates)
+    environ: dict[str, str] = {}
+    if compose_dir is not None:
+        env_path = compose_dir / ".env"
+        if env_path.is_file():
+            with suppress(OSError, UnicodeDecodeError, ComposeEnvInterpolationError):
+                environ.update(compose_env_file_values(env_path))
+    environ.update(os.environ)
     try:
-        expanded = compose_expand_value(stripped, environ={}).strip()
+        expanded = compose_expand_value(stripped, environ=environ).strip()
     except ComposeEnvInterpolationError:
         return tuple(candidates)
     if expanded and expanded != stripped and expanded not in candidates:
@@ -482,13 +503,10 @@ def _hosted_validation_env_file_declares_postgres_password(
     *,
     compose_dir: Path | None,
 ) -> bool:
-    """Return whether a Compose service env_file declares POSTGRES_PASSWORD.
+    """Whether a Compose service env_file declares POSTGRES_PASSWORD.
 
-    Scan assignment keys without expanding values. Full
-    ``compose_env_file_values`` parsing raises on required interpolations that
-    are unset in the Core process env (e.g. ``OTHER=${OTHER:?set OTHER}``);
-    skipping the whole file would miss a sibling ``POSTGRES_PASSWORD`` and leave
-    omit-mode payloads without ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    Scan assignment keys only: full ``compose_env_file_values`` raises on unset
+    required interpolations and would miss a sibling ``POSTGRES_PASSWORD``.
     """
     for env_file_path in compose_service_env_file_paths(env_file, compose_dir=compose_dir):
         try:
@@ -669,24 +687,11 @@ def _hosted_validation_should_omit_environment_entry(
     *,
     omit_credential_env_keys: bool,
 ) -> bool:
-    """Return whether validation omit mode should drop this Compose env entry.
+    """Whether omit mode should drop this Compose env entry.
 
-    Credential-*named* keys are dropped so Cloud does not see ``${TOKEN}``-style
-    references. Secret-*valued* entries (URL userinfo, known tokens, PEMs, etc.)
-    are also dropped: leaving them would redact them to ``${NAME}`` (including
-    safe-looking names such as ``DATABASE_URL``) and recreate the same rejection
-    class. Plain ``${NAME}`` refs on URL/DSN keys are dropped for the same reason
-    — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
-    Credential-*source* refs under otherwise-safe target names
-    (``PUBLIC_URL: ${POSTGRES_PASSWORD}``, ``Bearer ${API_TOKEN}``,
-    ``prefix-${POSTGRES_PASSWORD}``, ``Bearer ${DATABASE_URL}``,
-    ``prefix-${APP_DSN}``) are omitted so the credential name never
-    reaches Cloud even when embedded in surrounding text or the target key
-    looks benign. Safe-named connection sources (URL/DSN) are treated like
-    generic credential sources here — not only when they are the target key.
-    Compose operator arms with literal credentials
-    (``PUBLIC_URL=${PUBLIC_URL:-postgresql://user:pw@postgres/db}``) are omitted
-    even when the outer target name looks safe.
+    Drops credential-named keys, secret-valued entries, plain ``${NAME}`` URL/DSN
+    refs, credential-source refs under safe target names, and operator-arm
+    credential literals (see regressions in hosted validation omit-mode tests).
     """
     if not omit_credential_env_keys:
         return False

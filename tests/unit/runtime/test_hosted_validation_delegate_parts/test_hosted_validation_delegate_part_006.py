@@ -467,3 +467,80 @@ def test_hosted_profile_payload_skips_non_list_services(monkeypatch: pytest.Monk
 
     assert payload["name"] == "hosted-non-list-services"
     assert payload["services"] == {"broken": True}
+
+
+@pytest.mark.unit
+def test_rendered_stack_direct_image_interpolation_uses_host_environ(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain ``${POSTGRES_IMAGE}`` must resolve via host environ for trust injection.
+
+    Empty-environ expand yields ``""``, so omit mode would strip
+    ``POSTGRES_PASSWORD`` without ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    """
+    monkeypatch.setenv("POSTGRES_IMAGE", "postgres:16")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_direct_image_interpolation_uses_compose_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose-dir ``.env`` must resolve plain ``${POSTGRES_IMAGE}`` for trust."""
+    monkeypatch.delenv("POSTGRES_IMAGE", raising=False)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("POSTGRES_IMAGE=pgvector/pgvector:pg18\n", encoding="utf-8")
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
