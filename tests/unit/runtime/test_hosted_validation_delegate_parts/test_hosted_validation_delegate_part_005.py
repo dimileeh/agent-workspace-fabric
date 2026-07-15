@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest
+from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation import (
     HostedDelegationProtocolError,
@@ -16,6 +19,11 @@ from awf.runtime.hosted_delegation import (
     _hosted_validation_profile_payload,
     _hosted_validation_sanitize_environment_container,
     _hosted_validation_sanitize_secret_refs,
+)
+from awf.runtime.hosted_delegation_payloads import (
+    _agent_start_payload,
+    _hosted_validation_agent_auth_payload,
+    _hosted_validation_attach_rendered_stack,
 )
 from tests.unit.runtime.test_hosted_validation_delegate import _config
 
@@ -749,3 +757,86 @@ def test_hosted_validation_profile_payload_preserves_empty_services() -> None:
     )
 
     assert payload["services"] == []
+
+
+@pytest.mark.unit
+def test_agent_start_payload_file_auth_mount_targets_empty() -> None:
+    """Repair-agent hosted start payloads never forward file auth mounts."""
+    request = AgentRuntimeExecRequest(
+        workspace_id="ws_hosted",
+        agent_runtime=AgentRuntime.codex,
+        cli_args=("codex", "exec", "-"),
+        prompt_stdin=b"repair prompt",
+        log_source="monitor.repair",
+        model="gpt-5",
+        effort="high",
+        env_passthrough_names=("CODEX_API_KEY", "NPM_TOKEN"),
+        env_passthrough_aliases=(("GH_TOKEN", "AWF_GITHUB_TOKEN"),),
+        file_auth_mount_targets=(
+            "/home/agent/.codex",
+            "/home/agent/.ssh",
+        ),
+    )
+
+    payload = _agent_start_payload(request)
+
+    assert payload["file_auth_mount_targets"] == []
+    assert payload["env_passthrough_names"] == ["CODEX_API_KEY", "NPM_TOKEN"]
+    assert payload["env_passthrough_aliases"] == [
+        {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "/home/agent/.codex" not in body
+    assert "/home/agent/.ssh" not in body
+    assert "/home/agent" not in body
+
+
+@pytest.mark.unit
+def test_hosted_validation_agent_auth_file_targets_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Validation agent_auth keeps env auth and clears file mount targets."""
+    monkeypatch.setenv("NPM_TOKEN", "npm-secret-value")
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "github-secret-value")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent-runtime:latest
+    environment:
+      NPM_TOKEN: ${NPM_TOKEN}
+      GH_TOKEN: ${AWF_GITHUB_TOKEN}
+    volumes:
+      - /home/user/.ssh:/home/agent/.ssh:ro
+      - /home/user/.codex:/home/agent/.codex:ro
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    agent_auth = _hosted_validation_agent_auth_payload(compose_file=compose_file)
+    assert agent_auth is not None
+    assert agent_auth["file_auth_mount_targets"] == []
+    assert agent_auth["env_passthrough_names"] == ["NPM_TOKEN"]
+    assert agent_auth["env_passthrough_aliases"] == [
+        {"target": "GH_TOKEN", "source": "AWF_GITHUB_TOKEN"},
+    ]
+
+    envelope: dict[str, object] = {}
+    _hosted_validation_attach_rendered_stack(
+        envelope,
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        include_agent_auth_context=True,
+    )
+    attached = envelope["agent_auth"]
+    assert isinstance(attached, dict)
+    assert attached["file_auth_mount_targets"] == []
+    body = json.dumps(envelope, sort_keys=True)
+    assert "npm-secret-value" not in body
+    assert "github-secret-value" not in body
+    assert "/home/user/.ssh" not in body
+    assert "/home/user/.codex" not in body
+    assert "/home/agent/.ssh" not in body
+    assert "/home/agent/.codex" not in body
