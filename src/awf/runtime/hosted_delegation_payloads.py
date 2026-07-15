@@ -49,7 +49,7 @@ _SECRET_ENV_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN = re.compile(
-    r"(?:^|[_-])(?:DATABASE[_-]?(?:URL|URI)|POSTGRES[_-]?(?:URL|URI))"
+    r"(?:^|[_-])(?:DATABASE[_-]?(?:URL|URI)|POSTGRES[_-]?(?:URL|URI)|DB[_-]?(?:URL|URI))"
     r"(?:[_-]|$)|(?:^|[_-])DSN(?:[_-]|$)",
     re.IGNORECASE,
 )

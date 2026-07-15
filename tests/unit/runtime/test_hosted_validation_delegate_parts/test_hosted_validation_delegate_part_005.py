@@ -1083,7 +1083,9 @@ def test_hosted_profile_env_omits_credentials_passwordless_postgres_and_trust() 
                         "postgresql+asyncpg://awf:literal-db-secret@postgres:5432/awf"
                     ),
                     "APP_DSN": "${DATABASE_URL}",
+                    "DB_URL": "${DB_URL}",
                     "PUBLIC_HEADER": "Bearer ${POSTGRES_PASSWORD}",
+                    "DB_HEADER": "Bearer ${DB_URL}",
                 }
             },
             "services": [
@@ -1128,11 +1130,16 @@ def test_hosted_profile_env_omits_credentials_passwordless_postgres_and_trust() 
     assert "literal-service-password" not in body
     assert "literal-cache-token" not in body
     assert "${DATABASE_URL}" not in body
+    assert "${DB_URL}" not in body
     assert "${POSTGRES_PASSWORD}" not in body
     assert "POSTGRES_PASSWORD" not in body
     assert "NPM_TOKEN" not in body
     assert "EXTERNAL_API_KEY" not in body
     assert "CACHE_TOKEN" not in body
+    assert "DB_URL" not in body
+    assert "DB_HEADER" not in body
+    assert "PUBLIC_HEADER" not in body
+    assert "APP_DSN" not in body
 
 
 @pytest.mark.unit
