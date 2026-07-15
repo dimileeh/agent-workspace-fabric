@@ -756,3 +756,134 @@ services:
         "POSTGRES_DB": "awf",
     }
     assert "POSTGRES_HOST_AUTH_METHOD" not in environment
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "image_yaml",
+    [
+        'image: ""',
+        'image: "   "',
+        'image: "${MISSING_IMAGE}"',
+        'image: "${EMPTY_DEFAULT:-}"',
+        "image: null",
+        "",  # missing image field
+    ],
+)
+def test_rendered_stack_blank_or_unresolved_image_omits_password_without_trust(
+    tmp_path: Path,
+    image_yaml: str,
+) -> None:
+    """Blank, null, missing, or unresolved images are not postgres-like."""
+    compose_file = tmp_path / "compose.yml"
+    image_line = f"    {image_yaml}\n" if image_yaml else ""
+    compose_file.write_text(
+        f"""
+services:
+  db:
+{image_line}    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["db"]["environment"]
+    assert environment == {"POSTGRES_USER": "awf"}
+    assert "POSTGRES_HOST_AUTH_METHOD" not in environment
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "image",
+    [
+        "postgres",
+        "localhost:5000/postgres",
+        "myregistry.com:5000/postgres-custom",
+    ],
+)
+def test_rendered_stack_untagged_and_port_registry_postgres_gets_trust(
+    tmp_path: Path,
+    image: str,
+) -> None:
+    """Detect postgres via untagged and host:port/repo image forms."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  postgres:
+    image: "{image}"
+    environment:
+      POSTGRES_PASSWORD: literal-postgres-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_list_env_replaces_auth_method_and_omits_bare_credentials(
+    tmp_path: Path,
+) -> None:
+    """List env drops bare credential keys and replaces auth-method entries with trust."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_PASSWORD
+      - API_TOKEN
+      - POSTGRES_HOST_AUTH_METHOD=md5
+      - POSTGRES_HOST_AUTH_METHOD
+      - POSTGRES_USER=awf
+      - PUBLIC_URL=http://postgres:5432
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert isinstance(environment, list)
+    assert environment == [
+        "POSTGRES_USER=awf",
+        "PUBLIC_URL=http://postgres:5432",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "API_TOKEN" not in body
+    assert "md5" not in body
