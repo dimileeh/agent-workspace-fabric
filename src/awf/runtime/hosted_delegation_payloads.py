@@ -680,11 +680,16 @@ def _hosted_validation_should_omit_environment_entry(
     """Whether omit mode should drop this Compose env entry.
 
     Drops credential-named keys, secret-valued entries, plain ``${NAME}`` URL/DSN
-    refs, credential-source refs under safe target names, and operator-arm
+    refs, mapping pass-through URL/DSN slots (``NAME:`` / ``NAME: null`` →
+    ``None``), credential-source refs under safe target names, and operator-arm
     credential literals (see regressions in hosted validation omit-mode tests).
     """
     if not omit_credential_env_keys:
         return False
+    # Mapping pass-through slots deserialize as None; do not stringify to "None"
+    # before the safe-name check, or Cloud keeps a broken credential slot.
+    if value is None and _hosted_validation_env_key_is_safe_named_credential(name):
+        return True
     text = str(value)
     if _hosted_validation_env_key_is_credential(name) or _hosted_validation_env_value_is_secret(
         name, text
