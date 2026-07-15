@@ -867,13 +867,15 @@ services:
         "postgres",
         "localhost:5000/postgres",
         "myregistry.com:5000/postgres-custom",
+        "${POSTGRES_IMAGE:-localhost:5000/postgres}",
+        "${POSTGRES_IMAGE:-localhost:5000/postgres:16}",
     ],
 )
 def test_rendered_stack_untagged_and_port_registry_postgres_gets_trust(
     tmp_path: Path,
     image: str,
 ) -> None:
-    """Detect postgres via untagged and host:port/repo image forms."""
+    """Detect postgres via untagged, host:port/repo, and default-arm image forms."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         f"""
@@ -902,6 +904,63 @@ services:
     body = json.dumps(payload, sort_keys=True)
     assert "POSTGRES_PASSWORD" not in body
     assert "literal-postgres-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_default_arm_literal_secrets(
+    tmp_path: Path,
+) -> None:
+    """Omit mode must drop Compose default/alternate arms with literal secrets.
+
+    Safe target names such as ``PUBLIC_URL=${PUBLIC_URL:-postgresql://user:pw@…}``
+    or ``CONFIG=${CONFIG:-password=…}`` must not keep credential material in the
+    hosted rendered stack — inspect operator arms, not only credential source names.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-postgresql://user:pw@postgres/db}
+      NESTED_URL: ${OUTER:-${INNER:-postgresql://agent:nested-secret@postgres/db}}
+      CONFIG: ${CONFIG:-password=supersecretvalue123}
+      TOKEN_DEFAULT: ${TOKEN_DEFAULT:-sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123}
+      KEEP_REF: ${PUBLIC_HOST:-localhost}
+  worker:
+    image: worker:latest
+    environment:
+      - CACHE_URL=${CACHE_URL:-postgresql://cache:cache-pw@postgres/cache}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_REF": "${PUBLIC_HOST:-localhost}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "user:pw" not in body
+    assert "nested-secret" not in body
+    assert "supersecretvalue123" not in body
+    assert "sk-ant-api03" not in body
+    assert "cache-pw" not in body
+    assert "PUBLIC_URL" not in body
+    assert "NESTED_URL" not in body
+    assert "CONFIG" not in body
+    assert "TOKEN_DEFAULT" not in body
+    assert "CACHE_URL" not in body
 
 
 @pytest.mark.unit

@@ -387,30 +387,43 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
     as ``${POSTGRES_IMAGE:-postgres:16}`` must still be recognized as Postgres so
     password redaction can inject ``POSTGRES_HOST_AUTH_METHOD=trust``. Expand with
     an empty environ so ``:-`` / ``-`` defaults are visible when the override is
-    unset.
+    unset. Also collect Compose operator-arm literals (e.g.
+    ``${IMG:-localhost:5000/postgres}``) so host:port registry forms are parsed
+    as clean image refs even when the raw expression would leave a trailing ``}``
+    on the repository name segment.
     """
     stripped = image.strip()
     candidates = [stripped]
+    for arm in _hosted_validation_compose_interpolation_operator_arms(stripped):
+        arm_stripped = arm.strip()
+        if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
+            candidates.append(arm_stripped)
     if "$" not in stripped:
-        return (stripped,)
+        return tuple(candidates)
     try:
         # Empty environ resolves ``:-`` / ``-`` defaults for postgres detection.
         # Required ``:?`` / ``?`` forms raise without the worker env; keep the raw
         # image string rather than aborting hosted stack sanitization.
         expanded = compose_expand_value(stripped, environ={}).strip()
     except ComposeEnvInterpolationError:
-        return (stripped,)
-    if expanded and expanded != stripped:
+        return tuple(candidates)
+    if expanded and expanded != stripped and expanded not in candidates:
         candidates.append(expanded)
     return tuple(candidates)
 
 
 def _hosted_validation_compose_image_repository_name(image: str) -> str:
+    """Return the image repository name, preserving host:port registries.
+
+    A trailing ``:tag`` is stripped only when the suffix after the final colon
+    does not contain ``/``. Untagged registry ports such as
+    ``localhost:5000/postgres`` therefore keep the port and resolve to
+    repository ``postgres`` (not ``5000``).
+    """
     without_digest = image.split("@", 1)[0]
-    if ":" in without_digest:
-        name_part, maybe_tag = without_digest.rsplit(":", 1)
-        if "/" not in maybe_tag:
-            without_digest = name_part
+    colon = without_digest.rfind(":")
+    if colon != -1 and "/" not in without_digest[colon + 1 :]:
+        without_digest = without_digest[:colon]
     return without_digest.rsplit("/", 1)[-1].lower()
 
 
@@ -483,6 +496,36 @@ def _hosted_validation_braced_expression_end(value: str, open_brace_index: int) 
     return None
 
 
+def _hosted_validation_compose_interpolation_operator_arms(value: str) -> Iterator[str]:
+    """Yield Compose operator/default/alternate/error arm texts in ``value``.
+
+    Walks braced interpolations with nesting so ``${OUTER:-${INNER:-lit}}``
+    yields both the outer arm ``${INNER:-lit}`` and the nested arm ``lit``.
+    """
+    index = 0
+    while index < len(value):
+        dollar = value.find("$", index)
+        if dollar < 0:
+            return
+        if dollar + 1 < len(value) and value[dollar + 1] == "{":
+            end = _hosted_validation_braced_expression_end(value, dollar + 1)
+            if end is None:
+                index = dollar + 1
+                continue
+            name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(value, dollar + 2)
+            if name_match is not None and name_match.end() <= end:
+                remainder = value[name_match.end() : end]
+                for operator in _COMPOSE_INTERPOLATION_OPERATORS:
+                    if remainder.startswith(operator):
+                        arm = remainder[len(operator) :]
+                        yield arm
+                        yield from _hosted_validation_compose_interpolation_operator_arms(arm)
+                        break
+            index = end + 1
+            continue
+        index = dollar + 1
+
+
 def _hosted_validation_env_reference_source_name(value: str) -> str | None:
     """Return the env var name referenced by a Compose interpolation value.
 
@@ -547,6 +590,41 @@ def _hosted_validation_env_reference_source_names(value: str) -> Iterator[str]:
         index = dollar + 1
 
 
+def _hosted_validation_operator_arm_literal_is_secret(arm: str) -> bool:
+    """Return whether a Compose operator arm holds a secret-valued literal.
+
+    Pure env references are ignored here — credential-*source* scanning covers
+    those. Literal URL userinfo, known tokens, PEMs, bearer headers, and
+    secret-key assignments in default/alternate/error arms must still be omitted.
+    """
+    stripped = arm.strip()
+    if not stripped:
+        return False
+    if _ENV_REFERENCE_PATTERN.fullmatch(stripped) or _SHELL_ENV_REFERENCE_PATTERN.fullmatch(
+        stripped
+    ):
+        return False
+    if stripped.startswith("${"):
+        end = _hosted_validation_braced_expression_end(stripped, 1)
+        if end == len(stripped) - 1:
+            name_match = _COMPOSE_INTERPOLATION_NAME_PATTERN.match(stripped, 2)
+            if name_match is not None:
+                remainder = stripped[name_match.end() : end]
+                if not remainder or any(
+                    remainder.startswith(operator) for operator in _COMPOSE_INTERPOLATION_OPERATORS
+                ):
+                    return False
+    return (
+        bool(_SECRET_VALUE_PATTERN.search(stripped))
+        or bool(_PROVIDER_REF_PATTERN.search(stripped))
+        or bool(_HOSTED_COMMAND_BEARER_PATTERN.search(stripped))
+        or _hosted_validation_value_has_url_credentials(stripped)
+        or "-----BEGIN " in stripped
+        or "\n" in stripped
+        or _hosted_validation_command_has_secret_assignment(stripped)
+    )
+
+
 def _hosted_validation_should_omit_environment_entry(
     name: str,
     value: object,
@@ -568,6 +646,9 @@ def _hosted_validation_should_omit_environment_entry(
     reaches Cloud even when embedded in surrounding text or the target key
     looks benign. Safe-named connection sources (URL/DSN) are treated like
     generic credential sources here — not only when they are the target key.
+    Compose operator arms with literal credentials
+    (``PUBLIC_URL=${PUBLIC_URL:-postgresql://user:pw@postgres/db}``) are omitted
+    even when the outer target name looks safe.
     """
     if not omit_credential_env_keys:
         return False
@@ -580,6 +661,11 @@ def _hosted_validation_should_omit_environment_entry(
         _hosted_validation_env_key_is_credential(source_name)
         or _hosted_validation_env_key_is_safe_named_credential(source_name)
         for source_name in _hosted_validation_env_reference_source_names(text)
+    ):
+        return True
+    if any(
+        _hosted_validation_operator_arm_literal_is_secret(arm)
+        for arm in _hosted_validation_compose_interpolation_operator_arms(text)
     ):
         return True
     source_name = _hosted_validation_env_reference_source_name(text)
