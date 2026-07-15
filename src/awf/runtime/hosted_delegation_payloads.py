@@ -455,6 +455,18 @@ def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
     return bool(_SAFE_NAMED_CONNECTION_CREDENTIAL_ENV_NAME_PATTERN.search(name))
 
 
+def _hosted_validation_env_reference_source_name(value: str) -> str | None:
+    """Return the env var name referenced by a bare ``${NAME}`` / ``$NAME`` value."""
+    stripped = value.strip()
+    brace_match = _ENV_REFERENCE_PATTERN.fullmatch(stripped)
+    if brace_match is not None:
+        return stripped[2:-1]
+    shell_match = _SHELL_ENV_REFERENCE_PATTERN.fullmatch(stripped)
+    if shell_match is not None:
+        return stripped[1:]
+    return None
+
+
 def _hosted_validation_should_omit_environment_entry(
     name: str,
     value: object,
@@ -469,6 +481,9 @@ def _hosted_validation_should_omit_environment_entry(
     safe-looking names such as ``DATABASE_URL``) and recreate the same rejection
     class. Plain ``${NAME}`` refs on URL/DSN keys are dropped for the same reason
     — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
+    Credential-*source* refs under otherwise-safe target names
+    (``PUBLIC_URL: ${POSTGRES_PASSWORD}``) are omitted so the credential name
+    never reaches Cloud even when the target key looks benign.
     """
     if not omit_credential_env_keys:
         return False
@@ -477,9 +492,10 @@ def _hosted_validation_should_omit_environment_entry(
         name, text
     ):
         return True
-    return _hosted_validation_env_key_is_safe_named_credential(name) and bool(
-        _ENV_REFERENCE_PATTERN.fullmatch(text.strip())
-    )
+    source_name = _hosted_validation_env_reference_source_name(text)
+    if source_name is not None and _hosted_validation_env_key_is_credential(source_name):
+        return True
+    return _hosted_validation_env_key_is_safe_named_credential(name) and source_name is not None
 
 
 def _hosted_validation_sanitize_compose_environment(
