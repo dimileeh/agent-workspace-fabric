@@ -375,7 +375,12 @@ def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
         return False
     for candidate in _hosted_validation_compose_image_candidates(image):
         repository = _hosted_validation_compose_image_repository_name(candidate)
-        if repository == "postgres" or repository.startswith("postgres-"):
+        if (
+            repository == "postgres"
+            or repository.startswith("postgres-")
+            or repository == "pgvector"
+            or repository.startswith("pgvector-")
+        ):
             return True
     return False
 
