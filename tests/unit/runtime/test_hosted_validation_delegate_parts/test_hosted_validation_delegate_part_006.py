@@ -213,6 +213,46 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_raw_interpolated_prefixed_default_not_treated_as_postgres(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful expansion must ignore the raw template's postgres-like leaf.
+
+    ``docker.io/${IMAGE:-library/postgres:16}`` still parses with repository
+    leaf ``postgres`` before expansion. When ``IMAGE`` is set to a non-Postgres
+    image, omit mode must use only the expanded image and must not inject trust.
+    """
+    monkeypatch.setenv("IMAGE", "nginx:latest")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: "docker.io/${IMAGE:-library/postgres:16}"
+    environment:
+      POSTGRES_PASSWORD: literal-app-db-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["app"]["environment"]
+    assert environment == {"POSTGRES_USER": "awf"}
+    assert "POSTGRES_HOST_AUTH_METHOD" not in environment
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-app-db-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_skips_comments_and_blank_lines(
     tmp_path: Path,
 ) -> None:

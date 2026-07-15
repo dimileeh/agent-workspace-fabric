@@ -439,9 +439,11 @@ def _hosted_validation_compose_image_candidates(
     """Raw/expanded image strings for postgres detection.
 
     Expand compose ``.env`` then ``os.environ`` (shell wins); unset still yields
-    ``:-``/``-`` defaults. Literal whole-interpolation operator arms are only
-    considered when expansion cannot resolve the image — never inactive arms
-    that expansion already deselected.
+    ``:-``/``-`` defaults. When expansion succeeds, only the concrete expanded
+    image is considered — the raw template can still parse as postgres-like via
+    an inactive ``:-library/postgres`` (or similar) default path segment. Literal
+    whole-interpolation operator arms are only considered when expansion cannot
+    resolve the image — never inactive arms that expansion already deselected.
     """
     stripped = image.strip()
     candidates = [stripped]
@@ -463,8 +465,10 @@ def _hosted_validation_compose_image_candidates(
                 if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
                     candidates.append(arm_stripped)
         return tuple(candidates)
-    if expanded and expanded != stripped and expanded not in candidates:
-        candidates.append(expanded)
+    if expanded:
+        # Successful expansion: never keep the raw interpolated template, which
+        # can still look postgres-like via inactive default path segments.
+        return (expanded,)
     return tuple(candidates)
 
 
