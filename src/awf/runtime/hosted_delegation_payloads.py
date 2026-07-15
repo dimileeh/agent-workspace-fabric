@@ -39,6 +39,13 @@ _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN = re.compile(
 )
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _ENV_EMPTY_DEFAULT_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-|-)\}$")
+# Full-value Compose interpolations: bare ``${NAME}`` / ``$NAME`` and operator
+# forms ``${NAME:-...}`` / ``${NAME-...}`` / ``${NAME:?...}`` / ``${NAME?...}`` /
+# ``${NAME:+...}`` / ``${NAME+...}`` (Compose interpolation syntax).
+_ENV_REFERENCE_SOURCE_PATTERN = re.compile(
+    r"^\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?::?[-+?].*)?\}$|"
+    r"^\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)$"
+)
 _SHELL_ENV_REFERENCE_PATTERN = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_ENV_NAME_PATTERN = re.compile(
     rf"^(?:{TOKEN_ASSIGNMENT_KEY_PATTERN})$|"
@@ -457,15 +464,17 @@ def _hosted_validation_env_key_is_safe_named_credential(name: str) -> bool:
 
 
 def _hosted_validation_env_reference_source_name(value: str) -> str | None:
-    """Return the env var name referenced by a bare ``${NAME}`` / ``$NAME`` value."""
-    stripped = value.strip()
-    brace_match = _ENV_REFERENCE_PATTERN.fullmatch(stripped)
-    if brace_match is not None:
-        return stripped[2:-1]
-    shell_match = _SHELL_ENV_REFERENCE_PATTERN.fullmatch(stripped)
-    if shell_match is not None:
-        return stripped[1:]
-    return None
+    """Return the env var name referenced by a Compose interpolation value.
+
+    Recognizes bare ``${NAME}`` / ``$NAME`` and Compose operator forms
+    (``${NAME:-default}``, ``${NAME:?error}``, ``${NAME:+alt}``, and the
+    non-colon variants). Returns ``None`` when the value is not a single
+    full-value interpolation expression.
+    """
+    match = _ENV_REFERENCE_SOURCE_PATTERN.fullmatch(value.strip())
+    if match is None:
+        return None
+    return match.group("braced") or match.group("plain")
 
 
 def _hosted_validation_should_omit_environment_entry(
@@ -483,8 +492,9 @@ def _hosted_validation_should_omit_environment_entry(
     class. Plain ``${NAME}`` refs on URL/DSN keys are dropped for the same reason
     — profiles often declare ``DATABASE_URL: ${DATABASE_URL}`` directly.
     Credential-*source* refs under otherwise-safe target names
-    (``PUBLIC_URL: ${POSTGRES_PASSWORD}``) are omitted so the credential name
-    never reaches Cloud even when the target key looks benign.
+    (``PUBLIC_URL: ${POSTGRES_PASSWORD}`` / ``${POSTGRES_PASSWORD:-}``) are
+    omitted so the credential name never reaches Cloud even when the target
+    key looks benign.
     """
     if not omit_credential_env_keys:
         return False
