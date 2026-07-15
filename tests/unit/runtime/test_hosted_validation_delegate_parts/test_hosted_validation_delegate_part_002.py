@@ -887,3 +887,109 @@ services:
     assert "POSTGRES_PASSWORD" not in body
     assert "API_TOKEN" not in body
     assert "md5" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_env_file_postgres_password_injects_trust(
+    tmp_path: Path,
+) -> None:
+    """Postgres password declared only via env_file still gets trust in omit mode."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=literal-env-file-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-env-file-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_env_file_list_mapping_postgres_password_injects_trust(
+    tmp_path: Path,
+) -> None:
+    """Mapping-shaped env_file entries declaring POSTGRES_PASSWORD get trust."""
+    env_file = tmp_path / "db.env"
+    env_file.write_text("POSTGRES_PASSWORD=mapping-env-file-secret\n", encoding="utf-8")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - path: db.env
+        required: true
+    environment:
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["postgres"]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "mapping-env-file-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_unreadable_env_file_does_not_inject_trust(
+    tmp_path: Path,
+) -> None:
+    """Unreadable env_file must not abort sanitization or invent trust mode."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text("POSTGRES_PASSWORD=secret\n", encoding="utf-8")
+    env_file.chmod(0o000)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file: postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    try:
+        payload = _hosted_validation_rendered_stack_payload(
+            compose_project="awf_ws_hosted",
+            compose_file=compose_file,
+            omit_credential_env_keys=True,
+        )
+    finally:
+        env_file.chmod(0o600)
+
+    assert payload is not None
+    assert "environment" not in payload["services"]["postgres"]

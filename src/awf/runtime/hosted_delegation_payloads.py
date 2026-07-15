@@ -23,8 +23,13 @@ from awf.common.token_patterns import (
     compile_known_token_re,
     compile_provider_ref_re,
 )
+from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
-from awf.service.environment import ComposeEnvInterpolationError, compose_expand_value
+from awf.service.environment import (
+    ComposeEnvInterpolationError,
+    compose_env_file_values,
+    compose_expand_value,
+)
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -185,6 +190,7 @@ def _hosted_validation_rendered_stack_payload(
             parsed.get("services"),
             volume_translations=volume_translations,
             omit_credential_env_keys=omit_credential_env_keys,
+            compose_dir=compose_file.parent,
         ),
     }
     volumes = parsed.get("volumes")
@@ -283,6 +289,7 @@ def _hosted_validation_rendered_stack_services(
     *,
     volume_translations: Mapping[str, str],
     omit_credential_env_keys: bool = False,
+    compose_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
@@ -296,6 +303,7 @@ def _hosted_validation_rendered_stack_services(
             service,
             volume_translations=volume_translations,
             omit_credential_env_keys=omit_credential_env_keys,
+            compose_dir=compose_dir,
         )
     return payload
 
@@ -305,13 +313,20 @@ def _hosted_validation_sanitize_compose_service(
     *,
     volume_translations: Mapping[str, str],
     omit_credential_env_keys: bool = False,
+    compose_dir: Path | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     image = service.get("image")
     source_environment = service.get("environment")
     inject_postgres_trust = (
         omit_credential_env_keys
-        and _hosted_validation_environment_declares_postgres_password(source_environment)
+        and (
+            _hosted_validation_environment_declares_postgres_password(source_environment)
+            or _hosted_validation_env_file_declares_postgres_password(
+                service.get("env_file"),
+                compose_dir=compose_dir,
+            )
+        )
         and _hosted_validation_compose_image_is_postgres_like(image)
     )
     for key, value in service.items():
@@ -330,6 +345,8 @@ def _hosted_validation_sanitize_compose_service(
             )
             continue
         payload[field] = _hosted_validation_sanitize_compose_value(value)
+    if inject_postgres_trust and "environment" not in payload:
+        payload["environment"] = {"POSTGRES_HOST_AUTH_METHOD": "trust"}
     return payload
 
 
@@ -386,6 +403,22 @@ def _hosted_validation_environment_declares_postgres_password(environment: objec
                 continue
             if item == "POSTGRES_PASSWORD" or item.startswith("POSTGRES_PASSWORD="):
                 return True
+    return False
+
+
+def _hosted_validation_env_file_declares_postgres_password(
+    env_file: object,
+    *,
+    compose_dir: Path | None,
+) -> bool:
+    """Return whether a Compose service env_file declares POSTGRES_PASSWORD."""
+    for env_file_path in compose_service_env_file_paths(env_file, compose_dir=compose_dir):
+        try:
+            values = compose_env_file_values(env_file_path)
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if "POSTGRES_PASSWORD" in values:
+            return True
     return False
 
 
