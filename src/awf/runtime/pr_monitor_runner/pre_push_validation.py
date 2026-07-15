@@ -1021,6 +1021,7 @@ async def _run_pre_push_validation(
                 "compose_file": compose_file,
                 "profile": profile,
                 "phase": "coverage",
+                "worktree_path": worktree_path,
             }
             if hosted_pr_identity is not None:
                 coverage_kwargs["pr_identity"] = hosted_pr_identity

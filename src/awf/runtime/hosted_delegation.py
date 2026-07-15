@@ -504,16 +504,20 @@ class HostedValidationDelegate:
         profile: WorkspaceProfile,
         phase: str = "coverage",
         parallel_worker_cpu_limit: int | None = None,
+        worktree_path: Path | None = None,
         pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidationCoverageResult | None:
         """Delegate a hosted coverage-only operation."""
 
+        # Same env_file base as run_profile_phases: repo-relative paths resolve
+        # from the worktree so Postgres trust injection matches phase validation.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
             "profile": _hosted_validation_profile_payload(
                 profile,
                 omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
                 compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
             ),
             "phase_names": [phase],
             "run_healthchecks": False,

@@ -558,10 +558,11 @@ class ValidationRunner:
         profile: WorkspaceProfile,
         phase: str = "coverage",
         parallel_worker_cpu_limit: int | None = None,
+        worktree_path: Path | None = None,
         pr_identity: object | None = None,
     ) -> ValidationCoverageResult | None:
         """Run only the profile coverage command and return its policy result."""
-        del pr_identity
+        del worktree_path, pr_identity
         coverage = profile.validation.coverage
         if not _coverage_requested(coverage):
             return None

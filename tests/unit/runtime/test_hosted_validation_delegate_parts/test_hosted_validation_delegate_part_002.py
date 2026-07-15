@@ -1381,6 +1381,91 @@ async def test_hosted_run_profile_phases_resolves_env_file_from_worktree(
 
 
 @pytest.mark.unit
+async def test_hosted_run_profile_coverage_resolves_env_file_from_worktree(
+    tmp_path: Path,
+) -> None:
+    """Coverage-only hosted payload must use the same worktree env_file base as phases."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "postgres.env").write_text(
+        "POSTGRES_PASSWORD=worktree-coverage-env-secret\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_dir = tmp_path / "compose-project"
+    compose_dir.mkdir()
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.0,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-pg-coverage-worktree-env-file",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "env_file": "postgres.env",
+                    "environment": {"POSTGRES_USER": "awf"},
+                }
+            ],
+        }
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path / "artifacts",
+            client=client,
+        )
+        await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree,
+        )
+
+    assert seen["body"]["profile"]["services"][0]["environment"] == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+    }
+    body = json.dumps(seen["body"], sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "worktree-coverage-env-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_null_environment_still_injects_trust(
     tmp_path: Path,
 ) -> None:
