@@ -433,15 +433,12 @@ def _hosted_validation_compose_image_candidates(
     """Raw/expanded image strings for postgres detection.
 
     Expand compose ``.env`` then ``os.environ`` (shell wins); unset still yields
-    ``:-``/``-`` defaults. Whole interpolations also collect literal operator arms.
+    ``:-``/``-`` defaults. Literal whole-interpolation operator arms are only
+    considered when expansion cannot resolve the image — never inactive arms
+    that expansion already deselected.
     """
     stripped = image.strip()
     candidates = [stripped]
-    if _hosted_validation_compose_image_is_whole_interpolation(stripped):
-        for arm in _hosted_validation_compose_interpolation_operator_arms(stripped):
-            arm_stripped = arm.strip()
-            if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
-                candidates.append(arm_stripped)
     if "$" not in stripped:
         return tuple(candidates)
     environ: dict[str, str] = {}
@@ -454,6 +451,11 @@ def _hosted_validation_compose_image_candidates(
     try:
         expanded = compose_expand_value(stripped, environ=environ).strip()
     except ComposeEnvInterpolationError:
+        if _hosted_validation_compose_image_is_whole_interpolation(stripped):
+            for arm in _hosted_validation_compose_interpolation_operator_arms(stripped):
+                arm_stripped = arm.strip()
+                if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
+                    candidates.append(arm_stripped)
         return tuple(candidates)
     if expanded and expanded != stripped and expanded not in candidates:
         candidates.append(expanded)

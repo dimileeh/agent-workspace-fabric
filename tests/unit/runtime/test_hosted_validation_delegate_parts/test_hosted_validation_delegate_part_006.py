@@ -171,6 +171,46 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_inactive_postgres_default_arm_not_treated_as_postgres(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active non-Postgres image must win over an unused ``:-postgres`` default.
+
+    When ``IMAGE`` is set to an app image, ``${IMAGE:-postgres:16}`` expands to
+    that app image. The inactive default arm must not classify the service as
+    Postgres or inject ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    """
+    monkeypatch.setenv("IMAGE", "myorg/app:latest")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  app:
+    image: "${IMAGE:-postgres:16}"
+    environment:
+      POSTGRES_PASSWORD: literal-app-db-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["app"]["environment"]
+    assert environment == {"POSTGRES_USER": "awf"}
+    assert "POSTGRES_HOST_AUTH_METHOD" not in environment
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-app-db-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_skips_comments_and_blank_lines(
     tmp_path: Path,
 ) -> None:
