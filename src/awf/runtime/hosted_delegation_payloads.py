@@ -714,7 +714,9 @@ def _hosted_validation_profile_payload(
     omit_runtime_environment: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
-    _hosted_validation_sanitize_secret_refs(payload.get("secrets"))
+    # Hosted Kubernetes validation Jobs do not resolve Core-local secret
+    # declarations; Cloud rejects any non-empty profile.secrets.
+    payload["secrets"] = []
     if omit_runtime_environment:
         _hosted_validation_omit_environment_entries(
             payload.get("runtime"),

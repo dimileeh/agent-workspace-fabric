@@ -719,7 +719,9 @@ def test_hosted_validation_sanitizer_preserves_only_env_source_name_refs() -> No
 
 
 @pytest.mark.unit
-def test_hosted_validation_profile_payload_preserves_env_secret_source_alias() -> None:
+def test_hosted_validation_profile_payload_clears_env_provider_secrets() -> None:
+    # Hosted validation Jobs reject any profile.secrets; env-provider
+    # declarations with refs are cleared the same as local-file mounts.
     payload = _hosted_validation_profile_payload(
         WorkspaceProfile.model_validate(
             {
@@ -737,17 +739,7 @@ def test_hosted_validation_profile_payload_preserves_env_secret_source_alias() -
         )
     )
 
-    assert payload["secrets"] == [
-        {
-            "name": "npm-token",
-            "target": "NPM_TOKEN",
-            "kind": "env",
-            "mode": "ro",
-            "required": True,
-            "provider": "env",
-            "ref": "env/AWF_NPM_TOKEN",
-        }
-    ]
+    assert payload["secrets"] == []
 
 
 @pytest.mark.unit
