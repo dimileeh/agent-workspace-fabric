@@ -1336,6 +1336,22 @@ def test_hosted_profile_passwordless_postgres_omits_query_fragment_credentials(
             "postgresql://postgres:5432/awf",
             "env://pg_secret_ref",
         ),
+        # Password arm present: strip password AND drop credential usernames.
+        (
+            "postgresql://${POSTGRES_PASSWORD}:x@postgres:5432/awf",
+            "postgresql://postgres:5432/awf",
+            "${POSTGRES_PASSWORD}",
+        ),
+        (
+            "postgresql://ghp_examplepasswordarmtoken12:x@postgres:5432/awf",
+            "postgresql://postgres:5432/awf",
+            "ghp_examplepasswordarmtoken12",
+        ),
+        (
+            "postgresql+asyncpg://%24%7BPOSTGRES_PASSWORD%7D:lit-pw@postgres:5432/awf",
+            "postgresql+asyncpg://postgres:5432/awf",
+            "POSTGRES_PASSWORD",
+        ),
     ],
 )
 def test_hosted_profile_passwordless_postgres_strips_username_only_credentials(
@@ -1343,7 +1359,7 @@ def test_hosted_profile_passwordless_postgres_strips_username_only_credentials(
     rewritten: str,
     leak: str,
 ) -> None:
-    """Username-only Postgres URLs must strip credential userinfo before shipping."""
+    """Credential usernames must be stripped even when a password arm is rewritten."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "hosted-profile-pg-url-userinfo-creds",

@@ -1414,7 +1414,7 @@ def _hosted_validation_should_omit_profile_environment_entry(name: str, text: st
 
 
 def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
-    """Postgres URL with password removed; strip credential username-only userinfo.
+    """Postgres URL with password removed; strip credential usernames from userinfo.
 
     Host-only stays unchanged. Non-Postgres returns ``None`` for ordinary omit/redact.
     """
@@ -1435,6 +1435,10 @@ def _hosted_validation_passwordless_postgres_url(value: str) -> str | None:
         if _hosted_validation_postgres_userinfo_has_credentials(userinfo):
             return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
         return stripped
+    # Password stripped; still drop credential usernames (e.g. ${POSTGRES_PASSWORD}:x)
+    # so callers that accept the rewrite never ship secret refs/tokens in userinfo.
+    if username and _hosted_validation_postgres_userinfo_has_credentials(username):
+        return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
     new_authority = f"{username}@{host}" if username else host
     return urlunsplit((parsed.scheme, new_authority, parsed.path, parsed.query, parsed.fragment))
 
