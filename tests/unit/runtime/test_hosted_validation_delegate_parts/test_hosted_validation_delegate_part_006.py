@@ -123,6 +123,52 @@ services:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "image",
+    [
+        "myorg/app:${TAG:-postgres}",
+        "${REGISTRY:-postgres}/app:1",
+    ],
+)
+def test_rendered_stack_partial_image_arm_not_treated_as_postgres(
+    tmp_path: Path,
+    image: str,
+) -> None:
+    """Partial Compose default arms must not classify an app image as Postgres.
+
+    Tag/registry fragments such as ``${TAG:-postgres}`` are not whole-image
+    defaults; treating them as image candidates would drop app DB passwords and
+    inject ``POSTGRES_HOST_AUTH_METHOD=trust``.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  app:
+    image: "{image}"
+    environment:
+      POSTGRES_PASSWORD: literal-app-db-secret
+      POSTGRES_USER: awf
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["app"]["environment"]
+    assert environment == {"POSTGRES_USER": "awf"}
+    assert "POSTGRES_HOST_AUTH_METHOD" not in environment
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+    assert "literal-app-db-secret" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_skips_comments_and_blank_lines(
     tmp_path: Path,
 ) -> None:

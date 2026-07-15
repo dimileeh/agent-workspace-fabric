@@ -422,6 +422,20 @@ def _hosted_validation_compose_image_is_postgres_like(image: object) -> bool:
     return False
 
 
+def _hosted_validation_compose_image_is_whole_interpolation(image: str) -> bool:
+    """Return whether ``image`` is a single full-value ``${...}`` expression.
+
+    Partial embeddings such as ``myorg/app:${TAG:-postgres}`` or
+    ``${REGISTRY:-postgres}/app:1`` must not treat operator-arm literals as
+    standalone image refs for Postgres detection.
+    """
+    stripped = image.strip()
+    if not stripped.startswith("${"):
+        return False
+    end = _hosted_validation_braced_expression_end(stripped, 1)
+    return end is not None and end == len(stripped) - 1
+
+
 def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
     """Return raw and Compose-expanded image strings for postgres detection.
 
@@ -429,17 +443,19 @@ def _hosted_validation_compose_image_candidates(image: str) -> tuple[str, ...]:
     as ``${POSTGRES_IMAGE:-postgres:16}`` must still be recognized as Postgres so
     password redaction can inject ``POSTGRES_HOST_AUTH_METHOD=trust``. Expand with
     an empty environ so ``:-`` / ``-`` defaults are visible when the override is
-    unset. Also collect Compose operator-arm literals (e.g.
-    ``${IMG:-localhost:5000/postgres}``) so host:port registry forms are parsed
-    as clean image refs even when the raw expression would leave a trailing ``}``
-    on the repository name segment.
+    unset. For whole-image interpolations only, also collect Compose operator-arm
+    literals (e.g. ``${IMG:-localhost:5000/postgres}``) so host:port registry
+    forms are parsed as clean image refs even when the raw expression would leave
+    a trailing ``}`` on the repository name segment. Partial arms (tag or registry
+    fragments) are ignored so an app image is not misclassified as Postgres.
     """
     stripped = image.strip()
     candidates = [stripped]
-    for arm in _hosted_validation_compose_interpolation_operator_arms(stripped):
-        arm_stripped = arm.strip()
-        if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
-            candidates.append(arm_stripped)
+    if _hosted_validation_compose_image_is_whole_interpolation(stripped):
+        for arm in _hosted_validation_compose_interpolation_operator_arms(stripped):
+            arm_stripped = arm.strip()
+            if arm_stripped and "$" not in arm_stripped and arm_stripped not in candidates:
+                candidates.append(arm_stripped)
     if "$" not in stripped:
         return tuple(candidates)
     try:
