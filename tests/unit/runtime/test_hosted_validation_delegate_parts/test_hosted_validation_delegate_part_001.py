@@ -14,6 +14,9 @@ from awf.runtime.hosted_delegation import (
     HostedDelegationProtocolError,
     HostedValidationDelegate,
 )
+from awf.runtime.hosted_delegation_payloads import (
+    _hosted_validation_rendered_stack_payload,
+)
 from awf.runtime.validation_types import ValidateCommandProbeTarget
 from tests.unit.runtime.test_hosted_validation_delegate import _config
 
@@ -517,3 +520,343 @@ async def test_hosted_validation_validate_toolchain_probe_rejects_malformed_payl
                 compose_file=tmp_path / "missing-compose.yml",
                 profile=WorkspaceProfile(name="hosted-probe-test"),
             )
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_secret_valued_safe_named_env(
+    tmp_path: Path,
+) -> None:
+    """Validation omit mode drops secret values even when the env name looks safe."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      DATABASE_URL: postgresql://user:literal-url-secret@postgres/awf
+      APP_DSN: postgresql://user:literal-dsn-secret@postgres/awf
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - DATABASE_URL=postgresql://user:list-url-secret@postgres/awf
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+    assert "literal-url-secret" not in body
+    assert "literal-dsn-secret" not in body
+    assert "list-url-secret" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_credential_refs(
+    tmp_path: Path,
+) -> None:
+    """Validation omit mode drops ${DATABASE_URL}-style refs on URL/DSN keys."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      DATABASE_URL: ${DATABASE_URL}
+      APP_DSN: ${APP_DSN}
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_bare_passthrough_slots(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops bare list URL/DSN pass-through slots, not only secret-named ones."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HOST
+      - API_TOKEN
+      - DATABASE_URL
+      - APP_DSN
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_HOST",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+    assert "API_TOKEN" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_credential_source_refs_under_safe_targets(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops ${CREDENTIAL} refs even when the target env name looks safe."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: http://backend:8000
+      DATABASE_URL: ${POSTGRES_PASSWORD}
+      APP_HOST: ${API_TOKEN}
+      ALREADY_REF: ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_URL=http://worker:8000
+      - CACHE_HOST=${POSTGRES_PASSWORD}
+      - SERVICE_ENDPOINT=${SERVICE_API_KEY}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "PUBLIC_URL": "http://backend:8000",
+        "ALREADY_REF": "${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "PUBLIC_URL=http://worker:8000",
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "DATABASE_URL" not in body
+    assert "APP_HOST" not in body
+    assert "CACHE_HOST" not in body
+    assert "SERVICE_ENDPOINT" not in body
+    assert "${POSTGRES_PASSWORD}" not in body
+    assert "${API_TOKEN}" not in body
+    assert "${SERVICE_API_KEY}" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_safe_named_credential_source_refs(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops ${DATABASE_URL}/${APP_DSN} sources under safe target names."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_HEADER: Bearer ${DATABASE_URL}
+      SERVICE_CONFIG: prefix-${APP_DSN}
+      PUBLIC_CONN: ${DATABASE_URL}
+      KEEP_HEADER: Bearer ${PUBLIC_HOST}
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HEADER=Bearer ${DATABASE_URL}
+      - SERVICE_CONFIG=prefix-${APP_DSN}
+      - PUBLIC_CONN=${DATABASE_URL}
+      - KEEP_REF=Bearer ${PUBLIC_HOST}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_HEADER": "Bearer ${PUBLIC_HOST}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "KEEP_REF=Bearer ${PUBLIC_HOST}",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_HEADER" not in body
+    assert "SERVICE_CONFIG" not in body
+    assert "PUBLIC_CONN" not in body
+    assert "${DATABASE_URL}" not in body
+    assert "${APP_DSN}" not in body
+    assert "DATABASE_URL" not in body
+    assert "APP_DSN" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_embedded_credential_source_refs(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops values that embed ${CREDENTIAL} inside surrounding text."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_HEADER: Bearer ${API_TOKEN}
+      CACHE_KEY: prefix-${POSTGRES_PASSWORD}
+      KEEP_HEADER: Bearer ${PUBLIC_HOST}
+      KEEP_KEY: prefix-${PUBLIC_HOST}-suffix
+  worker:
+    image: worker:latest
+    environment:
+      - PUBLIC_HEADER=Bearer ${API_TOKEN}
+      - CACHE_KEY=prefix-${POSTGRES_PASSWORD}
+      - KEEP_REF=Bearer ${PUBLIC_HOST}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_HEADER": "Bearer ${PUBLIC_HOST}",
+        "KEEP_KEY": "prefix-${PUBLIC_HOST}-suffix",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "KEEP_REF=Bearer ${PUBLIC_HOST}",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_HEADER" not in body
+    assert "CACHE_KEY" not in body
+    assert "${API_TOKEN}" not in body
+    assert "${POSTGRES_PASSWORD}" not in body
+    assert "API_TOKEN" not in body
+    assert "POSTGRES_PASSWORD" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_omit_mode_drops_credential_source_refs_with_compose_operators(
+    tmp_path: Path,
+) -> None:
+    """Omit mode drops Compose ${CREDENTIAL:-}/{:?} refs under safe-looking targets."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    image: backend:latest
+    environment:
+      PUBLIC_URL: ${POSTGRES_PASSWORD:-}
+      APP_HOST: ${API_TOKEN:?set API_TOKEN}
+      DATABASE_URL: ${DATABASE_URL:-}
+      KEEP_REF: ${PUBLIC_HOST:-localhost}
+  worker:
+    image: worker:latest
+    environment:
+      - CACHE_HOST=${POSTGRES_PASSWORD-}
+      - SERVICE_ENDPOINT=${SERVICE_API_KEY?missing}
+      - APP_DSN=${APP_DSN:+override}
+      - REDIS_URL=redis://cache:6379/0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    assert payload["services"]["backend"]["environment"] == {
+        "KEEP_REF": "${PUBLIC_HOST:-localhost}",
+    }
+    assert payload["services"]["worker"]["environment"] == [
+        "REDIS_URL=redis://cache:6379/0",
+    ]
+    body = json.dumps(payload, sort_keys=True)
+    assert "PUBLIC_URL" not in body
+    assert "APP_HOST" not in body
+    assert "DATABASE_URL" not in body
+    assert "CACHE_HOST" not in body
+    assert "SERVICE_ENDPOINT" not in body
+    assert "APP_DSN" not in body
+    assert "POSTGRES_PASSWORD" not in body
+    assert "API_TOKEN" not in body
+    assert "SERVICE_API_KEY" not in body
