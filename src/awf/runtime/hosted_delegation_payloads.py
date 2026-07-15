@@ -352,32 +352,24 @@ def _hosted_validation_compose_volume_name_translations(
         translations[name] = translated_name
         used_names[translated_name] = name
 
-    return _hosted_validation_redacted_top_level_volume_translations(
-        compose,
-        translations=translations,
-    )
+    return _hosted_validation_redacted_volume_translations(translations)
 
 
-def _hosted_validation_redacted_top_level_volume_translations(
-    compose: Mapping[object, object],
-    *,
+def _hosted_validation_redacted_volume_translations(
     translations: Mapping[str, str],
 ) -> dict[str, str]:
-    volumes = compose.get("volumes")
-    if not isinstance(volumes, Mapping):
-        return dict(translations)
-
-    top_level_names = [str(name) for name in volumes]
     redacted_names = {
         name
-        for name in top_level_names
+        for name, translated_name in translations.items()
         if _hosted_validation_compose_volume_name_needs_redaction(
             name,
-            translated_name=translations.get(name, name),
+            translated_name=translated_name,
         )
     }
     used_names = {
-        translations.get(name, name) for name in top_level_names if name not in redacted_names
+        translated_name
+        for name, translated_name in translations.items()
+        if name not in redacted_names
     }
     if (
         not redacted_names

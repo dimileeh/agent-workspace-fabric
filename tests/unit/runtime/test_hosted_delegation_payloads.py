@@ -533,6 +533,60 @@ volumes:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_disambiguates_redacted_explicit_volume_names(
+    tmp_path: Path,
+) -> None:
+    """Multiple secret-shaped explicit volume names must not alias."""
+    first_token_name = "ghp_volumeSecretToken123456"
+    first_translated_name = "ghp-volumesecrettoken123456"
+    second_token_name = "gho_volumeSecretToken123456"
+    second_translated_name = "gho-volumesecrettoken123456"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - cache-a:/cache-a
+      - cache-b:/cache-b
+volumes:
+  cache-a:
+    name: {first_token_name}
+  cache-b:
+    name: {second_token_name}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    explicit_names = {
+        payload["volumes"]["cache-a"]["name"],
+        payload["volumes"]["cache-b"]["name"],
+    }
+    assert len(explicit_names) == 2
+    assert all(
+        name == "redacted" or re.fullmatch(r"redacted-[0-9]+", name) for name in explicit_names
+    )
+    for name in explicit_names:
+        _assert_dns1123_label(name)
+    body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
+    for secret in (
+        first_token_name,
+        first_translated_name,
+        second_token_name,
+        second_translated_name,
+    ):
+        assert secret not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_redacts_token_service_volume_sources_before_translation(
     tmp_path: Path,
 ) -> None:
@@ -567,17 +621,23 @@ services:
     )
 
     assert payload is not None
-    assert payload["services"]["backend"]["volumes"] == [
-        "redacted:/cache-short",
-        {"type": "volume", "source": "redacted", "target": "/cache-source"},
-        {"type": "volume", "src": "redacted", "target": "/cache-src"},
-    ]
-    for volume in payload["services"]["backend"]["volumes"]:
-        source = (
-            volume.partition(":")[0]
-            if isinstance(volume, str)
-            else volume["source" if "source" in volume else "src"]
-        )
+    backend_volumes = payload["services"]["backend"]["volumes"]
+    assert len(backend_volumes) == 3
+    assert backend_volumes[0].partition(":")[2] == "/cache-short"
+    assert backend_volumes[1]["type"] == "volume"
+    assert backend_volumes[1]["target"] == "/cache-source"
+    assert backend_volumes[2]["type"] == "volume"
+    assert backend_volumes[2]["target"] == "/cache-src"
+    sources = {
+        backend_volumes[0].partition(":")[0],
+        backend_volumes[1]["source"],
+        backend_volumes[2]["src"],
+    }
+    assert len(sources) == 3
+    assert all(
+        source == "redacted" or re.fullmatch(r"redacted-[0-9]+", source) for source in sources
+    )
+    for source in sources:
         _assert_dns1123_label(source)
     body = json.dumps(payload, sort_keys=True)
     assert "<redacted>" not in body
@@ -588,6 +648,60 @@ services:
         source_translated_name,
         src_token_name,
         src_translated_name,
+    ):
+        assert secret not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_payload_disambiguates_redacted_service_only_volume_sources(
+    tmp_path: Path,
+) -> None:
+    """Multiple secret-shaped service-only volume sources must not alias."""
+    first_token_name = "ghp_volumeSecretToken123456"
+    first_translated_name = "ghp-volumesecrettoken123456"
+    second_token_name = "gho_volumeSecretToken123456"
+    second_translated_name = "gho-volumesecrettoken123456"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - {first_token_name}:/cache-first
+      - type: volume
+        source: {second_token_name}
+        target: /cache-second
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    backend_volumes = payload["services"]["backend"]["volumes"]
+    assert len(backend_volumes) == 2
+    redacted_volume_names = {
+        backend_volumes[0].partition(":")[0],
+        backend_volumes[1]["source"],
+    }
+    assert len(redacted_volume_names) == 2
+    assert all(
+        name == "redacted" or re.fullmatch(r"redacted-[0-9]+", name)
+        for name in redacted_volume_names
+    )
+    for name in redacted_volume_names:
+        _assert_dns1123_label(name)
+    body = json.dumps(payload, sort_keys=True)
+    assert "<redacted>" not in body
+    for secret in (
+        first_token_name,
+        first_translated_name,
+        second_token_name,
+        second_translated_name,
     ):
         assert secret not in body
 
