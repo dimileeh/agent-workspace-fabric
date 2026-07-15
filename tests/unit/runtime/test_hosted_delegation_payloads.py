@@ -389,6 +389,47 @@ volumes:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("token_name", "translated_token_name"),
+    [
+        ("ghp_volumeSecretToken123456", "ghp-volumesecrettoken123456"),
+        ("AIzaVolumeSecretToken123456", "aizavolumesecrettoken123456"),
+    ],
+)
+def test_rendered_stack_payload_redacts_token_explicit_volume_name_before_translation(
+    tmp_path: Path,
+    token_name: str,
+    translated_token_name: str,
+) -> None:
+    """Token-shaped explicit volume names must be redacted before normalization."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        f"""
+services:
+  backend:
+    image: backend:latest
+    volumes:
+      - cache:/cache
+volumes:
+  cache:
+    name: {token_name}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert payload["volumes"] == {"cache": {"name": "<redacted>"}}
+    body = json.dumps(payload, sort_keys=True)
+    assert token_name not in body
+    assert translated_token_name not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_payload_sanitizes_list_environment(tmp_path: Path) -> None:
     """List-form Compose environments preserve shape while removing secrets."""
     compose_file = tmp_path / "compose.yml"

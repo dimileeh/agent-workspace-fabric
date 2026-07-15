@@ -458,12 +458,24 @@ def _hosted_validation_sanitize_rendered_stack_volume(
     for key, value in volume.items():
         field = str(key)
         if field == "name" and isinstance(value, str):
-            payload[field] = _hosted_validation_sanitize_compose_value(
-                volume_translations.get(value, value)
+            payload[field] = _hosted_validation_sanitize_compose_volume_name(
+                value,
+                volume_translations=volume_translations,
             )
             continue
         payload[field] = _hosted_validation_sanitize_compose_value(value)
     return payload
+
+
+def _hosted_validation_sanitize_compose_volume_name(
+    name: str,
+    *,
+    volume_translations: Mapping[str, str],
+) -> str:
+    sanitized_original = redact_secrets(name)
+    if sanitized_original != name:
+        return sanitized_original
+    return redact_secrets(volume_translations.get(name, name))
 
 
 def _hosted_validation_sanitize_compose_service_volumes(
