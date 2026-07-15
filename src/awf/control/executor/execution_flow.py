@@ -578,6 +578,7 @@ async def execute(
                     profile=profile,
                     reuse=baseline_coverage,
                     skip_measure=resume_from_blocked,
+                    worktree_path=worktree_path,
                 )
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure(
