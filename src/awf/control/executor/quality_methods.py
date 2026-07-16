@@ -986,6 +986,8 @@ async def _run_post_agent_semantic_precommit_repair(
                 model=model,
                 workspace_id=workspace_id,
                 log_source="post_agent_precommit_repair",
+                profile=profile,
+                worktree_path=worktree_path,
             )
 
         recovered, repair_result = await _run_agent_callable_with_service_recovery(
