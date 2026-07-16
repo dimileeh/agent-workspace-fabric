@@ -449,6 +449,42 @@ def test_validation_tier_for_workspace_uses_active_validate_operation_payload_ti
 
 
 @pytest.mark.unit
+async def test_baseline_coverage_preflight_forwards_worktree_path(
+    tmp_path: Path,
+) -> None:
+    """Baseline preflight must pass worktree_path so hosted env_file resolution
+    matches phase/final coverage (repo checkout, not compose dir)."""
+    baseline = _coverage(tmp_path, percent=88, minimum=99)
+    validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "coverage-preflight-worktree",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "pytest --cov=awf",
+                }
+            },
+        }
+    )
+    worktree = tmp_path / "worktree"
+
+    result = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_preflight_worktree",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        worktree_path=worktree,
+    )
+
+    assert result is baseline
+    assert validation.calls == ["baseline_coverage"]
+    assert validation.kwargs[0]["worktree_path"] == worktree
+
+
+@pytest.mark.unit
 async def test_baseline_coverage_preflight_returns_logged_policy_result(
     tmp_path: Path,
 ) -> None:

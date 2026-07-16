@@ -95,6 +95,7 @@ async def _run_baseline_coverage_preflight(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    worktree_path: Path | None = None,
 ) -> ValidationCoverageResult | None:
     from awf.control.executor.quality_gates import _run_baseline_coverage_preflight
 
@@ -104,6 +105,7 @@ async def _run_baseline_coverage_preflight(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
     )
 
 
@@ -116,6 +118,7 @@ async def _measure_and_persist_baseline_coverage(
     profile: WorkspaceProfile,
     reuse: ValidationCoverageResult | None = None,
     skip_measure: bool = False,
+    worktree_path: Path | None = None,
 ) -> ValidationCoverageResult | None:
     """Measure the pre-agent baseline coverage and persist it for blocked-resume.
 
@@ -134,6 +137,7 @@ async def _measure_and_persist_baseline_coverage(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
     )
     await self._persist_block_baseline_coverage(
         workspace_id,
@@ -982,6 +986,8 @@ async def _run_post_agent_semantic_precommit_repair(
                 model=model,
                 workspace_id=workspace_id,
                 log_source="post_agent_precommit_repair",
+                profile=profile,
+                worktree_path=worktree_path,
             )
 
         recovered, repair_result = await _run_agent_callable_with_service_recovery(

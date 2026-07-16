@@ -360,7 +360,10 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
                     coverage_runner=validation_runner,
-                    coverage_run_kwargs=validation_run_kwargs,
+                    coverage_run_kwargs={
+                        **validation_run_kwargs,
+                        "worktree_path": worktree_path,
+                    },
                 )
                 val_result = replace(val_result, coverage=coverage_evidence.coverage)
         except ComposeExecCleanupError as exc:
@@ -1044,6 +1047,7 @@ async def run_validation_and_fix_cycle(
                     workspace_id=workspace_id,
                     hosted_pr_identity=_hosted_pr_identity,
                     profile=profile,
+                    worktree_path=worktree_path,
                 )
 
             async def _finish_fix_recovery_failure(

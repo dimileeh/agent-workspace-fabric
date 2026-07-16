@@ -951,19 +951,26 @@ async def test_measure_and_persist_baseline_coverage_fresh_run(
         reason_code="COVERAGE_BELOW_THRESHOLD",
     )
 
-    async def _preflight(**_kwargs: Any) -> ValidationCoverageResult:
+    preflight_kwargs: list[dict[str, Any]] = []
+
+    async def _preflight(**kwargs: Any) -> ValidationCoverageResult:
+        preflight_kwargs.append(kwargs)
         return measured
 
     monkeypatch.setattr(executor, "_run_baseline_coverage_preflight", _preflight)
+
+    worktree = Path("/worktrees/ws_baseline")
 
     result = await executor._measure_and_persist_baseline_coverage(
         workspace_id=ws_id,
         compose_project="proj",
         compose_file=Path("compose.yml"),
         profile=object(),  # type: ignore[arg-type]
+        worktree_path=worktree,
     )
 
     assert result is measured
+    assert preflight_kwargs[0]["worktree_path"] == worktree
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None

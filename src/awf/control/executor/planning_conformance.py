@@ -310,6 +310,7 @@ async def _run_post_validation_conformance_check(
             workspace_id=workspace.id,
             hosted_pr_identity=hosted_pr_identity,
             profile=profile,
+            worktree_path=worktree_path,
         )
     except AgentRunError as exc:
         terminal_head_sha = (

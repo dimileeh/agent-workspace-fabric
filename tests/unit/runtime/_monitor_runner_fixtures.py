@@ -60,6 +60,7 @@ class FakeAdapter(AgentAdapter):
     workspace_ids: list[str | None] = field(default_factory=list)
     hosted_pr_identities: list[dict[str, Any] | None] = field(default_factory=list)
     profiles: list[WorkspaceProfile | None] = field(default_factory=list)
+    worktree_paths: list[Path | None] = field(default_factory=list)
 
     def __init__(  # type: ignore[override]
         self,
@@ -78,6 +79,7 @@ class FakeAdapter(AgentAdapter):
         self.workspace_ids = []
         self.hosted_pr_identities = []
         self.profiles = []
+        self.worktree_paths = []
 
     def get_provider(self, model: str | None) -> str:
         """Return the fixed fake provider identifier."""
@@ -118,12 +120,14 @@ class FakeAdapter(AgentAdapter):
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
         profile: WorkspaceProfile | None = None,
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         """Consume one queued result and log the dispatched prompt."""
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
         self.hosted_pr_identities.append(hosted_pr_identity)
         self.profiles.append(profile)
+        self.worktree_paths.append(worktree_path)
         if self._log_store and workspace_id:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,

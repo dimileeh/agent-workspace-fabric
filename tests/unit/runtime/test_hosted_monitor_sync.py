@@ -68,7 +68,11 @@ class _HostedAdapterWithoutTerminalHead:
     name = AgentRuntime.codex
     is_hosted = True
 
-    async def run(self, **_kwargs: object) -> AgentRunResult:
+    def __init__(self) -> None:
+        self.worktree_paths: list[object] = []
+
+    async def run(self, **kwargs: object) -> AgentRunResult:
+        self.worktree_paths.append(kwargs.get("worktree_path"))
         return AgentRunResult(returncode=0, stdout="done", stderr="", terminal_head_sha=None)
 
 
@@ -79,11 +83,13 @@ class _HostedAdapterWithTerminalHead:
     def __init__(self, terminal_head_sha: str) -> None:
         self.terminal_head_sha = terminal_head_sha
         self.hosted_pr_identities: list[dict[str, object] | None] = []
+        self.worktree_paths: list[object] = []
 
     async def run(self, **kwargs: object) -> AgentRunResult:
         hosted_pr_identity = kwargs.get("hosted_pr_identity")
         identity = hosted_pr_identity if isinstance(hosted_pr_identity, dict) else None
         self.hosted_pr_identities.append(identity)
+        self.worktree_paths.append(kwargs.get("worktree_path"))
         return AgentRunResult(
             returncode=0,
             stdout="AWF-VERDICT: FIXED: remote repair",
@@ -161,7 +167,11 @@ def _monitor_context_with_runner(
     return context
 
 
-def _monitor_context_with_adapter(adapter: object) -> SimpleNamespace:
+def _monitor_context_with_adapter(
+    adapter: object,
+    *,
+    worktrees_root: Path | None = None,
+) -> SimpleNamespace:
     async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
         return SimpleNamespace(
             repo_url="git@github.com:dimileeh/aira-web.git",
@@ -183,6 +193,8 @@ def _monitor_context_with_adapter(adapter: object) -> SimpleNamespace:
     return SimpleNamespace(
         _load_workspace=_load_workspace,
         _deps=SimpleNamespace(adapter=adapter),
+        # Hosted agent-start resolves env_file relative to the worktree.
+        _worktrees_root=worktrees_root if worktrees_root is not None else Path("/tmp"),
     )
 
 
@@ -459,10 +471,13 @@ async def test_hosted_pr_identity_matches_handoff_and_recovery_precedence() -> N
 
 
 @pytest.mark.unit
-async def test_hosted_agent_success_without_terminal_head_fails_closed() -> None:
+async def test_hosted_agent_success_without_terminal_head_fails_closed(
+    tmp_path: Path,
+) -> None:
+    adapter = _HostedAdapterWithoutTerminalHead()
     with pytest.raises(AgentRunError) as excinfo:
         await _run_monitor_agent_with_service_recovery(
-            _monitor_context_with_adapter(_HostedAdapterWithoutTerminalHead()),
+            _monitor_context_with_adapter(adapter, worktrees_root=tmp_path),
             workspace_id="ws_hosted",
             compose_project="awf_ws_hosted",
             compose_file=Path("/tmp/missing-compose.yml"),
@@ -471,6 +486,7 @@ async def test_hosted_agent_success_without_terminal_head_fails_closed() -> None
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISSING"
+    assert adapter.worktree_paths == [tmp_path / "ws_hosted"]
 
 
 @pytest.mark.unit
@@ -507,10 +523,11 @@ async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
 @pytest.mark.unit
 async def test_hosted_agent_success_includes_result_output_in_terminal_head_gate_evidence(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     sha = "abcdef0123456789abcdef0123456789abcdef01"
     adapter = _HostedAdapterWithTerminalHead(sha.upper())
-    context = _monitor_context_with_adapter(adapter)
+    context = _monitor_context_with_adapter(adapter, worktrees_root=tmp_path)
     command_evidence = ["previous evidence"]
     captured_command_evidence: list[tuple[str, ...]] = []
 
@@ -535,6 +552,7 @@ async def test_hosted_agent_success_includes_result_output_in_terminal_head_gate
     )
 
     assert result.terminal_head_sha == sha.upper()
+    assert adapter.worktree_paths == [tmp_path / "ws_hosted"]
     assert captured_command_evidence == [("previous evidence", "AWF-VERDICT: FIXED: remote repair")]
     assert command_evidence == [
         "previous evidence",

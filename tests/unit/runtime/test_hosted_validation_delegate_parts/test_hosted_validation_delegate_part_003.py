@@ -640,7 +640,6 @@ async def test_hosted_coverage_sanitizes_literal_runtime_environment_secrets(
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "npm-profile-secret" not in body_blob
     assert seen["body"]["profile"]["runtime"]["environment"] == {
-        "NPM_TOKEN": "${NPM_TOKEN}",
         "OLLAMA_HOST": "http://ollama.profile:11434",
     }
 

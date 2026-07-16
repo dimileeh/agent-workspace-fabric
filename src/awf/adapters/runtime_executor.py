@@ -126,6 +126,8 @@ class AgentRuntimeExecRequest:
     profile: WorkspaceProfile | None = None
     compose_project: str | None = None
     compose_file: Path | None = None
+    # Local worktree for profile env_file password scanning only; never sent to Cloud.
+    worktree_path: Path | None = None
 
 
 @dataclass(frozen=True)

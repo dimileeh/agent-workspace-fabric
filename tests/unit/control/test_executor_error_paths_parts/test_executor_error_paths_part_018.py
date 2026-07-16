@@ -135,6 +135,7 @@ class _HostedSetupPreflightProbeValidation(_HostedSetupPreflightValidation):
         compose_project: str,
         compose_file: Path,
         profile: object,
+        worktree_path: Path | None = None,
         pr_identity: dict[str, object] | None = None,
     ) -> ValidateToolProbeResult:
         self.probe_kwargs.append(
@@ -143,6 +144,7 @@ class _HostedSetupPreflightProbeValidation(_HostedSetupPreflightValidation):
                 "compose_project": compose_project,
                 "compose_file": compose_file,
                 "profile": profile,
+                "worktree_path": worktree_path,
                 "pr_identity": pr_identity,
             }
         )
@@ -1232,6 +1234,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
                 "compose_project": "awf_x",
                 "compose_file": compose_file,
                 "profile": profile,
+                "worktree_path": worktree_path,
                 "pr_identity": {"pr_number": 42},
             }
         ]

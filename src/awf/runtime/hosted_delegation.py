@@ -397,12 +397,19 @@ class HostedValidationDelegate:
         compose_project: str,
         compose_file: Path,
         profile: WorkspaceProfile,
+        worktree_path: Path | None = None,
         pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidateToolProbeResult:
         """Delegate the post-setup validate-command toolchain probe to the host."""
+        # Same env_file base as run_profile_phases/coverage: repo-relative paths
+        # resolve from the worktree so Postgres trust injection matches.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
-            "profile": _hosted_validation_profile_payload(profile),
+            "profile": _hosted_validation_profile_payload(
+                profile,
+                compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
+            ),
             "phase_names": [],
             "run_healthchecks": False,
             "include_coverage": False,
@@ -414,6 +421,8 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
+            env_file_base_path=worktree_path,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
@@ -446,10 +455,16 @@ class HostedValidationDelegate:
         expected_command_count = len(expected_commands)
         # Hosted Jobs use their own /workspace/repo checkout; never send a
         # Core-local filesystem path (Cloud rejects non-null worktree_path).
-        del worktree_path
+        # Repo-relative profile env_file paths still resolve from the worktree
+        # (same base as profile_services), while compose_dir stays for .env image
+        # interpolation.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
-            "profile": _hosted_validation_profile_payload(profile),
+            "profile": _hosted_validation_profile_payload(
+                profile,
+                compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
+            ),
             "phase_names": list(phase_names),
             "run_healthchecks": run_healthchecks,
             "worktree_path": None,
@@ -461,6 +476,8 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
+            env_file_base_path=worktree_path,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
@@ -493,15 +510,20 @@ class HostedValidationDelegate:
         profile: WorkspaceProfile,
         phase: str = "coverage",
         parallel_worker_cpu_limit: int | None = None,
+        worktree_path: Path | None = None,
         pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidationCoverageResult | None:
         """Delegate a hosted coverage-only operation."""
 
+        # Same env_file base as run_profile_phases: repo-relative paths resolve
+        # from the worktree so Postgres trust injection matches phase validation.
         payload: dict[str, Any] = {
             "workspace_id": workspace_id,
             "profile": _hosted_validation_profile_payload(
                 profile,
                 omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
+                compose_dir=compose_file.parent,
+                profile_base_path=worktree_path,
             ),
             "phase_names": [phase],
             "run_healthchecks": False,
@@ -514,6 +536,8 @@ class HostedValidationDelegate:
             compose_project=compose_project,
             compose_file=compose_file,
             include_agent_auth_context=True,
+            omit_credential_env_keys=True,
+            env_file_base_path=worktree_path,
         )
         terminal = await self._run_operation(
             workspace_id=workspace_id,

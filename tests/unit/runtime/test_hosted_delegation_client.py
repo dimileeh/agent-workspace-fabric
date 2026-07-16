@@ -271,7 +271,7 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "secret-token" not in body_blob
     assert "repair prompt" not in body_blob
-    assert seen["body"]["cli_args"] == ["codex", "exec", "-"]
+    assert seen["body"]["cli_args"] == []
     assert base64.b64decode(seen["body"]["prompt_stdin_base64"]) == b"repair prompt"
     assert seen["body"]["pr_identity"] == {
         "repo_url": "git@github.com:dimileeh/aira-web.git",
@@ -359,7 +359,7 @@ networks:
         )
 
     assert seen["body"]["profile"]["name"] == "hosted-agent"
-    assert seen["body"]["profile"]["runtime"]["environment"]["API_TOKEN"] == "${API_TOKEN}"
+    assert "API_TOKEN" not in seen["body"]["profile"]["runtime"]["environment"]
     rendered_stack = seen["body"]["rendered_stack"]
     assert rendered_stack["schema"] == "hosted_validation_rendered_stack.v1"
     assert rendered_stack["compose_project"] == "awf_ws_hosted"
@@ -368,14 +368,15 @@ networks:
     backend = rendered_stack["services"]["backend"]
     assert backend["environment"] == {
         "PUBLIC_URL": "http://backend:8000",
-        "API_TOKEN": "${API_TOKEN}",
     }
+    assert "API_TOKEN" not in backend["environment"]
     assert backend["depends_on"] == {"postgres": {"condition": "service_healthy"}}
     assert rendered_stack["networks"] == {"awf_net": {"name": "awf-ws-hosted-net"}}
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "literal-profile-secret" not in body_blob
     assert "literal-service-secret" not in body_blob
     assert "literal-agent-secret" not in body_blob
+    assert "${API_TOKEN}" not in body_blob
     assert "/home/user/.codex" not in body_blob
 
 

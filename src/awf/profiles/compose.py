@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit, urlunsplit
 
 import yaml
 
@@ -243,12 +243,18 @@ def _relative_url_value_has_secret_credential_field(value: str) -> bool:
 
 
 def _url_component_variants(component: str) -> tuple[str, ...]:
+    """Raw plus percent- and form-decoded variants for secret scanning.
+
+    ``unquote`` alone leaves form-urlencoded ``+`` as ``+``, so bearer/PEM
+    checks that require whitespace would miss ``Bearer+token`` style values.
+    """
     if not component:
         return ()
-    decoded = unquote(component)
-    if decoded == component:
-        return (component,)
-    return (component, decoded)
+    variants: list[str] = [component]
+    for decoded in (unquote(component), unquote_plus(component)):
+        if decoded not in variants:
+            variants.append(decoded)
+    return tuple(variants)
 
 
 def _is_passwordless_git_ssh_url_userinfo(value: str, scheme: str) -> bool:

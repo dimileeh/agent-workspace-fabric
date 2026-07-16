@@ -368,12 +368,17 @@ async def _run_baseline_coverage_preflight(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    worktree_path: Path | None = None,
 ) -> ValidationCoverageResult | None:
     """Run the baseline coverage preflight check before agent work begins.
 
     Skips when the profile sets ``baseline_coverage`` to ``"skip"`` or
     when no coverage command is configured. Returns ``None`` on skip;
     logs and returns the result even if below threshold.
+
+    ``worktree_path`` is forwarded to hosted coverage so repo-relative
+    profile ``env_file`` entries resolve from the checkout (same as phases
+    and final coverage), not from the generated Compose directory.
     """
     coverage = profile.validation.coverage
     if profile.validation.strategy.baseline_coverage == "skip":
@@ -391,6 +396,7 @@ async def _run_baseline_coverage_preflight(
         compose_file=compose_file,
         profile=profile,
         phase="baseline_coverage",
+        worktree_path=worktree_path,
     )
     if result is not None and not result.ok:
         _log.info(
