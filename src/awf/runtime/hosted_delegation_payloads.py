@@ -515,9 +515,11 @@ def _hosted_validation_env_file_declares_postgres_password(
 ) -> bool:
     """Whether a Compose service env_file declares a Postgres password source.
 
-    Detects ``POSTGRES_PASSWORD`` and ``POSTGRES_PASSWORD_FILE``. Scan assignment
-    keys only: full ``compose_env_file_values`` raises on unset required
-    interpolations and would miss a sibling password declaration.
+    Detects ``POSTGRES_PASSWORD`` and ``POSTGRES_PASSWORD_FILE``, including bare
+    pass-through lines without ``=/:`` (Compose env_file ``VAR`` form; same
+    family as list ``environment: - POSTGRES_PASSWORD``). Scan keys only: full
+    ``compose_env_file_values`` raises on unset required interpolations and
+    would miss a sibling password declaration.
     """
     for env_file_path in compose_service_env_file_paths(env_file, compose_dir=compose_dir):
         try:
@@ -530,6 +532,12 @@ def _hosted_validation_env_file_declares_postgres_password(
                 continue
             match = _COMPOSE_ENV_FILE_ASSIGNMENT_KEY_PATTERN.match(line)
             if match is not None and match.group("key") in _POSTGRES_PASSWORD_DECLARATION_NAMES:
+                return True
+            # Bare VAR (no =/:): Compose may pass through from the host env.
+            bare_key = stripped.split("#", 1)[0].strip()
+            if bare_key.startswith("export "):
+                bare_key = bare_key[7:].strip()
+            if bare_key in _POSTGRES_PASSWORD_DECLARATION_NAMES:
                 return True
     return False
 

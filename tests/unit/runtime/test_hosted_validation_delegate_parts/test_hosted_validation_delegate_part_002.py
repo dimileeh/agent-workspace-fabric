@@ -1156,6 +1156,82 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_env_file_bare_postgres_password_injects_trust(
+    tmp_path: Path,
+) -> None:
+    """Bare env_file POSTGRES_PASSWORD (no =/:) must still inject trust in omit mode.
+
+    Compose treats a VAR line without a separator as a host-env pass-through
+    (same family as list ``environment: - POSTGRES_PASSWORD``). Detection that
+    requires ``=/:`` misses it, so omit mode would drop the password source
+    without injecting trust and Postgres would fail to start on Cloud.
+    """
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD" not in body
+
+
+@pytest.mark.unit
+def test_rendered_stack_env_file_bare_postgres_password_file_injects_trust(
+    tmp_path: Path,
+) -> None:
+    """Bare env_file POSTGRES_PASSWORD_FILE must inject trust in omit mode."""
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD_FILE\nPOSTGRES_USER=awf\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: postgres:16
+    env_file:
+      - postgres.env
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+        omit_credential_env_keys=True,
+    )
+
+    assert payload is not None
+    environment = payload["services"]["postgres"]["environment"]
+    assert environment == {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+    body = json.dumps(payload, sort_keys=True)
+    assert "POSTGRES_PASSWORD_FILE" not in body
+
+
+@pytest.mark.unit
 def test_rendered_stack_env_file_postgres_password_injects_trust(
     tmp_path: Path,
 ) -> None:
