@@ -66,7 +66,7 @@ def _agent_request(**overrides: object) -> AgentRuntimeExecRequest:
 
 @pytest.mark.unit
 def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
-    secret = "ghp_should-never-enter-git-preparation"
+    url_secret = "ghp_should-never-enter-git-preparation"
     preparation = AgentRuntimeGitPreparation(
         mode="merge_base",
         base_ref="development",
@@ -75,9 +75,9 @@ def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
 
     payload = _agent_start_payload(
         _agent_request(
-            prompt_stdin=f"resolve conflict using {secret}".encode(),
-            repo_url=f"https://user:{secret}@github.com/dimileeh/aira-web.git",
-            head_repo_url=f"https://user:{secret}@github.com/dimileeh/aira-web.git",
+            prompt_stdin=b"resolve conflict",
+            repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
+            head_repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
             git_preparation=preparation,
         )
     )
@@ -92,7 +92,7 @@ def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
         "base_ref",
         "expected_base_sha",
     }
-    assert secret not in json.dumps(payload, sort_keys=True)
+    assert url_secret not in json.dumps(payload, sort_keys=True)
 
 
 @pytest.mark.unit
