@@ -879,9 +879,10 @@ async def _run_sync_base(
             getattr(getattr(runner._deps, "adapter", None), "is_hosted", False)
             and conflicting_files
         ):
-            base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git(
-                "rev-parse", f"origin/{base_branch}"
-            )
+            # The mirror's origin/<base> ref is shared across worktrees and can
+            # advance after this merge. MERGE_HEAD is worktree-local and records
+            # the exact commit that produced the conflict being delegated.
+            base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git("rev-parse", "MERGE_HEAD")
             expected_base_sha = base_sha_stdout.strip()
             if base_sha_rc != 0 or re.fullmatch(r"[0-9a-f]{40}", expected_base_sha) is None:
                 return _GitPushResult(
@@ -892,7 +893,7 @@ async def _run_sync_base(
                     reason_code=_SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
                     details={
                         "base_ref": base_branch,
-                        "remote_ref": f"origin/{base_branch}",
+                        "merge_ref": "MERGE_HEAD",
                     },
                 )
             git_preparation = AgentRuntimeGitPreparation(

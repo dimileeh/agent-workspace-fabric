@@ -19,6 +19,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 _START_HEAD = "a" * 40
 _BASE_SHA = "b" * 40
 _TERMINAL_HEAD = "c" * 40
+_ADVANCED_BASE_SHA = "d" * 40
 
 
 class _SyncCommandRunner:
@@ -26,9 +27,11 @@ class _SyncCommandRunner:
         self,
         *,
         base_result: CommandResult | None = None,
+        remote_base_sha: str | None = None,
         terminal_head: str = _TERMINAL_HEAD,
     ) -> None:
         self.base_result = base_result or CommandResult(0, f"{_BASE_SHA}\n", "")
+        self.remote_base_sha = remote_base_sha
         self.terminal_head = terminal_head
         self.calls: list[list[str]] = []
         self.envs: list[Mapping[str, str] | None] = []
@@ -52,8 +55,12 @@ class _SyncCommandRunner:
             return CommandResult(1, "", "CONFLICT (content): merge conflict")
         if command == ["status", "--porcelain"]:
             return CommandResult(0, "UU src/conflict.py\n", "")
-        if command == ["rev-parse", "origin/development"]:
+        if command == ["rev-parse", "MERGE_HEAD"]:
             return self.base_result
+        if command == ["rev-parse", "origin/development"]:
+            if self.remote_base_sha is None:
+                return self.base_result
+            return CommandResult(0, f"{self.remote_base_sha}\n", "")
         if command == [
             "fetch",
             "--no-tags",
@@ -214,12 +221,37 @@ async def test_hosted_sync_base_conflict_emits_exact_pinned_git_preparation(
     rev_parse_index = next(
         index
         for index, call in enumerate(command_runner.calls)
-        if call[-2:] == ["rev-parse", "origin/development"]
+        if call[-2:] == ["rev-parse", "MERGE_HEAD"]
     )
     rev_parse_env = command_runner.envs[rev_parse_index]
     assert rev_parse_env is not None
     assert "GIT_OBJECT_DIRECTORY" not in rev_parse_env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in rev_parse_env
+
+
+@pytest.mark.unit
+async def test_hosted_sync_base_pins_failed_merge_when_remote_ref_advances(
+    tmp_path: Path,
+) -> None:
+    command_runner = _SyncCommandRunner(remote_base_sha=_ADVANCED_BASE_SHA)
+    harness = _SyncBaseHarness(
+        tmp_path,
+        adapter=_HostedAdapter(),
+        command_runner=command_runner,
+    )
+
+    result = await _run_conflicted_sync(harness)
+
+    assert result.pushed is True
+    assert harness.agent_calls[0]["git_preparation"] == AgentRuntimeGitPreparation(
+        mode="merge_base",
+        base_ref="development",
+        expected_base_sha=_BASE_SHA,
+    )
+    assert any(call[-2:] == ["rev-parse", "MERGE_HEAD"] for call in command_runner.calls)
+    assert not any(
+        call[-2:] == ["rev-parse", "origin/development"] for call in command_runner.calls
+    )
 
 
 @pytest.mark.unit
@@ -272,7 +304,7 @@ async def test_hosted_sync_base_conflict_fails_closed_for_unusable_base_sha(
     assert result.terminal_monitor_failure is True
     assert result.details == {
         "base_ref": "development",
-        "remote_ref": "origin/development",
+        "merge_ref": "MERGE_HEAD",
     }
     assert harness.agent_calls == []
     assert adapter.calls == []
