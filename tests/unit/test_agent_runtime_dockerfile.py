@@ -107,7 +107,19 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert 'ln -sf "$(command -v node)" /usr/local/bin/node' not in dockerfile
     assert "cursor-agent" in dockerfile
     assert "install -d -m 0755 /opt/cursor" in dockerfile
-    assert "curl https://cursor.com/install -fsS | HOME=/opt/cursor bash" in dockerfile
+    cursor_installer = (
+        "curl --fail --show-error --silent --location \\\n"
+        "      --retry 5 \\\n"
+        "      --retry-delay 2 \\\n"
+        "      --retry-all-errors \\\n"
+        "      --connect-timeout 20 \\\n"
+        "      --max-time 300 \\\n"
+        "      --output /tmp/cursor-install.sh \\\n"
+        "      https://cursor.com/install; \\\n"
+        "    HOME=/opt/cursor bash /tmp/cursor-install.sh; \\\n"
+        "    rm -f /tmp/cursor-install.sh"
+    )
+    assert cursor_installer in dockerfile
     assert 'cursor_path="/opt/cursor/.local/bin/cursor-agent"' in dockerfile
     assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
     assert 'install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
@@ -118,7 +130,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index("curl https://cursor.com/install -fsS")
+    ) < dockerfile.index(cursor_installer)
     assert (
         "USER agent\n"
         "WORKDIR /workspace\n\n"

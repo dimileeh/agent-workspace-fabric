@@ -161,7 +161,16 @@ ARG CCUSAGE_VERSION=20.0.3
 # stable standalone version pin for the Linux installer.
 RUN set -eux; \
     install -d -m 0755 /opt/cursor; \
-    curl https://cursor.com/install -fsS | HOME=/opt/cursor bash; \
+    curl --fail --show-error --silent --location \
+      --retry 5 \
+      --retry-delay 2 \
+      --retry-all-errors \
+      --connect-timeout 20 \
+      --max-time 300 \
+      --output /tmp/cursor-install.sh \
+      https://cursor.com/install; \
+    HOME=/opt/cursor bash /tmp/cursor-install.sh; \
+    rm -f /tmp/cursor-install.sh; \
     cursor_path="/opt/cursor/.local/bin/cursor-agent"; \
     if [ ! -e "$cursor_path" ]; then \
       echo "cursor-agent was not installed by the Cursor installer" >&2; \

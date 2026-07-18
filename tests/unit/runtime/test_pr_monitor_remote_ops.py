@@ -92,6 +92,14 @@ def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
 
 
 @pytest.mark.unit
+def test_git_push_failure_outcome_maps_sync_base_merge_failure_separately() -> None:
+    assert (
+        _git_push_failure_outcome(_make_push_result("SYNC_BASE_MERGE_FAILED"))
+        == "sync_base_merge_failed"
+    )
+
+
+@pytest.mark.unit
 def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() -> None:
     """Roll-back failure on pre-push validation should remain terminal."""
     assert _make_push_result("PRE_PUSH_VALIDATION_ROLLBACK_FAILED").terminal_monitor_failure is True
