@@ -250,6 +250,8 @@ class _WorkflowScopePushBlock:
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
+    if push_result.reason_code == _SYNC_BASE_MERGE_FAILED_REASON:
+        return "sync_base_merge_failed"
     if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
         return "pre_push_validation_toolchain_missing"
     if push_result.reason_code in {
