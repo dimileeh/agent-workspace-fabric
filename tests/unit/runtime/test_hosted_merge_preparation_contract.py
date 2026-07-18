@@ -1,4 +1,4 @@
-"""Focused hosted SyncBase git-preparation contract regressions."""
+"""Focused hosted SyncBase merge-preparation contract regressions."""
 
 from __future__ import annotations
 
