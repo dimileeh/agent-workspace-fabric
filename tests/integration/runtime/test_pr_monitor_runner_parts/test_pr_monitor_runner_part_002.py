@@ -462,6 +462,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
         cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout=("b" * 40) + "\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout="SYNC-BASE-SHA\n")  # rev-parse origin/<base>
         # Outer iter 2: CLEAN → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>

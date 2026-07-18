@@ -121,6 +121,7 @@ _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 _SYNC_BASE_MERGE_FAILED_REASON = "SYNC_BASE_MERGE_FAILED"
 _SYNC_BASE_GIT_PREPARATION_FAILED_REASON = "SYNC_BASE_GIT_PREPARATION_FAILED"
+_SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON = "SYNC_BASE_PUSHED_HEAD_UNAVAILABLE"
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 # Orphaned AWF branch refs surface as ``refs/heads/awf/ws_...`` and, for
@@ -208,6 +209,7 @@ class _GitPushResult:
                 _REPAIR_DIRTY_COMMIT_FAILED_REASON,
                 _SYNC_BASE_MERGE_FAILED_REASON,
                 _SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                _SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
                 "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -252,6 +254,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
     if push_result.reason_code == _SYNC_BASE_MERGE_FAILED_REASON:
         return "sync_base_merge_failed"
+    if push_result.reason_code == _SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON:
+        return "sync_base_pushed_head_unavailable"
     if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
         return "pre_push_validation_toolchain_missing"
     if push_result.reason_code in {
@@ -1178,7 +1182,7 @@ async def _run_sync_base(
             stderr=protected_scope_block.message,
             reason_code=protected_scope_block.reason_code,
         )
-    return await runner._validated_git_push_result(
+    push_result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
@@ -1188,6 +1192,40 @@ async def _run_sync_base(
         state=state,
         operation_start_head=operation_start_head,
     )
+    if (
+        state is None
+        or push_result.paused_into_blocked
+        or push_result.recovered_by_resync
+        or push_result.failed
+        or not push_result.pushed
+    ):
+        return push_result
+
+    pushed_head = await runner._rev_parse_head(worktree_path)
+    if pushed_head is None or re.fullmatch(r"[0-9a-fA-F]{40}", pushed_head) is None:
+        head_resolution = "unavailable" if pushed_head is None else "invalid"
+        details: dict[str, object] = {
+            "phase": "post_sync_base_push_head_resolution",
+            "push_reported_success": True,
+            "head_resolution": head_resolution,
+        }
+        if pushed_head is not None:
+            details["resolved_head_length"] = len(pushed_head)
+        return _GitPushResult(
+            pushed=True,
+            failed=True,
+            returncode=1,
+            stdout=push_result.stdout,
+            stderr=(
+                "SyncBase push succeeded, but the pushed local HEAD could not be "
+                "resolved to a valid full commit SHA."
+            ),
+            reason_code=_SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
+            details=details,
+        )
+
+    cast("MonitorState", state).last_push_sha = pushed_head.lower()
+    return push_result
 
 
 async def _refresh_staleness_after_sync_base(
