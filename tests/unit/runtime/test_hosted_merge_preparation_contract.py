@@ -27,10 +27,12 @@ class _SyncCommandRunner:
         self,
         *,
         base_result: CommandResult | None = None,
+        status_result: CommandResult | None = None,
         remote_base_sha: str | None = None,
         terminal_head: str = _TERMINAL_HEAD,
     ) -> None:
         self.base_result = base_result or CommandResult(0, f"{_BASE_SHA}\n", "")
+        self.status_result = status_result
         self.remote_base_sha = remote_base_sha
         self.terminal_head = terminal_head
         self.calls: list[list[str]] = []
@@ -54,6 +56,8 @@ class _SyncCommandRunner:
             self.conflicted_index = True
             return CommandResult(1, "", "CONFLICT (content): merge conflict")
         if command == ["status", "--porcelain"]:
+            if self.status_result is not None:
+                return self.status_result
             return CommandResult(0, "UU src/conflict.py\n", "")
         if command == ["rev-parse", "MERGE_HEAD"]:
             return self.base_result
@@ -306,6 +310,42 @@ async def test_hosted_sync_base_conflict_fails_closed_for_unusable_base_sha(
         "base_ref": "development",
         "merge_ref": "MERGE_HEAD",
     }
+    assert harness.agent_calls == []
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status_stderr", "expected_stderr"),
+    [
+        ("fatal: could not inspect index", "fatal: could not inspect index"),
+        ("", "could not inspect conflicts for hosted sync-base preparation"),
+    ],
+    ids=("preserves-stderr", "fallback-message"),
+)
+async def test_hosted_sync_base_conflict_fails_closed_when_status_inspection_fails(
+    tmp_path: Path,
+    status_stderr: str,
+    expected_stderr: str,
+) -> None:
+    command_runner = _SyncCommandRunner(status_result=CommandResult(73, "", status_stderr))
+    adapter = _HostedAdapter()
+    harness = _SyncBaseHarness(
+        tmp_path,
+        adapter=adapter,
+        command_runner=command_runner,
+        actual_hosted_recovery=True,
+    )
+
+    result = await _run_conflicted_sync(harness)
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 73
+    assert result.stderr == expected_stderr
+    assert result.reason_code == "SYNC_BASE_GIT_PREPARATION_FAILED"
+    assert result.terminal_monitor_failure is True
+    assert result.details == {"base_ref": "development"}
     assert harness.agent_calls == []
     assert adapter.calls == []
 

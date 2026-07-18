@@ -868,17 +868,25 @@ async def _run_sync_base(
         )
     rc, _stdout, stderr = await _git(*merge_args)
     if rc != 0:
-        _rc_status, status_out, _ = await _git("status", "--porcelain")
+        status_rc, status_out, status_stderr = await _git("status", "--porcelain")
+        is_hosted = bool(getattr(getattr(runner._deps, "adapter", None), "is_hosted", False))
+        if is_hosted and status_rc != 0:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=status_rc,
+                stderr=status_stderr
+                or "could not inspect conflicts for hosted sync-base preparation",
+                reason_code=_SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                details={"base_ref": base_branch},
+            )
         conflicting_files = tuple(
             line[3:]
             for line in status_out.splitlines()
             if line.startswith(("UU ", "AA ", "DD ", "AU ", "UA ", "DU ", "UD "))
         )
         git_preparation: AgentRuntimeGitPreparation | None = None
-        if (
-            getattr(getattr(runner._deps, "adapter", None), "is_hosted", False)
-            and conflicting_files
-        ):
+        if is_hosted and conflicting_files:
             # The mirror's origin/<base> ref is shared across worktrees and can
             # advance after this merge. MERGE_HEAD is worktree-local and records
             # the exact commit that produced the conflict being delegated.
