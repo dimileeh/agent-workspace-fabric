@@ -875,7 +875,10 @@ async def _run_sync_base(
             if line.startswith(("UU ", "AA ", "DD ", "AU ", "UA ", "DU ", "UD "))
         )
         git_preparation: AgentRuntimeGitPreparation | None = None
-        if runner._deps.adapter.is_hosted and conflicting_files:
+        if (
+            getattr(getattr(runner._deps, "adapter", None), "is_hosted", False)
+            and conflicting_files
+        ):
             base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git(
                 "rev-parse", f"origin/{base_branch}"
             )
