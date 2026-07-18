@@ -35,6 +35,7 @@ from awf.adapters.codex import CodexAdapter
 from awf.adapters.runtime_executor import (
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
+    AgentRuntimeGitPreparation,
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.db.enums import AgentRuntime
@@ -201,6 +202,33 @@ class TestRuntimeExecutorSeam:
         assert request.effort == "xhigh"
         assert request.wall_timeout_seconds is not None and request.wall_timeout_seconds > 0
         assert request.idle_timeout_seconds is not None and request.idle_timeout_seconds > 0
+        assert request.git_preparation is None
+
+    @pytest.mark.unit
+    async def test_injected_executor_receives_explicit_git_preparation_unchanged(
+        self,
+    ) -> None:
+        executor = _RecordingExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+        preparation = AgentRuntimeGitPreparation(
+            mode="merge_base",
+            base_ref="development",
+            expected_base_sha="b" * 40,
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_hosted_conflict",
+            git_preparation=preparation,
+        )
+
+        assert executor.calls[0].git_preparation is preparation
 
     @pytest.mark.unit
     async def test_injected_executor_receives_compose_context(self, tmp_path: Path) -> None:

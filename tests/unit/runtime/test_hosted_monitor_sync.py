@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.control.executor.monitor_handoff import _hosted_handoff_pr_identity
@@ -83,9 +84,11 @@ class _HostedAdapterWithTerminalHead:
     def __init__(self, terminal_head_sha: str) -> None:
         self.terminal_head_sha = terminal_head_sha
         self.hosted_pr_identities: list[dict[str, object] | None] = []
+        self.calls: list[dict[str, object]] = []
         self.worktree_paths: list[object] = []
 
     async def run(self, **kwargs: object) -> AgentRunResult:
+        self.calls.append(dict(kwargs))
         hosted_pr_identity = kwargs.get("hosted_pr_identity")
         identity = hosted_pr_identity if isinstance(hosted_pr_identity, dict) else None
         self.hosted_pr_identities.append(identity)
@@ -125,8 +128,10 @@ class _HostedAdapterRetriesAfterTerminalHead:
     def __init__(self, terminal_head_sha: str) -> None:
         self.terminal_head_sha = terminal_head_sha
         self.hosted_pr_identities: list[dict[str, object] | None] = []
+        self.git_preparations: list[object] = []
 
     async def run(self, **kwargs: object) -> AgentRunResult:
+        self.git_preparations.append(kwargs.get("git_preparation"))
         hosted_pr_identity = kwargs.get("hosted_pr_identity")
         identity = hosted_pr_identity if isinstance(hosted_pr_identity, dict) else None
         self.hosted_pr_identities.append(identity)
@@ -490,6 +495,58 @@ async def test_hosted_agent_success_without_terminal_head_fails_closed(
 
 
 @pytest.mark.unit
+async def test_ordinary_hosted_monitor_run_omits_git_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sha = "b" * 40
+    adapter = _HostedAdapterWithTerminalHead(sha)
+    context = _monitor_context_with_adapter(adapter, worktrees_root=tmp_path)
+
+    async def _sync(*_args: object, **_kwargs: object) -> str:
+        return sha
+
+    monkeypatch.setattr(agent_service_recovery, "_sync_hosted_worktree_to_terminal_head", _sync)
+
+    await _run_monitor_agent_with_service_recovery(
+        context,
+        workspace_id="ws_hosted",
+        compose_project="awf_ws_hosted",
+        compose_file=Path("/tmp/missing-compose.yml"),
+        prompt="fix ordinary review",
+        log_source="monitor.review",
+    )
+
+    assert "git_preparation" not in adapter.calls[0]
+
+
+@pytest.mark.unit
+async def test_hosted_monitor_git_preparation_base_ref_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    adapter = _HostedAdapterWithTerminalHead("b" * 40)
+    preparation = AgentRuntimeGitPreparation(
+        mode="merge_base",
+        base_ref="development",
+        expected_base_sha="c" * 40,
+    )
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            _monitor_context_with_adapter(adapter, worktrees_root=tmp_path),
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix merge conflict",
+            log_source="recovery",
+            git_preparation=preparation,
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH"
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
 async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
     tmp_path: Path,
 ) -> None:
@@ -671,3 +728,45 @@ async def test_hosted_agent_retry_refreshes_pr_identity_after_terminal_head_sync
     assert state.last_push_sha == sha
     assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
     assert adapter.hosted_pr_identities[1]["expected_head_sha"] == sha
+
+
+@pytest.mark.unit
+async def test_hosted_agent_retry_preserves_explicit_git_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    runner = _Runner(fetched_sha=sha)
+    adapter = _HostedAdapterRetriesAfterTerminalHead(sha)
+    context = _monitor_context_with_runner(tmp_path, runner=runner, adapter=adapter)
+    preparation = AgentRuntimeGitPreparation(
+        mode="merge_base",
+        base_ref="main",
+        expected_base_sha="c" * 40,
+    )
+
+    async def _recover(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def _skip_guards(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        agent_service_recovery, "_recover_monitor_agent_service_after_error", _recover
+    )
+    monkeypatch.setattr(
+        agent_service_recovery, "_rerun_monitor_agent_pre_launch_guards", _skip_guards
+    )
+
+    await _run_monitor_agent_with_service_recovery(
+        context,
+        workspace_id="ws_hosted",
+        compose_project="awf_ws_hosted",
+        compose_file=Path("/tmp/missing-compose.yml"),
+        prompt="fix merge conflict",
+        log_source="recovery",
+        state=MonitorState(last_push_sha="a" * 40),
+        git_preparation=preparation,
+    )
+
+    assert adapter.git_preparations == [preparation, preparation]

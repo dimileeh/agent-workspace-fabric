@@ -10,6 +10,9 @@ Operation state machine for AWF Cloud implementers:
 
 1. Core starts an operation with ``POST {base_url}/v1/agent-runs`` or
    ``POST {base_url}/v1/validation-runs``.
+   Agent runs normally omit ``git_preparation``; a SyncBase conflict may set
+   ``{mode: merge_base, base_ref, expected_base_sha}``, pinned to Core's exact
+   fetched base commit.
 2. The request uses ``Authorization: Bearer <configured token>``. The token is
    never sent in the body or query string.
 3. The start response returns ``operation_id``, ``workspace_id``, and an

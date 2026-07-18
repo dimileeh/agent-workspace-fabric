@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
@@ -118,6 +119,7 @@ _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
+_SYNC_BASE_GIT_PREPARATION_FAILED_REASON = "SYNC_BASE_GIT_PREPARATION_FAILED"
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 # Orphaned AWF branch refs surface as ``refs/heads/awf/ws_...`` and, for
@@ -203,6 +205,8 @@ class _GitPushResult:
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
                 _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                _SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -870,6 +874,29 @@ async def _run_sync_base(
             for line in status_out.splitlines()
             if line.startswith(("UU ", "AA ", "DD ", "AU ", "UA ", "DU ", "UD "))
         )
+        git_preparation: AgentRuntimeGitPreparation | None = None
+        if runner._deps.adapter.is_hosted and conflicting_files:
+            base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git(
+                "rev-parse", f"origin/{base_branch}"
+            )
+            expected_base_sha = base_sha_stdout.strip()
+            if base_sha_rc != 0 or re.fullmatch(r"[0-9a-f]{40}", expected_base_sha) is None:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=base_sha_rc or 1,
+                    stderr="could not pin the fetched base commit for hosted conflict repair",
+                    reason_code=_SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                    details={
+                        "base_ref": base_branch,
+                        "remote_ref": f"origin/{base_branch}",
+                    },
+                )
+            git_preparation = AgentRuntimeGitPreparation(
+                mode="merge_base",
+                base_ref=base_branch,
+                expected_base_sha=expected_base_sha,
+            )
         prompt = sync_base_conflict_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -921,17 +948,29 @@ async def _run_sync_base(
                     details=repair_details,
                 )
         try:
-            await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-                state=state,
-            )
+            agent_run_kwargs: dict[str, Any] = {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": compose_file,
+                "prompt": prompt,
+                "log_source": "recovery",
+                "command_evidence": command_evidence,
+                "operation_start_head": operation_start_head,
+                "state": state,
+            }
+            if git_preparation is not None:
+                agent_run_kwargs["git_preparation"] = git_preparation
+            await runner._run_monitor_agent_with_service_recovery(**agent_run_kwargs)
         except AgentRunError as exc:
+            if exc.reason_code == "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH":
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=exc.result.returncode,
+                    stderr=exc.result.stderr,
+                    reason_code=exc.reason_code,
+                    details=exc.details,
+                )
             agent_run_err = exc
             append_command_evidence(
                 command_evidence,
