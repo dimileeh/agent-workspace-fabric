@@ -813,11 +813,23 @@ async def _run_sync_base(
     if head_result is not None:
         return head_result
 
-    async def _git(*args: str) -> tuple[int, str, str]:
+    async def _git(
+        *args: str,
+        clear_identity_overrides: bool = False,
+    ) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
+        env = git_env_without_object_lookup_overrides()
+        if clear_identity_overrides:
+            for key in (
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ):
+                env.pop(key, None)
         r = await runner._deps.runner.run(
             git_worktree_command(worktree_path, *args),
-            env=git_env_without_object_lookup_overrides(),
+            env=env,
         )
         return r.returncode, r.stdout, r.stderr
 
@@ -868,7 +880,11 @@ async def _run_sync_base(
                 f"Merge remote-tracking branch 'origin/{base_branch}'", task_tag
             ),
         )
-    rc, _stdout, stderr = await _git(*git_identity_config_args(), *merge_args)
+    rc, _stdout, stderr = await _git(
+        *git_identity_config_args(),
+        *merge_args,
+        clear_identity_overrides=True,
+    )
     if rc != 0:
         status_rc, status_out, status_stderr = await _git("status", "--porcelain")
         conflicting_files = tuple(

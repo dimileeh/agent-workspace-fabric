@@ -105,6 +105,7 @@ class _RecordingRealCommandRunner:
     def __init__(self) -> None:
         self._runner = AsyncioSubprocessRunner()
         self.calls: list[list[str]] = []
+        self.envs: list[Mapping[str, str] | None] = []
 
     async def run(
         self,
@@ -114,6 +115,7 @@ class _RecordingRealCommandRunner:
         **kwargs: object,
     ) -> CommandResult:
         self.calls.append(args)
+        self.envs.append(env)
         return await self._runner.run(args, env=env, **kwargs)
 
 
@@ -326,6 +328,14 @@ async def test_clean_sync_base_merge_uses_command_scoped_awf_identity_without_de
 
     worktree = tmp_path / "ws_hosted_conflict"
     base_sha = _seed_cleanly_mergeable_histories(worktree, env=isolated_git_env)
+    inherited_identity = {
+        "GIT_AUTHOR_NAME": "Ambient Author",
+        "GIT_AUTHOR_EMAIL": "ambient-author@example.com",
+        "GIT_COMMITTER_NAME": "Ambient Committer",
+        "GIT_COMMITTER_EMAIL": "ambient-committer@example.com",
+    }
+    for key, value in inherited_identity.items():
+        monkeypatch.setenv(key, value)
     command_runner = _RecordingRealCommandRunner()
     adapter = _HostedAdapter()
     harness = _SyncBaseHarness(
@@ -371,8 +381,12 @@ async def test_clean_sync_base_merge_uses_command_scoped_awf_identity_without_de
     )
     assert local_name.returncode == 1
     merge_call = next(call for call in command_runner.calls if "--no-edit" in call)
+    merge_call_index = command_runner.calls.index(merge_call)
     merge_index = merge_call.index("merge")
     assert merge_call[merge_index - 4 : merge_index] == git_identity_config_args()
+    merge_env = command_runner.envs[merge_call_index]
+    assert merge_env is not None
+    assert inherited_identity.keys().isdisjoint(merge_env)
     assert harness.agent_calls == []
     assert adapter.calls == []
 
