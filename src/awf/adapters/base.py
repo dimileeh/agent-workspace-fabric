@@ -24,6 +24,7 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
     AgentRuntimeExecutor,
+    AgentRuntimeGitPreparation,
 )
 from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.common.commands import (
@@ -349,6 +350,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None = None,
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
+        git_preparation: AgentRuntimeGitPreparation | None = None,
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
     ) -> AgentRunResult:
@@ -381,6 +383,7 @@ class AgentAdapter(ABC):
                 workspace_id=workspace_id,
                 log_source=log_source,
                 hosted_pr_identity=hosted_pr_identity,
+                git_preparation=git_preparation,
                 profile=profile,
                 worktree_path=worktree_path,
             )
@@ -507,6 +510,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         log_source: str,
         hosted_pr_identity: dict[str, Any] | None,
+        git_preparation: AgentRuntimeGitPreparation | None,
         profile: WorkspaceProfile | None,
         worktree_path: Path | None = None,
     ) -> AgentRunResult:
@@ -682,6 +686,7 @@ class AgentAdapter(ABC):
             head_repo_slug=_hosted_identity_str(hosted_pr_identity, "head_repo_slug"),
             owned_paths=_hosted_identity_str_tuple(hosted_pr_identity, "owned_paths"),
             expected_head_sha=_hosted_identity_str(hosted_pr_identity, "expected_head_sha"),
+            git_preparation=git_preparation,
             on_stdout=on_stdout_cb,
             on_stderr=on_stderr_cb,
         )

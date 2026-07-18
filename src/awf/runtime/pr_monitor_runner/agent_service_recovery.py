@@ -16,6 +16,7 @@ from awf.adapters.provider_failures import (
     AGENT_TIMEOUT,
     classify_provider_failure,
 )
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
@@ -76,6 +77,7 @@ _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEO
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS = 300
 _HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON = "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+_HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH_REASON = "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH"
 
 
 async def _run_monitor_agent_with_service_recovery(
@@ -89,6 +91,7 @@ async def _run_monitor_agent_with_service_recovery(
     command_evidence: list[str] | None = None,
     operation_start_head: str | None = None,
     state: Any | None = None,
+    git_preparation: AgentRuntimeGitPreparation | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -97,18 +100,40 @@ async def _run_monitor_agent_with_service_recovery(
     )
     restart_attempts = 0
     while True:
+        if self._deps.adapter.is_hosted and git_preparation is not None:
+            trusted_base_ref = _nonblank_str((hosted_pr_identity or {}).get("base_ref"))
+            if trusted_base_ref != git_preparation.base_ref:
+                raise AgentRunError(
+                    agent=self._deps.adapter.name,
+                    result=CommandResult(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "hosted git preparation base ref does not match "
+                            "the trusted PR base identity"
+                        ),
+                    ),
+                    reason_code=_HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH_REASON,
+                    details={
+                        "preparation_base_ref": git_preparation.base_ref,
+                        "trusted_base_ref": trusted_base_ref,
+                    },
+                )
         try:
             if self._deps.adapter.is_hosted:
-                result = await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source=log_source,
-                    hosted_pr_identity=hosted_pr_identity,
-                    profile=getattr(self, "_workspace_profile", None),
-                    worktree_path=self._worktrees_root / workspace_id,
-                )
+                hosted_run_kwargs: dict[str, Any] = {
+                    "compose_project": compose_project,
+                    "compose_file": compose_file,
+                    "prompt": prompt,
+                    "workspace_id": workspace_id,
+                    "log_source": log_source,
+                    "hosted_pr_identity": hosted_pr_identity,
+                    "profile": getattr(self, "_workspace_profile", None),
+                    "worktree_path": self._worktrees_root / workspace_id,
+                }
+                if git_preparation is not None:
+                    hosted_run_kwargs["git_preparation"] = git_preparation
+                result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
                 result = await self._deps.adapter.run(
                     compose_project=compose_project,

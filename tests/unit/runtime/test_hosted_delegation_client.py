@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from awf.adapters.runtime_executor import AgentRuntimeExecRequest
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest, AgentRuntimeGitPreparation
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
@@ -24,6 +24,7 @@ from awf.runtime.hosted_delegation import (
     hosted_delegation_config_from_settings,
     hosted_delegation_config_from_values,
 )
+from awf.runtime.hosted_delegation_payloads import _agent_start_payload
 
 
 def _config(**overrides: object) -> HostedDelegationConfig:
@@ -61,6 +62,57 @@ def _agent_request(**overrides: object) -> AgentRuntimeExecRequest:
     }
     values.update(overrides)
     return AgentRuntimeExecRequest(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
+    url_secret = "ghp_should-never-enter-git-preparation"
+    preparation = AgentRuntimeGitPreparation(
+        mode="merge_base",
+        base_ref="development",
+        expected_base_sha="b" * 40,
+    )
+
+    payload = _agent_start_payload(
+        _agent_request(
+            prompt_stdin=b"resolve conflict",
+            repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
+            head_repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
+            git_preparation=preparation,
+        )
+    )
+
+    assert payload["git_preparation"] == {
+        "mode": "merge_base",
+        "base_ref": "development",
+        "expected_base_sha": "b" * 40,
+    }
+    assert set(payload["git_preparation"]) == {
+        "mode",
+        "base_ref",
+        "expected_base_sha",
+    }
+    assert url_secret not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("log_source", "prompt"),
+    [
+        ("monitor.review", "Resolve review comments and push the repair."),
+        ("monitor.ci", "Fix CI failures on the pull request."),
+        ("validation.repair", "Repair validation failures before merge."),
+    ],
+)
+def test_agent_payload_ordinary_runs_omit_git_preparation(
+    log_source: str,
+    prompt: str,
+) -> None:
+    payload = _agent_start_payload(
+        _agent_request(log_source=log_source, prompt_stdin=prompt.encode())
+    )
+
+    assert "git_preparation" not in payload
 
 
 @pytest.mark.unit
