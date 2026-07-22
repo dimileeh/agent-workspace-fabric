@@ -45,6 +45,9 @@ from awf.control.executor.constants import (
 from awf.control.executor.git_ops import (
     _git_name_lines,
 )
+from awf.control.executor.hosted_validation_sync import (
+    _sync_hosted_validation_fix_head,
+)
 from awf.control.executor.quality_gates import (
     _build_post_agent_precommit_repair_prompt,
     _classify_post_agent_commit_failure,
@@ -1027,6 +1030,47 @@ async def _run_post_agent_semantic_precommit_repair(
             stdout=repair_result.stdout,
             stderr=repair_result.stderr,
         )
+        if getattr(adapter, "is_hosted", False):
+            terminal_head_sha = getattr(repair_result, "terminal_head_sha", None)
+            if not isinstance(terminal_head_sha, str) or not terminal_head_sha.strip():
+                sync_result = CommandResult(
+                    returncode=1,
+                    stdout=repair_result.stdout,
+                    stderr="hosted pre-commit repair completed without terminal_head_sha",
+                    reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                )
+            else:
+                terminal_head_sha = terminal_head_sha.strip()
+                sync_result = await _sync_hosted_validation_fix_head(
+                    self,
+                    worktree_path=worktree_path,
+                    hosted_pr_identity=hosted_pr_identity,
+                    terminal_head_sha=terminal_head_sha,
+                )
+            if not sync_result.ok:
+                reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+                await self._record_post_agent_commit_format_repair(
+                    workspace_id=workspace_id,
+                    repaired_paths=[],
+                    restaged_paths=[],
+                    formatter_paths=classification.format_repair_files,
+                    normalizer_paths=classification.normalizer_repair_files,
+                    failed_hooks=classification.failed_hooks,
+                    repair_strategy="agent",
+                    retry_outcome="error",
+                    reason_code=reason_code,
+                )
+                raise _PostAgentCommitStepError(
+                    stage="hosted terminal head sync",
+                    result=sync_result,
+                    classification=classification,
+                    precommit_repair_attempted=True,
+                    repair_strategy="agent",
+                    reason_code_override=reason_code,
+                )
+            cast(dict[str, Any], hosted_pr_identity)["expected_head_sha"] = (
+                sync_result.stdout.strip()
+            )
     except AgentRunError as exc:
         repair_error = exc
         append_command_evidence(
