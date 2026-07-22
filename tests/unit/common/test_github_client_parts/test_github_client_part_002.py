@@ -63,6 +63,7 @@ def _adoption_pr_payload(
 def _sample_pr_payload(
     *,
     head_sha: str = "abc123",
+    head_ref: str = "feature/current-head",
     created_at: str = "2026-05-06T10:00:00Z",
     updated_at: str = "2026-05-06T10:00:00Z",
     committed_date: str = "2026-05-06T10:00:00Z",
@@ -98,6 +99,7 @@ def _sample_pr_payload(
                         "number": 42,
                         "createdAt": created_at,
                         "updatedAt": updated_at,
+                        "headRefName": head_ref,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
@@ -202,6 +204,7 @@ class TestFetchPrStatusPart001:
             base_behind_count=3,
         )
         assert status.number == 42
+        assert status.head_ref == "feature/current-head"
         assert status.head_sha == "abc123"
         assert status.mergeable == MergeableState.MERGEABLE
         assert status.check_state == CheckState.SUCCESS
@@ -219,6 +222,7 @@ class TestFetchPrStatusPart001:
         assert c.body_excerpt == "Summary with suggestions"
         assert c.blocks_merge is False
         assert status.blocking_reviews == ()
+        assert any("headRefName" in arg for arg in fake.calls[0].args)
 
     @pytest.mark.unit
     async def test_no_reviews_has_no_blocking_reviews(self) -> None:

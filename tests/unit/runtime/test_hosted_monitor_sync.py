@@ -475,6 +475,47 @@ async def test_hosted_pr_identity_matches_handoff_and_recovery_precedence() -> N
     assert await _hosted_pr_identity_for_workspace(context, "ws_hosted") == expected
 
 
+@pytest.mark.parametrize(
+    ("current_head_ref", "expected_head_ref"),
+    [
+        pytest.param("feature/renamed", "feature/renamed", id="renamed"),
+        pytest.param(None, None, id="blank-fails-closed"),
+    ],
+)
+@pytest.mark.unit
+async def test_hosted_pr_identity_uses_checked_current_pr_head_ref(
+    current_head_ref: str | None,
+    expected_head_ref: str | None,
+) -> None:
+    workspace = SimpleNamespace(
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        pr_url="https://github.com/dimileeh/aira-web/pull/751",
+        pr_number=751,
+        branch_base="main",
+        remote_push_branch="feature/old-name",
+        owned_paths=[],
+        monitor_last_commit_sha="a" * 40,
+        task_policy={"pr_adoption": {"head_ref": "feature/adoption-old-name"}},
+    )
+
+    async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
+        return workspace
+
+    state = SimpleNamespace(
+        current_pr_head_ref=current_head_ref,
+        current_pr_head_ref_checked=True,
+        last_push_sha="a" * 40,
+    )
+
+    identity = await _hosted_pr_identity_for_workspace(
+        SimpleNamespace(_load_workspace=_load_workspace),
+        "ws_hosted",
+        state=state,
+    )
+
+    assert identity["head_ref"] == expected_head_ref
+
+
 @pytest.mark.unit
 async def test_hosted_agent_success_without_terminal_head_fails_closed(
     tmp_path: Path,

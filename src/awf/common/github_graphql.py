@@ -18,6 +18,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       number
       createdAt
       updatedAt
+      headRefName
       headRefOid
       mergeable
       mergeStateStatus

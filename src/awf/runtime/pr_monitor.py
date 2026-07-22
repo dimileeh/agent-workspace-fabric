@@ -180,6 +180,18 @@ class MonitorState:
         repr=False,
         compare=False,
     )
+    current_pr_head_ref: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    current_pr_head_ref_checked: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     sync_base_no_progress_signature: str | None = None
     sync_base_no_progress_count: int = 0
     # thread/comment id → one of:

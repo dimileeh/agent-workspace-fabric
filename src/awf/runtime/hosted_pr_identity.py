@@ -14,8 +14,13 @@ def hosted_pr_identity_for_workspace(
     policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
     adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
     adoption_map = adoption if isinstance(adoption, Mapping) else {}
-    head_ref = _nonblank_str(workspace.remote_push_branch) or _nonblank_str(
+    stored_head_ref = _nonblank_str(workspace.remote_push_branch) or _nonblank_str(
         adoption_map.get("head_ref")
+    )
+    head_ref = (
+        _nonblank_str(getattr(state, "current_pr_head_ref", None))
+        if getattr(state, "current_pr_head_ref_checked", False)
+        else stored_head_ref
     )
     state_head_sha = _nonblank_str(getattr(state, "last_push_sha", None))
     return {

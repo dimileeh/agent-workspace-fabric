@@ -168,6 +168,7 @@ class RecordedSleep:
 def pr_payload(
     *,
     head_sha: str = "abc1234567890def",
+    head_ref: str | None = None,
     created_at: str = "2026-05-06T10:00:00Z",
     committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
@@ -200,6 +201,7 @@ def pr_payload(
                     "pullRequest": {
                         "number": 42,
                         "createdAt": created_at,
+                        "headRefName": head_ref,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
