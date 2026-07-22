@@ -21,6 +21,10 @@ from sqlalchemy import select
 from awf.adapters.base import (
     AgentAdapter,
     AgentRunError,
+    AgentRunResult,
+)
+from awf.common.audit import (
+    redact_audit_text,
 )
 from awf.common.command_evidence import (
     append_command_evidence,
@@ -36,6 +40,9 @@ from awf.control.executor.helpers import (
     _digest_file_if_present,
     _digest_text,
     _read_text_if_present,
+)
+from awf.control.executor.hosted_validation_sync import (
+    _sync_hosted_validation_fix_head,
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
@@ -754,6 +761,66 @@ def _planning_scope_auto_retry_payload_matches(payload: Mapping[str, Any]) -> bo
     return payload.get("source_reason_code") == AGENT_PLAN_PHASE_SCOPE_VIOLATION
 
 
+async def _sync_successful_hosted_agent_head(
+    self: Any,
+    *,
+    adapter: AgentAdapter,
+    result: AgentRunResult,
+    worktree_path: Path,
+    hosted_pr_identity: dict[str, Any] | None,
+    phase: str,
+) -> _PlanningRunFailure | None:
+    if not getattr(adapter, "is_hosted", False):
+        return None
+
+    terminal_head_sha = getattr(result, "terminal_head_sha", None)
+    if not isinstance(terminal_head_sha, str) or not terminal_head_sha.strip():
+        detail = f"hosted {phase} run completed without terminal_head_sha"
+        return _PlanningRunFailure(
+            message=f"hosted {phase} terminal head sync failed: {detail}",
+            reason_code="HOSTED_REMOTE_HEAD_MISSING",
+            details={
+                "hosted_terminal_head_sync": {
+                    "phase": phase,
+                    "terminal_head_sha": terminal_head_sha,
+                    "returncode": 1,
+                    "stdout": redact_audit_text(getattr(result, "stdout", ""), limit=400),
+                    "stderr": detail,
+                }
+            },
+        )
+    terminal_head_sha = terminal_head_sha.strip()
+
+    sync_result = await _sync_hosted_validation_fix_head(
+        self,
+        worktree_path=worktree_path,
+        hosted_pr_identity=hosted_pr_identity,
+        terminal_head_sha=terminal_head_sha,
+    )
+    if not sync_result.ok:
+        reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+        detail = sync_result.stderr or sync_result.stdout or reason_code
+        return _PlanningRunFailure(
+            message=(
+                f"hosted {phase} terminal head sync failed: {redact_audit_text(detail, limit=400)}"
+            ),
+            reason_code=reason_code,
+            details={
+                "hosted_terminal_head_sync": {
+                    "phase": phase,
+                    "terminal_head_sha": terminal_head_sha,
+                    "returncode": sync_result.returncode,
+                    "stdout": redact_audit_text(sync_result.stdout, limit=400),
+                    "stderr": redact_audit_text(sync_result.stderr, limit=400),
+                }
+            },
+        )
+
+    if hosted_pr_identity is not None:
+        hosted_pr_identity["expected_head_sha"] = sync_result.stdout.strip() or terminal_head_sha
+    return None
+
+
 async def _run_agent_task_with_optional_planning(
     self: Any,
     *,
@@ -796,6 +863,16 @@ async def _run_agent_task_with_optional_planning(
             stdout=result.stdout,
             stderr=result.stderr,
         )
+        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+            self,
+            adapter=adapter,
+            result=result,
+            worktree_path=worktree_path,
+            hosted_pr_identity=hosted_pr_identity,
+            phase="agent",
+        )
+        if hosted_sync_failure is not None:
+            return hosted_sync_failure
         return None
 
     try:
@@ -891,6 +968,16 @@ async def _run_agent_task_with_optional_planning(
             stdout=plan_result.stdout,
             stderr=plan_result.stderr,
         )
+        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+            self,
+            adapter=adapter,
+            result=plan_result,
+            worktree_path=worktree_path,
+            hosted_pr_identity=hosted_pr_identity,
+            phase="planning",
+        )
+        if hosted_sync_failure is not None:
+            return hosted_sync_failure
     dirty_paths = await self._changed_paths(worktree_path)
     committed_paths = (
         await self._committed_paths_since(worktree_path, baseline_sha)
@@ -1001,6 +1088,16 @@ async def _run_agent_task_with_optional_planning(
             stdout=execute_result.stdout,
             stderr=execute_result.stderr,
         )
+        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+            self,
+            adapter=adapter,
+            result=execute_result,
+            worktree_path=worktree_path,
+            hosted_pr_identity=hosted_pr_identity,
+            phase="implementation",
+        )
+        if hosted_sync_failure is not None:
+            return hosted_sync_failure
         before_compare = await self._changed_paths(worktree_path)
         before_compare_head: str | None = None
         before_dirty_digests: dict[Path, str] = {}
@@ -1051,6 +1148,16 @@ async def _run_agent_task_with_optional_planning(
                 stdout=compare_result.stdout,
                 stderr=compare_result.stderr,
             )
+            hosted_sync_failure = await _sync_successful_hosted_agent_head(
+                self,
+                adapter=adapter,
+                result=compare_result,
+                worktree_path=worktree_path,
+                hosted_pr_identity=hosted_pr_identity,
+                phase="conformance",
+            )
+            if hosted_sync_failure is not None:
+                return hosted_sync_failure
         except AgentRunError as exc:
             if exc.reason_code not in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
                 raise
