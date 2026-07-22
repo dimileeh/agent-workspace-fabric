@@ -821,6 +821,31 @@ async def _sync_successful_hosted_agent_head(
     return None
 
 
+async def _record_and_sync_hosted_phase(
+    self: Any,
+    *,
+    adapter: AgentAdapter,
+    result: AgentRunResult,
+    worktree_path: Path,
+    hosted_pr_identity: dict[str, Any] | None,
+    phase: str,
+    command_evidence: list[str] | None,
+) -> _PlanningRunFailure | None:
+    append_command_evidence(
+        command_evidence,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+    return await _sync_successful_hosted_agent_head(
+        self,
+        adapter=adapter,
+        result=result,
+        worktree_path=worktree_path,
+        hosted_pr_identity=hosted_pr_identity,
+        phase=phase,
+    )
+
+
 async def _run_agent_task_with_optional_planning(
     self: Any,
     *,
@@ -858,18 +883,14 @@ async def _run_agent_task_with_optional_planning(
             profile=profile,
             worktree_path=worktree_path,
         )
-        append_command_evidence(
-            command_evidence,
-            stdout=result.stdout,
-            stderr=result.stderr,
-        )
-        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+        hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
             adapter=adapter,
             result=result,
             worktree_path=worktree_path,
             hosted_pr_identity=hosted_pr_identity,
             phase="agent",
+            command_evidence=command_evidence,
         )
         if hosted_sync_failure is not None:
             return hosted_sync_failure
@@ -963,18 +984,14 @@ async def _run_agent_task_with_optional_planning(
             profile=profile,
             worktree_path=worktree_path,
         )
-        append_command_evidence(
-            command_evidence,
-            stdout=plan_result.stdout,
-            stderr=plan_result.stderr,
-        )
-        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+        hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
             adapter=adapter,
             result=plan_result,
             worktree_path=worktree_path,
             hosted_pr_identity=hosted_pr_identity,
             phase="planning",
+            command_evidence=command_evidence,
         )
         if hosted_sync_failure is not None:
             return hosted_sync_failure
@@ -1083,18 +1100,14 @@ async def _run_agent_task_with_optional_planning(
             profile=profile,
             worktree_path=worktree_path,
         )
-        append_command_evidence(
-            command_evidence,
-            stdout=execute_result.stdout,
-            stderr=execute_result.stderr,
-        )
-        hosted_sync_failure = await _sync_successful_hosted_agent_head(
+        hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
             adapter=adapter,
             result=execute_result,
             worktree_path=worktree_path,
             hosted_pr_identity=hosted_pr_identity,
             phase="implementation",
+            command_evidence=command_evidence,
         )
         if hosted_sync_failure is not None:
             return hosted_sync_failure
@@ -1143,18 +1156,14 @@ async def _run_agent_task_with_optional_planning(
                 profile=profile,
                 worktree_path=worktree_path,
             )
-            append_command_evidence(
-                command_evidence,
-                stdout=compare_result.stdout,
-                stderr=compare_result.stderr,
-            )
-            hosted_sync_failure = await _sync_successful_hosted_agent_head(
+            hosted_sync_failure = await _record_and_sync_hosted_phase(
                 self,
                 adapter=adapter,
                 result=compare_result,
                 worktree_path=worktree_path,
                 hosted_pr_identity=hosted_pr_identity,
                 phase="conformance",
+                command_evidence=command_evidence,
             )
             if hosted_sync_failure is not None:
                 return hosted_sync_failure
