@@ -579,6 +579,10 @@ async def execute(
                     reuse=baseline_coverage,
                     skip_measure=resume_from_blocked,
                     worktree_path=worktree_path,
+                    coverage_runner=(setup_validation_runner if hosted_pr_adoption else None),
+                    coverage_run_kwargs=(
+                        {"pr_identity": hosted_pr_identity} if hosted_pr_adoption else None
+                    ),
                 )
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure(

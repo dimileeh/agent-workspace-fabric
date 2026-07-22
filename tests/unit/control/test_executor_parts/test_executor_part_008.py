@@ -952,6 +952,8 @@ async def test_measure_and_persist_baseline_coverage_fresh_run(
     )
 
     preflight_kwargs: list[dict[str, Any]] = []
+    coverage_runner = object()
+    coverage_run_kwargs = {"pr_identity": {"pr_number": 42}}
 
     async def _preflight(**kwargs: Any) -> ValidationCoverageResult:
         preflight_kwargs.append(kwargs)
@@ -967,10 +969,14 @@ async def test_measure_and_persist_baseline_coverage_fresh_run(
         compose_file=Path("compose.yml"),
         profile=object(),  # type: ignore[arg-type]
         worktree_path=worktree,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
 
     assert result is measured
     assert preflight_kwargs[0]["worktree_path"] == worktree
+    assert preflight_kwargs[0]["coverage_runner"] is coverage_runner
+    assert preflight_kwargs[0]["coverage_run_kwargs"] == coverage_run_kwargs
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None

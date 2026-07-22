@@ -96,6 +96,8 @@ async def _run_baseline_coverage_preflight(
     compose_file: Path,
     profile: WorkspaceProfile,
     worktree_path: Path | None = None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> ValidationCoverageResult | None:
     from awf.control.executor.quality_gates import _run_baseline_coverage_preflight
 
@@ -106,6 +108,8 @@ async def _run_baseline_coverage_preflight(
         compose_file=compose_file,
         profile=profile,
         worktree_path=worktree_path,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
 
 
@@ -119,6 +123,8 @@ async def _measure_and_persist_baseline_coverage(
     reuse: ValidationCoverageResult | None = None,
     skip_measure: bool = False,
     worktree_path: Path | None = None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> ValidationCoverageResult | None:
     """Measure the pre-agent baseline coverage and persist it for blocked-resume.
 
@@ -126,7 +132,9 @@ async def _measure_and_persist_baseline_coverage(
     mutated the worktree); persisting it lets a later pause into ``blocked`` hand
     the original base back to the resume path. A directive resume passes
     ``skip_measure=True`` to keep the already-reused base (``reuse``) instead of
-    recomputing against the mutated blocked worktree.
+    recomputing against the mutated blocked worktree. Hosted PR adoption supplies
+    its validation delegate and PR identity through the optional coverage runner
+    arguments.
     """
     if skip_measure:
         return reuse
@@ -138,6 +146,8 @@ async def _measure_and_persist_baseline_coverage(
         compose_file=compose_file,
         profile=profile,
         worktree_path=worktree_path,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
     await self._persist_block_baseline_coverage(
         workspace_id,
