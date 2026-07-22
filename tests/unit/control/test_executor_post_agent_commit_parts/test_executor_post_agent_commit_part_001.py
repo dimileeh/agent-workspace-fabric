@@ -32,7 +32,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -739,6 +739,74 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     assert _git_add_suffixes(fake).count(["add", "-A"]) == 2
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_semantic_precommit_repair_forwards_hosted_pr_identity(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    commit_result = CommandResult(
+        returncode=1,
+        stdout=_precommit_mypy_output(),
+        stderr="",
+    )
+    classification = executor_quality_methods._classify_post_agent_commit_failure(commit_result)
+    hosted_pr_identity = {
+        "repo_url": "git@github.com:x/y.git",
+        "pr_url": "https://github.com/x/y/pull/42",
+        "pr_number": 42,
+        "base_ref": "development",
+        "head_ref": "feature/existing",
+        "expected_head_sha": "h" * 40,
+    }
+    adapter_calls: list[dict[str, Any]] = []
+
+    class _RecordingAdapter:
+        async def run(self, **kwargs: Any) -> object:
+            adapter_calls.append(kwargs)
+            return object()
+
+    async def _run_once_then_stop(self: Any, **kwargs: Any) -> tuple[bool, object]:
+        del self
+        result = await kwargs["run_agent"](False)
+        return False, result
+
+    async def _unused_git_command() -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "_run_agent_callable_with_service_recovery",
+        _run_once_then_stop,
+    )
+
+    repaired = await executor._run_post_agent_commit_repair(
+        workspace_id="ws-hosted-repair",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        commit_result=commit_result,
+        classification=classification,
+        staged_paths=["src/awf/foo.py"],
+        run_commit=_unused_git_command,
+        git_in_worktree=lambda _args: _unused_git_command(),
+        adapter=_RecordingAdapter(),
+        compose_project="awf_hosted_repair",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5",
+        allow_agent_repair=True,
+        ws=object(),
+        profile=object(),
+        command_evidence=[],
+        hosted_pr_identity=hosted_pr_identity,
+    )
+
+    assert repaired is False
+    assert len(adapter_calls) == 1
+    assert adapter_calls[0]["hosted_pr_identity"] is hosted_pr_identity
 
 
 @pytest.mark.unit
