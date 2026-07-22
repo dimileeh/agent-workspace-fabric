@@ -40,7 +40,7 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Hosted baseline coverage must not execute against the absent local stack."""
+        """Hosted execution skips local Git preflight and delegates baseline coverage."""
 
         monkeypatch.setattr(
             "awf.control.executor.execution_flow.repair_agent_runtime_ownership",
@@ -81,11 +81,8 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
             return action in {"execute", "baseline_coverage_preflight"}
 
         monkeypatch.setattr(executor, "_measure_and_persist_baseline_coverage", _measure_baseline)
-        monkeypatch.setattr(
-            executor,
-            "_run_agent_git_writability_preflight",
-            AsyncMock(return_value=True),
-        )
+        git_preflight = AsyncMock(return_value=False)
+        monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", git_preflight)
         monkeypatch.setattr(
             executor,
             "_ensure_ollama_model_or_mark_failed",
@@ -97,6 +94,7 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
 
         assert local_validation.calls == []
         assert hosted_validation.calls == [("setup", "pre_agent")]
+        git_preflight.assert_not_awaited()
         assert len(baseline_calls) == 1
         assert baseline_calls[0]["coverage_runner"] is hosted_validation
         identity = baseline_calls[0]["coverage_run_kwargs"]["pr_identity"]

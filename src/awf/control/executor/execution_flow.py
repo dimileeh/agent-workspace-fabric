@@ -544,7 +544,7 @@ async def execute(
             )
             return
         if recovery is None and not resume_skip_agent:
-            if not await self._run_agent_git_writability_preflight(
+            if not hosted_pr_adoption and not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
