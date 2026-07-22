@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
@@ -119,6 +120,7 @@ class FakeAdapter(AgentAdapter):
         workspace_id: str | None = None,
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
+        git_preparation: AgentRuntimeGitPreparation | None = None,
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
     ) -> AgentRunResult:
