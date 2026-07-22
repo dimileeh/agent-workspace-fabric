@@ -103,6 +103,7 @@ async def _run_helper(
     profile: WorkspaceProfile | None = None,
     workspace: SimpleNamespace | None = None,
     execution_owner_id: str | None = None,
+    hosted_pr_identity: dict[str, object] | None = None,
 ) -> tuple[bool, object]:
     return await agent_service_recovery._run_agent_task_with_service_recovery(
         executor,
@@ -117,6 +118,33 @@ async def _run_helper(
         command_evidence=[],
         workspace_id="ws_agent_service",
         execution_owner_id=execution_owner_id,
+        hosted_pr_identity=hosted_pr_identity,
+    )
+
+
+@pytest.mark.unit
+async def test_initial_agent_service_recovery_forwards_hosted_pr_identity(
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[None])
+    hosted_pr_identity = {
+        "repo_url": "https://github.com/example/repo.git",
+        "pr_number": 778,
+        "head_ref": "feature/hosted",
+        "expected_head_sha": "a" * 40,
+    }
+
+    recovered, planning_failure = await _run_helper(
+        executor,
+        tmp_path,
+        hosted_pr_identity=hosted_pr_identity,
+    )
+
+    assert recovered is True
+    assert planning_failure is None
+    assert (
+        executor._run_agent_task_with_optional_planning.await_args.kwargs["hosted_pr_identity"]
+        is hosted_pr_identity
     )
 
 

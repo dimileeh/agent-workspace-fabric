@@ -764,6 +764,7 @@ async def _run_agent_task_with_optional_planning(
     compose_file: Path,
     worktree_path: Path,
     model: str | None,
+    hosted_pr_identity: dict[str, Any] | None = None,
     command_evidence: list[str] | None = None,
     accept_existing_plan: bool = False,
     planning_retry_scope_baseline: dict[str, object] | None = None,
@@ -786,6 +787,7 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
         )
@@ -880,6 +882,7 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
         )
@@ -989,6 +992,7 @@ async def _run_agent_task_with_optional_planning(
             ),
             model=model,
             workspace_id=workspace.id,
+            hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
         )
@@ -1038,6 +1042,7 @@ async def _run_agent_task_with_optional_planning(
                 ),
                 model=model,
                 workspace_id=workspace.id,
+                hosted_pr_identity=hosted_pr_identity,
                 profile=profile,
                 worktree_path=worktree_path,
             )

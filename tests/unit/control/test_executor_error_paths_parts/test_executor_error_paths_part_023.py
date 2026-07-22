@@ -67,9 +67,14 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
             hosted_validation=hosted_validation,
         )
         baseline_calls: list[dict[str, Any]] = []
+        agent_calls: list[dict[str, Any]] = []
 
         async def _measure_baseline(**kwargs: Any) -> None:
             baseline_calls.append(kwargs)
+
+        async def _run_agent(*_args: Any, **kwargs: Any) -> tuple[bool, None]:
+            agent_calls.append(kwargs)
+            return False, None
 
         async def _recheck_status(
             _workspace_id: str,
@@ -78,9 +83,13 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
             action: str,
         ) -> bool:
             assert expected == WorkspaceStatus.running
-            return action in {"execute", "baseline_coverage_preflight"}
+            return action in {"execute", "baseline_coverage_preflight", "agent_run"}
 
         monkeypatch.setattr(executor, "_measure_and_persist_baseline_coverage", _measure_baseline)
+        monkeypatch.setattr(
+            "awf.control.executor.execution_flow._run_agent_task_with_service_recovery",
+            _run_agent,
+        )
         git_preflight = AsyncMock(return_value=False)
         monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", git_preflight)
         monkeypatch.setattr(
@@ -101,6 +110,8 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
         assert identity["pr_number"] == 42
         assert identity["head_ref"] == "awf/x"
         assert baseline_calls[0]["worktree_path"] == _test_worktrees_root(factory) / ws_id
+        assert len(agent_calls) == 1
+        assert agent_calls[0]["hosted_pr_identity"] == identity
 
     @pytest.mark.unit
     async def test_initial_hosted_pr_adoption_setup_missing_hosted_validation_is_not_recovery_failure(
