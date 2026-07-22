@@ -378,17 +378,6 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
-        # A directive resume reuses the warm env + skips flaky ``setup`` when a
-        # probe passes; grant/normal runs re-run it (#743).
-        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
-        if resume_from_blocked and not resume_skip_agent:
-            setup_phase_names = await self._blocked_resume_setup_phase_names(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                worktree_path=worktree_path,
-            )
         setup_validation_runner = self._validation
         setup_run_kwargs: dict[str, Any] = {}
         if hosted_pr_adoption:
@@ -421,6 +410,20 @@ async def execute(
                 "include_coverage": False,
                 "pr_identity": hosted_pr_identity,
             }
+        # A directive resume reuses the warm env + skips flaky ``setup`` when a
+        # probe passes; grant/normal runs re-run it (#743). Probe the same local
+        # or hosted environment that will execute the selected setup phases.
+        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
+        if resume_from_blocked and not resume_skip_agent:
+            setup_phase_names = await self._blocked_resume_setup_phase_names(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                validation=setup_validation_runner,
+                worktree_path=worktree_path,
+                pr_identity=hosted_pr_identity,
+            )
         try:
             setup_result = await setup_validation_runner.run_profile_phases(
                 workspace_id=workspace_id,

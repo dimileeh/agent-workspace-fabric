@@ -575,6 +575,92 @@ async def test_blocked_directive_resume_reruns_setup_when_probe_did_not_run(
 
 
 @pytest.mark.unit
+async def test_hosted_blocked_directive_resume_uses_hosted_env_probe(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted resumes decide setup reuse from delegated, not local, state."""
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory, grant_path=None, directive="revert the protected change"
+    )
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.task_policy = {
+            "pr_adoption": {
+                "pr_number": 42,
+                "pr_url": "https://github.com/x/y/pull/42",
+                "head_ref": "feature/existing",
+                "base_ref": "development",
+                "head_sha": "h" * 40,
+                "execution": {"mode": "hosted"},
+            }
+        }
+        await s.commit()
+
+    local_probe_calls: list[dict[str, Any]] = []
+
+    async def _healthy_local_probe(**kwargs: Any) -> ValidateToolProbeResult:
+        local_probe_calls.append(kwargs)
+        return ValidateToolProbeResult(probe_ran=True)
+
+    monkeypatch.setattr(
+        executor._validation,
+        "probe_validate_command_tools",
+        _healthy_local_probe,
+    )
+
+    stdout_path = tmp_path / "hosted_setup.stdout"
+    stderr_path = tmp_path / "hosted_setup.stderr"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("hosted setup failed\n", encoding="utf-8")
+    failing_setup = ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="hosted setup",
+                returncode=1,
+                duration_seconds=0.1,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                phase="setup",
+                reason_code="COMMAND_FAILED",
+            )
+        ]
+    )
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.probe_kwargs: list[dict[str, Any]] = []
+            self.phase_calls: list[tuple[str, ...]] = []
+
+        async def probe_validate_command_tools(self, **kwargs: Any) -> ValidateToolProbeResult:
+            self.probe_kwargs.append(kwargs)
+            return ValidateToolProbeResult(probe_errored=True, probe_ran=True)
+
+        async def run_profile_phases(
+            self, *, phase_names: tuple[str, ...], **_kwargs: Any
+        ) -> ValidationResult:
+            self.phase_calls.append(tuple(phase_names))
+            return failing_setup
+
+    hosted_validation = _HostedValidation()
+    monkeypatch.setattr(executor, "_hosted_validation", hosted_validation)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    assert local_probe_calls == []
+    assert len(hosted_validation.probe_kwargs) == 1
+    assert hosted_validation.probe_kwargs[0]["pr_identity"]["pr_number"] == 42
+    assert hosted_validation.phase_calls == [("setup", "pre_agent")]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
 async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
