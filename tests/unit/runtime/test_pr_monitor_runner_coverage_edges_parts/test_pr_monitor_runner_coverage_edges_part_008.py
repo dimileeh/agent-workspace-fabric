@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -735,6 +736,10 @@ async def test_protected_scope_repair_cleans_mirror_before_provider_retry(
             "HEAD object missing during protected-scope repair recovery",
         ),
         _MonitorMirrorHooksPathRepairFailedError(),
+        _MonitorPolicyBlockedError(
+            "supply-chain policy blocked protected-scope repair",
+            reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+        ),
     ],
 )
 async def test_protected_scope_repair_propagates_recovery_guard_errors_without_cleanup_masking(
