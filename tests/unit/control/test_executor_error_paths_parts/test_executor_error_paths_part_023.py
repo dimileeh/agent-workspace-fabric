@@ -32,6 +32,7 @@ _IMPORTED_FIXTURES = (factory, fake)
 
 
 class TestExecutorHostedPrAdoptionSetupMissingValidation:
+    @pytest.mark.unit
     async def test_hosted_pr_adoption_delegates_baseline_coverage_with_pr_identity(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -103,6 +104,7 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
         assert identity["head_ref"] == "awf/x"
         assert baseline_calls[0]["worktree_path"] == _test_worktrees_root(factory) / ws_id
 
+    @pytest.mark.unit
     async def test_initial_hosted_pr_adoption_setup_missing_hosted_validation_is_not_recovery_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -145,6 +147,7 @@ class TestExecutorHostedPrAdoptionSetupMissingValidation:
             assert "no hosted validation runner configured" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
 
+    @pytest.mark.unit
     async def test_recovery_hosted_pr_adoption_setup_missing_hosted_validation_keeps_recovery_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
