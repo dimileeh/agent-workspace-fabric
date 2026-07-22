@@ -15,11 +15,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.adapters.base import AgentRunResult
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.control.executor import quality_methods
 from awf.control.executor.quality_gates import _PostAgentCommitClassification
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 
 
@@ -119,6 +119,90 @@ async def test_semantic_precommit_repair_forwards_profile_and_worktree(
     assert captured["worktree_path"] == worktree_path
     assert captured["log_source"] == "post_agent_precommit_repair"
     assert captured["workspace_id"] == "ws_precommit_hosted"
+
+
+@pytest.mark.unit
+async def test_hosted_semantic_precommit_repair_agent_error_skips_local_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed hosted repair has no terminal head safe to commit locally."""
+    repair_result = CommandResult(
+        returncode=1,
+        stdout="hosted repair stdout",
+        stderr="hosted repair failed",
+    )
+    adapter = SimpleNamespace(
+        is_hosted=True,
+        run=AsyncMock(
+            side_effect=AgentRunError(
+                agent=AgentRuntime.codex,
+                result=repair_result,
+            )
+        ),
+    )
+
+    async def _invoke_run_agent(
+        self: Any,
+        *,
+        run_agent: Any,
+        **_kwargs: Any,
+    ) -> tuple[bool, Any]:
+        del self
+        return True, await run_agent(False)
+
+    monkeypatch.setattr(
+        quality_methods,
+        "_run_agent_callable_with_service_recovery",
+        _invoke_run_agent,
+    )
+
+    self_obj = SimpleNamespace(
+        _record_post_agent_commit_format_repair=AsyncMock(),
+    )
+    git_in_worktree = AsyncMock(
+        side_effect=AssertionError("hosted repair failure reached local git")
+    )
+    run_commit = AsyncMock()
+    command_evidence: list[str] = []
+
+    with pytest.raises(quality_methods._PostAgentCommitStepError) as exc_info:  # noqa: SLF001
+        await quality_methods._run_post_agent_semantic_precommit_repair(  # noqa: SLF001
+            self_obj,
+            workspace_id="ws_hosted_repair_failure",
+            worktree_path=tmp_path / "worktree",
+            base_commit="a" * 40,
+            commit_result=CommandResult(returncode=1, stdout="hook failed", stderr=""),
+            classification=_semantic_classification(),
+            staged_paths=["src/app.py"],
+            run_commit=run_commit,
+            git_in_worktree=git_in_worktree,
+            adapter=adapter,  # type: ignore[arg-type]
+            compose_project="awf_ws_hosted_repair_failure",
+            compose_file=tmp_path / "compose.yml",
+            model=None,
+            ws=SimpleNamespace(owned_paths=[]),  # type: ignore[arg-type]
+            profile=WorkspaceProfile(name="hosted-repair-failure"),
+            command_evidence=command_evidence,
+            hosted_pr_identity={
+                "repo_url": "https://github.com/example/repo.git",
+                "head_ref": "feature/repair",
+                "expected_head_sha": "b" * 40,
+            },
+        )
+
+    assert exc_info.value.stage == "post-agent pre-commit repair"
+    assert (
+        exc_info.value.reason_code_override
+        == quality_methods.POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    )
+    assert exc_info.value.result is repair_result
+    git_in_worktree.assert_not_awaited()
+    run_commit.assert_not_awaited()
+    repair_event = self_obj._record_post_agent_commit_format_repair.await_args.kwargs
+    assert repair_event["retry_outcome"] == "error"
+    assert repair_event["reason_code"] == "POST_AGENT_COMMIT_PRECOMMIT_FAILED"
+    assert command_evidence == ["hosted repair stdout", "hosted repair failed"]
 
 
 @pytest.mark.unit

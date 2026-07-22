@@ -1078,6 +1078,26 @@ async def _run_post_agent_semantic_precommit_repair(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    if repair_error is not None and getattr(adapter, "is_hosted", False):
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=[],
+            restaged_paths=[],
+            formatter_paths=classification.format_repair_files,
+            normalizer_paths=classification.normalizer_repair_files,
+            failed_hooks=classification.failed_hooks,
+            repair_strategy="agent",
+            retry_outcome="error",
+            reason_code=classification.reason_code,
+        )
+        raise _PostAgentCommitStepError(
+            stage="post-agent pre-commit repair",
+            result=repair_error.result,
+            classification=classification,
+            precommit_repair_attempted=True,
+            repair_strategy="agent",
+            reason_code_override=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+        ) from repair_error
 
     add_again = await git_in_worktree(["add", "-A"])
     await self._repair_agent_git_ownership(
