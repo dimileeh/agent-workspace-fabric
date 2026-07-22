@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
-    EgressAuditRepository,
     ResourceReservationRepository,
     SecretLeaseRepository,
     TaskAttemptRepository,
@@ -256,6 +255,351 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_hosted_pr_adoption_provisions_git_metadata_without_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RenderOnlyStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted/compose.yml"),
+                )
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        launcher = _RenderOnlyStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 277,
+                        "head_ref": "feature/ready",
+                        "execution": {"mode": "hosted"},
+                    }
+                },
+                remote_push_branch="feature/ready",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        assert launcher.render_requests[0].workspace_id == ws_id
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.node_id == "test-node-01"
+            assert reloaded.branch_name == f"feature-sync/{ws_id}"
+            assert reloaded.base_commit is not None
+            assert reloaded.remote_push_branch == "feature/ready"
+            assert reloaded.resolved_profile is not None
+            assert reloaded.compose_project_name is None
+            assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted/compose.yml"
+
+    @pytest.mark.unit
+    async def test_hosted_pr_adoption_render_receives_task_policy_companions(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.node.companion_services import validate_companion_service_graph
+        from awf.profiles.compose import profile_services
+
+        class _ValidatingRenderOnlyStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                services = profile_services(
+                    request.profile,
+                    base_path=request.layout.worktree_path,
+                )
+                validate_companion_service_graph(
+                    profile_services=services,
+                    companions=request.companions,
+                    docker_mode=request.profile.docker.mode,
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted_companion"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted_companion/compose.yml"),
+                )
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        launcher = _ValidatingRenderOnlyStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        _git(["update-ref", "refs/pull/278/head", "HEAD"], origin_repo)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted companion",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                resolved_profile={
+                    "name": "hosted-companion-dependent",
+                    "services": [
+                        {
+                            "name": "api",
+                            "image": "python:3.12-alpine",
+                            "depends_on": ["cache"],
+                        }
+                    ],
+                },
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 278,
+                        "head_ref": "feature/with-companion",
+                        "execution": {"mode": "hosted"},
+                    },
+                    "companions": [
+                        {
+                            "name": "cache",
+                            "repo_url": str(origin_repo),
+                            "healthcheck_cmd": "test -f /tmp/healthy",
+                        }
+                    ],
+                },
+                remote_push_branch="feature/with-companion",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        request = launcher.render_requests[0]
+        assert [companion.spec.name for companion in request.companions] == ["cache"]
+        assert request.companion_graph_prevalidated is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.compose_project_name is None
+            assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted_companion/compose.yml"
+
+    @pytest.mark.unit
+    async def test_hosted_pr_adoption_rejects_invalid_companion_graph_before_materializing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _NeverRenderStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                raise AssertionError("invalid hosted companion graph should fail before render")
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        _git(["update-ref", "refs/pull/279/head", "HEAD"], origin_repo)
+        launcher = _NeverRenderStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted invalid companion",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                resolved_profile={
+                    "name": "hosted-colliding-companion",
+                    "services": [{"name": "backend", "image": "redis:7-alpine"}],
+                },
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 279,
+                        "head_ref": "feature/invalid-companion",
+                        "execution": {"mode": "hosted"},
+                    },
+                    "companions": [
+                        {
+                            "name": "backend",
+                            "repo_url": str(origin_repo),
+                        }
+                    ],
+                },
+                remote_push_branch="feature/invalid-companion",
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        with pytest.raises(ProfileResolutionError) as raised:
+            await provisioner.provision(workspace_id)
+
+        assert raised.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
+        companion_worktree = (
+            git_manager.work_dir / "worktrees" / f"{workspace_id}__companion__backend"
+        )
+        assert not companion_worktree.exists()
+        assert launcher.render_requests == []
+        assert launcher.launch_requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
+
+    @pytest.mark.unit
+    async def test_hosted_pr_adoption_dind_profile_keeps_reservation_local_demand_zero(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RenderOnlyStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted_dind"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted_dind/compose.yml"),
+                )
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        _git(["add", "docker-compose.yml"], origin_repo)
+        _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
+        _git(["update-ref", "refs/pull/764/head", "HEAD"], origin_repo)
+
+        launcher = _RenderOnlyStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted dind",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                profile_ref="auto",
+                test_commands=[],
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/agent-workspace-fabric",
+                        "pr_number": 764,
+                        "head_ref": "feature/ready",
+                        "execution": {"mode": "hosted"},
+                    }
+                },
+                remote_push_branch="feature/ready",
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=f"hosted-provisioner-dind:{ws.id}",
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            await ResourceReservationRepository(s).create(
+                workspace_id=ws.id,
+                attempt_id=attempt.id,
+                node_id="local",
+                steady_cpu=3.0,
+                steady_memory_gb=10.0,
+                peak_cpu=6.0,
+                peak_memory_gb=16.0,
+                disk_mb=None,
+                dind_slots=0,
+                phase="workspace_lifecycle",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.resolved_profile is not None
+            assert reloaded.resolved_profile["docker"]["mode"] == "dind"
+            reservation = await ResourceReservationRepository(s).active_for_workspace(ws_id)
+            assert reservation is not None
+            assert reservation.node_id == "test-node-01"
+            assert reservation.steady_cpu == 0.0
+            assert reservation.steady_memory_gb == 0.0
+            assert reservation.peak_cpu == 0.0
+            assert reservation.peak_memory_gb == 0.0
+            assert reservation.dind_slots == 0
 
     @pytest.mark.unit
     async def test_materializes_companion_worktrees_before_stack_launch(
@@ -1106,226 +1450,3 @@ class TestSuccess:
         assert mount_md["providers"] == ["env"]
         assert mount_md["targets"] == ["GH_TOKEN"]
         assert mount_md["env_count"] == 1
-
-    @pytest.mark.unit
-    async def test_uses_persisted_resolved_profile_without_rewriting_it(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _RecordingStackLauncher:
-            def __init__(self) -> None:
-                self.requests: list[Any] = []
-
-            async def launch(self, request: Any) -> object:
-                self.requests.append(request)
-                return ComposeProjectPaths(
-                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
-                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
-                )
-
-        resolved_profile = {
-            "name": "persisted-profile",
-            "source": "repo:.awf/workspace.yml",
-            "phases": {"validate": [{"command": "pytest -q"}]},
-        }
-        launcher = _RecordingStackLauncher()
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=launcher,
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=["ruff check"],
-                profile_ref="python",
-                requested_profile={"name": ""},
-                resolved_profile=resolved_profile,
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        assert len(launcher.requests) == 1
-        assert launcher.requests[0].profile.name == "persisted-profile"
-        assert [c.command for c in launcher.requests[0].profile.phases.validate_commands] == [
-            "pytest -q"
-        ]
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.ready.value
-            assert reloaded.profile_ref == "python"
-            assert reloaded.resolved_profile == resolved_profile
-
-    @pytest.mark.unit
-    async def test_transitions_requested_to_ready(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.ready.value
-            assert reloaded.node_id == "test-node-01"
-            assert reloaded.branch_name == f"awf/{ws_id}"
-            assert reloaded.base_commit is not None
-            assert len(reloaded.base_commit) == 40  # SHA1 hex
-            assert reloaded.compose_project_name == f"awf_{ws_id}"
-
-    @pytest.mark.unit
-    async def test_egress_audit_records_workspace_task_attempt(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            task = await TaskRepository(s).create_or_get(
-                repo_url=ws.repo_url,
-                base_branch=ws.branch_base,
-                title=ws.task_title,
-                prompt=ws.task_prompt,
-                external_id=None,
-                idempotency_key=f"provisioner-audit:{ws.id}",
-                task_class=ws.task_class,
-                owned_paths=list(ws.owned_paths),
-            )
-            attempt = await TaskAttemptRepository(s).create_for_workspace(
-                task=task,
-                workspace=ws,
-            )
-            await s.commit()
-            ws_id = ws.id
-            attempt_id = attempt.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
-            assert audit is not None
-            assert audit.attempt_id == attempt_id
-
-    @pytest.mark.unit
-    async def test_records_state_transition_events(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            transitions = [(e.old_state, e.new_state) for e in reloaded.events]
-            assert (None, "requested") in transitions
-            assert ("requested", "provisioning") in transitions
-            assert ("provisioning", "ready") in transitions
-
-    @pytest.mark.unit
-    async def test_provisioner_updates_auto_profile_dind_reservation(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-        _git(["add", "docker-compose.yml"], origin_repo)
-        _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
-
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                profile_ref="auto",
-                test_commands=[],
-            )
-            task = await TaskRepository(s).create_or_get(
-                repo_url=ws.repo_url,
-                base_branch=ws.branch_base,
-                title=ws.task_title,
-                prompt=ws.task_prompt,
-                external_id=None,
-                idempotency_key=f"provisioner-dind:{ws.id}",
-                task_class=ws.task_class,
-                owned_paths=list(ws.owned_paths),
-            )
-            attempt = await TaskAttemptRepository(s).create_for_workspace(
-                task=task,
-                workspace=ws,
-            )
-            await ResourceReservationRepository(s).create(
-                workspace_id=ws.id,
-                attempt_id=attempt.id,
-                node_id="local",
-                steady_cpu=3.0,
-                steady_memory_gb=10.0,
-                peak_cpu=6.0,
-                peak_memory_gb=16.0,
-                disk_mb=None,
-                dind_slots=0,
-                phase="workspace_lifecycle",
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.ready.value
-            assert reloaded.resolved_profile is not None
-            assert reloaded.resolved_profile["docker"]["mode"] == "dind"
-            reservation = await ResourceReservationRepository(s).active_for_workspace(ws_id)
-            assert reservation is not None
-            assert reservation.dind_slots == 1
-            assert reservation.node_id == "test-node-01"

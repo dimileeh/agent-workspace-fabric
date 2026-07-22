@@ -48,10 +48,7 @@ OperationResponse = _schemas_operations.OperationResponse
 log_stream_ids = _schemas_operations.log_stream_ids
 merge_log_stream_ref_value = _schemas_operations.merge_log_stream_ref_value
 
-# Leaf request/response schemas live in ``awf.api.schemas_responses`` to keep
-# this module under the maintainability line limit. Re-exported here so
-# ``from awf.api.schemas import X`` keeps working for the REST app and the MCP
-# server (definitions are relocated, not changed).
+# Leaf schemas live in ``schemas_responses``; PR monitor request contracts stay canonical here.
 CallbackSubscriptionCreateRequest = _schemas_responses.CallbackSubscriptionCreateRequest
 CallbackSubscriptionResponse = _schemas_responses.CallbackSubscriptionResponse
 CallbackSubscriptionListResponse = _schemas_responses.CallbackSubscriptionListResponse
@@ -81,6 +78,71 @@ _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
 PUBLIC_DIRECT_CREATE_TASK_KINDS = _schemas_operations.PUBLIC_DIRECT_CREATE_TASK_KINDS
+
+
+class PullRequestMonitorExecutionPolicy(BaseModel):
+    """Execution placement policy for adopted PR monitor repair/validation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: Literal["local", "hosted"] = Field(
+        default="local",
+        description=(
+            "Where Core should run PR-monitor repair and post-repair validation. "
+            "'local' preserves Docker Compose execution; 'hosted' requires "
+            "configured hosted delegation and never starts local Compose."
+        ),
+    )
+
+
+class PullRequestMonitorAdoptionRequest(BaseModel):
+    """Input for adopting an already-open GitHub PR into AWF monitoring."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    pr_number: int | None = Field(default=None, ge=1)
+    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
+    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
+    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
+    profile: WorkspaceProfile | None = None
+    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
+    auto_merge: bool = True
+    execution: PullRequestMonitorExecutionPolicy = Field(
+        default_factory=PullRequestMonitorExecutionPolicy,
+        description=(
+            "Explicit PR monitor execution policy. Hosted mode is never inferred "
+            "from environment or Docker availability."
+        ),
+    )
+    initial_review_grace_period_seconds: float | None = Field(default=None, ge=0, le=86400)
+    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    task_prompt: Annotated[str | None, Field(default=None, min_length=1, max_length=16384)] = None
+    task_tag: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional issue/task key linked into the PR title and "
+                "AWF-authored monitor commits. Accepts a Jira issue key "
+                "(PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare "
+                "keys; bracketed [PROJ-T123] is accepted and normalized, but "
+                "bare is recommended because [ is a shell glob character."
+            ),
+        ),
+    ] = None
+    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
+
+    @field_validator("task_tag")
+    @classmethod
+    def _validate_task_tag(cls, value: str | None) -> str | None:
+        """Normalize and validate an optional task tag; ``None`` when absent."""
+        return validate_task_tag(value)
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -377,63 +439,6 @@ class WorkspaceCreateRequest(BaseModel):
     @property
     def requires_database(self) -> bool:
         return self.workspace.profile_ref == _LEGACY_DATABASE_PROFILE_REF
-
-
-class PullRequestMonitorAdoptionRequest(BaseModel):
-    """Input for adopting an already-open GitHub PR into AWF monitoring."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
-    pr_number: int | None = Field(default=None, ge=1)
-    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-
-    agent: AgentRuntime = Field(default=AgentRuntime.codex)
-    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
-    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
-    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
-    profile: WorkspaceProfile | None = None
-    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
-    auto_merge: bool = True
-    initial_review_grace_period_seconds: float | None = Field(
-        default=None,
-        ge=0,
-        le=86400,
-    )
-    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-    task_prompt: Annotated[
-        str | None,
-        Field(default=None, min_length=1, max_length=16384),
-    ] = None
-    task_tag: Annotated[
-        str | None,
-        Field(
-            default=None,
-            max_length=64,
-            description=(
-                "Optional issue/task key linked into the PR title and "
-                "AWF-authored monitor commits. Accepts a Jira issue key "
-                "(PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare "
-                "keys; bracketed [PROJ-T123] is accepted and normalized, but "
-                "bare is recommended because [ is a shell glob character."
-            ),
-        ),
-    ] = None
-    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
-
-    @field_validator("task_tag")
-    @classmethod
-    def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize and validate an optional task tag; ``None`` when absent.
-
-        Accepts a Jira issue key (``PROJ-123``) or an Aira task entity key
-        (``PROJ-T123``). Pass bare keys (``AIRA-T299``); bracketed
-        ``[AIRA-T299]`` is accepted and normalized, but bare is recommended
-        because ``[`` is a shell glob character. Entity keys appear bracketed
-        on AWF monitor commits; Jira keys are bare.
-        """
-        return validate_task_tag(value)
 
 
 class PullRequestMonitorAdoptionResponse(BaseModel):

@@ -424,6 +424,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert fresh.monitor_policy == {
             "auto_merge": True,
             "initial_review_grace_period_seconds": 13.0,
+            "execution": {"mode": "local"},
         }
 
         async with factory() as session:

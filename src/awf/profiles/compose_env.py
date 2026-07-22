@@ -104,9 +104,32 @@ _COMPOSE_ESCAPED_DOLLAR = "\0AWF_PROFILE_ESCAPED_DOLLAR\0"
 # literal ``""`` and excluded from passthrough (profile-owned). A NUL byte is
 # used so the sentinel can never collide with a real env value.
 _COMPOSE_PASSTHROUGH = "\0AWF_PROFILE_COMPOSE_PASSTHROUGH\0"
+_HOSTED_ENV_SECRET_ALIAS_PREFIX = "\0AWF_HOSTED_ENV_SECRET_ALIAS:"
+_HOSTED_ENV_SECRET_ALIAS_SUFFIX = "\0"
 
 _COMPOSE_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _POSTGRES_PASSWORD_SUBSTRING_REDACTION_MIN_LENGTH = 12
+
+
+def hosted_env_secret_alias_placeholder(source_name: str) -> str:
+    """Return a secret-free hosted marker carrying an env lease source name."""
+
+    return f"{_HOSTED_ENV_SECRET_ALIAS_PREFIX}{source_name}{_HOSTED_ENV_SECRET_ALIAS_SUFFIX}"
+
+
+def _hosted_env_secret_alias_source_name(value: str) -> str | None:
+    """Return the source name from a hosted env lease marker, if present."""
+
+    if not value.startswith(_HOSTED_ENV_SECRET_ALIAS_PREFIX) or not value.endswith(
+        _HOSTED_ENV_SECRET_ALIAS_SUFFIX
+    ):
+        return None
+    source_name = value[
+        len(_HOSTED_ENV_SECRET_ALIAS_PREFIX) : -len(_HOSTED_ENV_SECRET_ALIAS_SUFFIX)
+    ]
+    if not _COMPOSE_ENV_NAME_PATTERN.fullmatch(source_name):
+        return None
+    return source_name
 
 
 def _compose_braced_expression_end(value: str, open_brace_index: int) -> int | None:

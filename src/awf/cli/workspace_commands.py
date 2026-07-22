@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import typer
+from typer.models import OptionInfo
 
 from awf.cli.common import (
     MinRichHelpWidthCommand,
@@ -52,6 +53,13 @@ def _option_value(value: Any) -> str:
     """Return the wire value for Typer enum options and direct string test calls."""
     enum_value = getattr(value, "value", None)
     return str(enum_value if enum_value is not None else value)
+
+
+def _option_default(value: Any) -> Any:
+    """Return Typer option defaults for direct command-helper calls."""
+    if isinstance(value, OptionInfo):
+        return value.default
+    return value
 
 
 def _task_tag_callback(value: str | None) -> str | None:
@@ -879,6 +887,11 @@ def workspace_adopt_pr(
         "--auto-merge/--no-auto-merge",
         help="Allow the adopted PR monitor to merge when gates are green.",
     ),
+    execution: str = typer.Option(
+        "local",
+        "--execution",
+        help="PR monitor execution placement: local or hosted.",
+    ),
     initial_review_grace_period_seconds: float | None = typer.Option(
         None,
         "--initial-review-grace-period-seconds",
@@ -916,6 +929,10 @@ def workspace_adopt_pr(
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
         )
+    execution = str(_option_default(execution)).strip().lower()
+    if execution not in {"local", "hosted"}:
+        raise typer.BadParameter("--execution must be 'local' or 'hosted'")
+    task_tag = _option_default(task_tag)
     _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
         "repo_url": repo if _repo_is_url else None,
@@ -926,6 +943,7 @@ def workspace_adopt_pr(
         "profile_ref": profile_ref,
         "profile": None,
         "auto_merge": auto_merge,
+        "execution": {"mode": execution},
         "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         "task_title": task_title,
         "task_prompt": task_prompt,

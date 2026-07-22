@@ -149,6 +149,47 @@ def test_hosted_file_auth_mount_targets_supports_short_long_and_adc_mounts(
 
 
 @pytest.mark.unit
+def test_hosted_file_auth_mount_targets_includes_hosted_placeholder_mounts(
+    tmp_path: Path,
+) -> None:
+    """Rendered hosted placeholder sources surface custom file-auth targets."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "volumes": [
+                            (
+                                "/run/awf/hosted-auth-placeholders/run__secrets__npmrc"
+                                ":/run/secrets/npmrc:ro"
+                            ),
+                            {
+                                "type": "bind",
+                                "source": (
+                                    "/run/awf/hosted-auth-placeholders/run__secrets__pypirc"
+                                ),
+                                "target": "/run/secrets/pypirc",
+                                "read_only": True,
+                            },
+                            "/host/custom:/run/secrets/not-hosted:ro",
+                            "/duplicate:/run/secrets/npmrc:ro",
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert compose_module.hosted_file_auth_mount_targets(compose_file) == (
+        "/run/secrets/npmrc",
+        "/run/secrets/pypirc",
+    )
+
+
+@pytest.mark.unit
 def test_hosted_google_credentials_mount_targets_resolves_supported_forms() -> None:
     """ADC mount discovery accepts absolute literals, pass-through, and aliases only."""
 
@@ -199,6 +240,18 @@ def test_compose_volume_target_handles_all_supported_shapes() -> None:
     )
     assert compose_module._compose_volume_target({"target": 42}) is None
     assert compose_module._compose_volume_target(42) is None
+
+
+@pytest.mark.unit
+def test_compose_volume_source_handles_supported_shapes() -> None:
+    """Short syntax and supported long-syntax source aliases are normalized."""
+
+    assert compose_module._compose_volume_source("host-only") is None
+    assert compose_module._compose_volume_source("host:/container:ro") == "host"
+    assert compose_module._compose_volume_source({"source": "/source"}) == "/source"
+    assert compose_module._compose_volume_source({"src": "/src"}) == "/src"
+    assert compose_module._compose_volume_source({"source": 42}) is None
+    assert compose_module._compose_volume_source(42) is None
 
 
 @pytest.mark.unit

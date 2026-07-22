@@ -792,8 +792,9 @@ class TestPullRequestUnexpectedErrorPart001:
                 prompt: str,
                 model: str | None = None,
                 workspace_id: str | None = None,
+                **_kwargs: Any,
             ) -> None:
-                del compose_project, compose_file, model, workspace_id
+                del compose_project, compose_file, model, workspace_id, _kwargs
                 captured["prompt"] = prompt
                 raise RuntimeError("stop after prompt capture")
 

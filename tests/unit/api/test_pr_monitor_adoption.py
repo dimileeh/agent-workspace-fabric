@@ -18,6 +18,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
+from awf.service import pr_monitor_adoption as adoption_mod
 from awf.service.pr_monitor_adoption import pr_adoption_idempotency_key
 
 
@@ -132,6 +134,29 @@ def test_adoption_request_schema_accepts_model_effort_owned_paths_and_openapi_ex
 
 
 @pytest.mark.unit
+def test_adoption_request_schema_defaults_execution_policy_to_local_and_exposes_hosted() -> None:
+    payload = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    hosted = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        execution={"mode": "hosted"},
+    )
+
+    assert payload.execution.mode == "local"
+    assert hosted.execution.mode == "hosted"
+
+    schema = create_app(use_lifespan=False).openapi()
+    props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
+    assert "execution" in props
+    execution_ref = props["execution"]["$ref"].rsplit("/", 1)[-1]
+    execution_schema = schema["components"]["schemas"][execution_ref]
+    assert execution_schema["properties"]["mode"]["enum"] == ["local", "hosted"]
+
+
+@pytest.mark.unit
 async def test_adopt_pr_requires_api_token(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
 ) -> None:
@@ -210,6 +235,176 @@ async def test_adopt_pr_persists_requested_model_and_effort(
         workspace = (await session.execute(select(Workspace))).scalar_one()
     assert workspace.task_policy["agent_model"] == "gpt-5.3-codex"
     assert workspace.task_policy["agent_effort"] == "high"
+
+
+@pytest.mark.unit
+async def test_adopt_pr_rejects_hosted_execution_when_delegation_unconfigured(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "execution": {"mode": "hosted"},
+        },
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"
+    assert body["detail"] == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
+    }
+
+
+@pytest.mark.unit
+async def test_adopt_pr_rejects_hosted_execution_when_worker_delegation_unconfigured(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        api_token="secret",
+        work_dir=str(tmp_path / "awf-state"),
+        hosted_delegation_base_url="https://hosted.example.test",
+        hosted_delegation_bearer_token="api-visible-token",
+    )
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    worker_preflight: dict[str, object] = {}
+
+    def _raise_missing_worker_config(_settings: object, **kwargs: object) -> object:
+        worker_preflight.update(kwargs)
+        raise HostedDelegationConfigError(
+            missing=(
+                "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+            )
+        )
+
+    monkeypatch.setattr(
+        adoption_mod,
+        "hosted_delegation_config_from_service_settings",
+        _raise_missing_worker_config,
+    )
+    monkeypatch.setattr(
+        adoption_mod,
+        "resolve_service_settings",
+        lambda _settings: object(),
+    )
+    get_settings.cache_clear()
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.pr_adoption_metadata_fetcher = _MetadataFetcher(_metadata())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "execution": {"mode": "hosted"},
+            },
+        )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"
+    assert body["detail"] == {
+        "missing": ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"],
+    }
+    assert worker_preflight == {"required": True}
+
+
+@pytest.mark.unit
+async def test_adopt_pr_hosted_existing_adoption_requires_delegation_preflight(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured_settings = Settings(
+        _env_file=None,
+        api_token="secret",
+        work_dir=str(tmp_path / "awf-state"),
+        hosted_delegation_base_url="https://hosted.example.test",
+        hosted_delegation_bearer_token="api-visible-token",
+    )
+    missing_settings = Settings(
+        _env_file=None,
+        api_token="secret",
+        work_dir=str(tmp_path / "awf-state"),
+    )
+    current_settings = {"value": configured_settings}
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    app.dependency_overrides[get_settings] = lambda: current_settings["value"]
+    fetcher = _MetadataFetcher(_metadata())
+    app.state.pr_adoption_metadata_fetcher = fetcher
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+                "execution": {"mode": "hosted"},
+            },
+        )
+        conflict = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": True,
+                "execution": {"mode": "hosted"},
+            },
+        )
+        current_settings["value"] = missing_settings
+        retry = await client.post(
+            "/v1/workspaces/adopt-pr",
+            headers={"Authorization": "Bearer secret"},
+            json={
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+                "execution": {"mode": "hosted"},
+            },
+        )
+
+    assert first.status_code == 202
+    first_body = first.json()
+    assert first_body["attached_existing"] is False
+    assert conflict.status_code == 409
+    conflict_body = conflict.json()
+    assert conflict_body["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+    assert conflict_body["detail"] == {
+        "workspace_id": first_body["workspace_id"],
+        "existing_auto_merge": False,
+        "requested_auto_merge": True,
+    }
+    assert retry.status_code == 409
+    retry_body = retry.json()
+    assert retry_body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"
+    assert retry_body["detail"] == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
+    }
+    assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
 
 @pytest.mark.unit

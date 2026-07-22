@@ -250,6 +250,8 @@ class PRStatus:
     the state-filtered pending count for ``unresolved_reviews``.
     """
     base_behind_count: int  # commits on base not in head (local rev-list)
+    head_ref: str | None = None
+    """Current PR head branch reported by the forge for this snapshot."""
     blocking_reviews: tuple[ReviewComment, ...] = ()
     """Effective review-level blockers used only for merge gating.
     """

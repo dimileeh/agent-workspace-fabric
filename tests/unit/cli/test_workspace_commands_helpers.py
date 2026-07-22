@@ -655,6 +655,8 @@ def test_workspace_adopt_pr_accepts_cursor_agent(
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/workspaces/adopt-pr"
     assert captured["json"]["agent"] == "cursor"  # type: ignore[index]
+    assert captured["json"]["execution"] == {"mode": "local"}  # type: ignore[index]
+    assert "task_tag" not in captured["json"]  # type: ignore[operator]
 
 
 @pytest.mark.unit

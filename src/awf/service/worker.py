@@ -23,6 +23,7 @@ from awf.common.git_auth import add_git_config_entries as _add_git_config_entrie
 from awf.common.git_auth import apply_bitbucket_git_auth
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import TaskKind
@@ -38,6 +39,11 @@ from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver, WorkspaceRuntimeDriver
+from awf.runtime.hosted_delegation import (
+    HostedAgentRuntimeExecutor,
+    HostedDelegationConfig,
+    HostedValidationDelegate,
+)
 from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import (
@@ -49,7 +55,7 @@ from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
-from awf.service.config import ServiceSettings
+from awf.service.config import ServiceSettings, hosted_delegation_config_from_service_settings
 from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
@@ -93,6 +99,14 @@ class WorkerRuntime:
 # here until they finish so the event loop does not GC a pending close mid-flight
 # (the close is fire-and-forget on the error path; nothing else awaits it).
 _PENDING_FORGE_CLIENT_CLOSERS: set[asyncio.Task[None]] = set()
+
+
+def _hosted_delegation_config_for_worker(
+    settings: ServiceSettings,
+) -> HostedDelegationConfig | None:
+    """Return hosted delegation config for the worker when fully configured."""
+
+    return hosted_delegation_config_from_service_settings(settings)
 
 
 def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
@@ -146,6 +160,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
         log_store=log_store,
+    )
+    hosted_delegation_config = _hosted_delegation_config_for_worker(settings)
+    hosted_agent_runtime_executor = (
+        HostedAgentRuntimeExecutor(hosted_delegation_config)
+        if hosted_delegation_config is not None
+        else None
+    )
+    hosted_validation_delegate = (
+        HostedValidationDelegate(
+            hosted_delegation_config,
+            artifacts_dir=work_dir / "artifacts",
+        )
+        if hosted_delegation_config is not None
+        else None
     )
     pr_creator = PullRequestCreator(runner)
     open_pr_resolver = BranchOpenPullRequestResolver(runner)
@@ -230,6 +258,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.auto_merge and not force_release_monitor
             else build_release_pr_monitor
         )
+        workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
+        if workspace_is_hosted and hosted_validation_delegate is None:
+            raise RuntimeError(
+                "hosted PR adoption requested but hosted validation is not configured"
+            )
         # Build the forge client from the persisted resolved forge (reconstructed,
         # never re-resolved). github → GitHubClient; bitbucket → BitbucketClient
         # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
@@ -255,7 +288,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "runner": runner,
             "adapter": adapter,
             "gh": gh,
-            "validation": validation,
+            "validation": hosted_validation_delegate if workspace_is_hosted else validation,
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
@@ -271,6 +304,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
             "workspace_runtime_context": render_workspace_runtime_context(profile),
+            "workspace_profile": profile,
             "provider_recovery_default_model": provider_recovery_default_model,
         }
         try:
@@ -308,7 +342,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)
         # so PR monitor repair is not hard-wired to Docker Compose. The
         # worker does NOT build a Kubernetes executor here.
-        agent_runtime_executor=None,
+        agent_runtime_executor=hosted_agent_runtime_executor,
+        hosted_validation=hosted_validation_delegate,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

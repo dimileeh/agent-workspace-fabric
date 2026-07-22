@@ -9,6 +9,7 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -954,20 +955,21 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         await self._session.flush()
         cleaner = self._cleaner_factory()
         companion_worktrees = companion_worktree_remove_targets(workspace)
-        cleanup_result = _normalize_cleanup_result(
-            await cleaner.cleanup(
-                workspace_id=workspace_id,
-                repo_url=workspace.repo_url,
-                companion_worktrees=companion_worktrees,
-                compose_project_name=workspace.compose_project_name,
-                compose_file_path=(
-                    Path(workspace.compose_file_path) if workspace.compose_file_path else None
-                ),
-                worktree_host_path=None,
-                remove_volumes=remove_volumes,
-                remove_worktree=remove_worktree,
-            )
-        )
+        cleanup_kwargs: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "repo_url": workspace.repo_url,
+            "companion_worktrees": companion_worktrees,
+            "compose_project_name": workspace.compose_project_name,
+            "compose_file_path": (
+                Path(workspace.compose_file_path) if workspace.compose_file_path else None
+            ),
+            "worktree_host_path": None,
+            "remove_volumes": remove_volumes,
+            "remove_worktree": remove_worktree,
+        }
+        if pr_adoption_is_hosted(workspace.task_policy):
+            cleanup_kwargs["skip_compose"] = True
+        cleanup_result = _normalize_cleanup_result(await cleaner.cleanup(**cleanup_kwargs))
         cleanup_payload = cleanup_result.to_dict()
         # The cleanup callback may append an already-failed secondary event.
         # Refresh with a row lock so the terminal/status decision stays

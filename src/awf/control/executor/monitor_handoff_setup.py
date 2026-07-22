@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_mes
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
     PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
 )
@@ -20,6 +23,7 @@ from awf.control.executor.logging_ops import (
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
@@ -32,6 +36,15 @@ from awf.runtime.ownership import (
 )
 
 _log = get_logger(__name__)
+
+_HOSTED_MONITOR_HANDOFF_SETUP_MARKER_STATUSES = frozenset(
+    {
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+    }
+)
 
 
 class _MonitorHandoffSetupFailureError(RuntimeError):
@@ -140,6 +153,8 @@ async def _run_monitor_handoff_validate_toolchain_probe(
     compose_project: str,
     compose_file: Path,
     profile: Any,
+    worktree_path: Path | None = None,
+    pr_identity: Mapping[str, object] | None = None,
 ) -> bool:
     """Fail the adopt-pr handoff early when a ``validate`` tool is unprovisioned.
 
@@ -160,13 +175,18 @@ async def _run_monitor_handoff_validate_toolchain_probe(
     probe = getattr(validation, "probe_validate_command_tools", None)
     if not callable(probe):
         return True
+    probe_kwargs = {
+        "workspace_id": workspace_id,
+        "compose_project": compose_project,
+        "compose_file": compose_file,
+        "profile": profile,
+    }
+    if worktree_path is not None:
+        probe_kwargs["worktree_path"] = worktree_path
+    if pr_identity is not None:
+        probe_kwargs["pr_identity"] = pr_identity
     try:
-        result = await probe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-        )
+        result = await probe(**probe_kwargs)
     except Exception as exc:
         # Non-blocking probe-infra failure: preserve the structured reason_code
         # and a redacted error, then proceed — never fail the adoption on a probe
@@ -399,6 +419,7 @@ async def _run_monitor_handoff_profile_setup(
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
+            worktree_path=worktree_path,
         ):
             return False
         return await _run_monitor_handoff_profile_preflight(
@@ -442,3 +463,157 @@ async def _run_monitor_handoff_profile_setup(
         )
         raise
     return False
+
+
+async def _run_hosted_monitor_handoff_profile_setup(
+    self: Any,
+    *,
+    workspace_id: str,
+    profile: Any,
+    compose_project: str,
+    compose_file: Path,
+    worktree_path: Path,
+    pr_identity: Mapping[str, object] | None = None,
+) -> bool:
+    """Delegate hosted setup before handing an adopted PR to the monitor."""
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    validation = getattr(self, "_hosted_validation", None)
+    if validation is None:
+        await _mark_failed_or_raise_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=(
+                "hosted monitor handoff profile setup failed: "
+                "no hosted validation runner configured"
+            ),
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        )
+        return False
+
+    async def _repair_mirror_hooks_path_or_mark_failed(*, failure_stage: str) -> bool:
+        repaired = await repair_mirror_hooks_path_or_mark_failed(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=False,
+            failure_stage=failure_stage,
+        )
+        return repaired is True
+
+    try:
+        # Hosted setup is delegated over HTTP. The hosted runner owns container
+        # and worktree repair before phase execution; local mirror repair is
+        # still required after success for subsequent local monitor sync.
+        setup_result = await validation.run_profile_phases(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+            worktree_path=worktree_path,
+            include_coverage=False,
+            pr_identity=pr_identity,
+        )
+    except _MonitorHandoffSetupFailureError:
+        raise
+    except Exception as exc:
+        _log.exception("executor.hosted_monitor_handoff_setup_failed", workspace_id=workspace_id)
+        safe_error = redact_audit_text(repr(exc))
+        await _mark_failed_or_raise_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"hosted monitor handoff profile setup failed: {safe_error}"[:2000],
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        )
+        return False
+
+    try:
+        await self._record_setup_dependency_network_events(
+            workspace_id=workspace_id,
+            result=setup_result,
+        )
+    except Exception:
+        _log.exception(
+            "executor.hosted_monitor_handoff_setup_dependency_network_event_record_failed",
+            workspace_id=workspace_id,
+            setup_all_passed=setup_result.all_passed,
+        )
+
+    if setup_result.all_passed:
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after successful hosted monitor handoff setup"
+        ):
+            return False
+        if not await _run_monitor_handoff_validate_toolchain_probe(
+            self,
+            workspace_id=workspace_id,
+            validation=validation,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree_path,
+            pr_identity=pr_identity,
+        ):
+            return False
+        preflight_passed = await _run_monitor_handoff_profile_preflight(
+            self,
+            workspace_id=workspace_id,
+            validation=validation,
+            profile=profile,
+        )
+        if not preflight_passed:
+            return False
+        return await _record_hosted_monitor_handoff_setup_completed(
+            self,
+            workspace_id=workspace_id,
+        )
+
+    first_fail = setup_result.first_failure
+    setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
+    setup_failure_reason_code = (
+        SETUP_DEPENDENCY_NETWORK_FAILURE
+        if setup_dependency_details is not None
+        else PR_MONITOR_SETUP_FAILED_REASON_CODE
+    )
+    failure_message = (
+        f"profile setup failed: {redact_audit_text(first_fail.command)}"
+        if first_fail is not None
+        else "profile setup failed"
+    )[:2000]
+    await _mark_failed_or_raise_setup_failure(
+        self,
+        workspace_id=workspace_id,
+        failure_reason=_failure_reason_for_phase(first_fail),
+        message=failure_message,
+        reason_code=setup_failure_reason_code,
+        details=setup_dependency_details,
+    )
+    return False
+
+
+async def _record_hosted_monitor_handoff_setup_completed(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> bool:
+    """Persist durable evidence that hosted handoff setup finished successfully."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get_for_update(workspace_id)
+        if ws is None or ws.status not in _HOSTED_MONITOR_HANDOFF_SETUP_MARKER_STATUSES:
+            return False
+        await repo.add_event(
+            ws,
+            event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+            reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+            payload={
+                "source": "hosted_pr_adoption",
+                "phase_names": ["setup", "pre_agent"],
+                "profile_preflight_passed": True,
+            },
+        )
+        await session.commit()
+    return True

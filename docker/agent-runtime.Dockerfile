@@ -153,18 +153,51 @@ ARG CLAUDE_CODE_VERSION=2.1.206
 ARG GEMINI_VERSION=0.50.0
 ARG OPENCODE_VERSION=1.17.18
 ARG GROK_VERSION=0.2.94
+ARG CURSOR_VERSION=2026.07.20-8cc9c0b
+ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4
+ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
 
-# Cursor CLI tracks the official installer because Cursor does not document a
-# stable standalone version pin for the Linux installer.
+# Install a pinned Cursor CLI release only after verifying its architecture-
+# specific checksum. The official convenience installer is mutable.
 RUN set -eux; \
+    cursor_dpkg_arch="$(dpkg --print-architecture)"; \
+    case "$cursor_dpkg_arch" in \
+      amd64) cursor_arch="x64"; expected_hash="${CURSOR_X64_SHA256}" ;; \
+      arm64) cursor_arch="arm64"; expected_hash="${CURSOR_ARM64_SHA256}" ;; \
+      *) echo "Unsupported Cursor CLI architecture: $cursor_dpkg_arch" >&2; exit 1 ;; \
+    esac; \
+    if [ -z "$expected_hash" ]; then \
+      echo "Cursor CLI checksum is not pinned for ${CURSOR_VERSION}/${cursor_arch}" >&2; \
+      exit 1; \
+    fi; \
+    cursor_archive="/tmp/cursor-agent-${CURSOR_VERSION}-${cursor_arch}.tar.gz"; \
+    cursor_version_dir="/opt/cursor/.local/share/cursor-agent/versions/${CURSOR_VERSION}"; \
+    trap 'rm -f "$cursor_archive"' EXIT; \
     install -d -m 0755 /opt/cursor; \
-    curl https://cursor.com/install -fsS | HOME=/opt/cursor bash; \
+    curl --fail --show-error --silent --location \
+      --retry 5 \
+      --retry-delay 2 \
+      --retry-all-errors \
+      --connect-timeout 20 \
+      --max-time 300 \
+      --output "$cursor_archive" \
+      "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/${cursor_arch}/agent-cli-package.tar.gz"; \
+    actual_hash="$(sha256sum "$cursor_archive")"; \
+    actual_hash="${actual_hash%% *}"; \
+    if [ "$actual_hash" != "$expected_hash" ]; then \
+      echo "Cursor CLI checksum mismatch for ${CURSOR_VERSION}/${cursor_arch}: expected ${expected_hash}, got ${actual_hash}" >&2; \
+      exit 1; \
+    fi; \
+    install -d -m 0755 "$cursor_version_dir" /opt/cursor/.local/bin; \
+    tar --strip-components=1 -xzf "$cursor_archive" -C "$cursor_version_dir"; \
+    ln -sf "$cursor_version_dir/cursor-agent" /opt/cursor/.local/bin/agent; \
+    ln -sf "$cursor_version_dir/cursor-agent" /opt/cursor/.local/bin/cursor-agent; \
     cursor_path="/opt/cursor/.local/bin/cursor-agent"; \
     if [ ! -e "$cursor_path" ]; then \
-      echo "cursor-agent was not installed by the Cursor installer" >&2; \
+      echo "cursor-agent was not installed from the pinned Cursor release" >&2; \
       exit 1; \
     fi; \
     ln -sf "$cursor_path" /usr/local/bin/cursor-agent; \

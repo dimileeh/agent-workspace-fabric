@@ -43,6 +43,15 @@ def _release_events(events: list) -> list:
     return [e for e in events if e.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE]
 
 
+def _mark_hosted_pr_adoption(workspace: object) -> None:
+    workspace.compose_project_name = None
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+        }
+    }
+
+
 @pytest.mark.unit
 async def test_cancel_stop_stack_runs_full_compose_down_not_docker_stop(
     session: AsyncSession,
@@ -180,6 +189,57 @@ async def test_stop_already_terminal_workspace_is_idempotent(
     assert operations[0].status == OperationStatus.succeeded.value
     assert any(e.event_type == "workspace.stack_stopped" for e in events)
     assert await has_terminal_runtime_released_event(session, workspace.id) is True
+
+
+@pytest.mark.unit
+async def test_stop_hosted_pr_adoption_skips_compose_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    compose_file_path = workspace.compose_file_path
+    assert compose_file_path is not None
+    _mark_hosted_pr_adoption(workspace)
+    await session.flush()
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.stop_workspace(workspace.id, reason="halt")
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert len(cleaner.calls) == 1
+    call = cleaner.calls[0]
+    assert call.skip_compose is True
+    assert call.compose_project_name is None
+    assert str(call.compose_file_path) == compose_file_path
+    assert call.remove_worktree is False
+
+
+@pytest.mark.unit
+async def test_destroy_hosted_pr_adoption_skips_compose_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    compose_file_path = workspace.compose_file_path
+    assert compose_file_path is not None
+    _mark_hosted_pr_adoption(workspace)
+    await session.flush()
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert len(cleaner.calls) == 1
+    call = cleaner.calls[0]
+    assert call.skip_compose is True
+    assert call.compose_project_name is None
+    assert str(call.compose_file_path) == compose_file_path
+    assert call.remove_worktree is True
 
 
 @pytest.mark.unit

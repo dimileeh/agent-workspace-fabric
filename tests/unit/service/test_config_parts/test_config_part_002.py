@@ -340,11 +340,16 @@ def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_serv
 
     for service_name in ("api", "worker", "migrate"):
         service = compose["services"][service_name]
-        assert service["environment"]["AWF_WORKER_NODE_ID"] == "local"
-        assert service["environment"]["AWF_PLANNING_MAX_ITERATIONS_DEFAULT"].endswith(":-3}")
-        assert service["environment"]["AWF_GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
-        assert service["environment"]["GH_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
-        assert service["environment"]["GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
+        environment = {
+            item.split("=", 1)[0]: item.split("=", 1)[1]
+            for item in service["environment"]
+            if "=" in item
+        }
+        assert environment["AWF_WORKER_NODE_ID"] == "local"
+        assert environment["AWF_PLANNING_MAX_ITERATIONS_DEFAULT"].endswith(":-3}")
+        assert environment["AWF_GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
+        assert environment["GH_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
+        assert environment["GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
 
 
 @pytest.mark.unit

@@ -354,6 +354,7 @@ class BitbucketClient(_BitbucketUrlsMixin):
         )
         return PRStatus(
             number=int(pr.get("id") or pr_number),
+            head_ref=source_branch,
             head_sha=head_sha,
             mergeable=mergeable_state_for(merged=merged, closed=closed),
             check_state=parse_check_state(statuses),

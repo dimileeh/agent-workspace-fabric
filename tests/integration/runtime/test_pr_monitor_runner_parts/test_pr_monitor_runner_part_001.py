@@ -1048,6 +1048,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit
         cmd.queue_result(returncode=0)  # git push (sync_base)
+        cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
         # Outer iter 2: clean → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>

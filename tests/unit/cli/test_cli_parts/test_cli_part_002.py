@@ -45,6 +45,7 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--model" in visible_help
     assert "--effort" in visible_help
     assert "--owned-path" in visible_help
+    assert "--execution" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -124,6 +125,7 @@ class TestWorkspaceAdoptPr:
             "profile_ref": "auto",
             "profile": None,
             "auto_merge": False,
+            "execution": {"mode": "local"},
             "initial_review_grace_period_seconds": 0,
             "task_title": None,
             "task_prompt": None,

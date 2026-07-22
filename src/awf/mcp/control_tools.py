@@ -24,6 +24,7 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorExecutionPolicy,
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
@@ -176,6 +177,13 @@ def register_control_tools(
             default=True,
             description="Whether AWF may merge the adopted PR once monitor gates are green.",
         ),
+        execution: PullRequestMonitorExecutionPolicy = Field(
+            default_factory=PullRequestMonitorExecutionPolicy,
+            description=(
+                "Execution placement for PR monitor repair and validation. Hosted "
+                "mode requires configured hosted delegation."
+            ),
+        ),
         initial_review_grace_period_seconds: float | None = Field(
             default=None,
             ge=0,
@@ -224,6 +232,7 @@ def register_control_tools(
                     profile=profile,
                     owned_paths=owned_paths,
                     auto_merge=auto_merge,
+                    execution=execution,
                     initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
                     task_title=task_title,
                     task_prompt=task_prompt,
