@@ -84,6 +84,42 @@ def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_verifies_pinned_cursor_release_before_extracting() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
+    assert (
+        "ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4"
+        in dockerfile
+    )
+    assert (
+        "ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb"
+        in dockerfile
+    )
+    assert "https://cursor.com/install" not in dockerfile
+    assert 'cursor_dpkg_arch="$(dpkg --print-architecture)"' in dockerfile
+    assert 'amd64) cursor_arch="x64"; expected_hash="${CURSOR_X64_SHA256}"' in dockerfile
+    assert 'arm64) cursor_arch="arm64"; expected_hash="${CURSOR_ARM64_SHA256}"' in dockerfile
+    assert "Unsupported Cursor CLI architecture: $cursor_dpkg_arch" in dockerfile
+    assert (
+        "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/"
+        "${cursor_arch}/agent-cli-package.tar.gz"
+    ) in dockerfile
+    assert (
+        'cursor_archive="/tmp/cursor-agent-${CURSOR_VERSION}-${cursor_arch}.tar.gz"' in dockerfile
+    )
+    assert "trap 'rm -f \"$cursor_archive\"' EXIT" in dockerfile
+    assert 'actual_hash="$(sha256sum "$cursor_archive")"' in dockerfile
+    assert 'actual_hash="${actual_hash%% *}"' in dockerfile
+    assert 'if [ "$actual_hash" != "$expected_hash" ]; then' in dockerfile
+    assert "Cursor CLI checksum mismatch for ${CURSOR_VERSION}/${cursor_arch}" in dockerfile
+    assert 'tar --strip-components=1 -xzf "$cursor_archive"' in dockerfile
+    assert dockerfile.index('if [ "$actual_hash" != "$expected_hash" ]; then') < dockerfile.index(
+        'tar --strip-components=1 -xzf "$cursor_archive"'
+    )
+
+
+@pytest.mark.unit
 def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
@@ -92,7 +128,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG CLAUDE_CODE_VERSION=2.1.206" in dockerfile
     assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
-    assert "Cursor CLI tracks the official installer" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
     assert "ARG GROK_VERSION=0.2.94" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
@@ -107,19 +143,6 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert 'ln -sf "$(command -v node)" /usr/local/bin/node' not in dockerfile
     assert "cursor-agent" in dockerfile
     assert "install -d -m 0755 /opt/cursor" in dockerfile
-    cursor_installer = (
-        "curl --fail --show-error --silent --location \\\n"
-        "      --retry 5 \\\n"
-        "      --retry-delay 2 \\\n"
-        "      --retry-all-errors \\\n"
-        "      --connect-timeout 20 \\\n"
-        "      --max-time 300 \\\n"
-        "      --output /tmp/cursor-install.sh \\\n"
-        "      https://cursor.com/install; \\\n"
-        "    HOME=/opt/cursor bash /tmp/cursor-install.sh; \\\n"
-        "    rm -f /tmp/cursor-install.sh"
-    )
-    assert cursor_installer in dockerfile
     assert 'cursor_path="/opt/cursor/.local/bin/cursor-agent"' in dockerfile
     assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
     assert 'install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
@@ -130,7 +153,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index(cursor_installer)
+    ) < dockerfile.index("ARG CURSOR_VERSION=2026.07.20-8cc9c0b")
     assert (
         "USER agent\n"
         "WORKDIR /workspace\n\n"
