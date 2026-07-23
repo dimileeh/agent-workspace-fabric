@@ -199,12 +199,12 @@ async def test_initial_validation_handoff_cleans_only_empty_untracked_directorie
     )
 
     assert result.stop
-    assert checker_spy.await_args.kwargs == {
-        "run_git": ANY,
-        "worktree_path": worktree,
-        "ignore_all_ignored": True,
-        "remove_empty_untracked_dirs": True,
-    }
+    checker_spy.assert_awaited_once_with(
+        run_git=ANY,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
     if state == "empty_dir":
         assert not residue.exists()
         validation_run.assert_awaited_once()
@@ -219,6 +219,7 @@ async def test_initial_validation_handoff_cleans_only_empty_untracked_directorie
         validation_run.assert_not_awaited()
         cleanup_mock.assert_not_awaited()
         reason_code = VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    executor._mark_failed.assert_awaited_once()
     assert executor._mark_failed.await_args.kwargs["reason_code"] == reason_code
 
 
@@ -251,12 +252,12 @@ async def test_shared_fix_pass_handoff_cleans_only_empty_untracked_directories(
         profile=WorkspaceProfile.model_validate({"name": "fix-handoff"}),
     )
 
-    assert checker_spy.await_args.kwargs == {
-        "run_git": ANY,
-        "worktree_path": worktree,
-        "ignore_all_ignored": True,
-        "remove_empty_untracked_dirs": True,
-    }
+    checker_spy.assert_awaited_once_with(
+        run_git=ANY,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
     if state == "empty_dir":
         assert result is None
         assert not residue.exists()
@@ -265,6 +266,7 @@ async def test_shared_fix_pass_handoff_cleans_only_empty_untracked_directories(
         assert result is not None
         assert result.stop
         assert residue.exists()
+        executor._mark_failed.assert_awaited_once()
         assert executor._mark_failed.await_args.kwargs["reason_code"] == (
             VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
         )
