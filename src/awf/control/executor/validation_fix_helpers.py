@@ -90,6 +90,7 @@ async def check_post_fix_worktree_clean(
         run_git=git_in_worktree,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
     )
     if fix_pass_ignored_check.clean:
         return None

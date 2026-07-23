@@ -262,6 +262,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
+            remove_empty_untracked_dirs=True,
         )
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
