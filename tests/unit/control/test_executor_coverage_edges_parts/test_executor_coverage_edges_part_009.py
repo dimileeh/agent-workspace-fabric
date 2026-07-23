@@ -12,6 +12,7 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
 from awf.control.executor.agent_service_recovery import AGENT_SERVICE_RECOVERY_ABORTED
 from awf.control.executor.constants import (
     POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
@@ -1179,6 +1180,14 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     workspace = _workspace("ws_conf_fix_loop")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    post_fix_handoff = AsyncMock(
+        wraps=executor_validation_fix_helpers.check_post_fix_worktree_clean
+    )
+    monkeypatch.setattr(
+        executor_validation_fix_helpers,
+        "check_post_fix_worktree_clean",
+        post_fix_handoff,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -1243,6 +1252,7 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     assert conformance_check.await_count == 2
     # The conformance fix pass re-invoked the agent exactly once between checks.
     assert adapter.run.await_count == 1
+    post_fix_handoff.assert_awaited_once()
 
 
 @pytest.mark.unit
