@@ -9,14 +9,41 @@ steps:
       - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
       - .
 
-  - id: build-agent-runtime
+  # Agent-runtime must publish linux/amd64 + linux/arm64 (DGX Spark / PRD §18.5).
+  # Plain `docker build` only produces the builder's platform (amd64 on Cloud Build).
+  - id: setup-qemu
     name: gcr.io/cloud-builders/docker
     args:
+      - run
+      - --privileged
+      - --rm
+      - tonistiigi/binfmt
+      - --install
+      - all
+
+  - id: create-buildx-builder
+    name: gcr.io/cloud-builders/docker
+    args:
+      - buildx
+      - create
+      - --use
+      - --name
+      - awf-multiarch
+      - --driver
+      - docker-container
+
+  - id: build-and-push-agent-runtime
+    name: gcr.io/cloud-builders/docker
+    args:
+      - buildx
       - build
+      - --platform
+      - linux/amd64,linux/arm64
       - --file
       - docker/agent-runtime.Dockerfile
       - --tag
       - ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA
+      - --push
       - .
 
   - id: push-core
@@ -24,12 +51,6 @@ steps:
     args:
       - push
       - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
-
-  - id: push-agent-runtime
-    name: gcr.io/cloud-builders/docker
-    args:
-      - push
-      - ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA
 
 options:
   logging: CLOUD_LOGGING_ONLY
