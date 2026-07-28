@@ -1,0 +1,37 @@
+steps:
+  - id: build-core
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - docker/control-plane.Dockerfile
+      - --tag
+      - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
+      - .
+
+  - id: build-agent-runtime
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - docker/agent-runtime.Dockerfile
+      - --tag
+      - ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA
+      - .
+
+  - id: push-core
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
+
+  - id: push-agent-runtime
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 3600s
