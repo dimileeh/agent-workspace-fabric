@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+
+_BINFMT_DIGEST_REF = re.compile(r"^tonistiigi/binfmt(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$")
 
 
 def test_cloudbuild_publishes_only_core_owned_images_from_main_sha() -> None:
@@ -56,3 +59,22 @@ def test_cloudbuild_publishes_agent_runtime_multi_arch() -> None:
     assert "push-agent-runtime" not in {
         step.get("id") for step in config["steps"] if isinstance(step, dict)
     }
+
+
+def test_cloudbuild_pins_privileged_binfmt_by_digest() -> None:
+    """Privileged qemu/binfmt helper must not float on a mutable tag."""
+    path = ROOT / "cloudbuild.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    qemu_steps = [
+        step
+        for step in config["steps"]
+        if isinstance(step, dict) and step.get("id") == "setup-qemu"
+    ]
+    assert len(qemu_steps) == 1
+    args = qemu_steps[0].get("args", [])
+    assert args[:3] == ["run", "--privileged", "--rm"]
+    image = args[3]
+    assert _BINFMT_DIGEST_REF.match(image), (
+        f"setup-qemu must pin tonistiigi/binfmt by digest, got {image!r}"
+    )
