@@ -4320,8 +4320,16 @@
             "title": "Attempt Id"
           },
           "auto_merge": {
-            "title": "Auto Merge",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved auto-merge policy for the adopted PR, or null when it is not yet resolved. An adoption that omits an explicit intent falls through to the repo profile (monitor.auto_merge), which is only materialized at provisioning; until then the value is null (unresolved), never a provisional false. Inspect monitor_policy.auto_merge_intent and monitor_policy.auto_merge_resolved to distinguish intent from the resolved policy.",
+            "title": "Auto Merge"
           },
           "base_ref": {
             "title": "Base Ref",
@@ -4441,7 +4449,6 @@
           "pr_url",
           "head_ref",
           "base_ref",
-          "auto_merge",
           "attached_existing",
           "status_url",
           "events_url",

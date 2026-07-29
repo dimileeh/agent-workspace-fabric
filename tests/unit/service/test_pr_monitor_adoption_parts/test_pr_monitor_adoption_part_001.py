@@ -261,6 +261,66 @@ class TestPullRequestMonitorAdoptionServicePart001:
             ]
 
     @pytest.mark.unit
+    async def test_omitted_auto_merge_reports_unresolved_until_provisioned(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # An adoption that omits an explicit intent must NOT report the
+        # provisional ``DEFAULT_AUTO_MERGE`` seed as a resolved manual policy:
+        # provisioning may resolve the setting to True from a trusted profile.
+        # Until then the response surfaces ``auto_merge`` as unresolved (None).
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                )
+            )
+            await session.commit()
+
+        assert result.status == WorkspaceStatus.requested
+        assert result.auto_merge is None
+        assert result.monitor_policy["auto_merge"] is None
+        assert result.monitor_policy["auto_merge_intent"] is None
+        assert result.monitor_policy["auto_merge_resolved"] is False
+
+        # Once provisioning has resolved the flag (here, on to True), the
+        # response reports the authoritative resolved value, not None.
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(result.workspace_id)
+            assert workspace is not None
+            await repo.transition(
+                workspace, to=WorkspaceStatus.provisioning, reason_code="TEST_PROVISION"
+            )
+            workspace.auto_merge = True
+            await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+            await session.commit()
+
+        async with factory() as session:
+            resumed = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                )
+            )
+            await session.commit()
+
+        assert resumed.attached_existing is True
+        assert resumed.auto_merge is True
+        assert resumed.monitor_policy["auto_merge"] is True
+        assert resumed.monitor_policy["auto_merge_intent"] is None
+        assert resumed.monitor_policy["auto_merge_resolved"] is True
+
+    @pytest.mark.unit
     async def test_hosted_execution_policy_is_persisted_and_replay_attaches(
         self,
         factory: async_sessionmaker[AsyncSession],

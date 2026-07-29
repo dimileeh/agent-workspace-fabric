@@ -65,6 +65,12 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+# Statuses in which the provisioner has not yet resolved the final ``auto_merge``
+# flag from the materialized profile, so the persisted column is still the
+# provisional seed rather than the authoritative resolved policy.
+_AUTO_MERGE_UNRESOLVED_STATUSES = frozenset(
+    {WorkspaceStatus.requested.value, WorkspaceStatus.provisioning.value}
+)
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
 # #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
 # clears the adoption forge gate. But the *default* adoption metadata fetcher
@@ -544,6 +550,19 @@ class PullRequestMonitorAdoptionService:
         repo_slug = str(adoption.get("repo_slug") or RepoRef.from_url(workspace.repo_url).slug())
         pr_number = int(adoption.get("pr_number") or workspace.pr_number or 0)
         pr_url = str(adoption.get("pr_url") or workspace.pr_url or "")
+        # The persisted ``auto_merge`` column is only authoritative once the
+        # provisioner has resolved it against the materialized profile. Before
+        # then it is the provisional ``DEFAULT_AUTO_MERGE`` seed, which lies for an
+        # adoption that omitted an explicit intent and whose (trusted) profile
+        # resolves ``monitor.auto_merge`` on. Surface the resolved value only when
+        # it is actually settled — an explicit intent already fixes it, and any
+        # post-provisioning status has run the resolver — otherwise report the
+        # setting as unresolved (``None``) rather than a false ``manual`` policy.
+        auto_merge_intent = auto_merge_intent_from_policy(workspace.task_policy)
+        auto_merge_resolved = workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES
+        auto_merge_value: bool | None = (
+            workspace.auto_merge if auto_merge_resolved or auto_merge_intent is not None else None
+        )
         return PullRequestMonitorAdoptionResponse(
             workspace_id=workspace.id,
             status=_workspace_status_for_response(workspace.status),
@@ -559,9 +578,11 @@ class PullRequestMonitorAdoptionService:
             base_ref=str(adoption.get("base_ref") or workspace.branch_base),
             head_sha=_optional_str(adoption.get("head_sha")) or workspace.monitor_last_commit_sha,
             base_sha=_optional_str(adoption.get("base_sha")),
-            auto_merge=workspace.auto_merge,
+            auto_merge=auto_merge_value,
             monitor_policy={
-                "auto_merge": workspace.auto_merge,
+                "auto_merge": auto_merge_value,
+                "auto_merge_intent": auto_merge_intent,
+                "auto_merge_resolved": auto_merge_resolved,
                 "initial_review_grace_period_seconds": (
                     workspace.initial_review_grace_period_seconds
                 ),

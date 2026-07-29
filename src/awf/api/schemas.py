@@ -476,7 +476,18 @@ class PullRequestMonitorAdoptionResponse(BaseModel):
     base_ref: str
     head_sha: str | None = None
     base_sha: str | None = None
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Resolved auto-merge policy for the adopted PR, or null when it is not "
+            "yet resolved. An adoption that omits an explicit intent falls through "
+            "to the repo profile (monitor.auto_merge), which is only materialized "
+            "at provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect monitor_policy.auto_merge_intent and "
+            "monitor_policy.auto_merge_resolved to distinguish intent from the "
+            "resolved policy."
+        ),
+    )
     monitor_policy: dict[str, Any] = Field(default_factory=dict)
     attached_existing: bool
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
