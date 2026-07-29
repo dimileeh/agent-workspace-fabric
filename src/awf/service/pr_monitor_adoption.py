@@ -569,11 +569,11 @@ class PullRequestMonitorAdoptionService:
         auto_merge_intent = auto_merge_intent_from_policy(workspace.task_policy)
         legacy_policy = not task_policy_has_auto_merge_intent(workspace.task_policy)
         auto_merge_resolved = (
-            workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES or legacy_policy
+            auto_merge_intent is not None
+            or workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES
+            or legacy_policy
         )
-        auto_merge_value: bool | None = (
-            workspace.auto_merge if auto_merge_resolved or auto_merge_intent is not None else None
-        )
+        auto_merge_value: bool | None = workspace.auto_merge if auto_merge_resolved else None
         return PullRequestMonitorAdoptionResponse(
             workspace_id=workspace.id,
             status=_workspace_status_for_response(workspace.status),

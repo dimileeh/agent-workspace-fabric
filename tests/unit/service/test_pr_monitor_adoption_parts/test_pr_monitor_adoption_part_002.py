@@ -424,7 +424,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert fresh.monitor_policy == {
             "auto_merge": True,
             "auto_merge_intent": True,
-            "auto_merge_resolved": False,
+            "auto_merge_resolved": True,
             "initial_review_grace_period_seconds": 13.0,
             "execution": {"mode": "local"},
         }

@@ -320,6 +320,38 @@ class TestPullRequestMonitorAdoptionServicePart001:
         assert resumed.monitor_policy["auto_merge_resolved"] is True
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("explicit_intent", [True, False])
+    async def test_explicit_intent_reports_resolved_before_provisioning(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        explicit_intent: bool,
+    ) -> None:
+        # An explicit ``auto_merge`` intent fixes the policy regardless of
+        # provisioning status: ``resolve_auto_merge`` already has the final
+        # answer, so an unresolved new-world row (still ``requested``) must
+        # report ``auto_merge_resolved=True`` rather than contradicting the
+        # surfaced ``auto_merge`` value with a stale ``False``.
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                    auto_merge=explicit_intent,
+                )
+            )
+            await session.commit()
+
+        assert result.status == WorkspaceStatus.requested
+        assert result.auto_merge is explicit_intent
+        assert result.monitor_policy["auto_merge"] is explicit_intent
+        assert result.monitor_policy["auto_merge_intent"] is explicit_intent
+        assert result.monitor_policy["auto_merge_resolved"] is True
+
+    @pytest.mark.unit
     async def test_legacy_row_exposes_grandfathered_auto_merge_before_provisioning(
         self,
         factory: async_sessionmaker[AsyncSession],
