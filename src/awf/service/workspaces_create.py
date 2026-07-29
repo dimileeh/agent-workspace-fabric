@@ -376,11 +376,21 @@ def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequ
     post-change omitted replay. A stored ``False`` therefore matches only an
     explicit ``False`` request. New-world rows (intent key present) compare the
     persisted intent strictly against the request intent.
+
+    The one exception is a legacy ``sync_release_pr`` row: those force-set the
+    persisted ``auto_merge`` column to ``False`` at persistence regardless of the
+    request intent, so for that kind the column is not a reconstructable intent
+    signal. Comparing it against the historical default (``True``) would spuriously
+    conflict on an otherwise-identical replay, so we skip the comparison (the kind
+    itself is matched separately). New-world release-sync rows carry the intent key
+    and are handled by the strict branch above.
     """
     stored_policy = _stored_task_policy(existing)
     request_intent = payload.task.auto_merge
     if AUTO_MERGE_INTENT_POLICY_KEY in stored_policy:
         return auto_merge_intent_from_policy(stored_policy) == request_intent
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        return True
     # Legacy pre-change row: reconstruct historical intent and treat an omitted
     # request as the historical default (True).
     legacy_intent = getattr(existing, "auto_merge", None) is not False
