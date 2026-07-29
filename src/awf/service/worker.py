@@ -26,6 +26,7 @@ from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -305,6 +306,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "workspace_runtime_context": render_workspace_runtime_context(profile),
             "workspace_profile": profile,
             "provider_recovery_default_model": provider_recovery_default_model,
+            # A ``sync_release_pr`` head is the long-lived release source branch
+            # (normally ``development``). When such a workspace resolves
+            # ``auto_merge=True`` it runs the feature monitor, whose merge would
+            # otherwise ``--delete-branch`` its head and break subsequent release
+            # syncs — so keep the source branch on that path (PRRT_kwDOSJAM6s6U3YAS).
+            # Feature branches (``awf/<id>``) stay deletable.
+            "delete_source_branch_on_merge": (
+                getattr(workspace, "task_kind", None) != TaskKind.sync_release_pr.value
+            ),
         }
         try:
             return monitor_builder(**monitor_kwargs)

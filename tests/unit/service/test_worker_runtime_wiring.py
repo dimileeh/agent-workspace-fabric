@@ -1224,6 +1224,62 @@ def test_pr_monitor_factory_selection_depends_only_on_auto_merge(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("task_kind", "expected_delete"),
+    [
+        ("feature_branch_pr", True),
+        ("sync_feature_pr", True),
+        ("sync_release_pr", False),
+    ],
+)
+def test_pr_monitor_factory_preserves_release_source_branch_on_auto_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_kind: str,
+    expected_delete: bool,
+) -> None:
+    """A ``sync_release_pr`` auto-merge builds the feature monitor with branch
+    deletion disabled so the long-lived release source branch survives the
+    merge; throwaway feature/adopted heads keep the delete default
+    (PRRT_kwDOSJAM6s6U3YAS)."""
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+    captured: dict[str, Any] = {}
+
+    def _build_feature(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    def _build_release(**_kwargs: object) -> object:
+        raise AssertionError("auto_merge=True must select the feature monitor")
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_build_feature,
+        build_release=_build_release,
+    )
+    monkeypatch.setattr(worker_mod, "make_forge_client", lambda _forge, _runner: forge_client)
+
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    factory(
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind=task_kind,
+            repo_url="https://github.com/o/r.git",
+        ),
+    )
+
+    assert captured["delete_source_branch_on_merge"] is expected_delete
+
+
+@pytest.mark.unit
 def test_pr_monitor_factory_treats_null_auto_merge_as_manual(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

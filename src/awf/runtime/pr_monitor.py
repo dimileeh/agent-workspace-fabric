@@ -397,6 +397,17 @@ class MonitorConfig:
     only a live wait state for branch-protection and human-defer."""
 
     auto_merge: bool = False  # default off (release-PR/manual variant); True = feature variant
+    delete_source_branch_on_merge: bool = True
+    """Whether a successful auto-merge deletes the PR head (source) branch.
+
+    Default ``True`` matches feature PRs, whose head is a throwaway
+    ``awf/<id>`` branch that should be reaped on merge. A ``sync_release_pr``
+    workspace that resolves ``auto_merge=True`` runs the feature monitor even
+    though its head is the long-lived release *source* branch (normally
+    ``development``); deleting that branch on merge would break subsequent
+    release syncs, so the worker builds that monitor with this set ``False``
+    (PRRT_kwDOSJAM6s6U3YAS). Only consulted on the ``auto_merge=True`` merge
+    path — the release/manual variant never merges."""
     require_ci: bool = True
     """Whether a PR must observe at least one check/status before auto-merge.
 
