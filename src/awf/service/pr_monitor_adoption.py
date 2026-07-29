@@ -1253,15 +1253,16 @@ def _raise_if_policy_conflicts(
         )
     # Compare the persisted tri-state INTENT, not the resolved column: the
     # resolved value can legitimately differ from a None intent (profile/default),
-    # so a replay with the same None intent must not spuriously conflict.
-    existing_intent = auto_merge_intent_from_policy(workspace.task_policy)
-    if existing_intent != request.auto_merge:
+    # so a replay with the same None intent must not spuriously conflict. Legacy
+    # rows written before the intent key existed reconstruct the historical intent
+    # from the persisted column (see ``_adoption_auto_merge_conflicts``).
+    if _adoption_auto_merge_conflicts(workspace, request):
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different auto_merge policy.",
             detail={
                 "workspace_id": workspace.id,
-                "existing_auto_merge": existing_intent,
+                "existing_auto_merge": _adoption_auto_merge_intent(workspace),
                 "requested_auto_merge": request.auto_merge,
             },
         )
@@ -1277,6 +1278,43 @@ def _raise_if_policy_conflicts(
                 "requested_initial_review_grace_period_seconds": requested_grace,
             },
         )
+
+
+def _adoption_auto_merge_intent(workspace: Workspace) -> bool | None:
+    """Reconstruct the adoption's tri-state auto-merge intent for idempotency.
+
+    New-world rows persist the intent under ``AUTO_MERGE_INTENT_POLICY_KEY``; return
+    it verbatim. Legacy rows written before the key existed have none, and the
+    historical adoption request default was ``True`` (omitted -> merge) with the
+    persisted column set straight from the request, so reconstruct the historical
+    intent from the column (``auto_merge is not False`` -> ``True``). This value is
+    reported in the conflict detail so it reflects the compared intent, not ``None``.
+    """
+    policy = workspace.task_policy
+    if isinstance(policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in policy:
+        return auto_merge_intent_from_policy(policy)
+    return getattr(workspace, "auto_merge", None) is not False
+
+
+def _adoption_auto_merge_conflicts(
+    workspace: Workspace,
+    request: PullRequestMonitorAdoptionRequest,
+) -> bool:
+    """Whether a replay's auto-merge intent conflicts with the stored adoption.
+
+    New-world rows (intent key present) compare the persisted intent strictly
+    against the request intent. Legacy rows (no intent key) reconstruct the
+    historical intent from the persisted column and treat an omitted (``None``)
+    replay as that same historical default (``True``), so a pre-change row created
+    by an omitted/True request stays idempotent against a post-change replay instead
+    of spuriously raising ``PR_ADOPTION_POLICY_CONFLICT``.
+    """
+    policy = workspace.task_policy
+    if isinstance(policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in policy:
+        return auto_merge_intent_from_policy(policy) != request.auto_merge
+    legacy_intent = getattr(workspace, "auto_merge", None) is not False
+    effective_request = True if request.auto_merge is None else request.auto_merge
+    return legacy_intent != effective_request
 
 
 def _raise_if_agent_policy_conflicts(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -689,3 +690,77 @@ class TestPullRequestMonitorAdoptionServicePart003:
             "existing_auto_merge": existing_detail,
             "requested_auto_merge": requested_detail,
         }
+
+
+def _legacy_workspace(*, auto_merge: bool | None) -> SimpleNamespace:
+    """A pre-intent-key adoption row: task_policy lacks ``auto_merge_intent``."""
+    return SimpleNamespace(auto_merge=auto_merge, task_policy={})
+
+
+def _adoption_request(*, auto_merge: bool | None) -> PullRequestMonitorAdoptionRequest:
+    kwargs: dict[str, Any] = {"repo_slug": "dimileeh/aira-web", "pr_number": 277}
+    if auto_merge is not None:
+        kwargs["auto_merge"] = auto_merge
+    return PullRequestMonitorAdoptionRequest(**kwargs)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("request_intent", [True, None])
+def test_legacy_true_column_matches_true_or_omitted(request_intent: bool | None) -> None:
+    # Regression: a legacy adoption (no intent key) with column True reconstructs
+    # the historical default True and must NOT conflict with an explicit True or an
+    # omitted replay instead of spuriously raising PR_ADOPTION_POLICY_CONFLICT.
+    legacy = _legacy_workspace(auto_merge=True)
+    request = _adoption_request(auto_merge=request_intent)
+    assert not adoption_module._adoption_auto_merge_conflicts(legacy, request)
+    assert adoption_module._adoption_auto_merge_intent(legacy) is True
+
+
+@pytest.mark.unit
+def test_legacy_false_column_matches_only_explicit_false() -> None:
+    # A legacy row with column False reconstructs intent False: matches an explicit
+    # False request but conflicts with True (an omitted replay maps to the historical
+    # default True and therefore conflicts).
+    legacy = _legacy_workspace(auto_merge=False)
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=False)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=True)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=None)
+    )
+    assert adoption_module._adoption_auto_merge_intent(legacy) is False
+
+
+@pytest.mark.unit
+def test_legacy_null_column_reconstructs_true() -> None:
+    # A legacy row with a NULL column (historical unset) reconstructs True.
+    legacy = _legacy_workspace(auto_merge=None)
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=True)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=False)
+    )
+    assert adoption_module._adoption_auto_merge_intent(legacy) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("intent", [None, True, False])
+def test_new_world_intent_compares_strictly(intent: bool | None) -> None:
+    # A new-world row (intent key present) compares the persisted intent strictly
+    # and reports it verbatim in the detail.
+    workspace = SimpleNamespace(
+        auto_merge=bool(intent),
+        task_policy={"auto_merge_intent": intent},
+    )
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        workspace, _adoption_request(auto_merge=intent)
+    )
+    other = None if intent is True else True
+    assert adoption_module._adoption_auto_merge_conflicts(
+        workspace, _adoption_request(auto_merge=other)
+    )
+    assert adoption_module._adoption_auto_merge_intent(workspace) is intent
