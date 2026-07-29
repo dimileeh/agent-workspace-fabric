@@ -602,3 +602,90 @@ class TestPullRequestMonitorAdoptionServicePart003:
             "existing_auto_merge": False,
             "requested_auto_merge": True,
         }
+
+    @pytest.mark.unit
+    async def test_adopt_persists_tri_state_auto_merge_intent(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An omitted auto_merge persists intent None and a provisional column
+        default of False (the resolver finalizes the flag at provision)."""
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert workspace.task_policy["auto_merge_intent"] is None
+            assert workspace.auto_merge is False
+
+    @pytest.mark.unit
+    async def test_replay_with_same_unset_intent_does_not_conflict(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Two omitted-intent adoptions compare equal on the persisted intent
+        (None == None) even though the resolved column can differ from None."""
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            replay = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+        assert replay.workspace_id == first.workspace_id
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("initial", "replay", "existing_detail", "requested_detail"),
+        [
+            (None, True, None, True),
+            (None, False, None, False),
+            (True, None, True, None),
+            (False, None, False, None),
+        ],
+    )
+    async def test_replay_with_changed_intent_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        initial: bool | None,
+        replay: bool | None,
+        existing_detail: bool | None,
+        requested_detail: bool | None,
+    ) -> None:
+        """Changing the tri-state intent (None vs True vs False) conflicts and the
+        detail reports the persisted intent, not the resolved column."""
+        fetcher = _MetadataFetcher(_metadata())
+
+        def _kwargs(value: bool | None) -> dict[str, Any]:
+            return {} if value is None else {"auto_merge": value}
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web", pr_number=277, **_kwargs(initial)
+                )
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web", pr_number=277, **_kwargs(replay)
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "existing_auto_merge": existing_detail,
+            "requested_auto_merge": requested_detail,
+        }

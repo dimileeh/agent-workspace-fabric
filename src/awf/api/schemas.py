@@ -111,7 +111,15 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
     profile: WorkspaceProfile | None = None
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
-    auto_merge: bool = True
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent for the adopted PR. True/False set it "
+            "explicitly; omit (null) to fall through to the repo profile "
+            "(monitor.auto_merge) and the uniform default (off). When resolved "
+            "off the monitor reports readiness without merging (manual gate)."
+        ),
+    )
     execution: PullRequestMonitorExecutionPolicy = Field(
         default_factory=PullRequestMonitorExecutionPolicy,
         description=(
@@ -236,7 +244,15 @@ class WorkspaceTask(BaseModel):
     human_boost: int = Field(default=0, ge=0, le=5)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     out_of_scope_changes: OutOfScopeChangePolicy | None = None
-    auto_merge: bool = True
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent. True/False set it explicitly; omit "
+            "(null) to fall through to the repo profile (monitor.auto_merge) and "
+            "the uniform default (off). When resolved off the monitor reports "
+            "readiness without merging (manual gate)."
+        ),
+    )
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -273,7 +289,8 @@ class WorkspaceTask(BaseModel):
         if value == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             raise ValueError(
                 "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-                "release/manual PR via PR adoption with auto_merge=false instead."
+                "release/manual PR via PR adoption instead (auto_merge defaults to "
+                "false, giving the manual/no-auto-merge gate)."
             )
         if value == TaskKind.sync_feature_pr.value:
             raise ValueError(

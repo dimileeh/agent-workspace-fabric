@@ -396,7 +396,7 @@ class MonitorConfig:
     PR until it is merged or closed no matter the volume; NotifyHuman is
     only a live wait state for branch-protection and human-defer."""
 
-    auto_merge: bool = True  # False = release-PR variant
+    auto_merge: bool = False  # default off (release-PR/manual variant); True = feature variant
     require_ci: bool = True
     """Whether a PR must observe at least one check/status before auto-merge.
 

@@ -21,6 +21,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -501,11 +502,29 @@ class ProfileValidation(BaseModel):
     retry_budget: int = Field(default=0, ge=0, le=10)
 
 
+class ProfileAutoMerge(BaseModel):
+    """Repo-level auto-merge configuration under ``monitor.auto_merge``.
+
+    ``default`` is the repo-global auto-merge stance; ``by_base_branch`` overrides
+    it per PR base/target branch (exact match). Both feed the shared
+    ``resolve_auto_merge`` precedence chain, below a per-task ``--auto-merge``
+    intent. Omitting the block entirely resolves to ``DEFAULT_AUTO_MERGE``
+    (off). Values are ``StrictBool`` so a non-bool (``"yes"``, ``1``) is rejected
+    loudly at profile load rather than silently coerced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    default: StrictBool = Field(default=False)
+    by_base_branch: dict[str, StrictBool] = Field(default_factory=dict)
+
+
 class ProfileMonitor(BaseModel):
     """PR monitor policy supplied by the workspace profile."""
 
     model_config = ConfigDict(extra="forbid")
 
+    auto_merge: ProfileAutoMerge = Field(default_factory=ProfileAutoMerge)
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
     non_check_reviewer_settle_seconds: float = Field(default=900.0, ge=0, le=86400)
     require_ci: bool = Field(default=True)

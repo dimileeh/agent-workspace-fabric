@@ -448,12 +448,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         is created["feature_monitor_kwargs"]["merge_coordinator"]
     )
 
-    # Regression (PRRT_kwDOSJAM6s6EN6XO): a sync_release_pr workspace must get
-    # the human-gated release monitor even when its persisted auto_merge is True,
-    # so the never-auto-merge guarantee never hinges on that flag staying False.
+    # Monitor selection is a pure function of the persisted auto_merge flag;
+    # task_kind must NEVER affect it. A sync_release_pr workspace whose resolved
+    # auto_merge is True therefore gets the FEATURE monitor (the flag is
+    # authoritative), and a False flag gets the human-gated release monitor
+    # regardless of task_kind.
     created.pop("feature_monitor_kwargs", None)
     created.pop("release_monitor_kwargs", None)
-    release_sync_monitor = created["executor_monitor_factory"](
+    release_sync_auto_merge_monitor = created["executor_monitor_factory"](
         object(),
         profile,
         SimpleNamespace(
@@ -463,7 +465,23 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             repo_url="https://github.com/o/r.git",
         ),
     )
-    assert release_sync_monitor is not None
+    assert release_sync_auto_merge_monitor is not None
+    assert "feature_monitor_kwargs" in created
+    assert "release_monitor_kwargs" not in created
+
+    created.pop("feature_monitor_kwargs", None)
+    created.pop("release_monitor_kwargs", None)
+    release_sync_manual_monitor = created["executor_monitor_factory"](
+        object(),
+        profile,
+        SimpleNamespace(
+            auto_merge=False,
+            initial_review_grace_period_seconds=None,
+            task_kind="sync_release_pr",
+            repo_url="https://github.com/o/r.git",
+        ),
+    )
+    assert release_sync_manual_monitor is not None
     assert "feature_monitor_kwargs" not in created
     assert "release_monitor_kwargs" in created
 

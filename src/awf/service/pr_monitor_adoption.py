@@ -15,6 +15,11 @@ from awf.api.schemas import (
     PullRequestMonitorAdoptionResponse,
 )
 from awf.common.audit import redact_audit_text
+from awf.common.auto_merge import (
+    AUTO_MERGE_INTENT_POLICY_KEY,
+    DEFAULT_AUTO_MERGE,
+    auto_merge_intent_from_policy,
+)
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.forge import ForgeNotSupportedError, ensure_forge_supported
@@ -335,7 +340,9 @@ class PullRequestMonitorAdoptionService:
             requires_database=False,
             owned_paths=list(request.owned_paths),
             task_policy=task_policy,
-            auto_merge=request.auto_merge,
+            auto_merge=(
+                request.auto_merge if request.auto_merge is not None else DEFAULT_AUTO_MERGE
+            ),
             initial_review_grace_period_seconds=request.initial_review_grace_period_seconds,
             profile_ref=request.profile_ref,
             requested_profile=requested_profile,
@@ -959,6 +966,10 @@ def _adoption_task_policy(
     }
     if lineage is not None:
         policy["pr_adoption"]["lineage"] = lineage
+    # Persist the raw tri-state auto-merge intent durably so the provisioner
+    # resolves the final flag from it and idempotent replays compare the stable
+    # intent (not the provisional-then-resolved column).
+    policy[AUTO_MERGE_INTENT_POLICY_KEY] = request.auto_merge
     policy.update(_requested_agent_policy(request))
     return policy
 
@@ -1240,13 +1251,17 @@ def _raise_if_policy_conflicts(
                 "requested_task_tag": request.task_tag,
             },
         )
-    if workspace.auto_merge != request.auto_merge:
+    # Compare the persisted tri-state INTENT, not the resolved column: the
+    # resolved value can legitimately differ from a None intent (profile/default),
+    # so a replay with the same None intent must not spuriously conflict.
+    existing_intent = auto_merge_intent_from_policy(workspace.task_policy)
+    if existing_intent != request.auto_merge:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different auto_merge policy.",
             detail={
                 "workspace_id": workspace.id,
-                "existing_auto_merge": workspace.auto_merge,
+                "existing_auto_merge": existing_intent,
                 "requested_auto_merge": request.auto_merge,
             },
         )

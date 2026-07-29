@@ -2670,6 +2670,26 @@
         "title": "ProfileAppEndpointHealth",
         "type": "object"
       },
+      "ProfileAutoMerge": {
+        "additionalProperties": false,
+        "description": "Repo-level auto-merge configuration under ``monitor.auto_merge``.\n\n``default`` is the repo-global auto-merge stance; ``by_base_branch`` overrides\nit per PR base/target branch (exact match). Both feed the shared\n``resolve_auto_merge`` precedence chain, below a per-task ``--auto-merge``\nintent. Omitting the block entirely resolves to ``DEFAULT_AUTO_MERGE``\n(off). Values are ``StrictBool`` so a non-bool (``\"yes\"``, ``1``) is rejected\nloudly at profile load rather than silently coerced.",
+        "properties": {
+          "by_base_branch": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "By Base Branch",
+            "type": "object"
+          },
+          "default": {
+            "default": false,
+            "title": "Default",
+            "type": "boolean"
+          }
+        },
+        "title": "ProfileAutoMerge",
+        "type": "object"
+      },
       "ProfileCapabilitySchema": {
         "description": "Public-safe description of the profile capability classification contract.\n\nSurfaced through Core discovery so a cloud substrate can interpret\nper-profile capability payloads without Core embedding cloud product\npolicy. Carries no secrets.",
         "properties": {
@@ -3026,6 +3046,9 @@
         "additionalProperties": false,
         "description": "PR monitor policy supplied by the workspace profile.",
         "properties": {
+          "auto_merge": {
+            "$ref": "#/components/schemas/ProfileAutoMerge"
+          },
           "awaiting_required_checks_grace_seconds": {
             "default": 600.0,
             "maximum": 86400.0,
@@ -4085,9 +4108,16 @@
             "default": "codex"
           },
           "auto_merge": {
-            "default": true,
-            "title": "Auto Merge",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tri-state auto-merge intent for the adopted PR. True/False set it explicitly; omit (null) to fall through to the repo profile (monitor.auto_merge) and the uniform default (off). When resolved off the monitor reports readiness without merging (manual gate).",
+            "title": "Auto Merge"
           },
           "effort": {
             "anyOf": [
@@ -11558,9 +11588,16 @@
             "default": "codex"
           },
           "auto_merge": {
-            "default": true,
-            "title": "Auto Merge",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tri-state auto-merge intent. True/False set it explicitly; omit (null) to fall through to the repo profile (monitor.auto_merge) and the uniform default (off). When resolved off the monitor reports readiness without merging (manual gate).",
+            "title": "Auto Merge"
           },
           "effort": {
             "anyOf": [

@@ -1166,3 +1166,101 @@ def test_pr_monitor_factory_closes_forge_client_when_builder_raises(
         )
 
     assert forge_client.aclose_calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "task_kind",
+    ["feature_branch_pr", "sync_feature_pr", "sync_release_pr"],
+)
+@pytest.mark.parametrize("auto_merge", [True, False])
+def test_pr_monitor_factory_selection_depends_only_on_auto_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_kind: str,
+    auto_merge: bool,
+) -> None:
+    """Monitor selection is a pure function of workspace.auto_merge.
+
+    task_kind must NEVER affect it: for every task_kind, auto_merge True selects
+    the feature (squash-on-green) monitor and False selects the release/manual
+    (NotifyHuman) monitor.
+    """
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+
+    def _build_feature(**_kwargs: object) -> object:
+        created["selected"] = "feature"
+        return object()
+
+    def _build_release(**_kwargs: object) -> object:
+        created["selected"] = "release"
+        return object()
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_build_feature,
+        build_release=_build_release,
+    )
+    monkeypatch.setattr(worker_mod, "make_forge_client", lambda _forge, _runner: forge_client)
+
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    factory(
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(
+            auto_merge=auto_merge,
+            initial_review_grace_period_seconds=None,
+            task_kind=task_kind,
+            repo_url="https://github.com/o/r.git",
+        ),
+    )
+
+    assert created["selected"] == ("feature" if auto_merge else "release")
+
+
+@pytest.mark.unit
+def test_pr_monitor_factory_treats_null_auto_merge_as_manual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A legacy NULL/falsy auto_merge selects the safe manual (release) monitor."""
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+
+    def _build_feature(**_kwargs: object) -> object:
+        created["selected"] = "feature"
+        return object()
+
+    def _build_release(**_kwargs: object) -> object:
+        created["selected"] = "release"
+        return object()
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_build_feature,
+        build_release=_build_release,
+    )
+    monkeypatch.setattr(worker_mod, "make_forge_client", lambda _forge, _runner: forge_client)
+
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    factory(
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(
+            auto_merge=None,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+            repo_url="https://github.com/o/r.git",
+        ),
+    )
+
+    assert created["selected"] == "release"

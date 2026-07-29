@@ -26,7 +26,6 @@ from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -248,15 +247,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         *,
         provider_recovery_default_model: str | None = None,
     ) -> Any:
-        # sync_release_pr's contract is "auto_merge forced False; never merges"
-        # (TaskKind.sync_release_pr). Bind the release monitor to the task kind so
-        # the human-gated guarantee can't hinge on the persisted auto_merge flag
-        # being False at every monitor (re)build.
-        force_release_monitor = workspace.task_kind == TaskKind.sync_release_pr.value
+        # Monitor selection is a pure function of the persisted, resolved
+        # ``workspace.auto_merge`` flag — task_kind never affects it. The flag is
+        # authoritative by design: it is resolved once at provision time from the
+        # per-task intent + the repo profile (``monitor.auto_merge``) and written
+        # to the column the monitor reads. True -> feature monitor (squash-merge on
+        # green); a False/NULL/falsy flag -> release/manual monitor (NotifyHuman on
+        # green, never merges), which is the safe default for legacy rows too.
         monitor_builder = (
-            build_feature_pr_monitor
-            if workspace.auto_merge and not force_release_monitor
-            else build_release_pr_monitor
+            build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
         )
         workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
         if workspace_is_hosted and hosted_validation_delegate is None:

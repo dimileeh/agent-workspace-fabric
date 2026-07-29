@@ -217,10 +217,11 @@ def register_workspace_tools(
             default="feature_branch_pr",
             description=(
                 "Task kind: 'feature_branch_pr' (default) or 'sync_release_pr' "
-                "(open/reuse a source->target release PR, monitored without "
-                "auto-merge). The deprecated 'monitor_release_pr' and the "
+                "(open/reuse a source->target release PR). task_kind no longer "
+                "affects auto-merge; auto_merge is a separate opt-in flag that "
+                "defaults off. The deprecated 'monitor_release_pr' and the "
                 "adoption-only 'sync_feature_pr' are rejected here; to monitor an "
-                "existing PR, adopt it with auto_merge=false."
+                "existing PR, adopt it (auto_merge defaults to false / manual)."
             ),
         ),
         agent: AgentRuntime = Field(
@@ -320,9 +321,14 @@ def register_workspace_tools(
             default=None, gt=0, description="Optional peak memory."
         ),
         disk_mb: int | None = Field(default=None, gt=0, description="Optional disk MB request."),
-        auto_merge: bool = Field(
-            default=True,
-            description="Whether AWF may merge once gates are green.",
+        auto_merge: bool | None = Field(
+            default=None,
+            description=(
+                "Tri-state auto-merge intent. True/False set it explicitly; omit "
+                "(null) to use the repo/profile default (off unless the profile's "
+                "monitor.auto_merge enables it). Off means the monitor reports "
+                "readiness without merging."
+            ),
         ),
         initial_review_grace_period_seconds: float | None = Field(
             default=None,

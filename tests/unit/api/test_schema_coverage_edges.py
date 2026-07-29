@@ -69,7 +69,7 @@ def test_workspace_task_rejects_deprecated_monitor_release_pr() -> None:
     message = str(exc.value)
     assert "deprecated" in message
     assert "PR adoption" in message
-    assert "auto_merge=false" in message
+    assert "auto_merge defaults to false" in message
 
 
 @pytest.mark.unit

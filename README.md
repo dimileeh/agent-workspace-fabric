@@ -101,7 +101,9 @@ Implemented now:
 - Generic phase-based validation.
 - Git worktree provisioning.
 - PR creation.
-- Feature PR monitor with automated comment handling and auto-merge.
+- Feature PR monitor with automated comment handling and opt-in auto-merge
+  (`auto_merge` defaults to off; enable per task with `--auto-merge` or per repo
+  under `monitor.auto_merge` in `workspace.yml`).
 - Release/sync PR monitor variants that keep workspaces alive until human merge.
 - Post-merge target-branch reconciliation for Python/Alembic multi-head repair.
 - Initial PR review grace period before auto-merge.

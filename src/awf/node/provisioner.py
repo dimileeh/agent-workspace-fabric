@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_value
+from awf.common.auto_merge import auto_merge_intent_from_policy, resolve_auto_merge
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -861,6 +862,28 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 node_id=self._config.node_id,
                 profile=profile,
                 zero_local_capacity=hosted_pr_adoption,
+            )
+
+            # Resolve the FINAL auto-merge flag now that the profile (workspace.yml)
+            # is materialized. This is the single shared call site for both create
+            # and adopt (adoption also provisions through here). task_kind never
+            # affects it; the monitor reads only this persisted column. Precedence:
+            # per-task intent -> monitor.auto_merge.by_base_branch[base] ->
+            # monitor.auto_merge.default -> DEFAULT_AUTO_MERGE (False).
+            auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
+            resolved_auto_merge = resolve_auto_merge(
+                auto_merge_intent, profile, persisted.branch_base
+            )
+            persisted.auto_merge = resolved_auto_merge
+            await repo.add_event(
+                persisted,
+                event_type="workspace.auto_merge_resolved",
+                reason_code="AUTO_MERGE_RESOLVED",
+                payload={
+                    "intent": auto_merge_intent,
+                    "base_branch": persisted.branch_base,
+                    "resolved": resolved_auto_merge,
+                },
             )
 
             if execution_claim_epoch is not None:

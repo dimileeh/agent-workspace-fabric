@@ -692,12 +692,13 @@ async def test_create_payload_match_treats_legacy_null_task_tag_as_absent(
 
 
 @pytest.mark.unit
-async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
+async def test_create_release_sync_persists_explicit_auto_merge_intent(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Release-PR sync persists auto_merge=False; a same-payload replay (which
-    still carries the request default auto_merge=True) must match instead of
-    raising a spurious idempotency conflict."""
+    """task_kind no longer forces auto_merge off. A sync_release_pr create with an
+    explicit auto_merge=True persists the provisional flag True (final value is
+    resolved at provision), and a same-payload replay matches on the stored
+    intent instead of raising a spurious idempotency conflict."""
     service = WorkspaceService(factory)
     request = _release_sync_request(auto_merge=True)
     idempotency_key = "service-create-v2-release-sync-auto-merge"
@@ -706,7 +707,8 @@ async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(created.id)
         assert workspace is not None
-        assert workspace.auto_merge is False
+        # Provisional value == explicit intent; the resolver finalizes at provision.
+        assert workspace.auto_merge is True
 
     replayed = await service.create(request, idempotency_key=idempotency_key)
 
@@ -717,10 +719,10 @@ async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
 async def test_create_release_sync_legacy_replay_allows_stored_auto_merge_true(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A legacy sync_release_pr row written before auto_merge was forced off at
-    persistence snapshotted the raw request default (auto_merge=True). An identical
-    replay now resolves the effective auto_merge to False, so the matcher must skip
-    the comparison rather than conflict on an otherwise unchanged request."""
+    """A legacy sync_release_pr row written before the intent key existed carries
+    no ``auto_merge_intent`` in task_policy and snapshotted the historical request
+    default (auto_merge=True). An identical replay (still sending auto_merge=True)
+    must match via the legacy NULL/True->True mapping rather than conflict."""
     service = WorkspaceService(factory)
     idempotency_key = "service-create-v2-release-sync-legacy-auto-merge"
     request = _release_sync_request(auto_merge=True)
@@ -729,6 +731,10 @@ async def test_create_release_sync_legacy_replay_allows_stored_auto_merge_true(
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(created.id)
         assert workspace is not None
+        # Simulate a pre-change row: no intent key, column left at historical True.
+        policy = dict(workspace.task_policy or {})
+        policy.pop("auto_merge_intent", None)
+        workspace.task_policy = policy
         workspace.auto_merge = True
         await session.commit()
 
