@@ -513,6 +513,11 @@ async def test_create_database_profile_replays_legacy_requires_database_row(
             profile_ref=None,
             test_commands=request.validation.commands,
             requires_database=True,
+            # Legacy pre-change row: created by an omitted auto_merge request when
+            # the historical DB default was True. The matcher reconstructs that
+            # intent from the persisted column, so seed it to faithfully model the
+            # pre-change row an omitted replay must stay idempotent against.
+            auto_merge=True,
             idempotency_key=idempotency_key,
         )
         await session.commit()
@@ -554,6 +559,10 @@ async def test_create_profile_ref_replays_legacy_env_profile_row_with_missing_re
             resolved_profile=None,
             test_commands=request.validation.commands,
             requires_database=False,
+            # Legacy pre-change row: omitted auto_merge under the historical True
+            # default. The matcher reconstructs that intent from the column, so
+            # seed True to model the row an omitted replay stays idempotent with.
+            auto_merge=True,
             idempotency_key=idempotency_key,
         )
         await session.commit()
