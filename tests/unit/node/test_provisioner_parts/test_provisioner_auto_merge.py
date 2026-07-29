@@ -66,11 +66,16 @@ class _RecordingStackLauncher:
         )
 
 
-def _profile(*, default: bool, by_base_branch: dict[str, bool]) -> dict[str, Any]:
-    return {
+def _profile(
+    *, default: bool, by_base_branch: dict[str, bool], source: str | None = None
+) -> dict[str, Any]:
+    profile: dict[str, Any] = {
         "name": "generic",
         "monitor": {"auto_merge": {"default": default, "by_base_branch": by_base_branch}},
     }
+    if source is not None:
+        profile["source"] = source
+    return profile
 
 
 @pytest.mark.parametrize(
@@ -134,6 +139,85 @@ async def test_provision_resolves_auto_merge(
         assert reloaded.auto_merge is expected
         events = [e.event_type for e in reloaded.events]
         assert "workspace.auto_merge_resolved" in events
+
+
+@pytest.mark.parametrize(
+    ("task_kind", "profile", "intent", "expected"),
+    [
+        # Adopted feature PR whose profile comes from the PR-head checkout
+        # (source ``repo:...``): its monitor.auto_merge config is attacker-
+        # controlled and must NOT self-authorize auto-merge when intent is unset.
+        (
+            "sync_feature_pr",
+            _profile(
+                default=True, by_base_branch={"development": True}, source="repo:.awf/workspace.yml"
+            ),
+            None,
+            False,
+        ),
+        # ...but an explicit operator intent still enables it for the same PR.
+        (
+            "sync_feature_pr",
+            _profile(default=False, by_base_branch={}, source="repo:.awf/workspace.yml"),
+            True,
+            True,
+        ),
+        # An operator-supplied inline profile (source ``inline``) is trusted, so its
+        # config is honoured even for an adopted PR with unset intent.
+        (
+            "sync_feature_pr",
+            _profile(default=True, by_base_branch={}, source="inline"),
+            None,
+            True,
+        ),
+        # A normal create workspace resolves its profile from the trusted base
+        # branch, so a repo-sourced auto-merge default is honoured.
+        (
+            "feature_branch_pr",
+            _profile(default=True, by_base_branch={}, source="repo:.awf/workspace.yml"),
+            None,
+            True,
+        ),
+    ],
+)
+async def test_provision_untrusted_pr_head_profile_cannot_self_authorize_auto_merge(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+    task_kind: str,
+    profile: dict[str, Any],
+    intent: bool | None,
+    expected: bool,
+) -> None:
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=_RecordingStackLauncher(),
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            resolved_profile=profile,
+            task_policy={AUTO_MERGE_INTENT_POLICY_KEY: intent},
+            auto_merge=bool(intent) if intent is not None else False,
+            task_kind=task_kind,
+        )
+        await s.commit()
+        ws_id = ws.id
+
+    await provisioner.provision(ws_id)
+
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(ws_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.ready.value
+        assert reloaded.auto_merge is expected
 
 
 @pytest.mark.parametrize("grandfathered", [True, False])
