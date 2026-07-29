@@ -538,6 +538,42 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
     return "\n".join(kept)
 
 
+def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
+    """Offsets of the live start/end managed markers in ``body``.
+
+    Only markers at the top level are AWF's own output. A human may paste a whole
+    managed block into a fenced example ("AWF renders this block:") or park one in
+    an HTML comment; those markers are illustrative text. Counting them would let
+    reconciliation rewrite the bytes inside the human's fence — leaving the real
+    description with no policy statement — or read a lone fenced example beside the
+    live block as a duplicate layout and wedge every later sync. Skip the same
+    containers :func:`_strip_legacy_policy_paragraph` skips.
+    """
+
+    starts: list[int] = []
+    ends: list[int] = []
+    offset = 0
+    fence: str | None = None
+    in_comment = False
+    for line in body.split("\n"):
+        if in_comment:
+            in_comment = _advance_html_comment_state(line, in_comment=True)
+        elif fence is not None:
+            if _fence_closes(line, fence=fence):
+                fence = None
+        elif (opened := _FENCE_OPEN_RE.match(line)) is not None:
+            fence = opened.group("fence")
+        else:
+            for marker, found in ((_MANAGED_POLICY_START, starts), (_MANAGED_POLICY_END, ends)):
+                index = line.find(marker)
+                while index != -1:
+                    found.append(offset + index)
+                    index = line.find(marker, index + len(marker))
+            in_comment = _advance_html_comment_state(line, in_comment=False)
+        offset += len(line) + 1
+    return starts, ends
+
+
 def _extract_managed_policy_section(body: str) -> str | None:
     """Return the marker-delimited managed section of ``body``, or ``None``."""
 
@@ -559,6 +595,10 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
     at the end when absent), so the reused PR advertises the merge policy the
     attached monitor now enforces without destroying human-authored content.
 
+    Markers are located with :func:`_managed_marker_offsets`, so a pair a human
+    quoted inside a fenced example or an HTML comment is never mistaken for the
+    live managed section.
+
     When the markers are absent, ``existing_body`` may still carry a pre-marker
     AWF-generated policy paragraph (a PR opened before the fences existed); strip
     that stale paragraph before appending the fresh section so the reused PR never
@@ -571,18 +611,16 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
         # Never seen in practice (``release_pr_body`` always emits them); fall back to
         # the generated body rather than silently dropping the policy statement.
         return generated_body
-    start = existing_body.find(_MANAGED_POLICY_START)
-    end = existing_body.find(_MANAGED_POLICY_END)
-    start_count = existing_body.count(_MANAGED_POLICY_START)
-    end_count = existing_body.count(_MANAGED_POLICY_END)
-    if start_count or end_count:
+    starts, ends = _managed_marker_offsets(existing_body)
+    if starts or ends:
         # A managed block is (partially) present. Only an unambiguous, correctly
         # ordered single pair is safe to splice in place: pairing the first start
         # with the first end across an orphan marker or a duplicate block would
         # delete every byte in between — including human-authored release notes.
         # Fail closed on any malformed or duplicate layout so a human untangles the
         # markers rather than AWF silently destroying content on the next sync.
-        if start_count == 1 and end_count == 1 and start < end:
+        if len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0]:
+            start, end = starts[0], ends[0]
             return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
         raise ReleasePrSyncError(
             reason_code=RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE,
@@ -591,8 +629,8 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
                 "refusing to reconcile to avoid deleting human-authored content."
             ),
             detail={
-                "start_marker_count": start_count,
-                "end_marker_count": end_count,
+                "start_marker_count": len(starts),
+                "end_marker_count": len(ends),
             },
         )
     stripped = _strip_legacy_policy_paragraph(existing_body).rstrip()

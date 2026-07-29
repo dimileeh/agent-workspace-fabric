@@ -1128,6 +1128,69 @@ class TestReconcileReleasePrBody:
         assert "auto-merge enabled" in reconciled
 
     @pytest.mark.unit
+    def test_ignores_marker_pair_quoted_inside_fenced_code_block(self) -> None:
+        # A human may paste a whole managed block into a fenced example. Those
+        # markers are illustrative text, not AWF's live section: rewriting between
+        # them would gut the human's code block *and* leave the real description
+        # without any policy statement. Treat the body as marker-free and append.
+        quoted_block = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=False
+        )
+        fenced = f"```markdown\n{quoted_block}\n```"
+        existing = f"# Notes\n\nAWF renders this block:\n\n{fenced}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_splices_live_block_and_leaves_fenced_marker_example_alone(self) -> None:
+        # A fenced example beside the live block must not read as a duplicate block
+        # (which would fail closed and wedge every later sync); only the top-level
+        # block is reconciled.
+        fenced = (
+            "```markdown\n"
+            "<!-- AWF:release-merge-policy:start -->\n"
+            "sample policy text\n"
+            "<!-- AWF:release-merge-policy:end -->\n"
+            "```"
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{fenced}\n\n{stale}\n\ntrailing human text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        assert "sample policy text" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
+    def test_ignores_markers_inside_multiline_html_comment(self) -> None:
+        # Markers parked in a human's multi-line HTML comment are invisible in the
+        # rendered description and must not be mistaken for the live section.
+        commented = "<!--\ndraft: <!-- AWF:release-merge-policy:start -->\n-->"
+        existing = f"# Notes\n\n{commented}\n\nhand-written context"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert commented in reconciled
+        assert "hand-written context" in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+
+    @pytest.mark.unit
     def test_empty_existing_body_yields_only_managed_section(self) -> None:
         generated = release_pr_body(source_branch="development", target_branch="main")
         section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)
