@@ -20,6 +20,7 @@ Generic AWF core behaviour — no hard-coded repositories or branch names.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -473,11 +474,17 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
     yielding a PR that simultaneously claims manual and automatic merge. Delete the
     exact generated paragraph text (both variants) while preserving surrounding
     human-authored content.
+
+    Only a *standalone* occurrence — the paragraph alone on its own line — is
+    AWF-authored output. A human release note may quote the same sentences
+    blockquoted, inside a list item, or embedded mid-line with commentary around
+    it; an unrestricted replace would silently delete that human text (and leave a
+    dangling bullet), so the match is anchored to whole lines.
     """
 
     for auto_merge in (False, True):
         legacy = _release_merge_policy_text(auto_merge=auto_merge)
-        body = body.replace(legacy, "")
+        body = re.sub(rf"^{re.escape(legacy)}[ \t]*$", "", body, flags=re.MULTILINE)
     return body
 
 

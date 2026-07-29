@@ -1019,6 +1019,50 @@ class TestReconcileReleasePrBody:
         assert "human-gated" not in reconciled
 
     @pytest.mark.unit
+    def test_preserves_legacy_paragraph_quoted_inside_human_content(self) -> None:
+        # A human release note may *quote* the legacy paragraph — blockquoted, or
+        # embedded mid-line with commentary around it. Neither is an AWF-authored
+        # standalone paragraph, so legacy cleanup must leave both intact instead of
+        # silently deleting human-authored text during reconciliation.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        quoted = f"> {legacy_paragraph}"
+        embedded = f"The old body said: {legacy_paragraph} That claim is now stale."
+        existing = f"# Notes\n\n{quoted}\n\n{embedded}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert quoted in reconciled
+        assert embedded in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_only_when_it_owns_its_line(self) -> None:
+        # An indented/list-item legacy paragraph belongs to human markdown structure
+        # (removing it would leave a dangling bullet), while the same text on its own
+        # line is AWF's own stale output and must go.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
+        existing = f"- {legacy_paragraph}\n\n{legacy_paragraph}"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert f"- {legacy_paragraph}" in reconciled
+        # Only the bulleted copy survives; the standalone stale paragraph is gone.
+        assert reconciled.count(legacy_paragraph) == 1
+
+    @pytest.mark.unit
     def test_empty_existing_body_yields_only_managed_section(self) -> None:
         generated = release_pr_body(source_branch="development", target_branch="main")
         section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)
