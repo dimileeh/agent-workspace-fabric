@@ -14,6 +14,8 @@ from awf.common.auto_merge import (
 )
 from awf.profiles.models import ProfileAutoMerge, ProfileMonitor, WorkspaceProfile
 
+pytestmark = pytest.mark.unit
+
 
 def _profile(
     *, default: bool = False, by_base_branch: dict[str, bool] | None = None
