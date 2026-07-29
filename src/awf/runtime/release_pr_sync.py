@@ -541,13 +541,16 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
 def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
     """Offsets of the live start/end managed markers in ``body``.
 
-    Only markers at the top level are AWF's own output. A human may paste a whole
-    managed block into a fenced example ("AWF renders this block:") or park one in
-    an HTML comment; those markers are illustrative text. Counting them would let
-    reconciliation rewrite the bytes inside the human's fence — leaving the real
-    description with no policy statement — or read a lone fenced example beside the
-    live block as a duplicate layout and wedge every later sync. Skip the same
-    containers :func:`_strip_legacy_policy_paragraph` skips.
+    Only markers at the top level are AWF's own output, which emits each marker
+    alone on its own unindented line. A human may paste a whole managed block into
+    a fenced example ("AWF renders this block:"), quote one in a blockquote or list
+    item, or park one in an HTML comment; those markers are illustrative text.
+    Counting them would let reconciliation rewrite the bytes inside the human's
+    quote — leaving the real description with no policy statement — or read a lone
+    example beside the live block as a duplicate layout and wedge every later sync.
+    So the match is anchored to whole lines, like
+    :func:`_strip_legacy_policy_paragraph`, *and* skipped inside the same fenced
+    code blocks and HTML comments.
     """
 
     starts: list[int] = []
@@ -564,11 +567,11 @@ def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
         elif (opened := _FENCE_OPEN_RE.match(line)) is not None:
             fence = opened.group("fence")
         else:
-            for marker, found in ((_MANAGED_POLICY_START, starts), (_MANAGED_POLICY_END, ends)):
-                index = line.find(marker)
-                while index != -1:
-                    found.append(offset + index)
-                    index = line.find(marker, index + len(marker))
+            own_line = line.rstrip(" \t")
+            if own_line == _MANAGED_POLICY_START:
+                starts.append(offset)
+            elif own_line == _MANAGED_POLICY_END:
+                ends.append(offset)
             in_comment = _advance_html_comment_state(line, in_comment=False)
         offset += len(line) + 1
     return starts, ends
@@ -596,8 +599,8 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
     attached monitor now enforces without destroying human-authored content.
 
     Markers are located with :func:`_managed_marker_offsets`, so a pair a human
-    quoted inside a fenced example or an HTML comment is never mistaken for the
-    live managed section.
+    quoted inside a fenced example, a blockquote, or an HTML comment is never
+    mistaken for the live managed section.
 
     When the markers are absent, ``existing_body`` may still carry a pre-marker
     AWF-generated policy paragraph (a PR opened before the fences existed); strip

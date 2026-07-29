@@ -1176,6 +1176,47 @@ class TestReconcileReleasePrBody:
         assert "human-gated" not in reconciled
 
     @pytest.mark.unit
+    def test_ignores_marker_pair_quoted_in_a_blockquote(self) -> None:
+        # A human may quote a managed block in a blockquote ("AWF appends this:").
+        # Those markers do not own their lines, so they are illustrative text rather
+        # than the live section: splicing between them would replace the quoted
+        # human content and leave the description without a real managed block.
+        quoted = (
+            "> <!-- AWF:release-merge-policy:start -->\n"
+            "> sample policy text\n"
+            "> <!-- AWF:release-merge-policy:end -->"
+        )
+        existing = f"# Notes\n\nAWF appends this:\n\n{quoted}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert quoted in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_splices_live_block_and_leaves_indented_marker_example_alone(self) -> None:
+        # A marker parked inside a list item beside the live block must not read as a
+        # duplicate block (which would fail closed and wedge every later sync).
+        listed = "- example: <!-- AWF:release-merge-policy:start -->"
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{listed}\n\n{stale}\n\ntrailing human text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert listed in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
     def test_ignores_markers_inside_multiline_html_comment(self) -> None:
         # Markers parked in a human's multi-line HTML comment are invisible in the
         # rendered description and must not be mistaken for the live section.
