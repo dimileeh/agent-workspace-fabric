@@ -840,3 +840,15 @@ class TestReleasePrText:
         assert "development" in title and "main" in title
         assert "development" in body and "main" in body
         assert "auto-merge disabled" in body
+        assert "human-gated" in body
+
+    @pytest.mark.unit
+    def test_body_reflects_enabled_auto_merge(self) -> None:
+        # A resolved auto_merge=True release-sync workspace runs the feature
+        # monitor and may squash-merge, so the body must not claim the target
+        # stays human-gated with auto-merge disabled.
+        body = release_pr_body(source_branch="development", target_branch="main", auto_merge=True)
+        assert "development" in body and "main" in body
+        assert "auto-merge disabled" not in body
+        assert "human-gated" not in body
+        assert "auto-merge enabled" in body

@@ -402,10 +402,20 @@ def release_pr_title(*, source_branch: str, target_branch: str) -> str:
     return f"Release: merge {source_branch} into {target_branch}"
 
 
-def release_pr_body(*, source_branch: str, target_branch: str) -> str:
+def release_pr_body(*, source_branch: str, target_branch: str, auto_merge: bool = False) -> str:
+    intro = f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
+    if auto_merge:
+        # Mirror the monitor selection in ``worker._pr_monitor_factory``: a resolved
+        # ``auto_merge=True`` release-sync workspace runs the feature monitor and
+        # squash-merges into the release target on green, so the body must not claim
+        # the merge stays human-gated.
+        return (
+            intro + "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
     return (
-        f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
-        "Opened by the `sync_release_pr` task kind and monitored with "
+        intro + "Opened by the `sync_release_pr` task kind and monitored with "
         "release/manual behavior (auto-merge disabled). Merging into the "
         "release target stays human-gated."
     )
