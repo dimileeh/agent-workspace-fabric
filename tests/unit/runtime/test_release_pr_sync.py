@@ -15,6 +15,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
+    RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE,
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
     ReleasePrSyncResult,
@@ -1033,3 +1034,63 @@ class TestReconcileReleasePrBody:
             existing_body="human content", generated_body="no markers here"
         )
         assert reconciled == "no markers here"
+
+    @pytest.mark.unit
+    def test_orphan_start_marker_before_valid_block_fails_closed(self) -> None:
+        # An orphan start marker sits before a later valid block. Pairing the first
+        # start with the first end would splice across — and delete — the human text
+        # in between. Fail closed instead so nothing human-authored is destroyed.
+        start = "<!-- AWF:release-merge-policy:start -->"
+        valid_block = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=False
+        )
+        existing = f"{start}\n\nhand-written release notes\n\n{valid_block}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+        # The caller keeps ``existing_body`` untouched — the human notes survive.
+        assert "hand-written release notes" in existing
+
+    @pytest.mark.unit
+    def test_duplicate_managed_blocks_fail_closed(self) -> None:
+        block = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"{block}\n\nhand-written context\n\n{block}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+        assert excinfo.value.detail == {"start_marker_count": 2, "end_marker_count": 2}
+
+    @pytest.mark.unit
+    def test_reversed_markers_fail_closed(self) -> None:
+        # An end marker preceding a start marker cannot bound a section; reconciling
+        # it in place would produce garbage, so refuse rather than guess.
+        start = "<!-- AWF:release-merge-policy:start -->"
+        end = "<!-- AWF:release-merge-policy:end -->"
+        existing = f"{end}\n\nhuman text\n\n{start}"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+
+    @pytest.mark.unit
+    def test_orphan_end_marker_only_fails_closed(self) -> None:
+        end = "<!-- AWF:release-merge-policy:end -->"
+        existing = f"human notes\n\n{end}\n\nmore notes"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE

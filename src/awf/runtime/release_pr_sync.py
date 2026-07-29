@@ -46,6 +46,12 @@ NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 # ``gh pr view`` and parses github.com-only PR URLs. Mirrors
 # ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
 RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+# A reused PR body whose AWF merge-policy markers form anything other than a single,
+# correctly ordered start→end pair (orphan marker, reversed order, or duplicate
+# blocks). Reconciling such a layout by pairing the first start with the first end
+# would splice across intervening human-authored content and delete it, so we fail
+# closed and surface the tangle to a human instead.
+RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE = "RELEASE_SYNC_POLICY_MARKERS_MALFORMED"
 _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES = 3
 
 SleepFn = Callable[[float], Awaitable[None]]
@@ -510,8 +516,28 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
         return generated_body
     start = existing_body.find(_MANAGED_POLICY_START)
     end = existing_body.find(_MANAGED_POLICY_END)
-    if start != -1 and end != -1 and end > start:
-        return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
+    start_count = existing_body.count(_MANAGED_POLICY_START)
+    end_count = existing_body.count(_MANAGED_POLICY_END)
+    if start_count or end_count:
+        # A managed block is (partially) present. Only an unambiguous, correctly
+        # ordered single pair is safe to splice in place: pairing the first start
+        # with the first end across an orphan marker or a duplicate block would
+        # delete every byte in between — including human-authored release notes.
+        # Fail closed on any malformed or duplicate layout so a human untangles the
+        # markers rather than AWF silently destroying content on the next sync.
+        if start_count == 1 and end_count == 1 and start < end:
+            return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
+        raise ReleasePrSyncError(
+            reason_code=RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE,
+            message=(
+                "Reused release PR body has a malformed AWF merge-policy marker layout; "
+                "refusing to reconcile to avoid deleting human-authored content."
+            ),
+            detail={
+                "start_marker_count": start_count,
+                "end_marker_count": end_count,
+            },
+        )
     stripped = _strip_legacy_policy_paragraph(existing_body).rstrip()
     if not stripped:
         return section
