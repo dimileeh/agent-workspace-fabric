@@ -199,6 +199,7 @@ class TestFindOrCreateReleasePr:
     async def test_reuses_existing_open_pr_without_create(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
 
@@ -209,16 +210,20 @@ class TestFindOrCreateReleasePr:
             source_branch="development",
             target_branch="main",
             title="t",
-            body="b",
+            body="reconciled-body",
         )
 
         assert created is False
         assert metadata.number == 99
-        # Only list + view ran; no `gh pr create`.
+        # list → edit (reconcile the reused PR's stale policy body) → view; no create.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
+            ["gh", "pr", "edit"],
             ["gh", "pr", "view"],
         ]
+        edit_args = fake.calls[1].args
+        assert edit_args[edit_args.index("--body") + 1] == "reconciled-body"
+        assert edit_args[3] == "99"
 
     @pytest.mark.unit
     async def test_creates_pr_when_none_exists(self) -> None:
@@ -362,6 +367,7 @@ class TestFindOrCreateReleasePr:
             returncode=0,
             stdout=_fork_and_same_repo_pr_list_payload(fork_number=555, same_repo_number=99),
         )  # gh pr list
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
 
@@ -377,13 +383,15 @@ class TestFindOrCreateReleasePr:
 
         assert created is False
         assert metadata.number == 99
-        # Only list + view of the same-repo PR ran; the fork PR is never viewed
-        # and no `gh pr create` is issued.
+        # list → edit (reconcile the same-repo PR's body) → view of the same-repo
+        # PR; the fork PR is never viewed and no `gh pr create` is issued.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
+            ["gh", "pr", "edit"],
             ["gh", "pr", "view"],
         ]
-        assert fake.calls[1].args[:4] == ["gh", "pr", "view", "99"]
+        assert fake.calls[1].args[:4] == ["gh", "pr", "edit", "99"]
+        assert fake.calls[2].args[:4] == ["gh", "pr", "view", "99"]
 
     @pytest.mark.unit
     async def test_created_url_for_other_repo_raises(self) -> None:
@@ -812,6 +820,7 @@ class TestPrepareReleasePrSync:
         fake.queue_result(returncode=0)  # fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=88))  # gh pr list
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=88))  # view
         gh = GitHubClient(fake)
 
@@ -830,6 +839,8 @@ class TestPrepareReleasePrSync:
         assert outcome.created is False
         assert outcome.metadata.number == 88
         assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
+        # The reused PR's stale policy body was reconciled before adoption.
+        assert any(c.args[:3] == ["gh", "pr", "edit"] for c in fake.calls)
 
 
 class TestReleasePrText:

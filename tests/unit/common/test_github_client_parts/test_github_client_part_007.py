@@ -68,6 +68,30 @@ class TestMutations:
             await client.post_comment(repo=RepoRef(owner="o", name="r"), pr_number=1, body="x")
 
     @pytest.mark.unit
+    async def test_update_pull_request_body_argv(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0)
+        client = GitHubClient(fake)
+        await client.update_pull_request_body(
+            repo=RepoRef(owner="o", name="r"), pr_number=99, body="reconciled policy"
+        )
+        args = fake.calls[0].args
+        assert args[:3] == ["gh", "pr", "edit"]
+        assert "99" in args
+        assert "--body" in args and "reconciled policy" in args
+        assert "--repo" in args and "o/r" in args
+
+    @pytest.mark.unit
+    async def test_update_pull_request_body_raises_on_error(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="forbidden")
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError):
+            await client.update_pull_request_body(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, body="x"
+            )
+
+    @pytest.mark.unit
     async def test_create_pull_request_argv_and_url(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

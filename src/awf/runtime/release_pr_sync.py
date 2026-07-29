@@ -324,6 +324,16 @@ async def find_or_create_release_pr(
     if existing_number is not None:
         pr_number = existing_number
         created = False
+        # A reused open PR skips ``_create_release_pr_with_redundancy`` — the only
+        # creator that applies ``body`` — so its description can still advertise a
+        # stale merge policy (e.g. the "human-gated" manual text from an earlier
+        # ``auto_merge=false`` open) that contradicts the now-resolved
+        # ``auto_merge`` the attached monitor enforces. Reconcile the reused PR's
+        # body so reviewers see the policy that will actually apply. Release-PR
+        # sync is GitHub-only (``ensure_release_sync_forge_supported`` above), so
+        # ``gh`` is a ``GitHubClient`` whose edit maps to reason-coded failures.
+        assert isinstance(gh, GitHubClient)
+        await gh.update_pull_request_body(repo=repo, pr_number=pr_number, body=body)
     else:
         pr_number, created = await _create_release_pr_with_redundancy(
             runner=runner,

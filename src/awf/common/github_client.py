@@ -832,6 +832,31 @@ class GitHubClient:
             retry_policy=RetryPolicy.NEVER,
         )
 
+    async def update_pull_request_body(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        """Overwrite an existing PR's description.
+
+        Used by release-PR sync to reconcile a reused PR's advertised merge
+        policy: a PR opened earlier under one ``auto_merge`` resolution is reused
+        without re-running the creator that applies the body, so its description
+        can contradict the policy the attached monitor now enforces. Setting the
+        body is idempotent, so ``NEVER`` retry keeps a transient blip from issuing
+        a duplicate edit; the caller treats a failure as a reason-coded error.
+        """
+        await self._run_gh_command(
+            [
+                "gh",
+                "pr",
+                "edit",
+                str(pr_number),
+                "--repo",
+                repo.slug(),
+                "--body",
+                body,
+            ],
+            operation="gh pr edit body",
+            retry_policy=RetryPolicy.NEVER,
+        )
+
     async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
         """Open a tracking issue and return its URL.
 
