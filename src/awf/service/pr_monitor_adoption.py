@@ -1344,11 +1344,11 @@ def _adoption_auto_merge_conflicts(
     of spuriously raising ``PR_ADOPTION_POLICY_CONFLICT``.
     """
     policy = workspace.task_policy
+    persisted_intent = _adoption_auto_merge_intent(workspace)
     if isinstance(policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in policy:
-        return auto_merge_intent_from_policy(policy) != request.auto_merge
-    legacy_intent = getattr(workspace, "auto_merge", None) is not False
+        return persisted_intent != request.auto_merge
     effective_request = True if request.auto_merge is None else request.auto_merge
-    return legacy_intent != effective_request
+    return persisted_intent != effective_request
 
 
 def _raise_if_agent_policy_conflicts(
