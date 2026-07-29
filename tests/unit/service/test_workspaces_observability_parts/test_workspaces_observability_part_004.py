@@ -252,6 +252,7 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
 
     assert policy == {
         "agent_model": "gpt-5.3-codex",
+        "auto_merge_intent": None,
         "companions": [],
         "out_of_scope_changes": {
             "mode": "block",
