@@ -26,7 +26,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_value
-from awf.common.auto_merge import auto_merge_intent_from_policy, resolve_auto_merge
+from awf.common.auto_merge import (
+    auto_merge_intent_from_policy,
+    resolve_auto_merge,
+    task_policy_has_auto_merge_intent,
+)
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -870,10 +874,21 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             # affects it; the monitor reads only this persisted column. Precedence:
             # per-task intent -> monitor.auto_merge.by_base_branch[base] ->
             # monitor.auto_merge.default -> DEFAULT_AUTO_MERGE (False).
-            auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
-            resolved_auto_merge = resolve_auto_merge(
-                auto_merge_intent, profile, persisted.branch_base
-            )
+            #
+            # Legacy in-flight rows persisted before the intent key existed carry no
+            # ``auto_merge_intent`` in task_policy; their persisted ``auto_merge``
+            # column is already the grandfathered authority. Resolving those as a
+            # fresh unset intent would clobber a grandfathered ``True`` with the
+            # profile's new default, so only re-resolve when the intent key is
+            # actually present and otherwise preserve the persisted column.
+            if task_policy_has_auto_merge_intent(persisted.task_policy):
+                auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
+                resolved_auto_merge = resolve_auto_merge(
+                    auto_merge_intent, profile, persisted.branch_base
+                )
+            else:
+                auto_merge_intent = None
+                resolved_auto_merge = persisted.auto_merge
             persisted.auto_merge = resolved_auto_merge
             await repo.add_event(
                 persisted,

@@ -134,3 +134,51 @@ async def test_provision_resolves_auto_merge(
         assert reloaded.auto_merge is expected
         events = [e.event_type for e in reloaded.events]
         assert "workspace.auto_merge_resolved" in events
+
+
+@pytest.mark.parametrize("grandfathered", [True, False])
+async def test_provision_preserves_legacy_auto_merge_column(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+    grandfathered: bool,
+) -> None:
+    """A legacy in-flight row (no intent key) keeps its grandfathered column.
+
+    Such a row was persisted before ``auto_merge_intent`` existed; its task_policy
+    lacks the key, so the resolver must preserve the persisted ``auto_merge``
+    column rather than clobbering it with the profile's new default.
+    """
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=_RecordingStackLauncher(),
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            # Profile default (False) would flip a grandfathered True if resolved.
+            resolved_profile=_profile(default=False, by_base_branch={}),
+            # Legacy row: no AUTO_MERGE_INTENT_POLICY_KEY persisted.
+            task_policy={},
+            auto_merge=grandfathered,
+        )
+        await s.commit()
+        ws_id = ws.id
+
+    await provisioner.provision(ws_id)
+
+    async with session_factory() as s:
+        reloaded = await WorkspaceRepository(s).get(ws_id)
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.ready.value
+        # Preserved, not overwritten by the profile default.
+        assert reloaded.auto_merge is grandfathered
+        events = [e.event_type for e in reloaded.events]
+        assert "workspace.auto_merge_resolved" in events

@@ -9,6 +9,7 @@ from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
     resolve_auto_merge,
+    task_policy_has_auto_merge_intent,
 )
 from awf.profiles.models import ProfileAutoMerge, ProfileMonitor, WorkspaceProfile
 
@@ -69,3 +70,15 @@ def test_intent_from_policy_missing_or_legacy_is_none() -> None:
     # A non-bool stored value normalizes to unset.
     assert auto_merge_intent_from_policy({AUTO_MERGE_INTENT_POLICY_KEY: "true"}) is None
     assert auto_merge_intent_from_policy("not-a-mapping") is None  # type: ignore[arg-type]
+
+
+def test_task_policy_has_auto_merge_intent_presence_check() -> None:
+    # Presence is strict: a present ``None`` counts as set, unlike the resolver
+    # helper which collapses absent-and-None together.
+    assert task_policy_has_auto_merge_intent({AUTO_MERGE_INTENT_POLICY_KEY: None}) is True
+    assert task_policy_has_auto_merge_intent({AUTO_MERGE_INTENT_POLICY_KEY: True}) is True
+    assert task_policy_has_auto_merge_intent({AUTO_MERGE_INTENT_POLICY_KEY: False}) is True
+    # Legacy rows (no key) and non-mappings are absent.
+    assert task_policy_has_auto_merge_intent({}) is False
+    assert task_policy_has_auto_merge_intent(None) is False
+    assert task_policy_has_auto_merge_intent("not-a-mapping") is False  # type: ignore[arg-type]

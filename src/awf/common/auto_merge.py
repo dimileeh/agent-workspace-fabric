@@ -56,6 +56,21 @@ def auto_merge_intent_from_policy(task_policy: Mapping[str, Any] | None) -> bool
     return None
 
 
+def task_policy_has_auto_merge_intent(task_policy: Mapping[str, Any] | None) -> bool:
+    """Whether a task policy carries an explicit auto-merge intent key.
+
+    New-world rows always persist ``AUTO_MERGE_INTENT_POLICY_KEY`` (even for an
+    unset ``None`` intent). Legacy rows written before the key existed lack it
+    entirely; callers use this to preserve a grandfathered persisted
+    ``workspace.auto_merge`` column instead of resolving such a row as a fresh
+    unset intent (which would clobber a grandfathered ``True`` with the profile's
+    new default). This is a strict *presence* check, distinct from
+    :func:`auto_merge_intent_from_policy`, which collapses both an absent key and a
+    present ``None`` to ``None``.
+    """
+    return isinstance(task_policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in task_policy
+
+
 def resolve_auto_merge(
     intent: bool | None,
     resolved_profile: WorkspaceProfile,
