@@ -72,18 +72,14 @@ def test_resolved_flag_drives_merge_vs_notify(auto_merge: bool, expected: type) 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("entry_point", ["create", "adopt"])
 @pytest.mark.parametrize("intent", [True, False, None])
-def test_create_adopt_parity_same_intent_same_outcome(
-    entry_point: str, intent: bool | None
-) -> None:
-    # Both entry points share resolve_auto_merge, so the same intent + profile +
-    # base branch yields the same flag and therefore the same decide() outcome.
-    del entry_point  # the resolver is entry-point agnostic by construction
+def test_default_off_intent_drives_merge_vs_notify(intent: bool | None) -> None:
+    # Against a default-off profile the shared resolve_auto_merge (used verbatim by
+    # both create and adopt at provision) maps each tri-state intent to a flag, which
+    # drives the decide() outcome: True -> Merge; False/None (default off) -> NotifyHuman.
     profile = _profile(default=False)
     flag = resolve_auto_merge(intent, profile, "development")
     action = decide(_green_status(), MonitorState(), MonitorConfig(auto_merge=flag))
-    # intent True -> Merge; False/None (default off) -> NotifyHuman.
     assert isinstance(action, Merge if intent is True else NotifyHuman)
 
 
