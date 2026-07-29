@@ -841,6 +841,15 @@ class GitHubClient:
         read, so ``READ`` retry policy lets a transient blip recover. ``gh``'s
         ``--jq`` emits the raw body plus one trailing newline; strip only that so
         the body's internal formatting is preserved faithfully.
+
+        A PR opened without a description has a JSON ``null`` body, which a bare
+        ``.body`` filter renders as the literal text ``null``. That sentinel would
+        reach release-PR reconciliation as human-authored content and be written
+        back as a description reading "null", so the ``// ""`` alternative maps it
+        to an empty body at the source (same shape as the ``// empty`` fallback in
+        the post-merge SHA read). Filtering here rather than normalizing the
+        rendered output also keeps a description whose literal text *is* ``null``
+        intact — the two are indistinguishable once ``gh`` has rendered them.
         """
         result = await self._run_gh_command(
             [
@@ -853,7 +862,7 @@ class GitHubClient:
                 "--json",
                 "body",
                 "--jq",
-                ".body",
+                '.body // ""',
             ],
             operation="gh pr view body",
             retry_policy=RetryPolicy.READ,
