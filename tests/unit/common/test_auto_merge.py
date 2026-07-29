@@ -9,6 +9,7 @@ from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
     resolve_auto_merge,
+    seed_auto_merge,
     task_policy_has_auto_merge_intent,
 )
 from awf.profiles.models import ProfileAutoMerge, ProfileMonitor, WorkspaceProfile
@@ -57,6 +58,17 @@ def test_global_default_fallback() -> None:
 def test_nothing_set_resolves_false() -> None:
     profile = _profile()
     assert resolve_auto_merge(None, profile, "development") is False
+
+
+@pytest.mark.parametrize("intent", [True, False])
+def test_seed_auto_merge_keeps_explicit_intent(intent: bool) -> None:
+    assert seed_auto_merge(intent) is intent
+
+
+def test_seed_auto_merge_unset_intent_uses_opt_in_default() -> None:
+    # create/adopt seed the column before the profile resolves, so an unset
+    # intent must persist the conservative default rather than guess.
+    assert seed_auto_merge(None) is DEFAULT_AUTO_MERGE
 
 
 def test_intent_from_policy_reads_explicit_values() -> None:

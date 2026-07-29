@@ -17,8 +17,8 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.auto_merge import (
     AUTO_MERGE_INTENT_POLICY_KEY,
-    DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
+    seed_auto_merge,
     task_policy_has_auto_merge_intent,
 )
 from awf.common.commands import AsyncioSubprocessRunner
@@ -347,9 +347,7 @@ class PullRequestMonitorAdoptionService:
             requires_database=False,
             owned_paths=list(request.owned_paths),
             task_policy=task_policy,
-            auto_merge=(
-                request.auto_merge if request.auto_merge is not None else DEFAULT_AUTO_MERGE
-            ),
+            auto_merge=seed_auto_merge(request.auto_merge),
             initial_review_grace_period_seconds=request.initial_review_grace_period_seconds,
             profile_ref=request.profile_ref,
             requested_profile=requested_profile,

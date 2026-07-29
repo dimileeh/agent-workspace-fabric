@@ -85,49 +85,6 @@ async def _count(session: AsyncSession, model: type[Any]) -> int:
     return int((await session.execute(select(func.count()).select_from(model))).scalar_one())
 
 
-async def _transition_adoption(
-    session: AsyncSession,
-    workspace_id: str,
-    status: WorkspaceStatus,
-) -> None:
-    repo = WorkspaceRepository(session)
-    workspace = await repo.get(workspace_id)
-    assert workspace is not None
-    if status == WorkspaceStatus.cancelled:
-        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
-        return
-    if status == WorkspaceStatus.failed:
-        await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
-        return
-    if status == WorkspaceStatus.completed:
-        await repo.transition(
-            workspace, to=WorkspaceStatus.provisioning, reason_code="TEST_PROVISION"
-        )
-        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST_READY")
-        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="TEST_RUN")
-        await repo.transition(workspace, to=WorkspaceStatus.validating, reason_code="TEST_VALIDATE")
-        await repo.transition(workspace, to=WorkspaceStatus.completed, reason_code="TEST_COMPLETE")
-        return
-    if status in {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}:
-        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
-        await repo.transition(workspace, to=WorkspaceStatus.destroying, reason_code="TEST_DESTROY")
-        if status == WorkspaceStatus.destroyed:
-            await repo.transition(
-                workspace,
-                to=WorkspaceStatus.destroyed,
-                reason_code="TEST_DESTROYED",
-            )
-        return
-    raise AssertionError(f"Unsupported terminal test status: {status.value}")
-
-
-def _canonical_key() -> str:
-    return adoption_module.pr_adoption_idempotency_key(
-        repo_slug="dimileeh/aira-web",
-        pr_number=277,
-    )
-
-
 async def _adoption_workspaces(
     session: AsyncSession,
     *,

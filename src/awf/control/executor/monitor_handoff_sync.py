@@ -84,10 +84,15 @@ async def _handoff_sync_release_pr_monitor(
     compose_file: Path,
     worktree_path: Path,
 ) -> None:
-    """Open/reuse a source→target release PR, then monitor it (never auto-merge).
+    """Open/reuse a source→target release PR, then monitor it.
 
     No coding agent, no feature PR. When the source branch has no commits
     ahead of the target, the workspace completes cleanly without a PR.
+
+    Merge policy follows the resolved ``workspace.auto_merge`` like any other
+    workspace: an unresolved/unset value keeps the opt-in default (human-gated,
+    never merged), while a workspace that resolves ``auto_merge=True`` may merge
+    the release PR once every gate is green.
     """
     if not await self._ensure_worktree_available(
         workspace_id=workspace_id,

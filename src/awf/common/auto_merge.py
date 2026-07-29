@@ -71,6 +71,18 @@ def task_policy_has_auto_merge_intent(task_policy: Mapping[str, Any] | None) -> 
     return isinstance(task_policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in task_policy
 
 
+def seed_auto_merge(intent: bool | None) -> bool:
+    """Seed the provisional ``workspace.auto_merge`` column from a tri-state intent.
+
+    Create/adopt persist the workspace row before the profile is resolved, so the
+    column starts at the explicit intent when one was given and otherwise at the
+    conservative ``DEFAULT_AUTO_MERGE`` seed. The provisioner later re-runs
+    :func:`resolve_auto_merge` against the materialized profile and overwrites an
+    unset seed, so this rule must stay identical on both entry paths.
+    """
+    return DEFAULT_AUTO_MERGE if intent is None else intent
+
+
 def resolve_auto_merge(
     intent: bool | None,
     resolved_profile: WorkspaceProfile,

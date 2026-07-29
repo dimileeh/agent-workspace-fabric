@@ -23,8 +23,8 @@ from awf.api.schemas import (
 from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.auto_merge import (
     AUTO_MERGE_INTENT_POLICY_KEY,
-    DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
+    seed_auto_merge,
 )
 from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
@@ -185,9 +185,7 @@ async def create_workspace_row(
         task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
-        auto_merge=(
-            payload.task.auto_merge if payload.task.auto_merge is not None else DEFAULT_AUTO_MERGE
-        ),
+        auto_merge=seed_auto_merge(payload.task.auto_merge),
         initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
         agent=payload.task.agent.value,
         env_profile=None,
