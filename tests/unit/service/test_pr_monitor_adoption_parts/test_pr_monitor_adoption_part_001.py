@@ -321,6 +321,67 @@ class TestPullRequestMonitorAdoptionServicePart001:
         assert resumed.monitor_policy["auto_merge_resolved"] is True
 
     @pytest.mark.unit
+    async def test_legacy_row_exposes_grandfathered_auto_merge_before_provisioning(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # A pre-upgrade adoption row carries no ``auto_merge_intent`` key in its
+        # ``task_policy``. The provisioner grandfathers such rows by preserving the
+        # persisted ``auto_merge`` column instead of re-resolving it, so that column
+        # is already authoritative even while the row is still ``requested``. The
+        # response must expose the grandfathered value (and report it resolved),
+        # not hide a merging ``True`` behind ``auto_merge=None``.
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                )
+            )
+            await session.commit()
+
+        assert result.status == WorkspaceStatus.requested
+
+        # Simulate a legacy in-flight row: strip the intent key and grandfather a
+        # persisted ``auto_merge=True`` while the workspace is still ``requested``.
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(result.workspace_id)
+            assert workspace is not None
+            legacy_policy = {
+                key: value
+                for key, value in (workspace.task_policy or {}).items()
+                if key != "auto_merge_intent"
+            }
+            workspace.task_policy = legacy_policy
+            workspace.auto_merge = True
+            await session.commit()
+
+        async with factory() as session:
+            resumed = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                )
+            )
+            await session.commit()
+
+        assert resumed.attached_existing is True
+        assert resumed.status == WorkspaceStatus.requested
+        assert resumed.auto_merge is True
+        assert resumed.monitor_policy["auto_merge"] is True
+        assert resumed.monitor_policy["auto_merge_intent"] is None
+        assert resumed.monitor_policy["auto_merge_resolved"] is True
+
+    @pytest.mark.unit
     async def test_hosted_execution_policy_is_persisted_and_replay_attaches(
         self,
         factory: async_sessionmaker[AsyncSession],

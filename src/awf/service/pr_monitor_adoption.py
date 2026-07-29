@@ -19,6 +19,7 @@ from awf.common.auto_merge import (
     AUTO_MERGE_INTENT_POLICY_KEY,
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
+    task_policy_has_auto_merge_intent,
 )
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
@@ -558,8 +559,20 @@ class PullRequestMonitorAdoptionService:
         # it is actually settled — an explicit intent already fixes it, and any
         # post-provisioning status has run the resolver — otherwise report the
         # setting as unresolved (``None``) rather than a false ``manual`` policy.
+        #
+        # A legacy row written before the intent key existed carries no
+        # ``auto_merge_intent`` in ``task_policy``, so ``auto_merge_intent`` is
+        # ``None``. But the provisioner treats a missing key as grandfathered and
+        # *preserves* the persisted ``auto_merge`` column rather than re-resolving
+        # it, so that column is already the authoritative policy even while the row
+        # is still ``requested``/``provisioning``. Reporting such a row as
+        # unresolved would hide a grandfathered ``True`` that will auto-merge, so
+        # treat a missing intent key as a legacy-resolved policy.
         auto_merge_intent = auto_merge_intent_from_policy(workspace.task_policy)
-        auto_merge_resolved = workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES
+        legacy_policy = not task_policy_has_auto_merge_intent(workspace.task_policy)
+        auto_merge_resolved = (
+            workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES or legacy_policy
+        )
         auto_merge_value: bool | None = (
             workspace.auto_merge if auto_merge_resolved or auto_merge_intent is not None else None
         )
