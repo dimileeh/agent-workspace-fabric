@@ -832,6 +832,34 @@ class GitHubClient:
             retry_policy=RetryPolicy.NEVER,
         )
 
+    async def fetch_pull_request_body(self, *, repo: RepoRef, pr_number: int) -> str:
+        """Return a pull request's current description body.
+
+        Used by release-PR sync to reconcile *only* AWF's managed merge-policy
+        section into a reused PR — preserving any human-authored release notes,
+        checklists, or context rather than overwriting the whole description. A
+        read, so ``READ`` retry policy lets a transient blip recover. ``gh``'s
+        ``--jq`` emits the raw body plus one trailing newline; strip only that so
+        the body's internal formatting is preserved faithfully.
+        """
+        result = await self._run_gh_command(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                repo.slug(),
+                "--json",
+                "body",
+                "--jq",
+                ".body",
+            ],
+            operation="gh pr view body",
+            retry_policy=RetryPolicy.READ,
+        )
+        return result.stdout.rstrip("\n")
+
     async def update_pull_request_body(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Overwrite an existing PR's description.
 

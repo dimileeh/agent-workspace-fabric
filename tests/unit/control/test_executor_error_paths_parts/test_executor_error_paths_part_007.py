@@ -1074,6 +1074,7 @@ class TestSyncReleasePrHandoff:
         fake.queue_result(
             returncode=0, stdout=_release_open_pr_list_payload(number=88)
         )  # gh pr list
+        fake.queue_result(returncode=0, stdout="stale reused body\n")  # gh pr view (current body)
         fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile reused body)
         fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=88))  # gh pr view
 

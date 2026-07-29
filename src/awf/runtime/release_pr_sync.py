@@ -328,12 +328,21 @@ async def find_or_create_release_pr(
         # creator that applies ``body`` — so its description can still advertise a
         # stale merge policy (e.g. the "human-gated" manual text from an earlier
         # ``auto_merge=false`` open) that contradicts the now-resolved
-        # ``auto_merge`` the attached monitor enforces. Reconcile the reused PR's
-        # body so reviewers see the policy that will actually apply. Release-PR
-        # sync is GitHub-only (``ensure_release_sync_forge_supported`` above), so
-        # ``gh`` is a ``GitHubClient`` whose edit maps to reason-coded failures.
+        # ``auto_merge`` the attached monitor enforces. But the reused PR may be a
+        # manually authored release PR carrying human release notes and checklists,
+        # so overwriting the whole body would silently destroy that context on every
+        # sync. Fetch the current body and reconcile *only* AWF's marker-delimited
+        # merge-policy section, preserving everything else; skip the edit when the
+        # body already matches so a no-op sync makes no write. Release-PR sync is
+        # GitHub-only (``ensure_release_sync_forge_supported`` above), so ``gh`` is a
+        # ``GitHubClient`` whose read/edit map to reason-coded failures.
         assert isinstance(gh, GitHubClient)
-        await gh.update_pull_request_body(repo=repo, pr_number=pr_number, body=body)
+        existing_body = await gh.fetch_pull_request_body(repo=repo, pr_number=pr_number)
+        reconciled_body = reconcile_release_pr_body(
+            existing_body=existing_body, generated_body=body
+        )
+        if reconciled_body != existing_body:
+            await gh.update_pull_request_body(repo=repo, pr_number=pr_number, body=reconciled_body)
     else:
         pr_number, created = await _create_release_pr_with_redundancy(
             runner=runner,
@@ -412,20 +421,74 @@ def release_pr_title(*, source_branch: str, target_branch: str) -> str:
     return f"Release: merge {source_branch} into {target_branch}"
 
 
-def release_pr_body(*, source_branch: str, target_branch: str, auto_merge: bool = False) -> str:
-    intro = f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
+# HTML-comment fences (invisible in rendered Markdown) that delimit the single
+# AWF-managed merge-policy paragraph inside a release PR body. Reconciling a
+# reused PR rewrites *only* the text between these markers, so human-authored
+# release notes and checklists elsewhere in the description survive every sync.
+_MANAGED_POLICY_START = "<!-- AWF:release-merge-policy:start -->"
+_MANAGED_POLICY_END = "<!-- AWF:release-merge-policy:end -->"
+
+
+def _release_merge_policy_section(*, auto_merge: bool) -> str:
+    """The marker-delimited AWF-managed merge-policy block for a release PR."""
+
     if auto_merge:
         # Mirror the monitor selection in ``worker._pr_monitor_factory``: a resolved
         # ``auto_merge=True`` release-sync workspace runs the feature monitor and
         # squash-merges into the release target on green, so the body must not claim
         # the merge stays human-gated.
-        return (
-            intro + "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+        text = (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
             "AWF's monitor squash-merges into the release target once checks are "
             "green and review comments are addressed."
         )
-    return (
-        intro + "Opened by the `sync_release_pr` task kind and monitored with "
-        "release/manual behavior (auto-merge disabled). Merging into the "
-        "release target stays human-gated."
-    )
+    else:
+        text = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+    return f"{_MANAGED_POLICY_START}\n{text}\n{_MANAGED_POLICY_END}"
+
+
+def _extract_managed_policy_section(body: str) -> str | None:
+    """Return the marker-delimited managed section of ``body``, or ``None``."""
+
+    start = body.find(_MANAGED_POLICY_START)
+    end = body.find(_MANAGED_POLICY_END)
+    if start == -1 or end == -1 or end < start:
+        return None
+    return body[start : end + len(_MANAGED_POLICY_END)]
+
+
+def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str:
+    """Splice AWF's managed merge-policy section into a reused PR's description.
+
+    ``generated_body`` is the freshly rendered :func:`release_pr_body` (intro +
+    managed policy section). For a *reused* PR — which may be a manually authored
+    release PR carrying human release notes, checklists, and other context — we
+    must not overwrite the whole description. Preserve ``existing_body`` verbatim
+    and only replace the marker-delimited AWF policy block in place (inserting it
+    at the end when absent), so the reused PR advertises the merge policy the
+    attached monitor now enforces without destroying human-authored content.
+    """
+
+    section = _extract_managed_policy_section(generated_body)
+    if section is None:
+        # Defensive: a body without managed markers can't be reconciled section-wise.
+        # Never seen in practice (``release_pr_body`` always emits them); fall back to
+        # the generated body rather than silently dropping the policy statement.
+        return generated_body
+    start = existing_body.find(_MANAGED_POLICY_START)
+    end = existing_body.find(_MANAGED_POLICY_END)
+    if start != -1 and end != -1 and end > start:
+        return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
+    stripped = existing_body.rstrip()
+    if not stripped:
+        return section
+    return f"{stripped}\n\n{section}"
+
+
+def release_pr_body(*, source_branch: str, target_branch: str, auto_merge: bool = False) -> str:
+    intro = f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
+    return intro + _release_merge_policy_section(auto_merge=auto_merge)

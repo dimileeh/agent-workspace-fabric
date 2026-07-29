@@ -21,6 +21,7 @@ from awf.runtime.release_pr_sync import (
     count_commits_ahead,
     find_or_create_release_pr,
     prepare_release_pr_sync,
+    reconcile_release_pr_body,
     release_pr_body,
     release_pr_title,
 )
@@ -199,10 +200,12 @@ class TestFindOrCreateReleasePr:
     async def test_reuses_existing_open_pr_without_create(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout="old policy body\n")  # gh pr view (body)
         fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
 
+        generated = release_pr_body(source_branch="development", target_branch="main")
         metadata, created = await find_or_create_release_pr(
             runner=fake,
             gh=gh,
@@ -210,20 +213,87 @@ class TestFindOrCreateReleasePr:
             source_branch="development",
             target_branch="main",
             title="t",
-            body="reconciled-body",
+            body=generated,
         )
 
         assert created is False
         assert metadata.number == 99
-        # list → edit (reconcile the reused PR's stale policy body) → view; no create.
+        # list → view (current body) → edit (reconcile policy) → view (adoption); no create.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
             ["gh", "pr", "edit"],
             ["gh", "pr", "view"],
         ]
-        edit_args = fake.calls[1].args
-        assert edit_args[edit_args.index("--body") + 1] == "reconciled-body"
+        edit_args = fake.calls[2].args
+        reconciled = edit_args[edit_args.index("--body") + 1]
+        # The human-authored line survives; AWF's managed policy section is appended.
+        assert "old policy body" in reconciled
+        assert "human-gated" in reconciled
         assert edit_args[3] == "99"
+
+    @pytest.mark.unit
+    async def test_reuse_preserves_human_body_and_replaces_managed_section(self) -> None:
+        # A manually authored release PR carrying human release notes must keep that
+        # content; only AWF's marker-delimited policy block is rewritten in place.
+        fake = FakeCommandRunner()
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        human_body = f"## Release notes\n\n- shipped X\n- fixed Y\n\n{stale}"
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout=human_body + "\n")  # gh pr view (body)
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
+        gh = GitHubClient(fake)
+
+        # Now the workspace resolves auto_merge=True, so the managed section flips.
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+        await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body=generated,
+        )
+
+        edit_args = fake.calls[2].args
+        reconciled = edit_args[edit_args.index("--body") + 1]
+        assert "## Release notes" in reconciled
+        assert "- shipped X" in reconciled
+        assert "auto-merge enabled" in reconciled  # policy flipped in place
+        assert "human-gated" not in reconciled  # stale policy gone
+        assert reconciled.count("AWF:release-merge-policy:start") == 1  # no duplication
+
+    @pytest.mark.unit
+    async def test_reuse_skips_edit_when_body_already_matches(self) -> None:
+        # An idempotent re-sync where the reused PR already carries the exact
+        # reconciled body must issue no ``gh pr edit`` write.
+        fake = FakeCommandRunner()
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout=generated + "\n")  # gh pr view (body)
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
+        gh = GitHubClient(fake)
+
+        await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body=generated,
+        )
+
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+            ["gh", "pr", "view"],
+        ]
+        assert all(c.args[:3] != ["gh", "pr", "edit"] for c in fake.calls)
 
     @pytest.mark.unit
     async def test_creates_pr_when_none_exists(self) -> None:
@@ -367,6 +437,7 @@ class TestFindOrCreateReleasePr:
             returncode=0,
             stdout=_fork_and_same_repo_pr_list_payload(fork_number=555, same_repo_number=99),
         )  # gh pr list
+        fake.queue_result(returncode=0, stdout="stale body\n")  # gh pr view (current body)
         fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
@@ -378,20 +449,22 @@ class TestFindOrCreateReleasePr:
             source_branch="development",
             target_branch="main",
             title="t",
-            body="b",
+            body=release_pr_body(source_branch="development", target_branch="main"),
         )
 
         assert created is False
         assert metadata.number == 99
-        # list → edit (reconcile the same-repo PR's body) → view of the same-repo
-        # PR; the fork PR is never viewed and no `gh pr create` is issued.
+        # list → view (current body) → edit (reconcile) → view (adoption) of the
+        # same-repo PR; the fork PR is never edited and no `gh pr create` is issued.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
             ["gh", "pr", "edit"],
             ["gh", "pr", "view"],
         ]
-        assert fake.calls[1].args[:4] == ["gh", "pr", "edit", "99"]
-        assert fake.calls[2].args[:4] == ["gh", "pr", "view", "99"]
+        assert fake.calls[1].args[:4] == ["gh", "pr", "view", "99"]
+        assert fake.calls[2].args[:4] == ["gh", "pr", "edit", "99"]
+        assert fake.calls[3].args[:4] == ["gh", "pr", "view", "99"]
 
     @pytest.mark.unit
     async def test_created_url_for_other_repo_raises(self) -> None:
@@ -820,6 +893,7 @@ class TestPrepareReleasePrSync:
         fake.queue_result(returncode=0)  # fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=88))  # gh pr list
+        fake.queue_result(returncode=0, stdout="stale body\n")  # gh pr view (current body)
         fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=88))  # view
         gh = GitHubClient(fake)
@@ -831,8 +905,8 @@ class TestPrepareReleasePrSync:
             cwd="/work",
             source_branch="development",
             target_branch="main",
-            title="t",
-            body="b",
+            title=release_pr_title(source_branch="development", target_branch="main"),
+            body=release_pr_body(source_branch="development", target_branch="main"),
         )
 
         assert isinstance(outcome, ReleasePrSyncResult)
@@ -863,3 +937,57 @@ class TestReleasePrText:
         assert "auto-merge disabled" not in body
         assert "human-gated" not in body
         assert "auto-merge enabled" in body
+
+    @pytest.mark.unit
+    def test_body_wraps_policy_in_managed_markers(self) -> None:
+        body = release_pr_body(source_branch="development", target_branch="main")
+        assert "AWF:release-merge-policy:start" in body
+        assert "AWF:release-merge-policy:end" in body
+
+
+class TestReconcileReleasePrBody:
+    @pytest.mark.unit
+    def test_replaces_managed_section_in_place_preserving_human_content(self) -> None:
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\nhand-written context\n\n{stale}\n\ntrailing human text"
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "hand-written context" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_appends_managed_section_when_absent(self) -> None:
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        existing = "## Human release PR\n\n- item one"
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert reconciled.startswith("## Human release PR")
+        assert "- item one" in reconciled
+        assert "AWF:release-merge-policy:start" in reconciled
+        assert "human-gated" in reconciled
+
+    @pytest.mark.unit
+    def test_empty_existing_body_yields_only_managed_section(self) -> None:
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)
+        # An empty human body reduces to just the managed section (no intro grafted on).
+        assert section.startswith("<!-- AWF:release-merge-policy:start")
+        assert "human-gated" in section
+
+    @pytest.mark.unit
+    def test_generated_body_without_markers_falls_back(self) -> None:
+        # Defensive: a generated body missing the managed markers can't be spliced,
+        # so the whole generated body is returned rather than dropping the policy.
+        reconciled = reconcile_release_pr_body(
+            existing_body="human content", generated_body="no markers here"
+        )
+        assert reconciled == "no markers here"
