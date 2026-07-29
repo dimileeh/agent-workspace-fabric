@@ -429,26 +429,50 @@ _MANAGED_POLICY_START = "<!-- AWF:release-merge-policy:start -->"
 _MANAGED_POLICY_END = "<!-- AWF:release-merge-policy:end -->"
 
 
-def _release_merge_policy_section(*, auto_merge: bool) -> str:
-    """The marker-delimited AWF-managed merge-policy block for a release PR."""
+def _release_merge_policy_text(*, auto_merge: bool) -> str:
+    """The bare AWF-managed merge-policy paragraph (no marker fences)."""
 
     if auto_merge:
         # Mirror the monitor selection in ``worker._pr_monitor_factory``: a resolved
         # ``auto_merge=True`` release-sync workspace runs the feature monitor and
         # squash-merges into the release target on green, so the body must not claim
         # the merge stays human-gated.
-        text = (
+        return (
             "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
             "AWF's monitor squash-merges into the release target once checks are "
             "green and review comments are addressed."
         )
-    else:
-        text = (
-            "Opened by the `sync_release_pr` task kind and monitored with "
-            "release/manual behavior (auto-merge disabled). Merging into the "
-            "release target stays human-gated."
-        )
+    return (
+        "Opened by the `sync_release_pr` task kind and monitored with "
+        "release/manual behavior (auto-merge disabled). Merging into the "
+        "release target stays human-gated."
+    )
+
+
+def _release_merge_policy_section(*, auto_merge: bool) -> str:
+    """The marker-delimited AWF-managed merge-policy block for a release PR."""
+
+    text = _release_merge_policy_text(auto_merge=auto_merge)
     return f"{_MANAGED_POLICY_START}\n{text}\n{_MANAGED_POLICY_END}"
+
+
+def _strip_legacy_policy_paragraph(body: str) -> str:
+    """Remove a pre-marker AWF-generated merge-policy paragraph from ``body``.
+
+    A release PR opened before the managed markers existed carries the old
+    *unfenced* generated paragraph — either the "human-gated" manual text or the
+    "auto-merge enabled" text — with no fences for
+    :func:`_extract_managed_policy_section` to find. Left in place, the marker-only
+    reconciliation would append the fresh section beside the stale paragraph,
+    yielding a PR that simultaneously claims manual and automatic merge. Delete the
+    exact generated paragraph text (both variants) while preserving surrounding
+    human-authored content.
+    """
+
+    for auto_merge in (False, True):
+        legacy = _release_merge_policy_text(auto_merge=auto_merge)
+        body = body.replace(legacy, "")
+    return body
 
 
 def _extract_managed_policy_section(body: str) -> str | None:
@@ -471,6 +495,11 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
     and only replace the marker-delimited AWF policy block in place (inserting it
     at the end when absent), so the reused PR advertises the merge policy the
     attached monitor now enforces without destroying human-authored content.
+
+    When the markers are absent, ``existing_body`` may still carry a pre-marker
+    AWF-generated policy paragraph (a PR opened before the fences existed); strip
+    that stale paragraph before appending the fresh section so the reused PR never
+    claims both manual and automatic merge.
     """
 
     section = _extract_managed_policy_section(generated_body)
@@ -483,7 +512,7 @@ def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str
     end = existing_body.find(_MANAGED_POLICY_END)
     if start != -1 and end != -1 and end > start:
         return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
-    stripped = existing_body.rstrip()
+    stripped = _strip_legacy_policy_paragraph(existing_body).rstrip()
     if not stripped:
         return section
     return f"{stripped}\n\n{section}"

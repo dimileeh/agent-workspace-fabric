@@ -976,6 +976,48 @@ class TestReconcileReleasePrBody:
         assert "human-gated" in reconciled
 
     @pytest.mark.unit
+    def test_replaces_legacy_unmarked_policy_paragraph(self) -> None:
+        # A release PR opened before the managed markers existed carries the old
+        # unfenced "human-gated" paragraph. Reconciling to auto-merge must strip the
+        # stale paragraph instead of appending the enabled section beside it, or the
+        # PR would claim both manual and automatic merge.
+        legacy_body = (
+            "Automated AWF release PR syncing `development` into `main`.\n\n"
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=legacy_body, generated_body=generated)
+
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled  # stale legacy paragraph gone
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_preserving_surrounding_human_content(self) -> None:
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"# Notes\n\nhand-written context\n\n{legacy_paragraph}\n\ntrailing text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "hand-written context" in reconciled
+        assert "trailing text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
     def test_empty_existing_body_yields_only_managed_section(self) -> None:
         generated = release_pr_body(source_branch="development", target_branch="main")
         section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)
