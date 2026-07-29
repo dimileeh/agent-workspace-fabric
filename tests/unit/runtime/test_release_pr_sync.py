@@ -1063,6 +1063,71 @@ class TestReconcileReleasePrBody:
         assert reconciled.count(legacy_paragraph) == 1
 
     @pytest.mark.unit
+    def test_preserves_legacy_paragraph_inside_fenced_code_block(self) -> None:
+        # A human release note may quote the old body verbatim in a fenced code
+        # block, where the paragraph sits at column zero on its own line. That is
+        # human-authored content, not AWF's stale output, so it must survive while a
+        # standalone copy outside the fence is still stripped.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        fenced = f"```text\n{legacy_paragraph}\n```"
+        existing = f"# Notes\n\nThe previous body read:\n\n{fenced}\n\n{legacy_paragraph}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        # Only the quoted copy survives; the standalone stale paragraph is gone.
+        assert reconciled.count(legacy_paragraph) == 1
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_preserves_legacy_paragraph_inside_html_comment(self) -> None:
+        # Text a human parked inside an HTML comment is invisible in the rendered
+        # description but is still their content; container-unaware cleanup would
+        # gut the comment.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
+        commented = f"<!--\n{legacy_paragraph}\n-->"
+        existing = f"# Notes\n\n{commented}\n\nhand-written context"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert commented in reconciled
+        assert "hand-written context" in reconciled
+        assert "human-gated" in reconciled
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_after_a_closed_fence(self) -> None:
+        # Container tracking must reopen stripping once the fence closes, otherwise a
+        # code block early in the body would shield every later stale paragraph.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"~~~\nsome sample\n~~~\n\n{legacy_paragraph}\n\ntrailing text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "some sample" in reconciled
+        assert "trailing text" in reconciled
+        assert legacy_paragraph not in reconciled
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
     def test_empty_existing_body_yields_only_managed_section(self) -> None:
         generated = release_pr_body(source_branch="development", target_branch="main")
         section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)

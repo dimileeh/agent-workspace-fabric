@@ -463,6 +463,34 @@ def _release_merge_policy_section(*, auto_merge: bool) -> str:
     return f"{_MANAGED_POLICY_START}\n{text}\n{_MANAGED_POLICY_END}"
 
 
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
+
+
+def _fence_closes(line: str, *, fence: str) -> bool:
+    """Whether ``line`` closes a code fence opened with ``fence``."""
+
+    return re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line) is not None
+
+
+def _advance_html_comment_state(line: str, *, in_comment: bool) -> bool:
+    """Whether an HTML comment is still open after consuming ``line``."""
+
+    index = 0
+    while True:
+        if in_comment:
+            close = line.find("-->", index)
+            if close == -1:
+                return True
+            in_comment = False
+            index = close + len("-->")
+        else:
+            opening = line.find("<!--", index)
+            if opening == -1:
+                return False
+            in_comment = True
+            index = opening + len("<!--")
+
+
 def _strip_legacy_policy_paragraph(body: str) -> str:
     """Remove a pre-marker AWF-generated merge-policy paragraph from ``body``.
 
@@ -475,17 +503,39 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
     exact generated paragraph text (both variants) while preserving surrounding
     human-authored content.
 
-    Only a *standalone* occurrence — the paragraph alone on its own line — is
-    AWF-authored output. A human release note may quote the same sentences
-    blockquoted, inside a list item, or embedded mid-line with commentary around
-    it; an unrestricted replace would silently delete that human text (and leave a
-    dangling bullet), so the match is anchored to whole lines.
+    Only a *standalone* occurrence — the paragraph alone on its own line, outside
+    any container — is AWF-authored output. A human release note may quote the same
+    sentences blockquoted, inside a list item, or embedded mid-line with commentary
+    around it; it may also quote the old body verbatim in a fenced code block or
+    park it in an HTML comment, where the paragraph does sit alone at column zero.
+    An unrestricted replace would silently delete that human text (and leave a
+    dangling bullet or a gutted code block), so the match is anchored to whole
+    lines *and* skipped inside fenced code blocks and HTML comments.
     """
 
-    for auto_merge in (False, True):
-        legacy = _release_merge_policy_text(auto_merge=auto_merge)
-        body = re.sub(rf"^{re.escape(legacy)}[ \t]*$", "", body, flags=re.MULTILINE)
-    return body
+    legacy_paragraphs = {
+        _release_merge_policy_text(auto_merge=auto_merge) for auto_merge in (False, True)
+    }
+    kept: list[str] = []
+    fence: str | None = None
+    in_comment = False
+    for line in body.split("\n"):
+        if in_comment:
+            in_comment = _advance_html_comment_state(line, in_comment=True)
+        elif fence is not None:
+            if _fence_closes(line, fence=fence):
+                fence = None
+        elif (opened := _FENCE_OPEN_RE.match(line)) is not None:
+            fence = opened.group("fence")
+        elif line.rstrip(" \t") in legacy_paragraphs:
+            # Blank the line rather than dropping it, so the surrounding paragraph
+            # spacing a human wrote around the stale text is left untouched.
+            kept.append("")
+            continue
+        else:
+            in_comment = _advance_html_comment_state(line, in_comment=False)
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _extract_managed_policy_section(body: str) -> str | None:
