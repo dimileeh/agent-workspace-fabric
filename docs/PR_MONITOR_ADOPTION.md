@@ -59,10 +59,11 @@ awf workspace adopt-pr \
   --initial-review-grace-period-seconds 900
 ```
 
-`--auto-merge` is the default. It lets the monitor merge after comments,
-checks, freshness, validation provenance, merge queue policy, and the initial
-review grace window are clean. `--no-auto-merge` keeps AWF monitoring and
-repairing the PR, but a human must merge it.
+Auto-merge is opt-in. Omit both flags to use the repo/profile default (off
+unless configured in `monitor.auto_merge`). Pass `--auto-merge` to let the
+monitor merge after comments, checks, freshness, validation provenance, merge queue
+policy, and the initial review grace window are clean. `--no-auto-merge` keeps
+AWF monitoring and repairing the PR, but a human must merge it.
 
 `initial_review_grace_period_seconds` is optional. Omit it to use the resolved
 profile monitor policy; the profile default is 900 seconds. Set it to `0` only
