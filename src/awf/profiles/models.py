@@ -1032,10 +1032,14 @@ def normalize_inline_profile_snapshot(
     added after some inline-profile workspaces were persisted, so their stored
     ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
     dumps the ``600.0`` default. Backfill a missing value there too so legacy
-    inline-profile replays stay idempotent. ``runtime.browsers`` was added later
-    with an empty-list default, so missing values in legacy ``runtime`` sub-dicts
-    are backfilled the same way. Returns a shallow copy; the input is never
-    mutated (nested sub-dicts are copied only when backfilled).
+    inline-profile replays stay idempotent. The ``monitor.auto_merge`` block (the
+    unified auto-merge setting) was added the same way, so a legacy ``monitor``
+    sub-dict lacks it while a fresh replay now dumps the defaulted block; backfill
+    the default dump so pre-``auto_merge`` snapshots stay idempotent instead of
+    raising a spurious conflict. ``runtime.browsers`` was added later with an
+    empty-list default, so missing values in legacy ``runtime`` sub-dicts are
+    backfilled the same way. Returns a shallow copy; the input is never mutated
+    (nested sub-dicts are copied only when backfilled).
     """
     if profile is None:
         return None
@@ -1043,13 +1047,18 @@ def normalize_inline_profile_snapshot(
     if "forge" not in result:
         result["forge"] = "auto"
     monitor = result.get("monitor")
-    if isinstance(monitor, dict) and "awaiting_required_checks_grace_seconds" not in monitor:
-        result["monitor"] = {
-            **monitor,
-            "awaiting_required_checks_grace_seconds": (
+    if isinstance(monitor, dict):
+        monitor_backfills: dict[str, Any] = {}
+        if "awaiting_required_checks_grace_seconds" not in monitor:
+            monitor_backfills["awaiting_required_checks_grace_seconds"] = (
                 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
-            ),
-        }
+            )
+        if "auto_merge" not in monitor:
+            # Fresh dump of the current default so retuning the block keeps legacy
+            # replays idempotent; built per call so the nested dict is never shared.
+            monitor_backfills["auto_merge"] = ProfileAutoMerge().model_dump()
+        if monitor_backfills:
+            result["monitor"] = {**monitor, **monitor_backfills}
     runtime = result.get("runtime")
     if isinstance(runtime, dict) and "browsers" not in runtime:
         result["runtime"] = {**runtime, "browsers": []}
