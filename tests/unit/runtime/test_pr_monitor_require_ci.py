@@ -58,7 +58,7 @@ def test_require_ci_false_no_checks_clean_pr_merges() -> None:
     action = decide(
         status=_status(check_state=CheckState.PENDING, no_checks_observed=True),
         state=MonitorState(),
-        config=MonitorConfig(require_ci=False),
+        config=MonitorConfig(require_ci=False, auto_merge=True),
     )
     assert isinstance(action, Merge)
 
@@ -391,6 +391,6 @@ def test_grace_flag_does_not_block_clean_green_merge() -> None:
             awaiting_required_checks_grace_active=True,
         ),
         state=MonitorState(),
-        config=MonitorConfig(),
+        config=MonitorConfig(auto_merge=True),
     )
     assert isinstance(action, Merge)

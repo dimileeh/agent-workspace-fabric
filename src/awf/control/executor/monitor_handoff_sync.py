@@ -276,7 +276,11 @@ async def _handoff_sync_release_pr_monitor(
                     release_pr_title(source_branch=source_branch, target_branch=target_branch),
                     workspace.task_tag,
                 ),
-                body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
+                body=release_pr_body(
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    auto_merge=bool(workspace.auto_merge),
+                ),
             )
     except (ReleasePrSyncError, PullRequestMetadataError) as exc:
         await self._mark_failed(

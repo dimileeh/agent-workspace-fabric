@@ -371,6 +371,7 @@ def make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
+    delete_source_branch_on_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
     non_check_reviewer_settle_seconds: float = 0,
@@ -395,6 +396,7 @@ def make_runner(
         "gh": gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         "monitor_config": MonitorConfig(
             auto_merge=auto_merge,
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,

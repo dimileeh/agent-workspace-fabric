@@ -164,14 +164,20 @@ class TaskKind(StrEnum):
     development→``repo.base_branch``). No coding agent and no feature PR:
     checks whether the source branch is ahead of the target; completes
     cleanly when nothing is ahead; otherwise reuses an existing open
-    source→target PR or opens one, then attaches the release-PR monitor
-    (auto_merge forced ``False``). Never merges; only posts "ready to
-    merge" when all gates are green. The open PR is kept current via the
-    monitor's SyncBase cycle as more work lands on the source branch.
+    source→target PR or opens one, then attaches the PR monitor. The open
+    PR is kept current via the monitor's SyncBase cycle as more work lands
+    on the source branch.
+
+    ``task_kind`` no longer forces ``auto_merge``: like every other path it
+    defaults OFF (``DEFAULT_AUTO_MERGE``) unless a per-task ``--auto-merge``
+    intent or the repo profile (``monitor.auto_merge``) enables it. With
+    auto_merge off (the default) the human-gated release monitor never
+    merges and only posts "ready to merge" when all gates are green; the
+    (default) setting IS the human gate, not the task kind.
 
     To monitor an arbitrary already-open PR (any base/head), use the
-    generic PR-adoption flow with ``auto_merge=false`` instead of a task
-    kind — that selects the same release/manual monitor behavior."""
+    generic PR-adoption flow instead of a task kind — auto_merge resolves
+    identically there."""
 
     sync_feature_pr = "sync_feature_pr"
     """Adopt an already-open feature PR into AWF's service monitor.

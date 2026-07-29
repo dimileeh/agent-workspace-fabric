@@ -26,6 +26,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_value
+from awf.common.auto_merge import (
+    DEFAULT_AUTO_MERGE,
+    auto_merge_intent_from_policy,
+    resolve_auto_merge,
+    task_policy_has_auto_merge_intent,
+)
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -80,6 +86,9 @@ _egress_plan_destination_category = _provisioner_helpers._egress_plan_destinatio
 _positive_int = _provisioner_helpers._positive_int
 _provision_checkout_base_branch = _provisioner_helpers._provision_checkout_base_branch
 _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
+_provision_profile_auto_merge_is_trusted = (
+    _provisioner_helpers._provision_profile_auto_merge_is_trusted
+)
 _provision_remote_push_branch = _provisioner_helpers._provision_remote_push_branch
 _reconcile_active_reservation_for_profile = (
     _provisioner_helpers._reconcile_active_reservation_for_profile
@@ -861,6 +870,52 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 node_id=self._config.node_id,
                 profile=profile,
                 zero_local_capacity=hosted_pr_adoption,
+            )
+
+            # Resolve the FINAL auto-merge flag now that the profile (workspace.yml)
+            # is materialized. This is the single shared call site for both create
+            # and adopt (adoption also provisions through here). task_kind never
+            # affects it; the monitor reads only this persisted column. Precedence:
+            # per-task intent -> monitor.auto_merge.by_base_branch[base] ->
+            # monitor.auto_merge.default -> DEFAULT_AUTO_MERGE (False).
+            #
+            # Legacy in-flight rows persisted before the intent key existed carry no
+            # ``auto_merge_intent`` in task_policy; their persisted ``auto_merge``
+            # column is already the grandfathered authority. Resolving those as a
+            # fresh unset intent would clobber a grandfathered ``True`` with the
+            # profile's new default, so only re-resolve when the intent key is
+            # actually present and otherwise preserve the persisted column.
+            #
+            # Trust boundary: an adopted feature PR resolves its profile from the PR
+            # head checkout, so its ``monitor.auto_merge`` config is attacker-
+            # controlled. It must not authorize auto-merge — only an explicit
+            # operator intent may. When the profile is untrusted and the intent is
+            # unset we short-circuit to ``DEFAULT_AUTO_MERGE`` instead of falling
+            # through to the profile config (AWF owns merge safety; a PR cannot
+            # enable its own merge).
+            if task_policy_has_auto_merge_intent(persisted.task_policy):
+                auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
+                if auto_merge_intent is None and not _provision_profile_auto_merge_is_trusted(
+                    persisted, profile
+                ):
+                    resolved_auto_merge = DEFAULT_AUTO_MERGE
+                else:
+                    resolved_auto_merge = resolve_auto_merge(
+                        auto_merge_intent, profile, persisted.branch_base
+                    )
+            else:
+                auto_merge_intent = None
+                resolved_auto_merge = persisted.auto_merge
+            persisted.auto_merge = resolved_auto_merge
+            await repo.add_event(
+                persisted,
+                event_type="workspace.auto_merge_resolved",
+                reason_code="AUTO_MERGE_RESOLVED",
+                payload={
+                    "intent": auto_merge_intent,
+                    "base_branch": persisted.branch_base,
+                    "resolved": resolved_auto_merge,
+                },
             )
 
             if execution_claim_epoch is not None:

@@ -332,6 +332,43 @@ When meaningful bot or human feedback appears, AWF:
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
 
+### Auto-merge (opt-in, default off)
+
+`auto_merge` is one uniform, opt-in setting that behaves identically whether a
+workspace is created (`awf workspace create`) or an existing PR is adopted
+(`awf workspace adopt-pr`). It **defaults to `false`** everywhere. The persisted
+`workspace.auto_merge` flag is the single authority for monitor selection:
+
+- `true` → feature monitor: squash-merge once all gates are green.
+- `false` → release/manual monitor: report "ready to merge" via `NotifyHuman`
+  and never merge.
+
+`task_kind` (including `sync_release_pr`) never affects auto-merge — it is a
+separate opt-in flag. The flag is resolved once at provision time from the
+per-task intent and the repo profile, and written to the column the monitor
+reads. Resolution precedence (highest wins):
+
+1. per-task intent — `--auto-merge` / `--no-auto-merge` (omit to leave unset);
+2. `monitor.auto_merge.by_base_branch[<PR base branch>]` (exact match);
+3. `monitor.auto_merge.default` (repo global);
+4. the built-in default (`false`).
+
+Configure it per repo in `workspace.yml`:
+
+```yaml
+monitor:
+  auto_merge:
+    default: false
+    by_base_branch:
+      development: true   # auto-merge PRs targeting development
+      main: false         # keep main a human-gated merge
+```
+
+Omitting the block resolves to `false`. A per-task `--auto-merge` /
+`--no-auto-merge` always overrides the profile config. Existing workspaces
+persisted with `auto_merge=true` before this default flip are grandfathered
+untouched.
+
 ### Initial Review Grace
 
 Feature PRs with `auto_merge: true` do not merge immediately on the first green

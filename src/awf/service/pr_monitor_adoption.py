@@ -15,6 +15,12 @@ from awf.api.schemas import (
     PullRequestMonitorAdoptionResponse,
 )
 from awf.common.audit import redact_audit_text
+from awf.common.auto_merge import (
+    AUTO_MERGE_INTENT_POLICY_KEY,
+    DEFAULT_AUTO_MERGE,
+    auto_merge_intent_from_policy,
+    task_policy_has_auto_merge_intent,
+)
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.forge import ForgeNotSupportedError, ensure_forge_supported
@@ -60,6 +66,12 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+# Statuses in which the provisioner has not yet resolved the final ``auto_merge``
+# flag from the materialized profile, so the persisted column is still the
+# provisional seed rather than the authoritative resolved policy.
+_AUTO_MERGE_UNRESOLVED_STATUSES = frozenset(
+    {WorkspaceStatus.requested.value, WorkspaceStatus.provisioning.value}
+)
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
 # #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
 # clears the adoption forge gate. But the *default* adoption metadata fetcher
@@ -335,7 +347,9 @@ class PullRequestMonitorAdoptionService:
             requires_database=False,
             owned_paths=list(request.owned_paths),
             task_policy=task_policy,
-            auto_merge=request.auto_merge,
+            auto_merge=(
+                request.auto_merge if request.auto_merge is not None else DEFAULT_AUTO_MERGE
+            ),
             initial_review_grace_period_seconds=request.initial_review_grace_period_seconds,
             profile_ref=request.profile_ref,
             requested_profile=requested_profile,
@@ -537,6 +551,31 @@ class PullRequestMonitorAdoptionService:
         repo_slug = str(adoption.get("repo_slug") or RepoRef.from_url(workspace.repo_url).slug())
         pr_number = int(adoption.get("pr_number") or workspace.pr_number or 0)
         pr_url = str(adoption.get("pr_url") or workspace.pr_url or "")
+        # The persisted ``auto_merge`` column is only authoritative once the
+        # provisioner has resolved it against the materialized profile. Before
+        # then it is the provisional ``DEFAULT_AUTO_MERGE`` seed, which lies for an
+        # adoption that omitted an explicit intent and whose (trusted) profile
+        # resolves ``monitor.auto_merge`` on. Surface the resolved value only when
+        # it is actually settled — an explicit intent already fixes it, and any
+        # post-provisioning status has run the resolver — otherwise report the
+        # setting as unresolved (``None``) rather than a false ``manual`` policy.
+        #
+        # A legacy row written before the intent key existed carries no
+        # ``auto_merge_intent`` in ``task_policy``, so ``auto_merge_intent`` is
+        # ``None``. But the provisioner treats a missing key as grandfathered and
+        # *preserves* the persisted ``auto_merge`` column rather than re-resolving
+        # it, so that column is already the authoritative policy even while the row
+        # is still ``requested``/``provisioning``. Reporting such a row as
+        # unresolved would hide a grandfathered ``True`` that will auto-merge, so
+        # treat a missing intent key as a legacy-resolved policy.
+        auto_merge_intent = auto_merge_intent_from_policy(workspace.task_policy)
+        legacy_policy = not task_policy_has_auto_merge_intent(workspace.task_policy)
+        auto_merge_resolved = (
+            workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES or legacy_policy
+        )
+        auto_merge_value: bool | None = (
+            workspace.auto_merge if auto_merge_resolved or auto_merge_intent is not None else None
+        )
         return PullRequestMonitorAdoptionResponse(
             workspace_id=workspace.id,
             status=_workspace_status_for_response(workspace.status),
@@ -552,9 +591,11 @@ class PullRequestMonitorAdoptionService:
             base_ref=str(adoption.get("base_ref") or workspace.branch_base),
             head_sha=_optional_str(adoption.get("head_sha")) or workspace.monitor_last_commit_sha,
             base_sha=_optional_str(adoption.get("base_sha")),
-            auto_merge=workspace.auto_merge,
+            auto_merge=auto_merge_value,
             monitor_policy={
-                "auto_merge": workspace.auto_merge,
+                "auto_merge": auto_merge_value,
+                "auto_merge_intent": auto_merge_intent,
+                "auto_merge_resolved": auto_merge_resolved,
                 "initial_review_grace_period_seconds": (
                     workspace.initial_review_grace_period_seconds
                 ),
@@ -959,6 +1000,10 @@ def _adoption_task_policy(
     }
     if lineage is not None:
         policy["pr_adoption"]["lineage"] = lineage
+    # Persist the raw tri-state auto-merge intent durably so the provisioner
+    # resolves the final flag from it and idempotent replays compare the stable
+    # intent (not the provisional-then-resolved column).
+    policy[AUTO_MERGE_INTENT_POLICY_KEY] = request.auto_merge
     policy.update(_requested_agent_policy(request))
     return policy
 
@@ -1240,13 +1285,18 @@ def _raise_if_policy_conflicts(
                 "requested_task_tag": request.task_tag,
             },
         )
-    if workspace.auto_merge != request.auto_merge:
+    # Compare the persisted tri-state INTENT, not the resolved column: the
+    # resolved value can legitimately differ from a None intent (profile/default),
+    # so a replay with the same None intent must not spuriously conflict. Legacy
+    # rows written before the intent key existed reconstruct the historical intent
+    # from the persisted column (see ``_adoption_auto_merge_conflicts``).
+    if _adoption_auto_merge_conflicts(workspace, request):
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different auto_merge policy.",
             detail={
                 "workspace_id": workspace.id,
-                "existing_auto_merge": workspace.auto_merge,
+                "existing_auto_merge": _adoption_auto_merge_intent(workspace),
                 "requested_auto_merge": request.auto_merge,
             },
         )
@@ -1262,6 +1312,43 @@ def _raise_if_policy_conflicts(
                 "requested_initial_review_grace_period_seconds": requested_grace,
             },
         )
+
+
+def _adoption_auto_merge_intent(workspace: Workspace) -> bool | None:
+    """Reconstruct the adoption's tri-state auto-merge intent for idempotency.
+
+    New-world rows persist the intent under ``AUTO_MERGE_INTENT_POLICY_KEY``; return
+    it verbatim. Legacy rows written before the key existed have none, and the
+    historical adoption request default was ``True`` (omitted -> merge) with the
+    persisted column set straight from the request, so reconstruct the historical
+    intent from the column (``auto_merge is not False`` -> ``True``). This value is
+    reported in the conflict detail so it reflects the compared intent, not ``None``.
+    """
+    policy = workspace.task_policy
+    if isinstance(policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in policy:
+        return auto_merge_intent_from_policy(policy)
+    return getattr(workspace, "auto_merge", None) is not False
+
+
+def _adoption_auto_merge_conflicts(
+    workspace: Workspace,
+    request: PullRequestMonitorAdoptionRequest,
+) -> bool:
+    """Whether a replay's auto-merge intent conflicts with the stored adoption.
+
+    New-world rows (intent key present) compare the persisted intent strictly
+    against the request intent. Legacy rows (no intent key) reconstruct the
+    historical intent from the persisted column and treat an omitted (``None``)
+    replay as that same historical default (``True``), so a pre-change row created
+    by an omitted/True request stays idempotent against a post-change replay instead
+    of spuriously raising ``PR_ADOPTION_POLICY_CONFLICT``.
+    """
+    policy = workspace.task_policy
+    persisted_intent = _adoption_auto_merge_intent(workspace)
+    if isinstance(policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in policy:
+        return persisted_intent != request.auto_merge
+    effective_request = True if request.auto_merge is None else request.auto_merge
+    return persisted_intent != effective_request
 
 
 def _raise_if_agent_policy_conflicts(

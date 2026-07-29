@@ -1,0 +1,93 @@
+"""Shared auto-merge intent resolution.
+
+``auto_merge`` is one uniform, opt-in setting that behaves identically whether a
+workspace is created (``awf workspace create``) or an existing PR is adopted
+(``awf workspace adopt-pr``). The persisted ``workspace.auto_merge`` column is the
+single authority for monitor selection; ``task_kind`` never affects it.
+
+The create/adopt request carries a tri-state *intent* (``True``/``False``/``None``
+where ``None`` means "unset — fall through to the profile/default"). The intent is
+persisted durably in ``task_policy[AUTO_MERGE_INTENT_POLICY_KEY]`` so idempotent
+replays compare a stable snapshot and so the resolver can re-run at provision time
+(when the resolved ``workspace.yml`` profile is finally materialized).
+
+Precedence (highest wins):
+
+1. per-task intent (``--auto-merge``/``--no-auto-merge``; ``None`` = unset)
+2. ``monitor.auto_merge.by_base_branch[<PR base branch>]`` (exact match)
+3. ``monitor.auto_merge.default`` (repo global)
+4. ``DEFAULT_AUTO_MERGE`` (``False``)
+
+This module is pure (no I/O) so both the create/adopt idempotency comparisons and
+the provisioner call the same code.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from awf.profiles.models import WorkspaceProfile
+
+#: The single source of truth for the uniform, opt-in default. Import this rather
+#: than re-typing the literal ``False`` in schemas/CLI/MCP/repo defaults.
+DEFAULT_AUTO_MERGE = False
+
+#: The ``task_policy`` key under which the raw tri-state intent is persisted.
+#: Import this rather than re-typing the string literal.
+AUTO_MERGE_INTENT_POLICY_KEY = "auto_merge_intent"
+
+
+def auto_merge_intent_from_policy(task_policy: Mapping[str, Any] | None) -> bool | None:
+    """Read the persisted tri-state auto-merge intent from a task policy.
+
+    Returns ``True``/``False`` when an explicit intent was persisted, or ``None``
+    when the intent is unset. Rows written before this key existed (legacy) and
+    any non-bool stored value normalize to ``None`` (unset) so the resolver falls
+    through to the profile/default; legacy idempotency mapping is handled by the
+    caller, not here.
+    """
+    if not isinstance(task_policy, Mapping):
+        return None
+    value = task_policy.get(AUTO_MERGE_INTENT_POLICY_KEY)
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def task_policy_has_auto_merge_intent(task_policy: Mapping[str, Any] | None) -> bool:
+    """Whether a task policy carries an explicit auto-merge intent key.
+
+    New-world rows always persist ``AUTO_MERGE_INTENT_POLICY_KEY`` (even for an
+    unset ``None`` intent). Legacy rows written before the key existed lack it
+    entirely; callers use this to preserve a grandfathered persisted
+    ``workspace.auto_merge`` column instead of resolving such a row as a fresh
+    unset intent (which would clobber a grandfathered ``True`` with the profile's
+    new default). This is a strict *presence* check, distinct from
+    :func:`auto_merge_intent_from_policy`, which collapses both an absent key and a
+    present ``None`` to ``None``.
+    """
+    return isinstance(task_policy, Mapping) and AUTO_MERGE_INTENT_POLICY_KEY in task_policy
+
+
+def resolve_auto_merge(
+    intent: bool | None,
+    resolved_profile: WorkspaceProfile,
+    base_branch: str,
+) -> bool:
+    """Resolve the final auto-merge flag from intent + resolved profile config.
+
+    ``intent`` is the per-task tri-state (``True``/``False`` explicit, ``None``
+    unset). ``resolved_profile`` is the reconstructed ``WorkspaceProfile`` (never a
+    raw dict). ``base_branch`` is the PR base/target branch matched exactly against
+    ``monitor.auto_merge.by_base_branch``. See the module docstring for the
+    precedence chain.
+    """
+    if intent is not None:
+        return intent
+    config = resolved_profile.monitor.auto_merge
+    by_base = config.by_base_branch.get(base_branch)
+    if by_base is not None:
+        return by_base
+    return config.default

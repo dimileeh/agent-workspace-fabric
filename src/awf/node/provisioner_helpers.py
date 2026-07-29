@@ -145,6 +145,23 @@ def _provision_remote_push_branch(ws: Workspace) -> str | None:
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
 
 
+def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
+    """Whether the resolved profile may authorize auto-merge via its own config.
+
+    Adopting a feature PR checks out the PR head (``refs/pull/<n>/head``), so a
+    ``monitor.auto_merge`` block read from that checkout's ``.awf/workspace.yml``
+    (profile ``source`` ``repo:<path>``) is controlled by the — possibly external —
+    PR author. Honouring it would let a PR enable its own auto-merge once the
+    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md). Such a
+    config is untrusted: only an explicit operator intent may enable auto-merge for
+    it. An operator-supplied inline profile and every non-adoption task kind resolve
+    from a trusted source, so their ``monitor.auto_merge`` config is honoured.
+    """
+    if ws.task_kind != "sync_feature_pr":
+        return True
+    return not (profile.source or "").startswith("repo:")
+
+
 def _release_sync_source_branch(ws: Workspace) -> str | None:
     """Source branch for a ``sync_release_pr`` worktree (default ``development``).
 

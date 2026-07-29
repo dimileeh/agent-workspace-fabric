@@ -74,6 +74,7 @@ class _MergeMethodClient:
         self.merge_results = merge_results or ["MERGESHA123"]
         self.post_comment_error = post_comment_error
         self.merge_calls: list[str] = []
+        self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
@@ -122,8 +123,8 @@ class _MergeMethodClient:
         """Record the attempted method and return or raise the queued outcome."""
         assert repo == self.expected_repo
         assert pr_number == self.expected_pr_number
-        assert delete_branch is True
         self.merge_calls.append(method)
+        self.delete_branch_calls.append(delete_branch)
         result = self.merge_results.pop(0)
         if isinstance(result, GitHubClientError | BitbucketClientError):
             raise result
@@ -144,6 +145,7 @@ async def _execute_merge(
     tmp_path: Path,
     gh: _MergeMethodClient,
     base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
+    delete_source_branch_on_merge: bool = True,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
     """Seed a monitored workspace and execute one merge action."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -160,6 +162,7 @@ async def _execute_merge(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
+        delete_source_branch_on_merge=delete_source_branch_on_merge,
     )
     state = MonitorState()
 
