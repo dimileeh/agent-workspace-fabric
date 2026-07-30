@@ -868,7 +868,7 @@ class GitHubClient:
             operation="gh pr view body",
             retry_policy=RetryPolicy.READ,
         )
-        return result.stdout.rstrip("\n")
+        return result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout
 
     async def update_pull_request_body(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Overwrite an existing PR's description.

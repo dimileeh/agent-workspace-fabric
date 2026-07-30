@@ -103,6 +103,19 @@ class TestMutations:
         assert body == "## Notes\n\n- shipped X"
 
     @pytest.mark.unit
+    async def test_fetch_pull_request_body_preserves_trailing_blank_lines(self) -> None:
+        # gh appends exactly one transport newline; stripping more would eat
+        # user-authored trailing blank lines, which release-PR sync then writes
+        # back as an altered body. Only that final newline is removed.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="## Notes\n\n- shipped X\n\n\n")
+        client = GitHubClient(fake)
+
+        body = await client.fetch_pull_request_body(repo=RepoRef(owner="o", name="r"), pr_number=99)
+
+        assert body == "## Notes\n\n- shipped X\n\n"
+
+    @pytest.mark.unit
     async def test_update_pull_request_body_argv(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0)
