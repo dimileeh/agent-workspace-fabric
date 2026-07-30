@@ -131,3 +131,18 @@ def test_stored_legacy_release_sync_true_column_matches_explicit_true(
     assert workspaces_create._stored_auto_merge_matches(
         legacy, _request(auto_merge=True, kind="sync_release_pr")
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stored_column", [True, None])
+def test_stored_legacy_release_sync_true_column_conflicts_on_explicit_false(
+    stored_column: bool | None,
+) -> None:
+    # A stored True/NULL column is a reconstructable pre-canonicalization intent
+    # (historical default True), not the forced-off "no signal" case, so the
+    # legacy comparison must still apply. An explicit False replay drops the
+    # historical merge intent and must conflict rather than silently match.
+    legacy = _existing(auto_merge=stored_column)
+    assert not workspaces_create._stored_auto_merge_matches(
+        legacy, _request(auto_merge=False, kind="sync_release_pr")
+    )

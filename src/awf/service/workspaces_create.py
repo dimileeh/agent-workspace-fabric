@@ -393,7 +393,11 @@ def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequ
     request_intent = payload.task.auto_merge
     if AUTO_MERGE_INTENT_POLICY_KEY in stored_policy:
         return auto_merge_intent_from_policy(stored_policy) == request_intent
-    if payload.task.kind == TaskKind.sync_release_pr.value and request_intent is not True:
+    if (
+        payload.task.kind == TaskKind.sync_release_pr.value
+        and getattr(existing, "auto_merge", None) is False
+        and request_intent is not True
+    ):
         return True
     # Legacy pre-change row: reconstruct historical intent and treat an omitted
     # request as the historical default (True).
