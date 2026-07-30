@@ -25,41 +25,6 @@ from awf.common.github_client import (
 from awf.runtime.pr_monitor import CheckState, MergeableState
 
 
-def _adoption_pr_payload(
-    *,
-    number: int = 277,
-    head_ref: str = "feature/head",
-    head_repo_slug: str = "dimileeh/aira-web",
-    base_ref: str = "development",
-    head_sha: str = "h" * 40,
-    base_sha: str = "b" * 40,
-    state: str = "OPEN",
-    is_draft: bool = False,
-    author: str | None = "octocat",
-    url: str = "https://github.com/dimileeh/aira-web/pull/277",
-    title: str = "feature: ready",
-) -> str:
-    return json.dumps(
-        {
-            "number": number,
-            "headRefName": head_ref,
-            "headRepository": {
-                "name": head_repo_slug.split("/", 1)[1],
-                "nameWithOwner": head_repo_slug,
-            },
-            "isCrossRepository": head_repo_slug.lower() != "dimileeh/aira-web",
-            "baseRefName": base_ref,
-            "headRefOid": head_sha,
-            "baseRefOid": base_sha,
-            "state": state,
-            "isDraft": is_draft,
-            "author": {"login": author} if author is not None else None,
-            "url": url,
-            "title": title,
-        }
-    )
-
-
 def _sample_pr_payload(
     *,
     head_sha: str = "abc123",
