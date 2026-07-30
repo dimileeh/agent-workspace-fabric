@@ -226,6 +226,10 @@ class TestFetchPrStatusPart001:
         assert c.blocks_merge is False
         assert status.blocking_reviews == ()
         assert any("headRefName" in arg for arg in fake.calls[0].args)
+        # Guard the base-ref drift detection at the query level: the canned
+        # payload always includes baseRef, so without this a query regression
+        # dropping the field would silently disable retarget detection.
+        assert any("baseRef" in arg for arg in fake.calls[0].args)
 
     @pytest.mark.unit
     async def test_no_reviews_has_no_blocking_reviews(self) -> None:
