@@ -413,6 +413,93 @@ class TestPullRequestMonitorAdoptionServicePart001:
         assert resumed.monitor_policy["auto_merge_resolved"] is True
 
     @pytest.mark.unit
+    async def test_legacy_row_grandfathers_false_auto_merge_before_provisioning(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Sibling of the grandfathered-``True`` case above for the ``False`` branch of
+        # ``_adoption_auto_merge_intent``: a pre-upgrade adoption row carries no
+        # ``auto_merge_intent`` key, so a persisted ``auto_merge=False`` column is the
+        # grandfathered, authoritative policy even while the row is still ``requested``.
+        # The response must resolve it as ``False`` (not hide it behind ``None``), and
+        # an omitted replay — whose historical default was ``True`` — must still
+        # conflict with the persisted legacy ``False`` rather than spuriously attaching.
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                )
+            )
+            await session.commit()
+
+        assert result.status == WorkspaceStatus.requested
+
+        # Simulate a legacy in-flight row: strip the intent key and grandfather a
+        # persisted ``auto_merge=False`` while the workspace is still ``requested``.
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(result.workspace_id)
+            assert workspace is not None
+            legacy_policy = {
+                key: value
+                for key, value in (workspace.task_policy or {}).items()
+                if key != "auto_merge_intent"
+            }
+            workspace.task_policy = legacy_policy
+            workspace.auto_merge = False
+            await session.commit()
+
+        # A replay carrying the matching explicit ``False`` intent attaches, and the
+        # response surfaces the grandfathered ``False`` as resolved.
+        async with factory() as session:
+            resumed = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                    auto_merge=False,
+                )
+            )
+            await session.commit()
+
+        assert resumed.attached_existing is True
+        assert resumed.status == WorkspaceStatus.requested
+        assert resumed.auto_merge is False
+        assert resumed.monitor_policy["auto_merge"] is False
+        assert resumed.monitor_policy["auto_merge_intent"] is None
+        assert resumed.monitor_policy["auto_merge_resolved"] is True
+
+        # An omitted replay reconstructs the historical default ``True`` and must
+        # conflict with the persisted legacy ``False`` intent instead of attaching.
+        async with factory() as session:
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=_MetadataFetcher(_metadata()),
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        agent="codex",
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": result.workspace_id,
+            "existing_auto_merge": False,
+            "requested_auto_merge": None,
+        }
+
+    @pytest.mark.unit
     async def test_hosted_execution_policy_is_persisted_and_replay_attaches(
         self,
         factory: async_sessionmaker[AsyncSession],
