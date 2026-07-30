@@ -8,6 +8,8 @@ from awf.common.auto_merge import (
     AUTO_MERGE_INTENT_POLICY_KEY,
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
+    auto_merge_is_resolved,
+    reported_auto_merge,
     resolve_auto_merge,
     seed_auto_merge,
     task_policy_has_auto_merge_intent,
@@ -96,3 +98,34 @@ def test_task_policy_has_auto_merge_intent_presence_check() -> None:
     assert task_policy_has_auto_merge_intent({}) is False
     assert task_policy_has_auto_merge_intent(None) is False
     assert task_policy_has_auto_merge_intent("not-a-mapping") is False  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("status", ["requested", "provisioning"])
+def test_unset_intent_is_unresolved_before_provisioning(status: str) -> None:
+    policy = {AUTO_MERGE_INTENT_POLICY_KEY: None}
+    assert auto_merge_is_resolved(status, policy) is False
+    # The seeded column would advertise a manual gate the profile may overturn.
+    assert reported_auto_merge(status, policy, DEFAULT_AUTO_MERGE) is None
+
+
+@pytest.mark.parametrize("status", ["ready", "running", "monitoring_pr", "completed"])
+def test_unset_intent_is_resolved_after_provisioning(status: str) -> None:
+    policy = {AUTO_MERGE_INTENT_POLICY_KEY: None}
+    assert auto_merge_is_resolved(status, policy) is True
+    assert reported_auto_merge(status, policy, True) is True
+
+
+@pytest.mark.parametrize("intent", [True, False])
+def test_explicit_intent_is_resolved_even_while_requested(intent: bool) -> None:
+    policy = {AUTO_MERGE_INTENT_POLICY_KEY: intent}
+    assert auto_merge_is_resolved("requested", policy) is True
+    assert reported_auto_merge("requested", policy, intent) is intent
+
+
+@pytest.mark.parametrize("grandfathered", [True, False])
+def test_legacy_row_without_intent_key_is_treated_as_resolved(grandfathered: bool) -> None:
+    # The provisioner preserves (never re-resolves) a legacy column, so reporting
+    # it as unresolved would hide a grandfathered policy.
+    assert auto_merge_is_resolved("requested", {}) is True
+    assert reported_auto_merge("requested", {}, grandfathered) is grandfathered
+    assert reported_auto_merge("requested", None, grandfathered) is grandfathered

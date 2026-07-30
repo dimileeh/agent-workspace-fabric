@@ -10693,8 +10693,16 @@
             "type": "boolean"
           },
           "auto_merge": {
-            "title": "Auto Merge",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved auto-merge policy, or null when it is not yet resolved. A create/adopt that omits an explicit intent falls through to the repo profile (monitor.auto_merge), which is only materialized at provisioning; until then the value is null (unresolved), never a provisional false. Inspect task_policy.auto_merge_intent for the raw tri-state intent.",
+            "title": "Auto Merge"
           },
           "awaiting_human_reason": {
             "anyOf": [

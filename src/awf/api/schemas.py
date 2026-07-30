@@ -919,7 +919,16 @@ class WorkspaceResponse(BaseModel):
     task_class: TaskClass | None
     owned_paths: list[str]
     task_policy: dict[str, Any] = Field(default_factory=dict)
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        description=(
+            "Resolved auto-merge policy, or null when it is not yet resolved. A "
+            "create/adopt that omits an explicit intent falls through to the repo "
+            "profile (monitor.auto_merge), which is only materialized at "
+            "provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect task_policy.auto_merge_intent for the raw "
+            "tri-state intent."
+        ),
+    )
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime

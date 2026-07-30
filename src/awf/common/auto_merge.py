@@ -27,12 +27,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from awf.db.enums import WorkspaceStatus
+
 if TYPE_CHECKING:
     from awf.profiles.models import WorkspaceProfile
 
 #: The single source of truth for the uniform, opt-in default. Import this rather
 #: than re-typing the literal ``False`` in schemas/CLI/MCP/repo defaults.
 DEFAULT_AUTO_MERGE = False
+
+#: Statuses in which the provisioner has not yet resolved the final ``auto_merge``
+#: flag from the materialized profile, so the persisted column is still the
+#: provisional :func:`seed_auto_merge` value rather than the authoritative policy.
+AUTO_MERGE_UNRESOLVED_STATUSES = frozenset(
+    {WorkspaceStatus.requested.value, WorkspaceStatus.provisioning.value}
+)
 
 #: The ``task_policy`` key under which the raw tri-state intent is persisted.
 #: Import this rather than re-typing the string literal.
@@ -81,6 +90,41 @@ def seed_auto_merge(intent: bool | None) -> bool:
     unset seed, so this rule must stay identical on both entry paths.
     """
     return DEFAULT_AUTO_MERGE if intent is None else intent
+
+
+def auto_merge_is_resolved(status: str, task_policy: Mapping[str, Any] | None) -> bool:
+    """Whether the persisted ``workspace.auto_merge`` column is authoritative.
+
+    Create and adopt persist a provisional :func:`seed_auto_merge` value before the
+    profile exists, so a row with an unset intent that is still
+    ``requested``/``provisioning`` carries ``DEFAULT_AUTO_MERGE`` even when the
+    profile's ``monitor.auto_merge`` will resolve it on. The column becomes
+    authoritative once any of the following holds:
+
+    * an explicit intent was given — :func:`resolve_auto_merge` already returns it;
+    * the row has left the pre-provisioning statuses — the resolver has run;
+    * the row is legacy (no persisted intent key) — the provisioner preserves the
+      grandfathered column instead of re-resolving it, so it is already final.
+    """
+    return (
+        auto_merge_intent_from_policy(task_policy) is not None
+        or status not in AUTO_MERGE_UNRESOLVED_STATUSES
+        or not task_policy_has_auto_merge_intent(task_policy)
+    )
+
+
+def reported_auto_merge(
+    status: str,
+    task_policy: Mapping[str, Any] | None,
+    auto_merge: bool,
+) -> bool | None:
+    """Project the persisted column for API responses, or ``None`` when unresolved.
+
+    Reporting the provisional seed would advertise a ``manual`` merge policy for a
+    workspace whose profile resolves auto-merge on, so surface the value only once
+    :func:`auto_merge_is_resolved` says it is settled.
+    """
+    return auto_merge if auto_merge_is_resolved(status, task_policy) else None
 
 
 def resolve_auto_merge(

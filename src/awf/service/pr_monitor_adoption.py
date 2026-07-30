@@ -18,8 +18,8 @@ from awf.common.audit import redact_audit_text
 from awf.common.auto_merge import (
     AUTO_MERGE_INTENT_POLICY_KEY,
     auto_merge_intent_from_policy,
+    auto_merge_is_resolved,
     seed_auto_merge,
-    task_policy_has_auto_merge_intent,
 )
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
@@ -66,12 +66,6 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
-# Statuses in which the provisioner has not yet resolved the final ``auto_merge``
-# flag from the materialized profile, so the persisted column is still the
-# provisional seed rather than the authoritative resolved policy.
-_AUTO_MERGE_UNRESOLVED_STATUSES = frozenset(
-    {WorkspaceStatus.requested.value, WorkspaceStatus.provisioning.value}
-)
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
 # #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
 # clears the adoption forge gate. But the *default* adoption metadata fetcher
@@ -550,29 +544,14 @@ class PullRequestMonitorAdoptionService:
         pr_number = int(adoption.get("pr_number") or workspace.pr_number or 0)
         pr_url = str(adoption.get("pr_url") or workspace.pr_url or "")
         # The persisted ``auto_merge`` column is only authoritative once the
-        # provisioner has resolved it against the materialized profile. Before
-        # then it is the provisional ``DEFAULT_AUTO_MERGE`` seed, which lies for an
-        # adoption that omitted an explicit intent and whose (trusted) profile
-        # resolves ``monitor.auto_merge`` on. Surface the resolved value only when
-        # it is actually settled — an explicit intent already fixes it, and any
-        # post-provisioning status has run the resolver — otherwise report the
-        # setting as unresolved (``None``) rather than a false ``manual`` policy.
-        #
-        # A legacy row written before the intent key existed carries no
-        # ``auto_merge_intent`` in ``task_policy``, so ``auto_merge_intent`` is
-        # ``None``. But the provisioner treats a missing key as grandfathered and
-        # *preserves* the persisted ``auto_merge`` column rather than re-resolving
-        # it, so that column is already the authoritative policy even while the row
-        # is still ``requested``/``provisioning``. Reporting such a row as
-        # unresolved would hide a grandfathered ``True`` that will auto-merge, so
-        # treat a missing intent key as a legacy-resolved policy.
+        # provisioner has resolved it against the materialized profile; before then
+        # it is the provisional seed, which lies for an adoption that omitted an
+        # explicit intent and whose (trusted) profile resolves ``monitor.auto_merge``
+        # on. ``auto_merge_is_resolved`` owns that rule (shared with the workspace
+        # GET/list projection), so report ``None`` rather than a false ``manual``
+        # policy while the setting is still unresolved.
         auto_merge_intent = auto_merge_intent_from_policy(workspace.task_policy)
-        legacy_policy = not task_policy_has_auto_merge_intent(workspace.task_policy)
-        auto_merge_resolved = (
-            auto_merge_intent is not None
-            or workspace.status not in _AUTO_MERGE_UNRESOLVED_STATUSES
-            or legacy_policy
-        )
+        auto_merge_resolved = auto_merge_is_resolved(workspace.status, workspace.task_policy)
         auto_merge_value: bool | None = workspace.auto_merge if auto_merge_resolved else None
         return PullRequestMonitorAdoptionResponse(
             workspace_id=workspace.id,
