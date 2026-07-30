@@ -1232,6 +1232,56 @@ class TestReconcileReleasePrBody:
         assert reconciled.count("AWF:release-merge-policy:start") == 2
 
     @pytest.mark.unit
+    def test_splices_live_block_in_a_crlf_body(self) -> None:
+        # GitHub returns a description saved through its web UI with CRLF endings, so
+        # a reused PR body can reach reconciliation with a trailing \r on every line.
+        # Marker and fence matching must look past it; otherwise the live block goes
+        # unseen and reconciliation appends a second one, leaving the PR advertising
+        # both merge policies at once.
+        fenced = (
+            "```markdown\n"
+            "<!-- AWF:release-merge-policy:start -->\n"
+            "sample policy text\n"
+            "<!-- AWF:release-merge-policy:end -->\n"
+            "```"
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{fenced}\n\n{stale}\n\ntrailing human text".replace("\n", "\r\n")
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "sample policy text" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+        # Only the live block was replaced; the fenced example is still the second one.
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_from_a_crlf_body(self) -> None:
+        # Same CRLF hazard on the pre-marker path: a stale paragraph carrying a
+        # trailing \r must still be recognised as AWF's own output and stripped.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"# Notes\n\n{legacy_paragraph}\n\ntrailing text".replace("\n", "\r\n")
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "trailing text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
     def test_empty_existing_body_yields_only_managed_section(self) -> None:
         generated = release_pr_body(source_branch="development", target_branch="main")
         section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)

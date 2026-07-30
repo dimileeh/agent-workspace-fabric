@@ -519,7 +519,11 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
     kept: list[str] = []
     fence: str | None = None
     in_comment = False
-    for line in body.split("\n"):
+    for raw_line in body.split("\n"):
+        # Match on the newline-free line but keep ``raw_line`` for the output: GitHub
+        # returns a description saved through its web UI with CRLF endings, and a
+        # retained "\r" would defeat every comparison below.
+        line = raw_line.removesuffix("\r")
         if in_comment:
             in_comment = _advance_html_comment_state(line, in_comment=True)
         elif fence is not None:
@@ -534,7 +538,7 @@ def _strip_legacy_policy_paragraph(body: str) -> str:
             continue
         else:
             in_comment = _advance_html_comment_state(line, in_comment=False)
-        kept.append(line)
+        kept.append(raw_line)
     return "\n".join(kept)
 
 
@@ -558,7 +562,12 @@ def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
     offset = 0
     fence: str | None = None
     in_comment = False
-    for line in body.split("\n"):
+    for raw_line in body.split("\n"):
+        # Match on the newline-free line but count offsets over ``raw_line``: a body
+        # saved through GitHub's web UI comes back with CRLF endings, and a retained
+        # "\r" would hide the live markers (reconciliation would then append a second
+        # managed block) while the offsets must still address the original bytes.
+        line = raw_line.removesuffix("\r")
         if in_comment:
             in_comment = _advance_html_comment_state(line, in_comment=True)
         elif fence is not None:
@@ -573,7 +582,7 @@ def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
             elif own_line == _MANAGED_POLICY_END:
                 ends.append(offset)
             in_comment = _advance_html_comment_state(line, in_comment=False)
-        offset += len(line) + 1
+        offset += len(raw_line) + 1
     return starts, ends
 
 
