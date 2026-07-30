@@ -205,6 +205,9 @@ class TestFetchPrStatusPart001:
         )
         assert status.number == 42
         assert status.head_ref == "feature/current-head"
+        # The live base ref lets the monitor detect a PR retargeted after
+        # provisioning (its merge policy was resolved against the original base).
+        assert status.base_ref == "development"
         assert status.head_sha == "abc123"
         assert status.mergeable == MergeableState.MERGEABLE
         assert status.check_state == CheckState.SUCCESS

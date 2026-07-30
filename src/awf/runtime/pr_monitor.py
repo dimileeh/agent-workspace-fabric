@@ -971,6 +971,21 @@ def _non_candidate_carries_fixable_code_evidence(status: PRStatus) -> bool:
     return False
 
 
+_BASE_REF_DRIFT_HUMAN_MESSAGE_PREFIX = (
+    "PR base branch changed after provisioning; AWF resolved its merge policy "
+    "against the original base"
+)
+
+
+def _base_ref_drift_human_message(base_ref: str | None) -> str:
+    """Explain a retargeted PR to the operator, naming the observed base."""
+    observed = f" (now {base_ref})" if base_ref else ""
+    return (
+        f"{_BASE_REF_DRIFT_HUMAN_MESSAGE_PREFIX}{observed}. "
+        "Retarget the PR back, or re-adopt it against the new base."
+    )
+
+
 _CI_MISSING_LOGS_HUMAN_MESSAGE = (
     "CI failed: AWF could not retrieve actionable logs; operator attention is required."
 )
@@ -1080,6 +1095,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
+    0b. PR retargeted after provisioning (``base_ref_drifted``) → NotifyHuman.
+        Every gate below acts on the workspace's persisted ``branch_base``, and
+        ``auto_merge`` was resolved from it; a retargeted PR must not be driven
+        (or merged) under the previous base's policy.
     1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments or
         operator hints so a PR on a fast-moving base doesn't loop
         forever on new bot-review cycles without ever integrating base
@@ -1142,6 +1161,19 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    # 0b. The PR was retargeted on the forge after provisioning. Every policy the
+    # monitor carries is keyed to the workspace's persisted ``branch_base``:
+    # ``auto_merge`` was resolved from ``monitor.auto_merge.by_base_branch`` at
+    # provision time, and SyncBase integrates that same branch. Acting on a
+    # retargeted PR would merge it into the new base under the OLD base's policy
+    # (e.g. an auto-merging ``development`` workspace retargeted onto a
+    # human-gated ``main``) and would push the wrong base's commits into the head.
+    # AWF owns merge safety and cannot re-resolve the new base's policy from a
+    # snapshot, so hand off. ``NotifyHuman`` is a live wait state, not a terminal
+    # failure: retargeting the PR back clears the drift on the next poll.
+    if status.base_ref_drifted:
+        return NotifyHuman(message=_base_ref_drift_human_message(status.base_ref))
 
     # Pre-compute actionable comments so a no-progress DIRTY loop can break
     # back to review repair instead of starving new feedback forever.

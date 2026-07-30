@@ -307,6 +307,9 @@ class BitbucketClient(_BitbucketUrlsMixin):
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
+        destination_branch = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("destination")).get("branch")).get("name")
+        )
         statuses = await self._paginate(
             f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_pr_status statuses",
@@ -355,6 +358,7 @@ class BitbucketClient(_BitbucketUrlsMixin):
         return PRStatus(
             number=int(pr.get("id") or pr_number),
             head_ref=source_branch,
+            base_ref=destination_branch,
             head_sha=head_sha,
             mergeable=mergeable_state_for(merged=merged, closed=closed),
             check_state=parse_check_state(statuses),

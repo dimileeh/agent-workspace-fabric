@@ -484,6 +484,7 @@ class GitHubClient:
         return PRStatus(
             number=pr["number"],
             head_ref=_clean_optional_str(pr.get("headRefName")),
+            base_ref=_clean_optional_str(_dig(pr, "baseRef", "name")),
             head_sha=pr["headRefOid"],
             mergeable=mergeable,
             check_state=check_state,

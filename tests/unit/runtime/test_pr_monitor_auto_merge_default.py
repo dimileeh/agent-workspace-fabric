@@ -9,6 +9,8 @@ regardless of which entry point created the workspace or what task_kind it has.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from awf.common.auto_merge import resolve_auto_merge
@@ -99,6 +101,43 @@ def test_sync_release_default_notifies_but_explicit_auto_merge_merges() -> None:
         decide(_green_status(), MonitorState(), MonitorConfig(auto_merge=explicit_flag)),
         Merge,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("observed_base", ["main", None])
+def test_retargeted_pr_does_not_merge_under_the_original_base_policy(
+    observed_base: str | None,
+) -> None:
+    # auto_merge is resolved ONCE at provision time against the workspace's
+    # branch_base (monitor.auto_merge.by_base_branch). A PR opened against an
+    # auto-merging base and retargeted afterwards onto a human-gated one would
+    # otherwise be merged under the stale base's policy, so a drifted base blocks.
+    # ``base_ref`` is optional on the snapshot, so the hand-off message names the
+    # new base when the forge reported one and stays generic when it did not.
+    profile = _profile(default=False, by_base_branch={"development": True})
+    flag = resolve_auto_merge(None, profile, "development")
+    assert flag is True
+    drifted = replace(_green_status(), base_ref=observed_base, base_ref_drifted=True)
+
+    action = decide(drifted, MonitorState(), MonitorConfig(auto_merge=flag))
+
+    assert isinstance(action, NotifyHuman)
+    assert action.message is not None
+    assert "base branch changed" in action.message
+    assert ("main" in action.message) is (observed_base is not None)
+
+
+@pytest.mark.unit
+def test_unchanged_base_still_merges() -> None:
+    # The drift gate must not fire for the ordinary case: the live base matches
+    # the workspace's branch_base, so the runner leaves the flag off.
+    flag = resolve_auto_merge(None, _profile(by_base_branch={"development": True}), "development")
+    action = decide(
+        replace(_green_status(), base_ref="development"),
+        MonitorState(),
+        MonitorConfig(auto_merge=flag),
+    )
+    assert isinstance(action, Merge)
 
 
 @pytest.mark.unit
