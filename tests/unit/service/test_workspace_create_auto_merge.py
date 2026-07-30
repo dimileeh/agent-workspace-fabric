@@ -93,16 +93,41 @@ def test_stored_false_legacy_matches_only_false_request(request_intent: bool | N
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("request_intent", [True, None, False])
+@pytest.mark.parametrize("request_intent", [None, False])
 def test_stored_legacy_release_sync_false_column_is_not_an_intent_signal(
     request_intent: bool | None,
 ) -> None:
     # Legacy ``sync_release_pr`` rows force-set the persisted ``auto_merge`` column
     # to False at persistence regardless of the request intent, so that column is
-    # not an idempotency signal for this kind. An otherwise-identical replay (with
-    # the historical default True, an omitted None, or an explicit False) must stay
-    # idempotent rather than spuriously conflict.
+    # not an idempotency signal for this kind. A replay that does not explicitly
+    # opt into auto-merge (omitted None or explicit False) must stay idempotent
+    # rather than spuriously conflict.
     legacy = _existing(auto_merge=False)
     assert workspaces_create._stored_auto_merge_matches(
         legacy, _request(auto_merge=request_intent, kind="sync_release_pr")
+    )
+
+
+@pytest.mark.unit
+def test_stored_legacy_release_sync_false_column_conflicts_on_explicit_true() -> None:
+    # The provisioner preserves a legacy row's persisted column, so reusing a
+    # forced-False release-sync workspace would silently drop an explicit
+    # auto-merge opt-in. Conflict instead of accepting the changed intent.
+    legacy = _existing(auto_merge=False)
+    assert not workspaces_create._stored_auto_merge_matches(
+        legacy, _request(auto_merge=True, kind="sync_release_pr")
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stored_column", [True, None])
+def test_stored_legacy_release_sync_true_column_matches_explicit_true(
+    stored_column: bool | None,
+) -> None:
+    # Pre-canonicalization legacy release-sync rows snapshotted the raw request
+    # (historical default True), so an explicit True replay is honourable and
+    # must stay idempotent.
+    legacy = _existing(auto_merge=stored_column)
+    assert workspaces_create._stored_auto_merge_matches(
+        legacy, _request(auto_merge=True, kind="sync_release_pr")
     )

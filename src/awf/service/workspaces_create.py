@@ -375,19 +375,25 @@ def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequ
     explicit ``False`` request. New-world rows (intent key present) compare the
     persisted intent strictly against the request intent.
 
-    The one exception is a legacy ``sync_release_pr`` row: those force-set the
+    Legacy ``sync_release_pr`` rows are a partial exception: those force-set the
     persisted ``auto_merge`` column to ``False`` at persistence regardless of the
-    request intent, so for that kind the column is not a reconstructable intent
-    signal. Comparing it against the historical default (``True``) would spuriously
-    conflict on an otherwise-identical replay, so we skip the comparison (the kind
-    itself is matched separately). New-world release-sync rows carry the intent key
-    and are handled by the strict branch above.
+    request intent, so for that kind a stored ``False`` is not a reconstructable
+    intent signal. Comparing it against the historical default (``True``) would
+    spuriously conflict on an otherwise-identical replay, so a release-sync replay
+    that does not explicitly opt in (``None``/``False``) skips the comparison (the
+    kind itself is matched separately). An explicit ``True`` still compares: the
+    provisioner preserves a legacy row's persisted column, so reusing a forced-off
+    workspace would silently drop the caller's merge opt-in — that must conflict
+    instead. Pre-canonicalization release-sync rows that snapshotted the raw
+    request (column ``True``/``NULL``) still match an explicit ``True``. New-world
+    release-sync rows carry the intent key and are handled by the strict branch
+    above.
     """
     stored_policy = _stored_task_policy(existing)
     request_intent = payload.task.auto_merge
     if AUTO_MERGE_INTENT_POLICY_KEY in stored_policy:
         return auto_merge_intent_from_policy(stored_policy) == request_intent
-    if payload.task.kind == TaskKind.sync_release_pr.value:
+    if payload.task.kind == TaskKind.sync_release_pr.value and request_intent is not True:
         return True
     # Legacy pre-change row: reconstruct historical intent and treat an omitted
     # request as the historical default (True).
