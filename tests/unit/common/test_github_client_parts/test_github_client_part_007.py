@@ -68,6 +68,78 @@ class TestMutations:
             await client.post_comment(repo=RepoRef(owner="o", name="r"), pr_number=1, body="x")
 
     @pytest.mark.unit
+    async def test_fetch_pull_request_body_argv_maps_missing_description_to_empty(self) -> None:
+        # A description-less PR has a JSON ``null`` body, which a bare ``--jq .body``
+        # renders as the literal text "null". That sentinel would flow into
+        # release-PR reconciliation and be written back as a body reading "null",
+        # so the filter must convert it to an empty string at the source. Asserting
+        # the jq expression pins the fix: ``FakeCommandRunner`` cannot evaluate it.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="\n")
+        client = GitHubClient(fake)
+
+        body = await client.fetch_pull_request_body(repo=RepoRef(owner="o", name="r"), pr_number=99)
+
+        args = fake.calls[0].args
+        assert args[:3] == ["gh", "pr", "view"]
+        assert "99" in args
+        assert "--repo" in args and "o/r" in args
+        assert args[args.index("--json") + 1] == "body"
+        # ``.body // ""`` also keeps a body whose literal text is "null" intact,
+        # which normalizing the rendered stdout could not distinguish.
+        assert args[args.index("--jq") + 1] == '.body // ""'
+        assert body == ""
+
+    @pytest.mark.unit
+    async def test_fetch_pull_request_body_preserves_internal_formatting(self) -> None:
+        # Only gh's single trailing newline is stripped; blank lines and indentation
+        # inside human-authored release notes must survive verbatim.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="## Notes\n\n- shipped X\n")
+        client = GitHubClient(fake)
+
+        body = await client.fetch_pull_request_body(repo=RepoRef(owner="o", name="r"), pr_number=99)
+
+        assert body == "## Notes\n\n- shipped X"
+
+    @pytest.mark.unit
+    async def test_fetch_pull_request_body_preserves_trailing_blank_lines(self) -> None:
+        # gh appends exactly one transport newline; stripping more would eat
+        # user-authored trailing blank lines, which release-PR sync then writes
+        # back as an altered body. Only that final newline is removed.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="## Notes\n\n- shipped X\n\n\n")
+        client = GitHubClient(fake)
+
+        body = await client.fetch_pull_request_body(repo=RepoRef(owner="o", name="r"), pr_number=99)
+
+        assert body == "## Notes\n\n- shipped X\n\n"
+
+    @pytest.mark.unit
+    async def test_update_pull_request_body_argv(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0)
+        client = GitHubClient(fake)
+        await client.update_pull_request_body(
+            repo=RepoRef(owner="o", name="r"), pr_number=99, body="reconciled policy"
+        )
+        args = fake.calls[0].args
+        assert args[:3] == ["gh", "pr", "edit"]
+        assert "99" in args
+        assert "--body" in args and "reconciled policy" in args
+        assert "--repo" in args and "o/r" in args
+
+    @pytest.mark.unit
+    async def test_update_pull_request_body_raises_on_error(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="forbidden")
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError):
+            await client.update_pull_request_body(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, body="x"
+            )
+
+    @pytest.mark.unit
     async def test_create_pull_request_argv_and_url(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

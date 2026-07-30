@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
+from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
@@ -73,6 +74,18 @@ ServiceGCRequest = _schemas_responses.ServiceGCRequest
 ServiceGCResponse = _schemas_responses.ServiceGCResponse
 ServiceGCWorkerReclaim = _schemas_responses.ServiceGCWorkerReclaim
 
+# Workspace log/artifact/validation-provenance leaf read models live in
+# ``schemas_workspace_io``; re-export so ``awf.api.schemas`` stays the single
+# import surface for REST + MCP.
+WorkspaceLogStreamResponse = _schemas_workspace_io.WorkspaceLogStreamResponse
+WorkspaceLogListResponse = _schemas_workspace_io.WorkspaceLogListResponse
+WorkspaceLogReadResponse = _schemas_workspace_io.WorkspaceLogReadResponse
+WorkspaceArtifactResponse = _schemas_workspace_io.WorkspaceArtifactResponse
+WorkspaceArtifactListResponse = _schemas_workspace_io.WorkspaceArtifactListResponse
+WorkspaceArtifactReadResponse = _schemas_workspace_io.WorkspaceArtifactReadResponse
+ValidationProvenanceItemResponse = _schemas_workspace_io.ValidationProvenanceItemResponse
+ValidationProvenanceListResponse = _schemas_workspace_io.ValidationProvenanceListResponse
+
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
@@ -111,7 +124,15 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
     profile: WorkspaceProfile | None = None
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
-    auto_merge: bool = True
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent for the adopted PR. True/False set it "
+            "explicitly; omit (null) to fall through to the repo profile "
+            "(monitor.auto_merge) and the uniform default (off). When resolved "
+            "off the monitor reports readiness without merging (manual gate)."
+        ),
+    )
     execution: PullRequestMonitorExecutionPolicy = Field(
         default_factory=PullRequestMonitorExecutionPolicy,
         description=(
@@ -236,7 +257,15 @@ class WorkspaceTask(BaseModel):
     human_boost: int = Field(default=0, ge=0, le=5)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     out_of_scope_changes: OutOfScopeChangePolicy | None = None
-    auto_merge: bool = True
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent. True/False set it explicitly; omit "
+            "(null) to fall through to the repo profile (monitor.auto_merge) and "
+            "the uniform default (off). When resolved off the monitor reports "
+            "readiness without merging (manual gate)."
+        ),
+    )
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -273,7 +302,8 @@ class WorkspaceTask(BaseModel):
         if value == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             raise ValueError(
                 "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-                "release/manual PR via PR adoption with auto_merge=false instead."
+                "release/manual PR via PR adoption instead (auto_merge defaults to "
+                "false, giving the manual/no-auto-merge gate)."
             )
         if value == TaskKind.sync_feature_pr.value:
             raise ValueError(
@@ -459,7 +489,18 @@ class PullRequestMonitorAdoptionResponse(BaseModel):
     base_ref: str
     head_sha: str | None = None
     base_sha: str | None = None
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Resolved auto-merge policy for the adopted PR, or null when it is not "
+            "yet resolved. An adoption that omits an explicit intent falls through "
+            "to the repo profile (monitor.auto_merge), which is only materialized "
+            "at provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect monitor_policy.auto_merge_intent and "
+            "monitor_policy.auto_merge_resolved to distinguish intent from the "
+            "resolved policy."
+        ),
+    )
     monitor_policy: dict[str, Any] = Field(default_factory=dict)
     attached_existing: bool
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
@@ -878,7 +919,16 @@ class WorkspaceResponse(BaseModel):
     task_class: TaskClass | None
     owned_paths: list[str]
     task_policy: dict[str, Any] = Field(default_factory=dict)
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        description=(
+            "Resolved auto-merge policy, or null when it is not yet resolved. A "
+            "create/adopt that omits an explicit intent falls through to the repo "
+            "profile (monitor.auto_merge), which is only materialized at "
+            "provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect task_policy.auto_merge_intent for the raw "
+            "tri-state intent."
+        ),
+    )
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime
@@ -1379,121 +1429,6 @@ class WorkspaceRuntimeResponse(BaseModel):
     reason: str | None = None
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
-
-
-class WorkspaceLogStreamResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    stream_id: str
-    source: str
-    name: str
-    kind: str
-    path: str
-    byte_count: int
-    line_count: int
-    opened_at: datetime
-    closed_at: datetime | None
-
-
-class WorkspaceLogListResponse(BaseModel):
-    items: list[WorkspaceLogStreamResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
-
-
-class WorkspaceLogReadResponse(BaseModel):
-    stream_id: str
-    offset: int
-    next_offset: int
-    eof: bool
-    data: str
-
-
-class WorkspaceArtifactResponse(BaseModel):
-    artifact_id: str
-    workspace_id: str
-    name: str
-    relative_path: str
-    path: str
-    kind: str
-    size_bytes: int
-    modified_at: datetime
-
-
-class WorkspaceArtifactListResponse(BaseModel):
-    items: list[WorkspaceArtifactResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
-
-
-class WorkspaceArtifactReadResponse(BaseModel):
-    """Bounded artifact bytes + metadata returned by ``awf_read_workspace_artifact``."""
-
-    workspace_id: str
-    relative_path: str
-    name: str
-    content_type: str
-    size_bytes: int
-    content: str
-    """Base64-encoded artifact bytes (standard alphabet, no line breaks)."""
-
-
-class ValidationProvenanceItemResponse(BaseModel):
-    validation_run_id: str | None = None
-    workspace_id: str
-    attempt_id: str | None = None
-    tier: ValidationTier | None = None
-    command_set_hash: str | None = None
-    phase: str
-    command_index: int
-    command: str | None
-    stream_ids: dict[str, str | None]
-    stdout_byte_count: int
-    stdout_line_count: int
-    stderr_byte_count: int
-    stderr_line_count: int
-    opened_at: datetime
-    closed_at: datetime | None
-    status: ValidationProvenanceStatus
-    reason_code: str | None = None
-    base_commit: str | None
-    base_sha: str | None = None
-    workspace_head_sha: str | None = None
-    branch_name: str | None
-    target_branch: str | None = None
-    target_head_sha: str | None = None
-    current_target_head_sha: str | None = None
-    profile_name: str | None = None
-    profile_version: int | None = None
-    profile_source: str | None = None
-    resolved_profile_digest: str | None = None
-    environment_identity_digest: str | None = None
-    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
-    identity_source: ValidationIdentitySource = "legacy_fallback"
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
-    fresh_for_target: bool | None = None
-    retry_count: int = 0
-    coverage_percent: float | None = None
-    coverage_minimum_percent: float | None = None
-    coverage_status: str | None = None
-    coverage_reason_code: str | None = None
-    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
-    failing_test_node_ids: list[str] = Field(default_factory=list)
-    failing_test_evidence: list[str] = Field(default_factory=list)
-
-
-class ValidationProvenanceListResponse(BaseModel):
-    items: list[ValidationProvenanceItemResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
 
 
 _merge_log_stream_ref_value = merge_log_stream_ref_value

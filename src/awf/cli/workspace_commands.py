@@ -142,10 +142,13 @@ def workspace_create(
         "--with-db",
         help="Deprecated v1 shortcut; selects the aira profile when set.",
     ),
-    auto_merge: bool = typer.Option(
-        True,
+    auto_merge: bool | None = typer.Option(
+        None,
         "--auto-merge/--no-auto-merge",
-        help="Allow the monitor to merge when PR gates are green.",
+        help=(
+            "Allow the monitor to merge when PR gates are green. Omit to use the "
+            "repo/profile default (off unless configured in monitor.auto_merge)."
+        ),
     ),
     initial_review_grace_period_seconds: float | None = typer.Option(
         None,
@@ -882,10 +885,14 @@ def workspace_adopt_pr(
         ),
     ),
     profile_ref: str | None = typer.Option("auto", "--profile"),
-    auto_merge: bool = typer.Option(
-        True,
+    auto_merge: bool | None = typer.Option(
+        None,
         "--auto-merge/--no-auto-merge",
-        help="Allow the adopted PR monitor to merge when gates are green.",
+        help=(
+            "Allow the adopted PR monitor to merge when gates are green. Omit to "
+            "use the repo/profile default (off unless configured in "
+            "monitor.auto_merge)."
+        ),
     ),
     execution: str = typer.Option(
         "local",

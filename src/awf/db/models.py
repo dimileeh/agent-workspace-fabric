@@ -136,8 +136,8 @@ class Workspace(Base):
     auto_merge: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        default=True,
-        server_default=true(),
+        default=False,
+        server_default=false(),
     )
     """Whether the service PR monitor may merge the PR once gates are green.
 

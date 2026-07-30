@@ -25,41 +25,6 @@ from awf.common.github_client import (
 from awf.runtime.pr_monitor import CheckState, MergeableState
 
 
-def _adoption_pr_payload(
-    *,
-    number: int = 277,
-    head_ref: str = "feature/head",
-    head_repo_slug: str = "dimileeh/aira-web",
-    base_ref: str = "development",
-    head_sha: str = "h" * 40,
-    base_sha: str = "b" * 40,
-    state: str = "OPEN",
-    is_draft: bool = False,
-    author: str | None = "octocat",
-    url: str = "https://github.com/dimileeh/aira-web/pull/277",
-    title: str = "feature: ready",
-) -> str:
-    return json.dumps(
-        {
-            "number": number,
-            "headRefName": head_ref,
-            "headRepository": {
-                "name": head_repo_slug.split("/", 1)[1],
-                "nameWithOwner": head_repo_slug,
-            },
-            "isCrossRepository": head_repo_slug.lower() != "dimileeh/aira-web",
-            "baseRefName": base_ref,
-            "headRefOid": head_sha,
-            "baseRefOid": base_sha,
-            "state": state,
-            "isDraft": is_draft,
-            "author": {"login": author} if author is not None else None,
-            "url": url,
-            "title": title,
-        }
-    )
-
-
 def _sample_pr_payload(
     *,
     head_sha: str = "abc123",
@@ -205,6 +170,9 @@ class TestFetchPrStatusPart001:
         )
         assert status.number == 42
         assert status.head_ref == "feature/current-head"
+        # The live base ref lets the monitor detect a PR retargeted after
+        # provisioning (its merge policy was resolved against the original base).
+        assert status.base_ref == "development"
         assert status.head_sha == "abc123"
         assert status.mergeable == MergeableState.MERGEABLE
         assert status.check_state == CheckState.SUCCESS
@@ -223,6 +191,10 @@ class TestFetchPrStatusPart001:
         assert c.blocks_merge is False
         assert status.blocking_reviews == ()
         assert any("headRefName" in arg for arg in fake.calls[0].args)
+        # Guard the base-ref drift detection at the query level: the canned
+        # payload always includes baseRef, so without this a query regression
+        # dropping the field would silently disable retarget detection.
+        assert any("baseRef" in arg for arg in fake.calls[0].args)
 
     @pytest.mark.unit
     async def test_no_reviews_has_no_blocking_reviews(self) -> None:

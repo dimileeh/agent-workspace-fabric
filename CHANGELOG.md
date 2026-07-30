@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **BREAKING: `auto_merge` now defaults to `false` everywhere.** It is one
+  uniform, opt-in setting that behaves identically for `awf workspace create`
+  and `awf workspace adopt-pr`, resolved once at provision time. `task_kind`
+  (including `sync_release_pr`) no longer forces or affects auto-merge, and the
+  persisted `workspace.auto_merge` flag is the single authority for monitor
+  selection (`true` → squash-merge on green; `false` → report readiness without
+  merging). Feature and adopted PRs no longer auto-merge unless you pass
+  `--auto-merge` (`auto_merge: true`). Configure a repo-wide default and
+  per-base-branch overrides under `monitor.auto_merge` in `workspace.yml`
+  (precedence: per-task flag → `by_base_branch[<base>]` → `default` → off).
+  Existing workspaces persisted with `auto_merge=true` are grandfathered
+  untouched (no data migration).
 - Added companion `environment_secrets` for env-backed companion service
   secrets, while clarifying that literal companion `environment` values reject
   Docker Compose interpolation.

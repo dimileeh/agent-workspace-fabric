@@ -104,7 +104,10 @@ async def test_resolved_human_wait_clears_attention_before_pre_merge_settle(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # git fetch origin development
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="PENDING"))
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(check_state="PENDING", base_ref=_TEST_DEFAULT_BASE_BRANCH),
+    )
     sleep_fn = _AttentionCheckingSleep(factory=factory, workspace_id=workspace_id)
     runner = make_runner(
         factory=factory,

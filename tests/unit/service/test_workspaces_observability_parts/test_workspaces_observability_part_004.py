@@ -21,7 +21,6 @@ from awf.service.workspace_observability import (
 from awf.service.workspaces import (
     WorkspaceRetryError,
     _assert_supported_direct_create_task_kind,
-    _effective_auto_merge,
     _parse_memory_gb,
     owned_path_overlap_warning_payload,
     owned_path_overlap_warnings,
@@ -253,6 +252,7 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
 
     assert policy == {
         "agent_model": "gpt-5.3-codex",
+        "auto_merge_intent": None,
         "companions": [],
         "out_of_scope_changes": {
             "mode": "block",
@@ -335,35 +335,33 @@ def test_feature_branch_pr_snapshot_omits_release_sync_block() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("kind", "requested_auto_merge", "expected"),
-    [
-        ("sync_release_pr", True, False),
-        ("feature_branch_pr", True, True),
-        ("feature_branch_pr", False, False),
-    ],
-)
-def test_effective_auto_merge_forces_false_for_release_sync(
+@pytest.mark.parametrize("kind", ["sync_release_pr", "feature_branch_pr"])
+@pytest.mark.parametrize("requested_auto_merge", [True, False, None])
+def test_task_policy_snapshot_persists_intent_without_task_kind_forcing(
     kind: str,
-    requested_auto_merge: bool,
-    expected: bool,
+    requested_auto_merge: bool | None,
 ) -> None:
+    # task_kind (including sync_release_pr) no longer forces auto_merge: the raw
+    # tri-state intent is persisted verbatim for every kind.
+    task: dict[str, object] = {
+        "title": "Auto merge",
+        "prompt": "p",
+        "agent": "codex",
+        "kind": kind,
+    }
+    if requested_auto_merge is not None:
+        task["auto_merge"] = requested_auto_merge
     request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/am.git", "base_branch": "main"},
-        task={
-            "title": "Auto merge",
-            "prompt": "p",
-            "agent": "codex",
-            "kind": kind,
-            "auto_merge": requested_auto_merge,
-        },
+        task=task,
         preflight={
             "provider_readiness_override": True,
             "provider_readiness_override_reason": "auto merge fixture",
         },
     )
 
-    assert _effective_auto_merge(request) is expected
+    snapshot = workspace_create_task_policy_snapshot(request)
+    assert snapshot["auto_merge_intent"] is requested_auto_merge
 
 
 @pytest.mark.unit

@@ -21,6 +21,11 @@ from awf.api.schemas import (
     WorkspaceWarningResponse,
 )
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.auto_merge import (
+    AUTO_MERGE_INTENT_POLICY_KEY,
+    auto_merge_intent_from_policy,
+    seed_auto_merge,
+)
 from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
@@ -180,7 +185,7 @@ async def create_workspace_row(
         task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
-        auto_merge=_effective_auto_merge(payload),
+        auto_merge=seed_auto_merge(payload.task.auto_merge),
         initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
         agent=payload.task.agent.value,
         env_profile=None,
@@ -352,16 +357,53 @@ def workspace_create_payload_matches(
 
 
 def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
-    """Check stored auto-merge intent, treating legacy NULL as the old default."""
-    if payload.task.kind == TaskKind.sync_release_pr.value:
-        # Release-PR syncs force auto_merge off at persistence and execution, so
-        # the stored value carries no idempotency signal. Rows written before
-        # that canonicalization snapshotted the raw request (default True), and
-        # comparing them against the effective False would spuriously conflict on
-        # an otherwise identical replay. The kind itself is matched separately.
+    """Compare the persisted auto-merge *intent* against the request intent.
+
+    ``auto_merge`` is resolved at provision time from the per-task intent + the
+    repo profile, so the persisted ``auto_merge`` column is provisional-then-final
+    and carries no stable idempotency signal. The durable signal is the tri-state
+    intent snapshotted into ``task_policy`` (``True``/``False``/``None`` unset).
+    ``task_kind`` no longer affects auto_merge, so no per-kind special-case.
+
+    Legacy rows written before the intent key existed have no
+    ``auto_merge_intent`` in ``task_policy``; the historical request default was
+    ``True`` (omitted -> merge). For such rows we reconstruct the historical
+    intent from the persisted column (``auto_merge is not False`` -> ``True``) and
+    interpret an omitted (``None``) request as that same historical default, so a
+    pre-change row created by an omitted request stays idempotent against a
+    post-change omitted replay. A stored ``False`` therefore matches only an
+    explicit ``False`` request. New-world rows (intent key present) compare the
+    persisted intent strictly against the request intent.
+
+    Legacy ``sync_release_pr`` rows are a partial exception: those force-set the
+    persisted ``auto_merge`` column to ``False`` at persistence regardless of the
+    request intent, so for that kind a stored ``False`` is not a reconstructable
+    intent signal. Comparing it against the historical default (``True``) would
+    spuriously conflict on an otherwise-identical replay, so a release-sync replay
+    that does not explicitly opt in (``None``/``False``) skips the comparison (the
+    kind itself is matched separately). An explicit ``True`` still compares: the
+    provisioner preserves a legacy row's persisted column, so reusing a forced-off
+    workspace would silently drop the caller's merge opt-in — that must conflict
+    instead. Pre-canonicalization release-sync rows that snapshotted the raw
+    request (column ``True``/``NULL``) still match an explicit ``True``. New-world
+    release-sync rows carry the intent key and are handled by the strict branch
+    above.
+    """
+    stored_policy = _stored_task_policy(existing)
+    request_intent = payload.task.auto_merge
+    if AUTO_MERGE_INTENT_POLICY_KEY in stored_policy:
+        return auto_merge_intent_from_policy(stored_policy) == request_intent
+    if (
+        payload.task.kind == TaskKind.sync_release_pr.value
+        and getattr(existing, "auto_merge", None) is False
+        and request_intent is not True
+    ):
         return True
-    stored = getattr(existing, "auto_merge", None)
-    return (stored is not False) == _effective_auto_merge(payload)
+    # Legacy pre-change row: reconstruct historical intent and treat an omitted
+    # request as the historical default (True).
+    legacy_intent = getattr(existing, "auto_merge", None) is not False
+    effective_request = True if request_intent is None else request_intent
+    return legacy_intent == effective_request
 
 
 def _release_sync_source_branch_matches(
@@ -1254,13 +1296,6 @@ def _assert_supported_direct_create_task_kind(task_kind: str) -> None:
         )
 
 
-def _effective_auto_merge(payload: WorkspaceCreateRequest) -> bool:
-    """Release-PR syncs must never auto-merge; force it off at the boundary."""
-    if payload.task.kind == TaskKind.sync_release_pr.value:
-        return False
-    return payload.task.auto_merge
-
-
 def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
     """Build a task policy dictionary from a rich create request."""
     from awf.service.workspaces import (  # noqa: E402
@@ -1278,6 +1313,11 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     policy[VALIDATION_POLICY_KEY] = {
         VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
     }
+    # Persist the raw tri-state auto-merge intent (True/False/None) durably so the
+    # provisioner resolves the final flag from it and idempotent replays compare a
+    # stable snapshot. Always write the key (even for None) to keep the snapshot
+    # stable across replays.
+    policy[AUTO_MERGE_INTENT_POLICY_KEY] = payload.task.auto_merge
     if payload.task.kind == TaskKind.sync_release_pr.value:
         policy[RELEASE_SYNC_POLICY_KEY] = {
             "source_branch": payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,

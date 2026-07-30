@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import build_audit_payload
+from awf.common.auto_merge import DEFAULT_AUTO_MERGE
 from awf.common.ids import (
     new_event_id,
 )
@@ -161,7 +162,7 @@ class WorkspaceRepository:
         task_class: str | None = None,
         owned_paths: list[str] | None = None,
         task_policy: dict[str, Any] | None = None,
-        auto_merge: bool = True,
+        auto_merge: bool = DEFAULT_AUTO_MERGE,
         initial_review_grace_period_seconds: float | None = None,
         env_profile: str | None = None,
         profile_ref: str | None = None,
