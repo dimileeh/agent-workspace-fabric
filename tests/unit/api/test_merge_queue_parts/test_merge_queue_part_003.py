@@ -21,6 +21,8 @@ async def _create_legacy_queue_workspace(
     pr_url: str,
     auto_merge: bool = True,
     updated_at: datetime | None = None,
+    awaiting_human_since: datetime | None = None,
+    awaiting_human_reason: str | None = None,
 ) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -43,6 +45,9 @@ async def _create_legacy_queue_workspace(
         workspace.pr_number = int(pr_url.rstrip("/").split("/")[-1])
         if updated_at is not None:
             workspace.updated_at = updated_at
+        if awaiting_human_since is not None:
+            workspace.awaiting_human_since = awaiting_human_since
+            workspace.awaiting_human_reason = awaiting_human_reason
         await repo.add_event(
             workspace,
             event_type="merge_queue.legacy_marker",
@@ -93,17 +98,33 @@ class TestMergeQueueLegacyTerminalExclusion:
         client: AsyncClient,
         engine: AsyncEngine,
     ) -> None:
-        """G5: blocked, pushing, monitoring_pr legacy rows remain in the queue."""
+        """G5: blocked, awaiting_human, pushing, monitoring_pr legacy rows remain."""
+        awaiting_since = datetime(2026, 5, 2, 3, 30, tzinfo=UTC)
         expected: dict[str, WorkspaceStatus] = {}
-        for index, (title, status, auto_merge) in enumerate(
+        for index, (title, status, auto_merge, human_since, human_reason) in enumerate(
             [
-                ("Blocked legacy boundary", WorkspaceStatus.blocked, True),
-                ("Pushing legacy boundary", WorkspaceStatus.pushing, True),
-                ("Monitoring legacy boundary", WorkspaceStatus.monitoring_pr, True),
+                ("Blocked legacy boundary", WorkspaceStatus.blocked, True, None, None),
+                ("Pushing legacy boundary", WorkspaceStatus.pushing, True, None, None),
+                (
+                    "Awaiting human legacy boundary",
+                    WorkspaceStatus.monitoring_pr,
+                    True,
+                    awaiting_since,
+                    "GitHub rejected the merge attempt",
+                ),
+                (
+                    "Monitoring legacy boundary",
+                    WorkspaceStatus.monitoring_pr,
+                    True,
+                    None,
+                    None,
+                ),
                 (
                     "Manual monitoring legacy boundary",
                     WorkspaceStatus.monitoring_pr,
                     False,
+                    None,
+                    None,
                 ),
             ]
         ):
@@ -114,6 +135,8 @@ class TestMergeQueueLegacyTerminalExclusion:
                 auto_merge=auto_merge,
                 pr_url=f"https://github.com/example/legacy/pull/{800 + index}",
                 updated_at=datetime(2026, 5, 2, index, 0, tzinfo=UTC),
+                awaiting_human_since=human_since,
+                awaiting_human_reason=human_reason,
             )
             expected[workspace_id] = status
 
