@@ -368,18 +368,13 @@ def test_merge_blocker_reason_from_workspace_covers_excluded_and_active_statuses
     expected_reason: str,
 ) -> None:
     """G7: excluded statuses map to failed_or_cancelled; never workspace_not_terminal."""
-    excluded = {
-        WorkspaceStatus.destroying.value,
-        WorkspaceStatus.destroyed.value,
-        WorkspaceStatus.completed.value,
-        WorkspaceStatus.failed.value,
-        WorkspaceStatus.cancelled.value,
-    }
+    from awf.db.enums import MERGE_QUEUE_EXCLUDED_STATUSES
+
     workspace = SimpleNamespace(status=status.value, auto_merge=auto_merge)
     reason, action = merge_queue._merge_blocker_reason_from_workspace(workspace)
     assert reason == expected_reason
     assert action is None
-    if status.value in excluded:
+    if status.value in MERGE_QUEUE_EXCLUDED_STATUSES:
         assert reason == "failed_or_cancelled"
         assert reason != "workspace_not_terminal"
 

@@ -75,6 +75,34 @@ class WorkspaceStatus(StrEnum):
     destroyed = "destroyed"
 
 
+WORKSPACE_TEARDOWN_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        WorkspaceStatus.destroying.value,
+        WorkspaceStatus.destroyed.value,
+    }
+)
+"""Statuses that always leave the operator merge-queue surface.
+
+Used by the candidate-backed queue path. An open MergeCandidate on a
+tearing-down workspace is filtered; an open candidate on a terminal
+(non-teardown) workspace is an invariant breach and must remain visible.
+"""
+
+MERGE_QUEUE_EXCLUDED_STATUSES: Final[frozenset[str]] = WORKSPACE_TEARDOWN_STATUSES | frozenset(
+    {
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.failed.value,
+        WorkspaceStatus.cancelled.value,
+    }
+)
+"""Blacklist of workspace statuses excluded from the *legacy* merge-queue path.
+
+Deliberately a blacklist: a future unclassified status must fail loud by
+appearing in the queue rather than silently vanishing. Candidate-backed
+``list_queue`` must NOT use this set — see ``WORKSPACE_TEARDOWN_STATUSES``.
+"""
+
+
 class OperationStatus(StrEnum):
     """Lifecycle status of an async control-plane operation."""
 

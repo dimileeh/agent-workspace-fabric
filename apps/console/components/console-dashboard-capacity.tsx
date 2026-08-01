@@ -35,7 +35,6 @@ toneTextClass
 } from "@/lib/format";
 import {
 formatRequiredNextAction,
-mergeQueueMergedAt,
 requiredNextActionTone,
 summarizeReadiness,
 summarizeRecovery,
@@ -433,7 +432,6 @@ export function MergeQueueRow({
   const stale = summarizeStaleReasons(item);
   const validation = summarizeValidation(item);
   const recovery = summarizeRecovery(item);
-  const mergedAt = mergeQueueMergedAt(item);
   return (
     <article className="grid gap-2 border-b border-line pb-2 text-xs last:border-b-0 last:pb-0">
       <div className="flex min-w-0 items-start justify-between gap-2">
@@ -447,7 +445,6 @@ export function MergeQueueRow({
           <div className="mono mt-1 truncate text-[11px] text-fg-muted">{item.workspace_id}</div>
           <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-fg-muted">
             <span className="truncate">created {formatDateTime(item.created_at)}</span>
-            <span className="truncate">merged {formatDateTime(mergedAt)}</span>
             <span className="truncate">
               base <span className="mono text-fg">{item.base_branch}</span>
             </span>
@@ -564,7 +561,6 @@ export function MergeQueueRow({
             <QueueDatum label="Readiness" value={readiness.detail} mono tone={readinessTone(readiness.label)} />
             <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
             <QueueDatum label="Created" value={formatDateTime(item.created_at)} />
-            <QueueDatum label="Merged" value={formatDateTime(mergedAt)} />
             <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
             <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
             <QueueDatum label="Required tier" value={recovery.requiredTierLabel} />
