@@ -175,3 +175,39 @@ async def test_clear_workspace_attention_skips_event_when_update_matches_zero_ro
     assert [e.event_type for e in events] == [ATTENTION_REQUIRED_EVENT_TYPE]
     assert workspace.awaiting_human_since is None
     assert workspace.awaiting_human_reason is None
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_skips_event_when_enter_update_matches_zero_rows(
+    session: AsyncSession,
+) -> None:
+    """Lost race: stale in-memory clear must not emit a second required event."""
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    episode_start = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    assert workspace.awaiting_human_since is None
+
+    # Simulate another session entering first without refreshing the identity map.
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(
+            awaiting_human_since=episode_start,
+            awaiting_human_reason="first",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    assert workspace.awaiting_human_since is None
+
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="second",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == episode_start
+    assert refreshed.awaiting_human_reason == "second"
+    assert await _attention_events(session, workspace.id) == []
