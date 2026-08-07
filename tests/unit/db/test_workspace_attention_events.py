@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.attention_events import (
@@ -142,3 +143,35 @@ async def test_clear_workspace_attention_when_already_clear_emits_nothing(
     await repo.clear_workspace_attention(workspace.id)
 
     assert await _attention_events(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_clear_workspace_attention_skips_event_when_update_matches_zero_rows(
+    session: AsyncSession,
+) -> None:
+    """Lost race: stale in-memory episode must not emit a second cleared event."""
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="blocking",
+        now=datetime(2026, 6, 22, tzinfo=UTC),
+    )
+    assert workspace.awaiting_human_since is not None
+
+    # Simulate another session clearing first without refreshing the identity map.
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(awaiting_human_since=None, awaiting_human_reason=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    assert workspace.awaiting_human_since is not None
+
+    await repo.clear_workspace_attention(workspace.id)
+
+    events = await _attention_events(session, workspace.id)
+    assert [e.event_type for e in events] == [ATTENTION_REQUIRED_EVENT_TYPE]
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None

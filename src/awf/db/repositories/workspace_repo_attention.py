@@ -124,7 +124,7 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
         return
     prior_reason = workspace.awaiting_human_reason
     pr_url = workspace.pr_url
-    await session.execute(
+    result = await session.execute(
         update(Workspace)
         .where(
             Workspace.id == workspace_id,
@@ -137,6 +137,13 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
         .execution_options(synchronize_session=False)
     )
     await session.flush()
+    # Gate the event on the guarded UPDATE flip, not the pre-update identity-map
+    # read: another session may have already cleared, leaving rowcount 0.
+    rowcount = getattr(result, "rowcount", 0)
+    if rowcount is None or rowcount <= 0:
+        workspace.awaiting_human_since = None
+        workspace.awaiting_human_reason = None
+        return
     workspace.awaiting_human_since = None
     workspace.awaiting_human_reason = None
     await repo.add_event(
