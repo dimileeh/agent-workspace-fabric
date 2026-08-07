@@ -147,12 +147,20 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     Emits ``workspace.attention_cleared`` exactly once when an episode ends
     (a guarded clear updates the row). A second clear while already clear is
     a no-op for both columns and events.
+
+    Always executes the guarded UPDATE — never skip based on a cached
+    ``awaiting_human_since`` read. guide/remonitor may hold an identity-mapped
+    row loaded while attention was clear; another transaction can open an
+    episode before this call, and trusting the stale clear would bypass the
+    atomic guard and leave the persisted flag active.
     """
     from awf.db.repositories.workspace_repo import WorkspaceRepository
 
     repo = WorkspaceRepository(session)
-    workspace = await repo.get(workspace_id)
-    if workspace is None or workspace.awaiting_human_since is None:
+    # Refresh so prior reason/pr_url are not taken from a stale identity-map
+    # clear while another transaction has since opened an episode.
+    workspace = await repo.get(workspace_id, populate_existing=True)
+    if workspace is None:
         return
     prior_reason = workspace.awaiting_human_reason
     pr_url = workspace.pr_url

@@ -179,6 +179,53 @@ async def test_clear_workspace_attention_skips_event_when_update_matches_zero_ro
 
 
 @pytest.mark.unit
+async def test_clear_workspace_attention_clears_when_identity_map_stale_clear(
+    session: AsyncSession,
+) -> None:
+    """Stale identity-map clear must not skip a concurrently committed episode.
+
+    guide/remonitor may cache the workspace while attention is clear; another
+    transaction can enter attention before clear runs. Skipping on the cached
+    flag would leave the persisted episode active (PRRT_kwDOSJAM6s6XYG7K).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(
+        repo,
+        session,
+        pr_url="https://github.com/example/app/pull/9",
+    )
+    assert workspace.awaiting_human_since is None
+
+    episode_start = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(
+            awaiting_human_since=episode_start,
+            awaiting_human_reason="blocking review",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    assert workspace.awaiting_human_since is None
+
+    await repo.clear_workspace_attention(workspace.id)
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since is None
+    assert refreshed.awaiting_human_reason is None
+    events = await _attention_events(session, workspace.id)
+    assert len(events) == 1
+    assert events[0].event_type == ATTENTION_CLEARED_EVENT_TYPE
+    assert events[0].payload == {
+        "reason": "blocking review",
+        "source": ATTENTION_SOURCE_MONITORING_PR,
+        "pr_url": "https://github.com/example/app/pull/9",
+    }
+
+
+@pytest.mark.unit
 async def test_set_workspace_attention_skips_event_when_enter_update_matches_zero_rows(
     session: AsyncSession,
 ) -> None:
