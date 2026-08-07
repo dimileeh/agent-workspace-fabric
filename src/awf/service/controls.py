@@ -229,6 +229,12 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             )
             if leaving_blocked:
                 await _emit_blocked_attention_cleared(repo, workspace)
+            # Terminal exit from monitoring_pr with an active HUMAN_WAIT episode
+            # must clear awaiting_human_since (and emit monitoring-source
+            # attention_cleared). Remonitor/guide already clear; cancel previously
+            # only handled leaving_blocked (PRRT_kwDOSJAM6s6XYW1j). Guarded no-op
+            # when no episode is open.
+            await repo.clear_workspace_attention(workspace_id)
         else:
             await repo.add_event(
                 workspace,
@@ -352,6 +358,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             )
             if leaving_blocked:
                 await _emit_blocked_attention_cleared(repo, workspace)
+            # Same as cancel: clear monitoring-source HUMAN_WAIT attention on
+            # terminal exit so awaiting_human_since is not stranded
+            # (PRRT_kwDOSJAM6s6XYW1j).
+            await repo.clear_workspace_attention(workspace_id)
         elif cleanup_result.ok:
             # ``stack_stopped`` asserts the runtime was actually stopped, so it
             # is only emitted once the compose down succeeds. A failed teardown
@@ -953,6 +963,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             )
             if leaving_blocked:
                 await _emit_blocked_attention_cleared(repo, workspace)
+            # Same as cancel/stop: clear monitoring-source HUMAN_WAIT attention on
+            # the active→cancelled hop so force-destroy does not leave a stranded
+            # awaiting_human_since episode (PRRT_kwDOSJAM6s6XYW1j).
+            await repo.clear_workspace_attention(workspace_id)
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
             await repo.transition(
