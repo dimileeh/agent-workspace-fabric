@@ -41,7 +41,7 @@
 
 - **What:** Move `MergeCandidate` creation earlier so that any workspace holding a `pr_url` also holds
   a candidate row, instead of creating it only on the `-> monitoring_pr` transition
-  (`db/repositories/workspace_repo.py:1036-1050`).
+  (`WorkspaceRepository._sync_merge_candidate_lifecycle`).
 - **Why:** This is the root cause behind the stale merge-queue rows fixed in
   `plans/MERGE_QUEUE_TERMINAL_ROWS_PLAN.md`. PR adoption stamps `pr_url` at workspace creation, but the
   candidate is only created at monitor handoff. A workspace that dies in between (5 did, on 2026-07-21,
@@ -64,7 +64,7 @@
 - **What:** Delete `merged_at` from `MergeQueueItemResponse` (`api/schemas.py:1300`), regenerate
   `openapi.json`, and update the MCP schema mirror plus console types.
 - **Why:** Verified during the merge-queue review: `merged_at` is structurally always null on this
-  endpoint. `mark_workspace_merged` (`db/repositories/quality_repo.py:516-519`) sets `status="merged"`
+  endpoint. `MergeCandidateRepository.mark_workspace_merged` sets `status="merged"`
   and `merged_at` in the same operation, and the queue only ever returns `open` candidates. Live DB
   confirms it: `open|3|0`, `closed|61|0`, `merged|500|500`. The contract advertises a field it can
   never populate.
