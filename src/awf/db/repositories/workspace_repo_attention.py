@@ -158,19 +158,19 @@ async def set_workspace_attention(
 async def clear_workspace_attention(session: AsyncSession, workspace_id: str) -> None:
     """Clear the awaiting-human attention flag once the monitor resumes.
 
-    Guarded by ``awaiting_human_since IS NOT NULL`` so the per-poll clear is
-    a DB-level no-op (no row churn, no spurious ``updated_at`` bump) when the
-    flag is already clear.
+    Fenced to the snapshotted ``awaiting_human_since`` episode start so a stale
+    clear cannot remove a replacement episode entered after a concurrent clear
+    between the snapshot and this UPDATE. When already clear after refresh the
+    call is a no-op (no row churn, no spurious ``updated_at`` bump).
 
-    Emits ``workspace.attention_cleared`` exactly once when an episode ends
-    (a guarded clear updates the row). A second clear while already clear is
-    a no-op for both columns and events.
+    Emits ``workspace.attention_cleared`` exactly once when the fenced clear
+    updates the row. A second clear while already clear, or a clear that loses
+    to a concurrent clear/replacement, is a no-op for both columns and events.
 
-    Always executes the guarded UPDATE — never skip based on a cached
-    ``awaiting_human_since`` read. guide/remonitor may hold an identity-mapped
-    row loaded while attention was clear; another transaction can open an
-    episode before this call, and trusting the stale clear would bypass the
-    atomic guard and leave the persisted flag active.
+    Always refreshes before deciding — never trust a cached clear identity-map
+    read alone. guide/remonitor may hold a row loaded while attention was clear;
+    another transaction can open an episode before this call, and skipping the
+    refresh would leave the persisted flag active.
     """
     from awf.db.repositories.workspace_repo import WorkspaceRepository
 
@@ -180,13 +180,16 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     workspace = await repo.get(workspace_id, populate_existing=True)
     if workspace is None:
         return
+    observed_since = workspace.awaiting_human_since
+    if observed_since is None:
+        return
     prior_reason = workspace.awaiting_human_reason
     pr_url = workspace.pr_url
     result = await session.execute(
         update(Workspace)
         .where(
             Workspace.id == workspace_id,
-            Workspace.awaiting_human_since.is_not(None),
+            Workspace.awaiting_human_since == observed_since,
         )
         .values(
             awaiting_human_since=None,
@@ -195,8 +198,9 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
         .execution_options(synchronize_session=False)
     )
     await session.flush()
-    # Gate the event on the guarded UPDATE flip, not the pre-update identity-map
-    # read: another session may have already cleared, leaving rowcount 0.
+    # Gate the event on the fenced UPDATE flip, not the pre-update identity-map
+    # read: another session may have cleared or replaced the episode, leaving
+    # rowcount 0.
     rowcount = getattr(result, "rowcount", 0)
     if rowcount is None or rowcount <= 0:
         # Lost race: do not assign None onto the still-stale pre-UPDATE snapshot.

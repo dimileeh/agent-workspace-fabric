@@ -246,6 +246,70 @@ async def test_clear_workspace_attention_lost_race_does_not_dirty_replacement_ep
 
 
 @pytest.mark.unit
+async def test_clear_workspace_attention_fenced_to_snapshotted_episode(
+    session: AsyncSession,
+) -> None:
+    """Stale clear must not wipe a replacement episode committed before UPDATE.
+
+    After this session snapshots E1, another session can clear E1 and enter E2
+    before the clear UPDATE takes the row lock. A predicate that only requires
+    non-null awaiting_human_since then clears E2 and emits attention_cleared
+    with E1's reason (PRRT_kwDOSJAM6s6XY5JC).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    episode_e1 = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    episode_e2 = datetime(2026, 6, 22, 11, 30, tzinfo=UTC)
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="episode-e1",
+        now=episode_e1,
+    )
+    assert workspace.awaiting_human_since == episode_e1
+
+    real_execute = session.execute
+    clear_updates = 0
+
+    async def execute_replace_before_clear(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal clear_updates
+        if isinstance(statement, Update):
+            clear_updates += 1
+            if clear_updates == 1:
+                # Concurrent clear of E1 + enter of E2 before this session's UPDATE.
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace.id)
+                    .values(awaiting_human_since=None, awaiting_human_reason=None)
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace.id)
+                    .values(
+                        awaiting_human_since=episode_e2,
+                        awaiting_human_reason="episode-e2",
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+        return await real_execute(statement, *args, **kwargs)
+
+    session.execute = execute_replace_before_clear  # type: ignore[method-assign]
+
+    await repo.clear_workspace_attention(workspace.id)
+    await session.flush()
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == episode_e2
+    assert refreshed.awaiting_human_reason == "episode-e2"
+    events = await _attention_events(session, workspace.id)
+    assert [e.event_type for e in events] == [ATTENTION_REQUIRED_EVENT_TYPE]
+    assert events[0].payload.get("reason") == "episode-e1"
+
+
+@pytest.mark.unit
 async def test_clear_workspace_attention_clears_when_identity_map_stale_clear(
     session: AsyncSession,
 ) -> None:
