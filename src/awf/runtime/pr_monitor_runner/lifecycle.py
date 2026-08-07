@@ -1188,4 +1188,9 @@ async def _terminate_failed(
         if details is not None:
             payload["details"] = redact_audit_value(dict(details))
         await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc, payload=payload)
+        # Same as operator cancel/stop: clear monitoring-source HUMAN_WAIT attention
+        # on this terminal exit so awaiting_human_since is not stranded after a
+        # permanent NotifyHuman forge fault (or any other monitor fail) that already
+        # emitted attention_required (PRRT_kwDOSJAM6s6XY5JH).
+        await repo.clear_workspace_attention(workspace_id)
         await s.commit()
