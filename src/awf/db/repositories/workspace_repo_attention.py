@@ -199,8 +199,10 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     # read: another session may have already cleared, leaving rowcount 0.
     rowcount = getattr(result, "rowcount", 0)
     if rowcount is None or rowcount <= 0:
-        workspace.awaiting_human_since = None
-        workspace.awaiting_human_reason = None
+        # Lost race: do not assign None onto the still-stale pre-UPDATE snapshot.
+        # That would dirty the row and can erase a replacement episode opened before
+        # the next flush without emitting attention_cleared.
+        await repo.get(workspace_id, populate_existing=True)
         return
     workspace.awaiting_human_since = None
     workspace.awaiting_human_reason = None

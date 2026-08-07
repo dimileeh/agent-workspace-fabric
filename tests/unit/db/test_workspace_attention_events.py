@@ -182,6 +182,70 @@ async def test_clear_workspace_attention_skips_event_when_update_matches_zero_ro
 
 
 @pytest.mark.unit
+async def test_clear_workspace_attention_lost_race_does_not_dirty_replacement_episode(
+    session: AsyncSession,
+) -> None:
+    """Lost clear must not dirty ORM so a replacement episode survives flush.
+
+    After refresh sees episode E1, a concurrent clear can make the guarded UPDATE
+    match zero rows. Assigning None onto the still-stale E1 snapshot dirties the
+    row; if E2 is entered before the next flush, SQLAlchemy can erase it without
+    attention_cleared (PRRT_kwDOSJAM6s6XYw7b).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    episode_e1 = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    episode_e2 = datetime(2026, 6, 22, 11, 30, tzinfo=UTC)
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="episode-e1",
+        now=episode_e1,
+    )
+    assert workspace.awaiting_human_since == episode_e1
+
+    real_execute = session.execute
+
+    async def execute_clear_then_replace(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(statement, Update):
+            # Concurrent clear of E1 so this session's guarded clear matches 0.
+            await real_execute(
+                update(Workspace)
+                .where(Workspace.id == workspace.id)
+                .values(awaiting_human_since=None, awaiting_human_reason=None)
+                .execution_options(synchronize_session=False)
+            )
+            await session.flush()
+            result = await real_execute(statement, *args, **kwargs)
+            # Replacement episode entered before lost-race handling returns.
+            await real_execute(
+                update(Workspace)
+                .where(Workspace.id == workspace.id)
+                .values(
+                    awaiting_human_since=episode_e2,
+                    awaiting_human_reason="episode-e2",
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await session.flush()
+            return result
+        return await real_execute(statement, *args, **kwargs)
+
+    session.execute = execute_clear_then_replace  # type: ignore[method-assign]
+
+    await repo.clear_workspace_attention(workspace.id)
+    # Caller (or unit-of-work boundary) may flush dirty ORM state after return.
+    await session.flush()
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == episode_e2
+    assert refreshed.awaiting_human_reason == "episode-e2"
+    events = await _attention_events(session, workspace.id)
+    assert [e.event_type for e in events] == [ATTENTION_REQUIRED_EVENT_TYPE]
+    assert events[0].payload.get("reason") == "episode-e1"
+
+
+@pytest.mark.unit
 async def test_clear_workspace_attention_clears_when_identity_map_stale_clear(
     session: AsyncSession,
 ) -> None:
