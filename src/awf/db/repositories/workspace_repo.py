@@ -25,6 +25,7 @@ from awf.common.ids import (
     new_event_id,
 )
 from awf.db.enums import (
+    MERGE_QUEUE_EXCLUDED_STATUSES,
     AgentRuntime,
     WorkspaceStatus,
 )
@@ -548,50 +549,6 @@ class WorkspaceRepository:
         )
         return list((await self._session.execute(stmt)).scalars())
 
-    async def list_merge_queue(
-        self,
-        *,
-        repo_url: str | None = None,
-        base_branch: str | None = None,
-        status: WorkspaceStatus | str | None = None,
-        before_updated_at: datetime | None = None,
-        before_workspace_id: str | None = None,
-        limit: int = 50,
-    ) -> builtins.list[Workspace]:
-        """List legacy PR workspaces visible in the merge queue."""
-        stmt = (
-            select(Workspace)
-            .where(
-                Workspace.pr_url.is_not(None),
-                Workspace.pr_url != "",
-                ~Workspace.status.in_(
-                    (
-                        WorkspaceStatus.destroying.value,
-                        WorkspaceStatus.destroyed.value,
-                    )
-                ),
-            )
-            .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
-        )
-        if repo_url is not None:
-            stmt = stmt.where(Workspace.repo_url == repo_url)
-        if base_branch is not None:
-            stmt = stmt.where(Workspace.branch_base == base_branch)
-        if status is not None:
-            stmt = stmt.where(Workspace.status == status)
-        if before_updated_at is not None and before_workspace_id is not None:
-            stmt = stmt.where(
-                or_(
-                    Workspace.updated_at < before_updated_at,
-                    and_(
-                        Workspace.updated_at == before_updated_at,
-                        Workspace.id < before_workspace_id,
-                    ),
-                )
-            )
-        stmt = stmt.limit(limit)
-        return list((await self._session.execute(stmt)).scalars())
-
     async def list_merge_queue_without_candidates(
         self,
         *,
@@ -610,12 +567,7 @@ class WorkspaceRepository:
                 MergeCandidate.id.is_(None),
                 Workspace.pr_url.is_not(None),
                 Workspace.pr_url != "",
-                ~Workspace.status.in_(
-                    (
-                        WorkspaceStatus.destroying.value,
-                        WorkspaceStatus.destroyed.value,
-                    )
-                ),
+                ~Workspace.status.in_(MERGE_QUEUE_EXCLUDED_STATUSES),
             )
             .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
         )
