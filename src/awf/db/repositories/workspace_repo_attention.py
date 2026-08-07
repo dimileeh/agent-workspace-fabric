@@ -68,6 +68,9 @@ async def set_workspace_attention(
 
     Emits ``workspace.attention_required`` exactly once when the guarded enter
     UPDATE flips the row. Reason-only refreshes (and lost enter races) do not emit.
+    Reason refreshes are also guarded on ``awaiting_human_since IS NOT NULL`` so a
+    concurrent clear between a lost enter and the refresh cannot orphan reason
+    text on a cleared row.
     """
     # Late import: ``WorkspaceRepository`` loads this module at class build time.
     from awf.db.repositories.workspace_repo import WorkspaceRepository
@@ -112,15 +115,26 @@ async def set_workspace_attention(
         return
 
     # Already in an episode (or lost the enter race): refresh reason only so
-    # episode start stays owned by the winning writer.
-    await session.execute(
+    # episode start stays owned by the winning writer. Guard on an active
+    # episode so a concurrent clear between enter and refresh cannot orphan
+    # awaiting_human_reason while awaiting_human_since is NULL.
+    refresh_result = await session.execute(
         update(Workspace)
-        .where(Workspace.id == workspace_id)
+        .where(
+            Workspace.id == workspace_id,
+            Workspace.awaiting_human_since.is_not(None),
+        )
         .values(awaiting_human_reason=clamped_reason)
         .execution_options(synchronize_session=False)
     )
     await session.flush()
-    workspace.awaiting_human_reason = clamped_reason
+    refresh_rowcount = getattr(refresh_result, "rowcount", 0)
+    if refresh_rowcount is not None and refresh_rowcount > 0:
+        workspace.awaiting_human_reason = clamped_reason
+    else:
+        # Concurrent clear won: keep the identity map aligned with cleared DB.
+        workspace.awaiting_human_since = None
+        workspace.awaiting_human_reason = None
 
 
 async def clear_workspace_attention(session: AsyncSession, workspace_id: str) -> None:

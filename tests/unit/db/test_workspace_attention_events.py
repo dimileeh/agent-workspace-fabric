@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import Update, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.attention_events import (
@@ -210,4 +211,62 @@ async def test_set_workspace_attention_skips_event_when_enter_update_matches_zer
     assert refreshed is not None
     assert refreshed.awaiting_human_since == episode_start
     assert refreshed.awaiting_human_reason == "second"
+    assert await _attention_events(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_reason_refresh_skips_when_episode_cleared(
+    session: AsyncSession,
+) -> None:
+    """Lost enter + concurrent clear must not orphan awaiting_human_reason.
+
+    After the guarded enter UPDATE matches zero rows, another transaction may
+    clear awaiting_human_since before the reason-only refresh. Refreshing by id
+    alone would write reason while attention is clear (PRRT_kwDOSJAM6s6XYFS3).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    episode_start = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(
+            awaiting_human_since=episode_start,
+            awaiting_human_reason="first",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+
+    real_execute = session.execute
+    update_calls = 0
+
+    async def execute_clearing_after_enter(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal update_calls
+        result = await real_execute(statement, *args, **kwargs)
+        if isinstance(statement, Update):
+            update_calls += 1
+            if update_calls == 1:
+                # Concurrent clear between lost-enter and reason refresh.
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace.id)
+                    .values(awaiting_human_since=None, awaiting_human_reason=None)
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+        return result
+
+    session.execute = execute_clearing_after_enter  # type: ignore[method-assign]
+
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="second",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since is None
+    assert refreshed.awaiting_human_reason is None
     assert await _attention_events(session, workspace.id) == []
