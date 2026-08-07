@@ -361,3 +361,71 @@ async def test_set_workspace_attention_reason_refresh_skips_when_episode_cleared
     assert refreshed.awaiting_human_since is None
     assert refreshed.awaiting_human_reason is None
     assert await _attention_events(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_reason_refresh_fenced_to_observed_episode(
+    session: AsyncSession,
+) -> None:
+    """Lost enter must not refresh a replacement episode's reason.
+
+    After setter A loses enter against episode E1, E1 can be cleared and setter B
+    can open E2 before A's reason refresh. A refresh guarded only by
+    ``awaiting_human_since IS NOT NULL`` overwrites B's reason so the required
+    event and read model disagree (PRRT_kwDOSJAM6s6XYlxN).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    episode_e1 = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    episode_e2 = datetime(2026, 6, 22, 11, 30, tzinfo=UTC)
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="episode-e1",
+        now=episode_e1,
+    )
+    assert workspace.awaiting_human_since == episode_e1
+
+    real_execute = session.execute
+    update_calls = 0
+
+    async def execute_replace_episode_after_enter(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal update_calls
+        result = await real_execute(statement, *args, **kwargs)
+        if isinstance(statement, Update):
+            update_calls += 1
+            if update_calls == 1:
+                # Concurrent clear of E1 + enter of E2 (as setter B) before refresh.
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace.id)
+                    .values(awaiting_human_since=None, awaiting_human_reason=None)
+                    .execution_options(synchronize_session=False)
+                )
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace.id)
+                    .values(
+                        awaiting_human_since=episode_e2,
+                        awaiting_human_reason="episode-e2-from-b",
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+        return result
+
+    session.execute = execute_replace_episode_after_enter  # type: ignore[method-assign]
+
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="stale-reason-from-a",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == episode_e2
+    assert refreshed.awaiting_human_reason == "episode-e2-from-b"
+    events = await _attention_events(session, workspace.id)
+    assert len(events) == 1
+    assert events[0].event_type == ATTENTION_REQUIRED_EVENT_TYPE
+    assert events[0].payload.get("reason") == "episode-e1"

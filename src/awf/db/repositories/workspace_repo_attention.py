@@ -72,9 +72,9 @@ async def set_workspace_attention(
 
     Emits ``workspace.attention_required`` exactly once when the guarded enter
     UPDATE flips the row. Reason-only refreshes (and lost enter races) do not emit.
-    Reason refreshes are also guarded on ``awaiting_human_since IS NOT NULL`` so a
-    concurrent clear between a lost enter and the refresh cannot orphan reason
-    text on a cleared row.
+    Reason refreshes are fenced to the episode start observed when enter lost so a
+    concurrent clear (or clear + new episode enter) between lost enter and refresh
+    cannot orphan reason text on a cleared row or overwrite a newer episode's reason.
     """
     # Late import: ``WorkspaceRepository`` loads this module at class build time.
     from awf.db.repositories.workspace_repo import WorkspaceRepository
@@ -88,6 +88,9 @@ async def set_workspace_attention(
     # building the event payload).
     pr_url = workspace.pr_url
     clamped_reason = reason[:_AWAITING_HUMAN_REASON_MAX_LENGTH]
+    # Episode start known before enter; used to fence a later reason-only refresh
+    # to the same attention episode (not a replacement opened after a clear).
+    observed_since = workspace.awaiting_human_since
     enter_result = await session.execute(
         update(Workspace)
         .where(
@@ -120,14 +123,25 @@ async def set_workspace_attention(
         return
 
     # Already in an episode (or lost the enter race): refresh reason only so
-    # episode start stays owned by the winning writer. Guard on an active
-    # episode so a concurrent clear between enter and refresh cannot orphan
-    # awaiting_human_reason while awaiting_human_since is NULL.
+    # episode start stays owned by the winning writer. Fence to the observed
+    # episode start so a concurrent clear (or clear + re-enter) between enter
+    # and refresh cannot orphan reason or overwrite a newer episode.
+    if observed_since is None:
+        # Stale in-memory clear while another session already entered: snapshot
+        # the winner's episode start before the fenced refresh.
+        workspace = await repo.get(workspace_id, populate_existing=True)
+        if workspace is None:
+            return
+        observed_since = workspace.awaiting_human_since
+        if observed_since is None:
+            workspace.awaiting_human_reason = None
+            return
+
     refresh_result = await session.execute(
         update(Workspace)
         .where(
             Workspace.id == workspace_id,
-            Workspace.awaiting_human_since.is_not(None),
+            Workspace.awaiting_human_since == observed_since,
         )
         .values(awaiting_human_reason=clamped_reason)
         .execution_options(synchronize_session=False)
@@ -137,9 +151,8 @@ async def set_workspace_attention(
     if refresh_rowcount is not None and refresh_rowcount > 0:
         workspace.awaiting_human_reason = clamped_reason
     else:
-        # Concurrent clear won: keep the identity map aligned with cleared DB.
-        workspace.awaiting_human_since = None
-        workspace.awaiting_human_reason = None
+        # Episode cleared or replaced: realign from DB (do not assume cleared).
+        workspace = await repo.get(workspace_id, populate_existing=True)
 
 
 async def clear_workspace_attention(session: AsyncSession, workspace_id: str) -> None:
