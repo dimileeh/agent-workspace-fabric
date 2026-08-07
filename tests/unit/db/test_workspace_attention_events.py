@@ -15,7 +15,7 @@ from awf.common.attention_events import (
     ATTENTION_REQUIRED_EVENT_TYPE,
     ATTENTION_SOURCE_MONITORING_PR,
 )
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from tests.postgres import postgres_test_session
@@ -32,6 +32,7 @@ async def _create_workspace(
     session: AsyncSession,
     *,
     pr_url: str | None = None,
+    status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
 ) -> Workspace:
     workspace = await repo.create(
         repo_url="git@github.com:example/app.git",
@@ -41,6 +42,8 @@ async def _create_workspace(
         agent=AgentRuntime.codex.value,
         test_commands=[],
     )
+    # Attention enter is fenced to monitoring_pr; create defaults to requested.
+    workspace.status = status.value
     if pr_url is not None:
         workspace.pr_url = pr_url
     await session.flush()
@@ -223,6 +226,47 @@ async def test_clear_workspace_attention_clears_when_identity_map_stale_clear(
         "source": ATTENTION_SOURCE_MONITORING_PR,
         "pr_url": "https://github.com/example/app/pull/9",
     }
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_skips_enter_when_status_left_monitoring_pr(
+    session: AsyncSession,
+) -> None:
+    """Terminal cancel/stop/destroy race must not reopen attention after clear.
+
+    Control can clear ``awaiting_human_since`` and leave ``monitoring_pr`` while a
+    blocked enter UPDATE waits; on re-evaluation it must not match a terminal
+    row (PRRT_kwDOSJAM6s6XYelT).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.awaiting_human_since is None
+
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace.id)
+        .values(
+            status=WorkspaceStatus.cancelled.value,
+            awaiting_human_since=None,
+            awaiting_human_reason=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="blocking review after cancel race",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.status == WorkspaceStatus.cancelled.value
+    assert refreshed.awaiting_human_since is None
+    assert refreshed.awaiting_human_reason is None
+    assert await _attention_events(session, workspace.id) == []
 
 
 @pytest.mark.unit

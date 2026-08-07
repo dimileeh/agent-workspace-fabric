@@ -18,6 +18,7 @@ from awf.common.attention_events import (
     ATTENTION_REQUIRED_EVENT_TYPE,
     monitoring_pr_attention_payload,
 )
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 
 # ``Workspace.awaiting_human_reason`` is a ``String(2048)`` column. Escalation
@@ -59,12 +60,15 @@ async def set_workspace_attention(
     """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation).
 
     Episode start (``awaiting_human_since``) flips only via a guarded UPDATE
-    ``WHERE awaiting_human_since IS NULL``, so concurrent first-time escalations
-    cannot each observe NULL and double-emit. Reason is always refreshed to the
-    latest escalation message (clamped to the column length so an unbounded
-    operator-hint reason cannot abort the write). This is an out-of-band
-    metadata flag on a still-polling ``monitoring_pr`` row — it deliberately
-    does NOT bump ``version`` (it is not a state transition).
+    ``WHERE awaiting_human_since IS NULL AND status = monitoring_pr``, so
+    concurrent first-time escalations cannot each observe NULL and double-emit,
+    and a cancel/stop/destroy that already left ``monitoring_pr`` (and cleared
+    attention) cannot reopen the episode when a blocked enter UPDATE is
+    re-evaluated. Reason is always refreshed to the latest escalation message
+    (clamped to the column length so an unbounded operator-hint reason cannot
+    abort the write). This is an out-of-band metadata flag on a still-polling
+    ``monitoring_pr`` row — it deliberately does NOT bump ``version`` (it is
+    not a state transition).
 
     Emits ``workspace.attention_required`` exactly once when the guarded enter
     UPDATE flips the row. Reason-only refreshes (and lost enter races) do not emit.
@@ -89,6 +93,7 @@ async def set_workspace_attention(
         .where(
             Workspace.id == workspace_id,
             Workspace.awaiting_human_since.is_(None),
+            Workspace.status == WorkspaceStatus.monitoring_pr.value,
         )
         .values(
             awaiting_human_since=now,
