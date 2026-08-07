@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.attention_events import (
@@ -167,6 +167,12 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     updates the row. A second clear while already clear, or a clear that loses
     to a concurrent clear/replacement, is a no-op for both columns and events.
 
+    The cleared-event reason and ``pr_url`` are taken from the guarded operation
+    itself (``SELECT … FOR UPDATE`` of the fenced episode, then clear returning
+    those pre-clear columns). An unlocked identity-map snapshot of the reason
+    can race a concurrent reason-only refresh and emit a stale reason while the
+    same timestamp fence still clears successfully.
+
     Always refreshes before deciding — never trust a cached clear identity-map
     read alone. guide/remonitor may hold a row loaded while attention was clear;
     another transaction can open an episode before this call, and skipping the
@@ -175,7 +181,7 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     from awf.db.repositories.workspace_repo import WorkspaceRepository
 
     repo = WorkspaceRepository(session)
-    # Refresh so prior reason/pr_url are not taken from a stale identity-map
+    # Refresh so episode-start fencing is not taken from a stale identity-map
     # clear while another transaction has since opened an episode.
     workspace = await repo.get(workspace_id, populate_existing=True)
     if workspace is None:
@@ -183,31 +189,42 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     observed_since = workspace.awaiting_human_since
     if observed_since is None:
         return
-    prior_reason = workspace.awaiting_human_reason
-    pr_url = workspace.pr_url
+    # Lock the fenced episode row and return pre-clear reason/pr_url atomically
+    # with the clear so a concurrent reason-only refresh cannot leave the event
+    # payload behind the episode state at clear time.
+    prior_stmt = select(
+        Workspace.id,
+        Workspace.awaiting_human_reason,
+        Workspace.pr_url,
+    ).where(
+        Workspace.id == workspace_id,
+        Workspace.awaiting_human_since == observed_since,
+    )
+    if repo.dialect_name == "postgresql":
+        prior_stmt = prior_stmt.with_for_update()
+    prior = prior_stmt.cte("attention_clear_prior")
     result = await session.execute(
         update(Workspace)
-        .where(
-            Workspace.id == workspace_id,
-            Workspace.awaiting_human_since == observed_since,
-        )
+        .where(Workspace.id == prior.c.id)
         .values(
             awaiting_human_since=None,
             awaiting_human_reason=None,
         )
+        .returning(prior.c.awaiting_human_reason, prior.c.pr_url)
         .execution_options(synchronize_session=False)
     )
     await session.flush()
-    # Gate the event on the fenced UPDATE flip, not the pre-update identity-map
-    # read: another session may have cleared or replaced the episode, leaving
-    # rowcount 0.
-    rowcount = getattr(result, "rowcount", 0)
-    if rowcount is None or rowcount <= 0:
+    # Gate the event on the fenced clear flip (RETURNING row), not the unlocked
+    # identity-map read: another session may have cleared or replaced the
+    # episode, leaving no returned row.
+    cleared = result.first()
+    if cleared is None:
         # Lost race: do not assign None onto the still-stale pre-UPDATE snapshot.
         # That would dirty the row and can erase a replacement episode opened before
         # the next flush without emitting attention_cleared.
         await repo.get(workspace_id, populate_existing=True)
         return
+    prior_reason, pr_url = cleared
     workspace.awaiting_human_since = None
     workspace.awaiting_human_reason = None
     await repo.add_event(

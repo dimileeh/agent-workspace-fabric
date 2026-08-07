@@ -246,6 +246,67 @@ async def test_clear_workspace_attention_lost_race_does_not_dirty_replacement_ep
 
 
 @pytest.mark.unit
+async def test_clear_workspace_attention_emits_reason_at_clear_not_stale_snapshot(
+    session: AsyncSession,
+) -> None:
+    """Cleared event must carry the reason present when the guarded clear flips.
+
+    After clear snapshots episode start (and previously the reason), a concurrent
+    reason-only refresh can commit a newer reason for the same awaiting_human_since
+    fence. Emitting the unlocked pre-refresh snapshot would make attention_cleared
+    disagree with the episode state immediately before clear (PRRT_kwDOSJAM6s6XZEFA).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(
+        repo,
+        session,
+        pr_url="https://github.com/example/app/pull/11",
+    )
+    episode_start = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    await repo.set_workspace_attention(
+        workspace.id,
+        reason="stale-snapshot-reason",
+        now=episode_start,
+    )
+    assert workspace.awaiting_human_since == episode_start
+
+    real_execute = session.execute
+
+    async def execute_refresh_before_clear(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(statement, Update):
+            await real_execute(
+                update(Workspace)
+                .where(
+                    Workspace.id == workspace.id,
+                    Workspace.awaiting_human_since == episode_start,
+                )
+                .values(awaiting_human_reason="refreshed-reason")
+                .execution_options(synchronize_session=False)
+            )
+            await session.flush()
+        return await real_execute(statement, *args, **kwargs)
+
+    session.execute = execute_refresh_before_clear  # type: ignore[method-assign]
+
+    await repo.clear_workspace_attention(workspace.id)
+
+    events = await _attention_events(session, workspace.id)
+    assert [e.event_type for e in events] == [
+        ATTENTION_CLEARED_EVENT_TYPE,
+        ATTENTION_REQUIRED_EVENT_TYPE,
+    ]
+    assert events[0].payload == {
+        "reason": "refreshed-reason",
+        "source": ATTENTION_SOURCE_MONITORING_PR,
+        "pr_url": "https://github.com/example/app/pull/11",
+    }
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since is None
+    assert refreshed.awaiting_human_reason is None
+
+
+@pytest.mark.unit
 async def test_clear_workspace_attention_fenced_to_snapshotted_episode(
     session: AsyncSession,
 ) -> None:
