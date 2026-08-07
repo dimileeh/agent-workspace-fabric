@@ -14,6 +14,10 @@ from typing import Any, cast
 from sqlalchemy import select
 
 from awf.api.schemas import WorkspaceControlResponse
+from awf.common.attention_events import (
+    ATTENTION_CLEARED_EVENT_TYPE,
+    blocked_attention_payload,
+)
 from awf.common.ids import new_operator_grant_id
 from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
 from awf.control.quality_gates import _grant_matches
@@ -748,6 +752,14 @@ async def _guide_monitor_origin_blocked_workspace(
         new_state=WorkspaceStatus.monitoring_pr.value,
         reason_code=_OPERATOR_GUIDE_REASON_CODE,
         payload=event_payload,
+    )
+    await repo.add_event(
+        workspace,
+        event_type=ATTENTION_CLEARED_EVENT_TYPE,
+        payload=blocked_attention_payload(
+            block_reason_code=workspace.block_reason_code,
+            block_type=workspace.block_type,
+        ),
     )
     await _add_control_audit_event(
         repo,

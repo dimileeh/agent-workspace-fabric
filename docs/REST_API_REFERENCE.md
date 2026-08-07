@@ -224,6 +224,11 @@ Events response shape:
 }
 ```
 
+Attention flips also appear on this timeline as first-class events:
+`workspace.attention_required` (enter) and `workspace.attention_cleared`
+(clear). Payload fields and callback subscription details are documented under
+[Create a callback subscription](#create-a-callback-subscription).
+
 ### List workspace events (per-workspace)
 
 ```bash
@@ -578,7 +583,8 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
 Public callback subscriptions accept the wildcards `workspace.*`, `merge.*`,
 and `operation.*`, plus exact public event types such as
 `workspace.created`, `workspace.state_changed`,
-`workspace.secondary_failure_recorded`, `operation.state_changed`, and
+`workspace.secondary_failure_recorded`, `workspace.attention_required`,
+`workspace.attention_cleared`, `operation.state_changed`, and
 `merge.candidate_updated`.
 
 Workspace callback deliveries use a sanitized envelope. For
@@ -613,6 +619,40 @@ event envelope used for other workspace events:
 The internal failure-causality payload keys stored on the workspace event, such
 as `primary_failure`, `secondary_failure`, and `secondary_failures`, are not
 part of the external callback envelope.
+
+`workspace.attention_required` and `workspace.attention_cleared` use the same
+workspace event envelope. They fire once per attention flip (enter or clear),
+not on every monitor poll while attention persists. Internal payload fields on
+the stored workspace event:
+
+| Field | When present | Notes |
+|---|---|---|
+| `source` | always | `"monitoring_pr"` (HUMAN_WAIT) or `"blocked"` (protected-gate pause) |
+| `reason` | usually | Escalation reason, or `block_reason_code` for blocked-source events |
+| `pr_url` | when known | Present for monitoring_pr flips when the workspace row has a PR URL |
+| `block_reason_code` | blocked source | Durable protected-gate reason code |
+| `block_type` | blocked source | e.g. `protected_quality_gate` |
+
+Example monitoring_pr enter payload (timeline event `payload`):
+
+```json
+{
+  "reason": "merge conflict needs human resolution",
+  "source": "monitoring_pr",
+  "pr_url": "https://github.com/example/app/pull/42"
+}
+```
+
+Example blocked enter payload:
+
+```json
+{
+  "reason": "QUALITY_GATE_POLICY_CHANGED",
+  "source": "blocked",
+  "block_reason_code": "QUALITY_GATE_POLICY_CHANGED",
+  "block_type": "protected_quality_gate"
+}
+```
 
 For each outbound delivery, callback target URLs are revalidated before the POST
 is sent:
