@@ -235,8 +235,9 @@ async def test_set_workspace_attention_lost_enter_after_null_projection_refreshe
     The scalar projection can observe ``awaiting_human_since IS NULL`` while
     another session opens the episode before the guarded enter UPDATE runs.
     Enter matches zero rows with ``observed_since`` still None; the setter must
-    re-fetch the winner's episode start and fence the reason-only refresh to it
-    (coverage branch 206→215) without emitting a second attention_required.
+    take the stale-null-projection re-fetch branch — re-fetch the winner's
+    episode start and fence the reason-only refresh to it — without emitting a
+    second attention_required.
     """
     repo = WorkspaceRepository(session)
     workspace = await _create_workspace(repo, session)

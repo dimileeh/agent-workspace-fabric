@@ -6,6 +6,7 @@ WorkspaceEvent emission for attention set/clear (AIRA-T490).
 
 from __future__ import annotations
 
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.attention_events import (
@@ -18,15 +19,9 @@ from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 
 # selectin child tables loaded by a full Workspace entity get(). Hot-path
 # already-clear attention clears must not materialize this graph (PRRT_kwDOSJAM6s6XdqPs).
-_SELECTIN_GRAPH_TABLES = (
-    "workspace_events",
-    "operations",
-    "workspace_log_streams",
-    "task_attempts",
-    "queue_decisions",
-    "resource_reservations",
-    "merge_candidates",
-    "policy_findings",
+# Derived from the mapper so newly added selectin relationships stay covered.
+_SELECTIN_GRAPH_TABLES = tuple(
+    rel.target.name for rel in inspect(Workspace).relationships if rel.lazy == "selectin"
 )
 
 

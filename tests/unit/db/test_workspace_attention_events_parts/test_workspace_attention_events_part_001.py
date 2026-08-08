@@ -41,9 +41,9 @@ async def test_set_workspace_attention_emits_required_once_with_pr_url(
 
     events = await _attention_events(session, workspace.id)
     assert len(events) == 1
-    event = events[0]
-    assert event.event_type == ATTENTION_REQUIRED_EVENT_TYPE
-    assert event.payload == {
+    emitted = events[0]
+    assert emitted.event_type == ATTENTION_REQUIRED_EVENT_TYPE
+    assert emitted.payload == {
         "reason": "blocking review",
         "source": ATTENTION_SOURCE_MONITORING_PR,
         "pr_url": "https://github.com/example/app/pull/42",
