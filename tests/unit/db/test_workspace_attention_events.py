@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Update, update
+from sqlalchemy import Update, event, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.attention_events import (
@@ -19,6 +19,19 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from tests.postgres import postgres_test_session
+
+# selectin child tables loaded by a full Workspace entity get(). Hot-path
+# already-clear attention clears must not materialize this graph (PRRT_kwDOSJAM6s6XdqPs).
+_SELECTIN_GRAPH_TABLES = (
+    "workspace_events",
+    "operations",
+    "workspace_log_streams",
+    "task_attempts",
+    "queue_decisions",
+    "resource_reservations",
+    "merge_candidates",
+    "policy_findings",
+)
 
 
 @pytest.fixture
@@ -147,6 +160,59 @@ async def test_clear_workspace_attention_when_already_clear_emits_nothing(
     await repo.clear_workspace_attention(workspace.id)
 
     assert await _attention_events(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_clear_workspace_attention_already_clear_skips_selectin_graph(
+    session: AsyncSession,
+) -> None:
+    """Already-clear clear must not eager-load the workspace selectin graph.
+
+    Monitor polls call clear on every non-NotifyHuman action; the common case is
+    already clear. A full ``get(..., populate_existing=True)`` would SELECT
+    events/operations/… on every poll (PRRT_kwDOSJAM6s6XdqPs).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    workspace_id = workspace.id
+    await session.flush()
+    # Mirror a fresh monitor session: no identity-mapped Workspace to reuse.
+    session.expunge_all()
+
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(bind, "before_cursor_execute", record_sql)
+    try:
+        await repo.clear_workspace_attention(workspace_id)
+    finally:
+        event.remove(bind, "before_cursor_execute", record_sql)
+
+    assert await _attention_events(session, workspace_id) == []
+    graph_hits = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and any(f"from {table}" in statement for table in _SELECTIN_GRAPH_TABLES)
+    ]
+    assert graph_hits == []
+    attention_projection = [
+        statement
+        for statement in statements
+        if statement.startswith("select") and "awaiting_human_since" in statement
+    ]
+    assert attention_projection, "expected a scalar attention-column refresh"
 
 
 @pytest.mark.unit

@@ -30,6 +30,53 @@ from awf.db.models import Workspace
 _AWAITING_HUMAN_REASON_MAX_LENGTH = 2048
 
 
+def _cached_workspace(session: AsyncSession, workspace_id: str) -> Workspace | None:
+    """Return the identity-mapped Workspace if present, without loading from DB."""
+    return session.identity_map.get(session.identity_key(Workspace, workspace_id))
+
+
+def _sync_cached_attention_columns(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    awaiting_human_since: datetime | None,
+    awaiting_human_reason: str | None,
+) -> None:
+    """Realign cached attention columns without dirtying the row for flush."""
+    # Late import: ``WorkspaceRepository`` loads this module at class build time.
+    from awf.db.repositories.workspace_repo import set_committed_value
+
+    cached = _cached_workspace(session, workspace_id)
+    if cached is None:
+        return
+    set_committed_value(cached, "awaiting_human_since", awaiting_human_since)
+    set_committed_value(cached, "awaiting_human_reason", awaiting_human_reason)
+
+
+async def _refresh_cached_attention_columns(
+    session: AsyncSession,
+    workspace_id: str,
+) -> None:
+    """Scalar-refresh cached attention columns after a lost clear race."""
+    if _cached_workspace(session, workspace_id) is None:
+        return
+    row = (
+        await session.execute(
+            select(Workspace.awaiting_human_since, Workspace.awaiting_human_reason).where(
+                Workspace.id == workspace_id
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return
+    _sync_cached_attention_columns(
+        session,
+        workspace_id,
+        awaiting_human_since=row[0],
+        awaiting_human_reason=row[1],
+    )
+
+
 async def update_activity(
     session: AsyncSession,
     workspace_id: str,
@@ -177,17 +224,32 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     read alone. guide/remonitor may hold a row loaded while attention was clear;
     another transaction can open an episode before this call, and skipping the
     refresh would leave the persisted flag active.
+
+    The refresh is a scalar projection of ``awaiting_human_since`` (not a full
+    ``Workspace`` load): monitor polls call clear on every non-human action, and
+    the common already-clear path must not materialize selectin collections
+    (events, operations, …) on every poll.
     """
     from awf.db.repositories.workspace_repo import WorkspaceRepository
 
     repo = WorkspaceRepository(session)
-    # Refresh so episode-start fencing is not taken from a stale identity-map
-    # clear while another transaction has since opened an episode.
-    workspace = await repo.get(workspace_id, populate_existing=True)
-    if workspace is None:
+    # Scalar projection so episode-start fencing is not taken from a stale
+    # identity-map clear, without eager-loading the Workspace selectin graph.
+    row = (
+        await session.execute(
+            select(Workspace.awaiting_human_since).where(Workspace.id == workspace_id)
+        )
+    ).one_or_none()
+    if row is None:
         return
-    observed_since = workspace.awaiting_human_since
+    observed_since = row[0]
     if observed_since is None:
+        _sync_cached_attention_columns(
+            session,
+            workspace_id,
+            awaiting_human_since=None,
+            awaiting_human_reason=None,
+        )
         return
     # Lock the fenced episode row and return pre-clear reason/pr_url atomically
     # with the clear so a concurrent reason-only refresh cannot leave the event
@@ -221,10 +283,16 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
     if cleared is None:
         # Lost race: do not assign None onto the still-stale pre-UPDATE snapshot.
         # That would dirty the row and can erase a replacement episode opened before
-        # the next flush without emitting attention_cleared.
-        await repo.get(workspace_id, populate_existing=True)
+        # the next flush without emitting attention_cleared. Scalar-refresh any
+        # identity-mapped instance without loading the selectin graph.
+        await _refresh_cached_attention_columns(session, workspace_id)
         return
     prior_reason, pr_url = cleared
+    workspace = _cached_workspace(session, workspace_id)
+    if workspace is None:
+        workspace = await repo.get(workspace_id)
+        if workspace is None:
+            return
     workspace.awaiting_human_since = None
     workspace.awaiting_human_reason = None
     await repo.add_event(
