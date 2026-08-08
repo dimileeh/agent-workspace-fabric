@@ -215,4 +215,4 @@ def test_cloudbuild_documents_carrier_schema() -> None:
 def test_cloudbuild_does_not_print_credentials() -> None:
     _config, text = _load()
     assert _FORBIDDEN_AUTH_PRINT.search(text) is None
-    assert "printenv" not in text.lower() or "TOKEN" not in text
+    assert "printenv" not in text.lower()
