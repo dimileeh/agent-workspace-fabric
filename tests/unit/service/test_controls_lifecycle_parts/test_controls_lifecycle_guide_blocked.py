@@ -701,6 +701,21 @@ async def test_guide_monitor_origin_blocked_directive_resumes_into_monitor(
     # Claims are force-cleared so the monitor poll can re-claim the row.
     assert workspace.monitor_claimed_by is None
     assert workspace.execution_claimed_by is None
+    # Durable unblock out of protected-gate pause emits attention_cleared once.
+    from awf.common.attention_events import (
+        ATTENTION_CLEARED_EVENT_TYPE,
+        ATTENTION_SOURCE_BLOCKED,
+    )
+
+    cleared = [
+        e
+        for e in await _events(session, workspace.id)
+        if e.event_type == ATTENTION_CLEARED_EVENT_TYPE
+    ]
+    assert len(cleared) == 1
+    assert cleared[0].payload["source"] == ATTENTION_SOURCE_BLOCKED
+    assert cleared[0].payload["block_reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert cleared[0].payload["block_type"] == "protected_quality_gate"
 
 
 @pytest.mark.unit

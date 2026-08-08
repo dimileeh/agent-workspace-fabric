@@ -17,6 +17,8 @@ def test_subscription_event_type_policy_accepts_public_exact_and_wildcards() -> 
     assert is_valid_callback_subscription_event_type("workspace.created") is True
     assert is_valid_callback_subscription_event_type("workspace.state_changed") is True
     assert is_valid_callback_subscription_event_type("workspace.secondary_failure_recorded") is True
+    assert is_valid_callback_subscription_event_type("workspace.attention_required") is True
+    assert is_valid_callback_subscription_event_type("workspace.attention_cleared") is True
     assert is_valid_callback_subscription_event_type("workspace.internal") is False
     assert is_valid_callback_subscription_event_type("internal.secret_rotated") is False
     assert is_valid_callback_subscription_event_type("workspace.internal_secret") is False
@@ -43,6 +45,22 @@ def test_subscription_event_matching_requires_public_source_event() -> None:
     assert callback_subscription_matches_event_type(
         "workspace.secondary_failure_recorded",
         "workspace.secondary_failure_recorded",
+    )
+    assert callback_subscription_matches_event_type(
+        "workspace.*",
+        "workspace.attention_required",
+    )
+    assert callback_subscription_matches_event_type(
+        "workspace.*",
+        "workspace.attention_cleared",
+    )
+    assert callback_subscription_matches_event_type(
+        "workspace.attention_required",
+        "workspace.attention_required",
+    )
+    assert callback_subscription_matches_event_type(
+        "workspace.attention_cleared",
+        "workspace.attention_cleared",
     )
     assert callback_subscription_matches_event_type(
         "workspace.created",

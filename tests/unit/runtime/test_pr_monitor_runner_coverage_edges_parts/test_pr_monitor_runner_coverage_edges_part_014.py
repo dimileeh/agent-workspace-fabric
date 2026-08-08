@@ -837,6 +837,7 @@ async def test_terminate_failed_locks_row_before_owner_fence(
 
     locked_ids: list[str] = []
     original_get_for_update = WorkspaceRepository.get_for_update
+    original_get = WorkspaceRepository.get
 
     async def _recording_get_for_update(
         self: WorkspaceRepository,
@@ -850,8 +851,14 @@ async def test_terminate_failed_locks_row_before_owner_fence(
     async def _forbidden_get(
         self: WorkspaceRepository,
         requested_workspace_id: str,
+        **kwargs: object,
     ) -> object | None:
-        raise AssertionError("_terminate_failed must lock the row with get_for_update, not get")
+        # Owner-fence load must be locked. Post-lock refreshes (e.g. clear
+        # attention after the failed transition) may use ``get`` in the same
+        # transaction that already holds FOR UPDATE.
+        if not locked_ids:
+            raise AssertionError("_terminate_failed must lock the row with get_for_update, not get")
+        return await original_get(self, requested_workspace_id, **kwargs)
 
     monkeypatch.setattr(WorkspaceRepository, "get_for_update", _recording_get_for_update)
     monkeypatch.setattr(WorkspaceRepository, "get", _forbidden_get)
