@@ -121,6 +121,67 @@ async def test_set_workspace_attention_reason_refresh_does_not_reemit(
 
 
 @pytest.mark.unit
+async def test_set_workspace_attention_reason_refresh_skips_selectin_graph(
+    session: AsyncSession,
+) -> None:
+    """Reason-only refresh must not eager-load the workspace selectin graph.
+
+    While NotifyHuman keeps polling, each cycle refreshes one scalar reason.
+    A full ``get()`` would SELECT events/operations/… on every poll
+    (PRRT_kwDOSJAM6s6Xd0TF).
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    workspace_id = workspace.id
+    first = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    second = first + timedelta(minutes=5)
+    await repo.set_workspace_attention(workspace_id, reason="first", now=first)
+    await session.flush()
+    # Mirror a fresh monitor session: no identity-mapped Workspace to reuse.
+    session.expunge_all()
+
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(bind, "before_cursor_execute", record_sql)
+    try:
+        await repo.set_workspace_attention(workspace_id, reason="second", now=second)
+    finally:
+        event.remove(bind, "before_cursor_execute", record_sql)
+
+    refreshed = await repo.get(workspace_id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == first
+    assert refreshed.awaiting_human_reason == "second"
+    graph_hits = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and any(f"from {table}" in statement for table in _SELECTIN_GRAPH_TABLES)
+    ]
+    assert graph_hits == []
+    attention_projection = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and "awaiting_human_since" in statement
+        and "pr_url" in statement
+    ]
+    assert attention_projection, "expected a scalar pr_url/attention-column projection"
+
+
+@pytest.mark.unit
 async def test_clear_workspace_attention_emits_cleared_once(session: AsyncSession) -> None:
     repo = WorkspaceRepository(session)
     workspace = await _create_workspace(

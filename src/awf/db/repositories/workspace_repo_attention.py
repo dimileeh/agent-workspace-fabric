@@ -122,22 +122,35 @@ async def set_workspace_attention(
     Reason refreshes are fenced to the episode start observed when enter lost so a
     concurrent clear (or clear + new episode enter) between lost enter and refresh
     cannot orphan reason text on a cleared row or overwrite a newer episode's reason.
+
+    The common NotifyHuman reason-refresh path uses a scalar projection of
+    ``pr_url`` / ``awaiting_human_since`` (not a full ``Workspace`` load) so each
+    poll does not materialize selectin collections. The entity is loaded only
+    when an enter flip needs ``add_event``.
     """
     # Late import: ``WorkspaceRepository`` loads this module at class build time.
     from awf.db.repositories.workspace_repo import WorkspaceRepository
 
     repo = WorkspaceRepository(session)
-    workspace = await repo.get(workspace_id)
-    if workspace is None:
+    # Scalar projection: reason-only refreshes must not eager-load the Workspace
+    # selectin graph on every NotifyHuman poll (PRRT_kwDOSJAM6s6Xd0TF).
+    row = (
+        await session.execute(
+            select(Workspace.pr_url, Workspace.awaiting_human_since).where(
+                Workspace.id == workspace_id
+            )
+        )
+    ).one_or_none()
+    if row is None:
         return
-    # synchronize_session=False keeps the identity-mapped instance from being
+    # synchronize_session=False keeps any identity-mapped instance from being
     # expired (async lazy-load would otherwise raise MissingGreenlet when
     # building the event payload).
-    pr_url = workspace.pr_url
+    pr_url = row[0]
     clamped_reason = reason[:_AWAITING_HUMAN_REASON_MAX_LENGTH]
     # Episode start known before enter; used to fence a later reason-only refresh
     # to the same attention episode (not a replacement opened after a clear).
-    observed_since = workspace.awaiting_human_since
+    observed_since = row[1]
     enter_result = await session.execute(
         update(Workspace)
         .where(
@@ -157,6 +170,11 @@ async def set_workspace_attention(
     enter_rowcount = getattr(enter_result, "rowcount", 0)
     entered = enter_rowcount is not None and enter_rowcount > 0
     if entered:
+        workspace = _cached_workspace(session, workspace_id)
+        if workspace is None:
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
         workspace.awaiting_human_since = now
         workspace.awaiting_human_reason = clamped_reason
         await repo.add_event(
@@ -174,14 +192,24 @@ async def set_workspace_attention(
     # episode start so a concurrent clear (or clear + re-enter) between enter
     # and refresh cannot orphan reason or overwrite a newer episode.
     if observed_since is None:
-        # Stale in-memory clear while another session already entered: snapshot
-        # the winner's episode start before the fenced refresh.
-        workspace = await repo.get(workspace_id, populate_existing=True)
-        if workspace is None:
+        # Stale projection while another session already entered: snapshot
+        # the winner's episode start before the fenced refresh without loading
+        # the selectin graph.
+        since_row = (
+            await session.execute(
+                select(Workspace.awaiting_human_since).where(Workspace.id == workspace_id)
+            )
+        ).one_or_none()
+        if since_row is None:
             return
-        observed_since = workspace.awaiting_human_since
+        observed_since = since_row[0]
         if observed_since is None:
-            workspace.awaiting_human_reason = None
+            _sync_cached_attention_columns(
+                session,
+                workspace_id,
+                awaiting_human_since=None,
+                awaiting_human_reason=None,
+            )
             return
 
     refresh_result = await session.execute(
@@ -196,10 +224,16 @@ async def set_workspace_attention(
     await session.flush()
     refresh_rowcount = getattr(refresh_result, "rowcount", 0)
     if refresh_rowcount is not None and refresh_rowcount > 0:
-        workspace.awaiting_human_reason = clamped_reason
+        _sync_cached_attention_columns(
+            session,
+            workspace_id,
+            awaiting_human_since=observed_since,
+            awaiting_human_reason=clamped_reason,
+        )
     else:
-        # Episode cleared or replaced: realign from DB (do not assume cleared).
-        workspace = await repo.get(workspace_id, populate_existing=True)
+        # Episode cleared or replaced: realign from DB (do not assume cleared)
+        # without loading the Workspace selectin graph.
+        await _refresh_cached_attention_columns(session, workspace_id)
 
 
 async def clear_workspace_attention(session: AsyncSession, workspace_id: str) -> None:
