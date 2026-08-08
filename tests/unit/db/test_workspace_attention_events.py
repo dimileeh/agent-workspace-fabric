@@ -750,3 +750,132 @@ async def test_set_workspace_attention_reason_refresh_fenced_to_observed_episode
     assert len(events) == 1
     assert events[0].event_type == ATTENTION_REQUIRED_EVENT_TYPE
     assert events[0].payload.get("reason") == "episode-e1"
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_unknown_id_is_noop(session: AsyncSession) -> None:
+    """Missing workspace id must not raise or emit attention_required."""
+    repo = WorkspaceRepository(session)
+
+    await repo.set_workspace_attention(
+        "ws_missing_attention_set",
+        reason="should never persist",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    assert await _attention_events(session, "ws_missing_attention_set") == []
+
+
+@pytest.mark.unit
+async def test_clear_workspace_attention_unknown_id_is_noop(session: AsyncSession) -> None:
+    """Missing workspace id must not raise or emit attention_cleared."""
+    repo = WorkspaceRepository(session)
+
+    await repo.clear_workspace_attention("ws_missing_attention_clear")
+
+    assert await _attention_events(session, "ws_missing_attention_clear") == []
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_lost_enter_after_null_projection_refreshes_winner(
+    session: AsyncSession,
+) -> None:
+    """Null projection + concurrent enter must refresh the winner's reason.
+
+    The scalar projection can observe ``awaiting_human_since IS NULL`` while
+    another session opens the episode before the guarded enter UPDATE runs.
+    Enter matches zero rows with ``observed_since`` still None; the setter must
+    re-fetch the winner's episode start and fence the reason-only refresh to it
+    (coverage branch 206→215) without emitting a second attention_required.
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    workspace_id = workspace.id
+    # Fresh monitor session: projection is not polluted by an identity-map episode.
+    session.expunge_all()
+    winner_since = datetime(2026, 6, 22, 11, 0, tzinfo=UTC)
+    real_execute = session.execute
+    update_calls = 0
+
+    async def execute_enter_after_projection(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal update_calls
+        if isinstance(statement, Update):
+            update_calls += 1
+            if update_calls == 1:
+                # Concurrent enter between null projection and this enter UPDATE.
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(
+                        awaiting_human_since=winner_since,
+                        awaiting_human_reason="winner-first",
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+        return await real_execute(statement, *args, **kwargs)
+
+    session.execute = execute_enter_after_projection  # type: ignore[method-assign]
+
+    await repo.set_workspace_attention(
+        workspace_id,
+        reason="loser-latest",
+        now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+    )
+
+    refreshed = await repo.get(workspace_id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == winner_since
+    assert refreshed.awaiting_human_reason == "loser-latest"
+    assert await _attention_events(session, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_clear_workspace_attention_lost_race_without_identity_map_is_noop(
+    session: AsyncSession,
+) -> None:
+    """Lost clear with no cached Workspace must not emit attention_cleared.
+
+    Monitor poll sessions often have no identity-mapped row. When a concurrent
+    clear wins after the scalar episode snapshot, the local UPDATE returns no
+    row; ``_refresh_cached_attention_columns`` must early-return without loading
+    the selectin graph or emitting a cleared event.
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    workspace_id = workspace.id
+    await repo.set_workspace_attention(
+        workspace_id,
+        reason="blocking",
+        now=datetime(2026, 6, 22, 11, 0, tzinfo=UTC),
+    )
+    await session.flush()
+    session.expunge_all()
+
+    real_execute = session.execute
+    clear_updates = 0
+
+    async def execute_clear_before_guarded(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal clear_updates
+        if isinstance(statement, Update):
+            clear_updates += 1
+            if clear_updates == 1:
+                await real_execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(awaiting_human_since=None, awaiting_human_reason=None)
+                    .execution_options(synchronize_session=False)
+                )
+                await session.flush()
+        return await real_execute(statement, *args, **kwargs)
+
+    session.execute = execute_clear_before_guarded  # type: ignore[method-assign]
+
+    await repo.clear_workspace_attention(workspace_id)
+
+    refreshed = await repo.get(workspace_id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since is None
+    assert refreshed.awaiting_human_reason is None
+    events = await _attention_events(session, workspace_id)
+    assert [e.event_type for e in events] == [ATTENTION_REQUIRED_EVENT_TYPE]
