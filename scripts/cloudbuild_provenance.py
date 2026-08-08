@@ -40,7 +40,9 @@ LABEL_AGENT_RUNTIME_DIGEST = "awf.agent.runtime.digest"
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_BUILD_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+# Cap at 122 so carrier_image_ref's "build-" prefix stays within Docker's
+# 128-character tag limit (see moby/docker-image-spec).
+_BUILD_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,121}$")
 _REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _CREDENTIAL_HINT_RE = re.compile(
     r"(?i)(://[^/\s]+:[^/\s]+@|\bghp_|\bgho_|\bghu_|\bghr_|\bgithub_pat_|\bglpat-|"

@@ -111,6 +111,8 @@ def test_bind_provenance_accepts_valid_bindings() -> None:
         ({"build_id": "digest@sha256"}, "build"),
         ({"build_id": ".leading-dot"}, "build"),
         ({"build_id": "-leading-hyphen"}, "build"),
+        # carrier_image_ref prefixes "build-" (6 chars); Docker tags max at 128.
+        ({"build_id": "x" * 123}, "build"),
         ({"build_id": "x" * 129}, "build"),
         ({"source_repository": ""}, "source"),
         ({"source_repository": "   "}, "source"),
@@ -429,7 +431,16 @@ def test_prepare_cli_rejects_credential_artifact_repo_without_leaking(
 
 @pytest.mark.parametrize(
     "build_id",
-    ["repo/path", "tag:extra", "digest@sha256", ".dot", "-hyphen", "x" * 129],
+    [
+        "repo/path",
+        "tag:extra",
+        "digest@sha256",
+        ".dot",
+        "-hyphen",
+        # "build-" + 123 chars exceeds Docker's 128-char tag limit.
+        "x" * 123,
+        "x" * 129,
+    ],
 )
 def test_carrier_image_ref_rejects_non_docker_tag_build_id(build_id: str) -> None:
     with pytest.raises(ProvenanceError, match="Docker tag"):
@@ -437,3 +448,15 @@ def test_carrier_image_ref_rejects_non_docker_tag_build_id(build_id: str) -> Non
             artifact_repository="us-docker.pkg.dev/proj/repo",
             build_id=build_id,
         )
+
+
+def test_carrier_image_ref_accepts_max_build_id_for_prefixed_tag() -> None:
+    """Exact boundary: build- (6) + 122-char id == 128-char Docker tag."""
+    build_id = "x" * 122
+    ref = carrier_image_ref(
+        artifact_repository="us-docker.pkg.dev/proj/repo",
+        build_id=build_id,
+    )
+    tag = ref.rsplit(":", 1)[1]
+    assert tag == f"build-{build_id}"
+    assert len(tag) == 128
