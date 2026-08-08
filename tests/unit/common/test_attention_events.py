@@ -66,6 +66,6 @@ def test_blocked_attention_payload_redacts_fallback_block_reason_code() -> None:
         block_type="policy",
     )
 
-    assert payload["block_reason_code"] == f"token leak {secret}"
-    assert secret not in str(payload["reason"])
+    assert secret not in repr(payload)
+    assert payload["block_reason_code"] == f"token leak {REDACTION_MARKER}"
     assert payload["reason"] == f"token leak {REDACTION_MARKER}"

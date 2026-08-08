@@ -36,7 +36,7 @@ def blocked_attention_payload(
     """Payload for protected-gate blocked attention enter/clear events."""
     payload: dict[str, Any] = {
         "source": ATTENTION_SOURCE_BLOCKED,
-        "block_reason_code": block_reason_code,
+        "block_reason_code": redact_audit_value(block_reason_code),
         "block_type": block_type,
     }
     # Keep parity with monitoring_pr shape: prefer an explicit reason, else the
