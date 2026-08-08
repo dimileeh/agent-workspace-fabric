@@ -35,7 +35,10 @@ from scripts.cloudbuild_provenance import (
     extract_digest_from_metadata,
     main,
     write_bindings_env,
+    write_carrier_build_script,
 )
+
+pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -213,6 +216,7 @@ def test_write_bindings_env_and_prepare_cli(
     core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
     out_env = tmp_path / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
 
     bindings = bind_provenance(
         build_id=_BUILD_ID,
@@ -247,6 +251,8 @@ def test_write_bindings_env_and_prepare_cli(
             str(runtime_meta),
             "--output-env",
             str(out_env),
+            "--output-build-script",
+            str(out_script),
         ]
     )
     assert rc == 0
@@ -254,6 +260,10 @@ def test_write_bindings_env_and_prepare_cli(
     assert _CORE_DIGEST in captured.err
     assert "TOKEN" not in captured.err
     assert "password" not in captured.err.lower()
+    script_text = out_script.read_text(encoding="utf-8")
+    assert "exec 'docker'" in script_text
+    assert "'--load'" in script_text
+    assert tag in script_text
 
 
 def test_prepare_cli_rejects_bad_metadata(tmp_path: Path) -> None:
@@ -262,6 +272,7 @@ def test_prepare_cli_rejects_bad_metadata(tmp_path: Path) -> None:
     core_meta.write_text(json.dumps({"containerimage.digest": "latest"}), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
     out_env = tmp_path / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
 
     rc = main(
         [
@@ -280,10 +291,81 @@ def test_prepare_cli_rejects_bad_metadata(tmp_path: Path) -> None:
             str(runtime_meta),
             "--output-env",
             str(out_env),
+            "--output-build-script",
+            str(out_script),
         ]
     )
     assert rc == 1
     assert not out_env.exists()
+    assert not out_script.exists()
+
+
+def test_prepare_cli_oserror_on_env_write_returns_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Missing parent dir / unwritable path must exit 1, not traceback."""
+    core_meta = tmp_path / "core.json"
+    runtime_meta = tmp_path / "runtime.json"
+    core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
+    runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    missing_parent = tmp_path / "no-such-dir" / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
+
+    rc = main(
+        [
+            "prepare",
+            "--build-id",
+            _BUILD_ID,
+            "--commit-sha",
+            _COMMIT,
+            "--source-repository",
+            _REPO,
+            "--artifact-repository",
+            "us-docker.pkg.dev/proj/repo",
+            "--core-metadata",
+            str(core_meta),
+            "--runtime-metadata",
+            str(runtime_meta),
+            "--output-env",
+            str(missing_parent),
+            "--output-build-script",
+            str(out_script),
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "provenance error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert not out_script.exists()
+
+
+def test_write_carrier_build_script_uses_helper_argv(tmp_path: Path) -> None:
+    bindings = bind_provenance(
+        build_id=_BUILD_ID,
+        commit_sha=_COMMIT,
+        source_repository=_REPO,
+        core_digest=_CORE_DIGEST,
+        agent_runtime_digest=_RUNTIME_DIGEST,
+    )
+    tag = carrier_image_ref(
+        artifact_repository="us-docker.pkg.dev/proj/repo",
+        build_id=_BUILD_ID,
+    )
+    script = tmp_path / "awf-provenance-build.sh"
+    write_carrier_build_script(script, bindings=bindings, carrier_tag=tag)
+    text = script.read_text(encoding="utf-8")
+    assert text.startswith("#!/bin/bash\n")
+    assert "set -eu\n" in text
+    assert "exec 'docker'" in text
+    assert "'buildx'" in text
+    assert "'--builder'" in text
+    assert "'default'" in text
+    assert "'--load'" in text
+    assert "docker/awf-core-provenance.Dockerfile" in text
+    assert f"{LABEL_BUILD_ID}={_BUILD_ID}" in text
+    assert f"{LABEL_CORE_DIGEST}={_CORE_DIGEST}" in text
+    assert "'--push'" not in text
+    assert "--push" not in text
 
 
 def test_carrier_image_ref_rejects_empty_or_trailing_slash_repo() -> None:

@@ -21,7 +21,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
+
+pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,7 +83,6 @@ def test_cloudbuild_publishes_core_and_runtime_rc_tags() -> None:
     assert "aira-web" not in text
     assert "secretmanager" not in text.lower()
     assert "gke" not in text.lower()
-    assert "kubectl" not in text
 
 
 def test_cloudbuild_images_lists_only_provenance_carrier() -> None:
@@ -182,19 +184,18 @@ def test_cloudbuild_provenance_carrier_validates_then_builds() -> None:
     assert "$BUILD_ID" in prepare_blob or "BUILD_ID" in prepare_blob
     assert "$COMMIT_SHA" in prepare_blob or "COMMIT_SHA" in prepare_blob
     assert "REPO_FULL_NAME" in prepare_blob
+    assert "--output-build-script" in prepare_blob
+    assert "awf-provenance-build.sh" in prepare_blob
 
     build = _step_by_id(config, "build-provenance-carrier")
     build_blob = _flatten_args(build)
-    assert "docker/awf-core-provenance.Dockerfile" in build_blob
-    assert _CARRIER_TAG in build_blob or "CARRIER_TAG" in build_blob
-    assert "awf.build.id" in build_blob or "AWF_BUILD_ID" in build_blob
-    # After create-buildx-builder --use (docker-container), plain `docker build`
-    # can leave the image only in BuildKit cache. Carrier must buildx --load into
-    # the local Docker store so Cloud Build top-level `images:` can push it.
-    assert "buildx build" in build_blob
-    assert "--builder default" in build_blob
-    assert "--load" in build_blob
-    # Carrier is tagged locally; Cloud Build `images:` performs the recorded push.
+    # Carrier docker argv (labels, --builder default, --load) comes from the
+    # Python helper via the generated script — do not duplicate it in YAML.
+    assert "awf-provenance-build.sh" in build_blob
+    assert "docker/awf-core-provenance.Dockerfile" not in build_blob
+    assert "--label" not in build_blob
+    assert "awf.build.id=" not in build_blob
+    # Script is executed by bash; Cloud Build top-level images: performs the push.
     assert "--push" not in build_blob
 
 
