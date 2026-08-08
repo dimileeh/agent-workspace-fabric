@@ -106,7 +106,12 @@ steps:
         # shellcheck disable=SC1091
         # $$ escapes Cloud Build substitutions so bash sees ${VAR} from the env file.
         source /workspace/awf-provenance.env
-        docker build \
+        # create-buildx-builder --use left docker-container as current builder.
+        # Explicit --builder default --load exports the single-platform carrier
+        # into the local Docker store so top-level images: can push it.
+        docker buildx build \
+          --builder default \
+          --load \
           --file docker/awf-core-provenance.Dockerfile \
           --tag "$${CARRIER_TAG}" \
           --label "awf.build.id=$${AWF_BUILD_ID}" \

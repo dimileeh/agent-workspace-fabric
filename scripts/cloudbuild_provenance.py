@@ -124,9 +124,18 @@ def carrier_docker_build_argv(
     dockerfile: str = "docker/awf-core-provenance.Dockerfile",
     context: str = "docker/",
 ) -> list[str]:
-    """Return `docker build` argv (without the `docker` binary) for the carrier."""
+    """Return `docker buildx build` argv (without the `docker` binary) for the carrier.
+
+    Uses `--builder default --load` so the single-platform carrier lands in the
+    local Docker store for Cloud Build top-level `images:` push (not BuildKit
+    cache-only after a docker-container builder was selected with `--use`).
+    """
     argv = [
+        "buildx",
         "build",
+        "--builder",
+        "default",
+        "--load",
         "--file",
         dockerfile,
         "--tag",
@@ -163,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prepare = sub.add_parser(
         "prepare",
-        help="Validate metadata + bindings and write a shell env file for docker build",
+        help="Validate metadata + bindings and write a shell env file for docker buildx --load",
     )
     prepare.add_argument("--build-id", required=True)
     prepare.add_argument("--commit-sha", required=True)

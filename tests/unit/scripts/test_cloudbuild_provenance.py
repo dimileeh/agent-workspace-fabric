@@ -180,18 +180,22 @@ def test_carrier_docker_build_argv_embeds_contract_labels() -> None:
         build_id=_BUILD_ID,
     )
     argv = carrier_docker_build_argv(bindings=bindings, carrier_tag=tag)
-    assert argv[:4] == [
+    assert argv[:6] == [
+        "buildx",
         "build",
+        "--builder",
+        "default",
+        "--load",
         "--file",
-        "docker/awf-core-provenance.Dockerfile",
-        "--tag",
     ]
+    assert "docker/awf-core-provenance.Dockerfile" in argv
     assert tag in argv
     assert f"{LABEL_BUILD_ID}={_BUILD_ID}" in argv
     assert f"{LABEL_GIT_COMMIT}={_COMMIT}" in argv
     assert f"{LABEL_CORE_DIGEST}={_CORE_DIGEST}" in argv
     assert f"{LABEL_AGENT_RUNTIME_DIGEST}={_RUNTIME_DIGEST}" in argv
     assert argv[-1] == "docker/"
+    assert "--push" not in argv
 
 
 def test_write_bindings_env_and_prepare_cli(

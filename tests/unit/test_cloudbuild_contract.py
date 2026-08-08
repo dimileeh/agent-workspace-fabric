@@ -188,8 +188,14 @@ def test_cloudbuild_provenance_carrier_validates_then_builds() -> None:
     assert "docker/awf-core-provenance.Dockerfile" in build_blob
     assert _CARRIER_TAG in build_blob or "CARRIER_TAG" in build_blob
     assert "awf.build.id" in build_blob or "AWF_BUILD_ID" in build_blob
+    # After create-buildx-builder --use (docker-container), plain `docker build`
+    # can leave the image only in BuildKit cache. Carrier must buildx --load into
+    # the local Docker store so Cloud Build top-level `images:` can push it.
+    assert "buildx build" in build_blob
+    assert "--builder default" in build_blob
+    assert "--load" in build_blob
     # Carrier is tagged locally; Cloud Build `images:` performs the recorded push.
-    assert "--push" not in build.get("args", [])
+    assert "--push" not in build_blob
 
 
 def test_cloudbuild_documents_carrier_schema() -> None:
