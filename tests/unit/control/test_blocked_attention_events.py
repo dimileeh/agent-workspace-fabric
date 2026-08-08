@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,31 @@ async def _seed_running(factory: async_sessionmaker[AsyncSession]) -> str:
         ws.status = WorkspaceStatus.running.value
         ws.execution_claimed_by = "worker-a"
         ws.block_reason_code = None
+        await session.commit()
+        return ws.id
+
+
+async def _seed_recovering(factory: async_sessionmaker[AsyncSession]) -> str:
+    """Provider-failure pause — must not emit blocked-source attention events."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/recovering-attention.git",
+            branch_base="main",
+            task_title="recovering attention guard",
+            task_prompt="exercise recovering resume without attention",
+            agent="codex",
+            test_commands=[],
+        )
+        ws.status = WorkspaceStatus.recovering.value
+        ws.execution_claimed_by = "worker-a"
+        ws.task_policy = {
+            "provider_recovery_state": {
+                "action": "retry",
+                "retry_attempt_number": 1,
+                "not_before": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+            }
+        }
         await session.commit()
         return ws.id
 
@@ -204,3 +230,26 @@ async def test_restore_blocked_resume_reemits_attention_required(
         assert types.count(ATTENTION_CLEARED_EVENT_TYPE) == 1
         required = [e for e in events if e.event_type == ATTENTION_REQUIRED_EVENT_TYPE]
         assert all(e.payload["source"] == ATTENTION_SOURCE_BLOCKED for e in required)
+
+
+@pytest.mark.unit
+async def test_recovering_claim_and_restore_emit_no_attention_events(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """recovering resume claim/restore must not emit blocked-source attention.
+
+    ``_claim_paused_for_resume`` / ``_restore_paused_resume_claim`` gate attention
+    on ``reason == "blocked"``. A regression that drops the guard would emit
+    blocked-source events for provider-failure pauses.
+    """
+    ws_id = await _seed_recovering(factory)
+    worker = _worker(factory)
+
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+    await worker._restore_recovering_resume_claim(  # noqa: SLF001
+        ws_id,
+        reason_code="RECOVERING_RESUME_NO_EXECUTOR",
+    )
+
+    async with factory() as session:
+        assert await _attention_events(session, ws_id) == []

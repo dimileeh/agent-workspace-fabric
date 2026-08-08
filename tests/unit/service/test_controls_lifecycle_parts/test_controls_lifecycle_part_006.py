@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     has_terminal_runtime_released_event,
@@ -599,7 +600,7 @@ async def test_destroy_blocked_workspace_with_force_routes_through_cancelled(
     assert len(cleaner.calls) == 1
 
 
-async def _seed_blocked_attention(session: AsyncSession) -> object:
+async def _seed_blocked_attention(session: AsyncSession) -> Workspace:
     """Blocked workspace with durable protected-gate attention fields set."""
     workspace = await _workspace(session, status=WorkspaceStatus.blocked)
     workspace.block_reason_code = "QUALITY_GATE_POLICY_CHANGED"
@@ -660,7 +661,8 @@ async def test_stop_blocked_workspace_emits_attention_cleared(
 
     cleared = _blocked_attention_cleared(await _events(session, workspace.id))
     assert len(cleared) == 1
-    assert cleared[0].payload["source"] == "blocked"
+    assert cleared[0].payload["block_reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert cleared[0].payload["block_type"] == "protected_quality_gate"
 
 
 @pytest.mark.unit

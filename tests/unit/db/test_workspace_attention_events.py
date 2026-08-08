@@ -204,9 +204,14 @@ async def test_clear_workspace_attention_lost_race_does_not_dirty_replacement_ep
     assert workspace.awaiting_human_since == episode_e1
 
     real_execute = session.execute
+    clear_updates = 0
 
     async def execute_clear_then_replace(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal clear_updates
         if isinstance(statement, Update):
+            clear_updates += 1
+            if clear_updates > 1:
+                return await real_execute(statement, *args, **kwargs)
             # Concurrent clear of E1 so this session's guarded clear matches 0.
             await real_execute(
                 update(Workspace)
