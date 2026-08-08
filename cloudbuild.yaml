@@ -1,14 +1,25 @@
-steps:
-  - id: build-core
-    name: gcr.io/cloud-builders/docker
-    args:
-      - build
-      - --file
-      - docker/control-plane.Dockerfile
-      - --tag
-      - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
-      - .
+# AWF Core Cloud Build — publish rc-$COMMIT_SHA images and an immutable
+# provenance carrier recorded in Build results.images.
+#
+# Product outputs (Buildx --push, NOT listed under top-level images:):
+#   ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
+#   ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA  (linux/amd64+arm64)
+#
+# Provenance carrier (only entry in images: so Cloud Build records its digest):
+#   ${_ARTIFACT_REPOSITORY}/awf-core-provenance:build-$BUILD_ID
+#
+# Carrier image config labels (validated before build; digests from Buildx
+# --metadata-file of each push — never from a later mutable-tag lookup):
+#   awf.build.id              = $BUILD_ID
+#   awf.git.commit            = lowercase 40-char hex $COMMIT_SHA
+#   awf.source.repository     = $REPO_FULL_NAME
+#   awf.core.digest           = sha256:… from awf-core.metadata.json
+#   awf.agent.runtime.digest  = sha256:… multi-arch index from runtime metadata
+#
+# Listing the pre-pushed multi-arch runtime tag under images: is forbidden:
+# Cloud Build would pull/re-push and can collapse the manifest list.
 
+steps:
   # Agent-runtime must publish linux/amd64 + linux/arm64 (DGX Spark / PRD §18.5).
   # Plain `docker build` only produces the builder's platform (amd64 on Cloud Build).
   - id: setup-qemu
@@ -33,6 +44,20 @@ steps:
       - --driver
       - docker-container
 
+  - id: build-and-push-core
+    name: gcr.io/cloud-builders/docker
+    args:
+      - buildx
+      - build
+      - --file
+      - docker/control-plane.Dockerfile
+      - --tag
+      - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
+      - --push
+      - --metadata-file
+      - /workspace/awf-core.metadata.json
+      - .
+
   - id: build-and-push-agent-runtime
     name: gcr.io/cloud-builders/docker
     args:
@@ -45,13 +70,58 @@ steps:
       - --tag
       - ${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA
       - --push
+      - --metadata-file
+      - /workspace/awf-agent-runtime.metadata.json
       - .
 
-  - id: push-core
-    name: gcr.io/cloud-builders/docker
+  # Digest-pinned Python helper validates bindings and writes a source-able env
+  # file. Never prints credentials or tokens — only digests / SHA / build id / repo.
+  - id: prepare-provenance-carrier
+    name: python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+    entrypoint: python3
     args:
-      - push
-      - ${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA
+      - scripts/cloudbuild_provenance.py
+      - prepare
+      - --build-id
+      - $BUILD_ID
+      - --commit-sha
+      - $COMMIT_SHA
+      - --source-repository
+      - $REPO_FULL_NAME
+      - --artifact-repository
+      - ${_ARTIFACT_REPOSITORY}
+      - --core-metadata
+      - /workspace/awf-core.metadata.json
+      - --runtime-metadata
+      - /workspace/awf-agent-runtime.metadata.json
+      - --output-env
+      - /workspace/awf-provenance.env
+
+  - id: build-provenance-carrier
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        # shellcheck disable=SC1091
+        # $$ escapes Cloud Build substitutions so bash sees ${VAR} from the env file.
+        source /workspace/awf-provenance.env
+        docker build \
+          --file docker/awf-core-provenance.Dockerfile \
+          --tag "$${CARRIER_TAG}" \
+          --label "awf.build.id=$${AWF_BUILD_ID}" \
+          --label "awf.git.commit=$${AWF_GIT_COMMIT}" \
+          --label "awf.source.repository=$${AWF_SOURCE_REPOSITORY}" \
+          --label "awf.core.digest=$${AWF_CORE_DIGEST}" \
+          --label "awf.agent.runtime.digest=$${AWF_AGENT_RUNTIME_DIGEST}" \
+          docker/
+
+# Only the provenance carrier is listed here. Cloud Build pushes it after the
+# steps and records the immutable digest in results.images (and can generate
+# provenance). Core + multi-arch runtime were already published via buildx
+# --push above; re-listing them would risk collapsing the runtime manifest list.
+images:
+  - ${_ARTIFACT_REPOSITORY}/awf-core-provenance:build-$BUILD_ID
 
 options:
   logging: CLOUD_LOGGING_ONLY
