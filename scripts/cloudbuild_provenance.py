@@ -112,6 +112,8 @@ def carrier_image_ref(*, artifact_repository: str, build_id: str) -> str:
     repo = artifact_repository.strip()
     if not repo:
         raise ProvenanceError("artifact repository must be non-empty")
+    if _CREDENTIAL_HINT_RE.search(repo):
+        raise ProvenanceError("artifact repository must not contain credential-looking material")
     if repo.endswith("/"):
         raise ProvenanceError("artifact repository must not end with '/'")
     validated_build_id = _validate_build_id(build_id)

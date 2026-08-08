@@ -375,6 +375,58 @@ def test_carrier_image_ref_rejects_empty_or_trailing_slash_repo() -> None:
         carrier_image_ref(artifact_repository="us-docker.pkg.dev/proj/repo/", build_id=_BUILD_ID)
 
 
+def test_carrier_image_ref_rejects_credential_looking_repo() -> None:
+    with pytest.raises(ProvenanceError, match="credential-looking"):
+        carrier_image_ref(
+            artifact_repository="https://user:password@registry.example/repo",
+            build_id=_BUILD_ID,
+        )
+
+
+def test_prepare_cli_rejects_credential_artifact_repo_without_leaking(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Credential-bearing artifact repos must fail before tag/log emission."""
+    core_meta = tmp_path / "core.json"
+    runtime_meta = tmp_path / "runtime.json"
+    core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
+    runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    out_env = tmp_path / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
+    credential_repo = "https://user:password@registry.example/repo"
+
+    rc = main(
+        [
+            "prepare",
+            "--build-id",
+            _BUILD_ID,
+            "--commit-sha",
+            _COMMIT,
+            "--source-repository",
+            _REPO,
+            "--artifact-repository",
+            credential_repo,
+            "--core-metadata",
+            str(core_meta),
+            "--runtime-metadata",
+            str(runtime_meta),
+            "--output-env",
+            str(out_env),
+            "--output-build-script",
+            str(out_script),
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "provenance error:" in captured.err
+    assert "credential-looking" in captured.err
+    assert "user:password" not in captured.err
+    assert "password" not in captured.err.lower()
+    assert credential_repo not in captured.err
+    assert not out_env.exists()
+    assert not out_script.exists()
+
+
 @pytest.mark.parametrize(
     "build_id",
     ["repo/path", "tag:extra", "digest@sha256", ".dot", "-hyphen", "x" * 129],
