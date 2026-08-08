@@ -102,6 +102,13 @@ def test_bind_provenance_accepts_valid_bindings() -> None:
         ({"commit_sha": "a" * 41}, "commit"),
         ({"build_id": ""}, "build"),
         ({"build_id": "   "}, "build"),
+        ({"build_id": "id with space"}, "build"),
+        ({"build_id": "repo/path"}, "build"),
+        ({"build_id": "tag:extra"}, "build"),
+        ({"build_id": "digest@sha256"}, "build"),
+        ({"build_id": ".leading-dot"}, "build"),
+        ({"build_id": "-leading-hyphen"}, "build"),
+        ({"build_id": "x" * 129}, "build"),
         ({"source_repository": ""}, "source"),
         ({"source_repository": "   "}, "source"),
         ({"source_repository": "https://x:y@github.com/org/repo"}, "source"),
@@ -284,3 +291,15 @@ def test_carrier_image_ref_rejects_empty_or_trailing_slash_repo() -> None:
         carrier_image_ref(artifact_repository="", build_id=_BUILD_ID)
     with pytest.raises(ProvenanceError, match="artifact repository"):
         carrier_image_ref(artifact_repository="us-docker.pkg.dev/proj/repo/", build_id=_BUILD_ID)
+
+
+@pytest.mark.parametrize(
+    "build_id",
+    ["repo/path", "tag:extra", "digest@sha256", ".dot", "-hyphen", "x" * 129],
+)
+def test_carrier_image_ref_rejects_non_docker_tag_build_id(build_id: str) -> None:
+    with pytest.raises(ProvenanceError, match="Docker tag"):
+        carrier_image_ref(
+            artifact_repository="us-docker.pkg.dev/proj/repo",
+            build_id=build_id,
+        )

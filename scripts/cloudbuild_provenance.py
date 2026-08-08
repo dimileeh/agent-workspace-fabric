@@ -40,6 +40,7 @@ LABEL_AGENT_RUNTIME_DIGEST = "awf.agent.runtime.digest"
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_BUILD_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 _REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _CREDENTIAL_HINT_RE = re.compile(
     r"(?i)(://[^/\s]+:[^/\s]+@|\bghp_|\bgho_|\bghu_|\bghr_|\bgithub_pat_|\bglpat-|"
@@ -270,8 +271,8 @@ def _validate_build_id(value: str) -> str:
         raise ProvenanceError("build id must not have surrounding whitespace")
     if not value:
         raise ProvenanceError("build id must be non-empty")
-    if any(ch.isspace() for ch in value):
-        raise ProvenanceError("build id must not contain whitespace")
+    if not _BUILD_ID_RE.fullmatch(value):
+        raise ProvenanceError("build id must be a valid Docker tag component")
     return value
 
 
