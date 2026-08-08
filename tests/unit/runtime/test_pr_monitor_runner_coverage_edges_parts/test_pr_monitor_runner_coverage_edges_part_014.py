@@ -717,6 +717,57 @@ async def test_terminate_failed_clears_persisted_human_attention(
 
 
 @pytest.mark.unit
+async def test_terminate_completed_clears_persisted_human_attention(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Externally merged PRs can terminate while a NotifyHuman episode is
+    still active (release/manual monitors). ``_terminate_completed`` must null
+    attention columns and emit ``workspace.attention_cleared`` in the same
+    commit — otherwise completed workspaces strand subscribers with an
+    active episode forever (Greptile issuecomment-5225662425 / PR #805).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        await repo.set_workspace_attention(
+            workspace_id,
+            reason="notify human: release PR awaits manual merge",
+            now=datetime(2026, 8, 8, 10, 0, tzinfo=UTC),
+        )
+        await session.commit()
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+        assert ws.awaiting_human_reason is not None
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_completed(workspace_id, pr_merge_sha="deadbeef")
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "completed"
+        assert ws.pr_merge_sha == "deadbeef"
+        assert ws.awaiting_human_since is None
+        assert ws.awaiting_human_reason is None
+        cleared = [
+            event
+            for event in ws.events
+            if event.event_type == ATTENTION_CLEARED_EVENT_TYPE
+            and (event.payload or {}).get("source") == ATTENTION_SOURCE_MONITORING_PR
+        ]
+    assert len(cleared) == 1
+
+
+@pytest.mark.unit
 async def test_terminate_failed_redacts_terminal_failure_details(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
