@@ -622,16 +622,24 @@ part of the external callback envelope.
 
 `workspace.attention_required` and `workspace.attention_cleared` use the same
 workspace event envelope. They fire once per attention flip (enter or clear),
-not on every monitor poll while attention persists. Internal payload fields on
-the stored workspace event:
+not on every monitor poll while attention persists. The table below describes
+the **stored timeline event `payload`** (written by
+`monitoring_pr_attention_payload` / `blocked_attention_payload`), not the
+sanitized outbound callback body — those attention payload keys are not part of
+the external callback envelope.
 
 | Field | When present | Notes |
 |---|---|---|
 | `source` | always | `"monitoring_pr"` (HUMAN_WAIT) or `"blocked"` (protected-gate pause) |
-| `reason` | usually | Escalation reason, or `block_reason_code` for blocked-source events |
-| `pr_url` | when known | Present for monitoring_pr flips when the workspace row has a PR URL |
-| `block_reason_code` | blocked source | Durable protected-gate reason code |
-| `block_type` | blocked source | e.g. `protected_quality_gate` |
+| `reason` | always (may be `null`) | `monitoring_pr`: escalation reason (nullable). `blocked`: explicit reason, else `block_reason_code` (may still be `null`) |
+| `pr_url` | `monitoring_pr` only, when truthy | Omitted unless the workspace row has a truthy PR URL; never emitted as `null` |
+| `block_reason_code` | always on `blocked` | Durable protected-gate reason code; key always present, value may be `null` |
+| `block_type` | always on `blocked` | e.g. `protected_quality_gate`; key always present, value may be `null` |
+
+`monitoring_pr_attention_payload` always includes `reason` and `source`; `reason`
+may be `null`, and `pr_url` is omitted unless truthy.
+`blocked_attention_payload` always includes `source`, `block_reason_code`,
+`block_type`, and `reason`; nullable values are stored as JSON `null`.
 
 Example monitoring_pr enter payload (timeline event `payload`):
 
