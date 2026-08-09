@@ -101,11 +101,11 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_skips_hosted_adapter(
+async def test_needs_human_reason_reask_records_clarification_unavailable_for_hosted_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hosted reason-only re-ask must not be able to advance the PR."""
+    """Hosted re-asks remain skipped and report why no re-ask was attempted."""
     invoked = False
     cleanup_called = False
     audit_events: list[dict[str, object]] = []
@@ -165,7 +165,7 @@ async def test_needs_human_reason_reask_skips_hosted_adapter(
     assert result == VerdictResult(verdict="needs_human")
     assert invoked is False
     assert cleanup_called is False
-    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
 
 
 @pytest.mark.unit

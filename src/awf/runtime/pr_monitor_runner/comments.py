@@ -31,6 +31,7 @@ from awf.runtime.ownership import (
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE,
     _NEEDS_HUMAN_REASON_MISSING,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
@@ -336,6 +337,7 @@ async def _enforce_needs_human_reason(
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
+            reason_code=_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE,
         )
         return result
 
@@ -467,8 +469,9 @@ async def _record_needs_human_reason_missing(
     operation_id: str | None,
     operation_type: str | None,
     monitor_log: WorkspaceLogSink | None,
+    reason_code: str = _NEEDS_HUMAN_REASON_MISSING,
 ) -> None:
-    """Warn and persist the diagnostic for an unrecoverably reasonless verdict."""
+    """Warn and persist the reason-clarification diagnostic."""
     evidence = {
         "item_id": redact_audit_text(item_id, limit=200),
         "item_kind": item_kind,
@@ -480,7 +483,7 @@ async def _record_needs_human_reason_missing(
         "monitor.needs_human_reason_missing",
         workspace_id=workspace_id,
         pr_number=pr_number,
-        reason_code=_NEEDS_HUMAN_REASON_MISSING,
+        reason_code=reason_code,
         operation_id=operation_id,
         **evidence,
     )
@@ -489,7 +492,7 @@ async def _record_needs_human_reason_missing(
         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
         action=f"address_{item_kind}",
         outcome="needs_human",
-        reason_code=_NEEDS_HUMAN_REASON_MISSING,
+        reason_code=reason_code,
         pr_number=pr_number,
         status=None,
         base_branch=base_branch,
