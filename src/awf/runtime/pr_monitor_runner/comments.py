@@ -116,6 +116,32 @@ async def _prepare_reask_primary_worktree(
         )
 
 
+async def _check_reask_primary_worktree_clean(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+) -> str | None:
+    """Report primary-worktree changes after a re-ask without modifying them."""
+    from awf.runtime.validation_worktree import check_validation_worktree_clean
+
+    async def _run_git(args: list[str]) -> CommandResult:
+        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        ignore_all_ignored=True,
+    )
+    if not check.clean:
+        return check.message or "Primary worktree changed during the NEEDS_HUMAN reason re-ask."
+
+    current_head = await runner._rev_parse_head(worktree_path)
+    if current_head != restore_ref:
+        return "Primary worktree HEAD changed during the NEEDS_HUMAN reason re-ask."
+    return None
+
+
 async def _create_isolated_reask_worktree(
     runner: PullRequestMonitorRunner,
     *,
@@ -544,11 +570,11 @@ async def _enforce_needs_human_reason(
 
     async def _cleanup_reask_worktree() -> tuple[str | None, bool]:
         # The re-ask only collects a reason. Remove its tracked-only checkout
-        # before cleaning the primary worktree, so it cannot be mistaken for an
-        # untracked side effect.
+        # first, then only inspect the primary worktree. The primary checkout
+        # is never mounted into the clarification container, so any changes
+        # there are unrelated and must not be restored or deleted.
         if worktree_path is None or reask_restore_ref is None:
             return None, False
-        from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
         isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
         if isolated_cleanup_failure is not None:
@@ -559,21 +585,20 @@ async def _enforce_needs_human_reason(
                 message=isolated_cleanup_failure,
             )
             return isolated_cleanup_failure, True
-        cleanup = await _ppv._pre_push_validation_cleanup(
+        primary_check_failure = await _check_reask_primary_worktree_clean(
             runner,
             worktree_path=worktree_path,
             restore_ref=reask_restore_ref,
         )
-        if cleanup.ok:
+        if primary_check_failure is None:
             return None, False
         _log.warning(
             "monitor.needs_human_reason_reask_cleanup_failed",
             workspace_id=workspace_id,
             restore_ref=reask_restore_ref,
-            reason_code=cleanup.reason_code,
-            message=cleanup.message[:400],
+            message=primary_check_failure[:400],
         )
-        return cleanup.message, False
+        return primary_check_failure, False
 
     async def _run_reask_cleanup(*, event_name: str) -> tuple[str | None, bool]:
         try:

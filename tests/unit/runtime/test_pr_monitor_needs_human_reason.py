@@ -14,7 +14,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import agent_service_recovery, comments, pre_push_validation
+from awf.runtime.pr_monitor_runner import agent_service_recovery, comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
 from awf.runtime.pr_monitor_runner.types import (
@@ -495,15 +495,11 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "a" * 40
 
-    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> str | None:
         cleanup_calls.append(kwargs)
         if cleanup_fails:
-            return SimpleNamespace(
-                ok=False,
-                reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
-                message="could not remove re-ask edits",
-            )
-        return SimpleNamespace(ok=True)
+            return "could not inspect primary worktree"
+        return None
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -512,9 +508,9 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     with pytest.raises(type(error)) as raised:
@@ -572,10 +568,9 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
         audit_events.append(kwargs)
 
-    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
+    async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> None:
         nonlocal cleanup_called
         cleanup_called = True
-        return SimpleNamespace(ok=True)
 
     runner = SimpleNamespace(
         _deps=SimpleNamespace(adapter=SimpleNamespace(is_hosted=True)),
@@ -584,9 +579,9 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     result = await comments._enforce_needs_human_reason(
@@ -706,9 +701,8 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "b" * 40
 
-    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> None:
         cleanup_calls.append(kwargs)
-        return SimpleNamespace(ok=True)
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -726,9 +720,9 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     runner._invoke_cli_for_verdict_result = _invoke_cli_for_verdict_result
     monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     result = await comments._enforce_needs_human_reason(
@@ -782,9 +776,8 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "b" * 40
 
-    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> None:
         cleanup_calls.append(kwargs)
-        return SimpleNamespace(ok=True)
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -792,9 +785,9 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     result = await comments._enforce_needs_human_reason(
@@ -901,6 +894,132 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_preserves_primary_changes_made_during_reask(
+    tmp_path: Path,
+) -> None:
+    """A clarification cleanup cannot reset unrelated primary-worktree changes."""
+    workspace_id = "ws_reask_primary_changes"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    primary_output = worktree / "operator-output.txt"
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        primary_output.write_text("created independently\n", encoding="utf-8")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
+    assert primary_output.read_text(encoding="utf-8") == "created independently\n"
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_preserves_primary_commit_made_during_reask(
+    tmp_path: Path,
+) -> None:
+    """A clean primary worktree with a new HEAD still fails closed without reset."""
+    workspace_id = "ws_reask_primary_commit"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        _git(worktree, "add", "tracked.py")
+        _git(worktree, "commit", "-qm", "independent primary change")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
+    assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
     tmp_path: Path,
 ) -> None:
@@ -986,19 +1105,11 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
-    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(ok=True)
-
     runner = SimpleNamespace(
         _deps=SimpleNamespace(runner=_BlockingWorktreeRemoveRunner()),
         _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
         _rev_parse_head=_rev_parse_head,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
     )
 
     task = asyncio.create_task(
@@ -1051,13 +1162,9 @@ async def test_needs_human_reason_reask_reraises_cancellation_when_cleanup_fails
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "e" * 40
 
-    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> str:
         cleanup_calls.append(kwargs)
-        return SimpleNamespace(
-            ok=False,
-            reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
-            message="could not remove re-ask edits",
-        )
+        return "could not inspect primary worktree"
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -1065,9 +1172,9 @@ async def test_needs_human_reason_reask_reraises_cancellation_when_cleanup_fails
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -1144,13 +1251,9 @@ async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fa
             reason="select the deployment region",
         )
 
-    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
-        cleanup_calls.append(_kwargs)
-        return SimpleNamespace(
-            ok=False,
-            reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
-            message="could not remove re-ask edits",
-        )
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> str:
+        cleanup_calls.append(kwargs)
+        return "could not inspect primary worktree"
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "c" * 40
@@ -1165,9 +1268,9 @@ async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fa
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     result = await comments._enforce_needs_human_reason(
@@ -1221,12 +1324,8 @@ async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fa
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "d" * 40
 
-    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            ok=False,
-            reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
-            message="could not remove re-ask edits",
-        )
+    async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> str:
+        return "could not inspect primary worktree"
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -1235,9 +1334,9 @@ async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fa
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _cleanup_reask_worktree,
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
     )
 
     result = await comments._enforce_needs_human_reason(
