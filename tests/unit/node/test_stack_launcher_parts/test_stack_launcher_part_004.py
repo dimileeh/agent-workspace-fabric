@@ -47,6 +47,11 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         target="/run/awf/secrets/aws-config",
         mode="ro",
     )
+    aws_web_identity_token = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-web-identity-token",
+        target="/run/awf/secrets/aws-web-identity-token",
+        mode="ro",
+    )
     database_credentials = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/database-password",
         target="/run/awf/secrets/database-password",
@@ -64,6 +69,7 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         provider_credentials,
         aws_shared_credentials,
         aws_config,
+        aws_web_identity_token,
         database_credentials,
         bitbucket_askpass,
         AuthMount(
@@ -89,6 +95,8 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         ("AWS_PROFILE", "awf-bedrock"),
         ("AWS_SHARED_CREDENTIALS_FILE", aws_shared_credentials.target),
         ("AWS_CONFIG_FILE", aws_config.target),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", aws_web_identity_token.target),
         ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
@@ -129,6 +137,11 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
             "/home/agent/.awf/clarification-auth/2",
         ),
         ("AWS_CONFIG_FILE", "/home/agent/.awf/clarification-auth/3"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        (
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "/home/agent/.awf/clarification-auth/4",
+        ),
         ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
@@ -153,6 +166,11 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         AuthMount(
             source=aws_config.source,
             target="/home/agent/.awf/clarification-auth/3",
+            mode="ro",
+        ),
+        AuthMount(
+            source=aws_web_identity_token.source,
+            target="/home/agent/.awf/clarification-auth/4",
             mode="ro",
         ),
     )
