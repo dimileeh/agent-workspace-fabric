@@ -452,28 +452,41 @@ class AgentAdapter(ABC):
                 readiness_timeout_seconds = (
                     profile.docker.startup_timeout_seconds if profile is not None else 300
                 )
-                model_service_update = await self._runner.run(
-                    [
-                        "docker",
-                        "compose",
-                        "-p",
-                        compose_project,
-                        "-f",
-                        str(compose_file),
-                        "up",
-                        "-d",
-                        "--no-deps",
-                        "--force-recreate",
-                        "--wait",
-                        "--wait-timeout",
-                        str(readiness_timeout_seconds),
-                        *clarification_model_services,
-                    ],
-                    timeout_seconds=compose_up_capture_timeout_seconds(
-                        readiness_timeout_seconds,
-                        wait=True,
-                    ),
-                )
+                try:
+                    model_service_update = await self._runner.run(
+                        [
+                            "docker",
+                            "compose",
+                            "-p",
+                            compose_project,
+                            "-f",
+                            str(compose_file),
+                            "up",
+                            "-d",
+                            "--no-deps",
+                            "--force-recreate",
+                            "--wait",
+                            "--wait-timeout",
+                            str(readiness_timeout_seconds),
+                            *clarification_model_services,
+                        ],
+                        timeout_seconds=compose_up_capture_timeout_seconds(
+                            readiness_timeout_seconds,
+                            wait=True,
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    # The persisted network migration is not complete until
+                    # Compose has recreated the selected model sidecars. This
+                    # bounded local restore intentionally runs synchronously:
+                    # a second shutdown cancellation cannot interrupt it and
+                    # strand a legacy stack with an unreachable model service.
+                    with contextlib.suppress(OSError):
+                        _restore_compose_file(
+                            compose_file=compose_file,
+                            contents=original_compose_file,
+                        )
+                    raise
                 if not model_service_update.ok:
                     # The sidecars did not receive the new network, so roll
                     # back the persisted migration. A later re-ask can then
