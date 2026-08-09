@@ -45,6 +45,9 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
         pytest.fail("terminal re-ask error must not be replaced with a missing reason")
 
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "a" * 40
+
     async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
         cleanup_calls.append(kwargs)
         if cleanup_fails:
@@ -59,6 +62,7 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
         _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
         pre_push_validation,
@@ -194,6 +198,9 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
         return None
 
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "b" * 40
+
     async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
         cleanup_calls.append(kwargs)
         return SimpleNamespace(ok=True)
@@ -204,6 +211,7 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
         _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
     )
     (tmp_path / "ws_1").mkdir()
 
@@ -244,6 +252,71 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
 
     assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
     assert committed_messages == []
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "b" * 40,
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_preserves_post_repair_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clarification cleanup must not reset the repair commit that preceded it."""
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "b" * 40
+
+    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+        cleanup_calls.append(kwargs)
+        return SimpleNamespace(ok=True)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="a" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
     assert cleanup_calls == [
         {
             "worktree_path": tmp_path / "ws_1",
@@ -331,7 +404,7 @@ async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
             compose_file=Path("compose.yml"),
             state=None,
             task_tag=None,
-            operation_start_head=None,
+            operation_start_head="a" * 40,
             base_branch="main",
             remote_branch="awf/ws_1",
             operation_id=None,
@@ -362,6 +435,9 @@ async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
         audit_events.append(kwargs)
 
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "d" * 40
+
     async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(
             ok=False,
@@ -373,6 +449,7 @@ async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
         _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
         pre_push_validation,

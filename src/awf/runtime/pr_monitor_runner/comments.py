@@ -342,9 +342,11 @@ async def _enforce_needs_human_reason(
         return result
 
     worktree_path = runner._worktrees_root / workspace_id
-    reask_restore_ref = operation_start_head
-    if reask_restore_ref is None:
-        reask_restore_ref = await runner._rev_parse_head(worktree_path)
+    # The original repair invocation has already returned. It may have created
+    # a clean repair commit, so snapshot its resulting HEAD before the
+    # clarification-only invocation. Cleanup must preserve that repair and
+    # discard only clarification side effects.
+    reask_restore_ref = await runner._rev_parse_head(worktree_path)
     if reask_restore_ref is None:
         raise _MonitorPolicyBlockedError(
             "Could not capture a worktree restore ref before the NEEDS_HUMAN reason re-ask.",
