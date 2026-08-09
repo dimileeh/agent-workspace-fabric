@@ -148,22 +148,49 @@ async def _create_isolated_reask_worktree(
     except asyncio.CancelledError:
         # Git may have registered the worktree before cancellation reaches the
         # command runner. Remove that checkout before preserving cancellation.
-        cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
-        if cleanup_error is not None:
-            _log.warning(
-                "monitor.needs_human_reason_reask_isolated_cleanup_failed_after_creation_cancellation",
-                worktree_path=str(worktree_path),
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                message=cleanup_error,
-            )
+        await _cleanup_isolated_reask_worktree_after_creation_failure(
+            runner,
+            reask_worktree=reask_worktree,
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_creation_cancellation"
+            ),
+        )
         raise
     if not create.ok:
+        # Git can register and populate the checkout before reporting an error
+        # (for example, when a post-checkout hook fails). Do not leave that
+        # nested repository behind while treating clarification as unavailable.
+        await _cleanup_isolated_reask_worktree_after_creation_failure(
+            runner,
+            reask_worktree=reask_worktree,
+            event_name=(
+                "monitor.needs_human_reason_reask_isolated_cleanup_failed_after_creation_failure"
+            ),
+        )
         raise _MonitorPolicyBlockedError(
             "Could not create an isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
     return reask_worktree
+
+
+async def _cleanup_isolated_reask_worktree_after_creation_failure(
+    runner: PullRequestMonitorRunner,
+    *,
+    reask_worktree: _IsolatedReaskWorktree,
+    event_name: str,
+) -> None:
+    """Remove and report a checkout Git might create before it signals failure."""
+    cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
+    if cleanup_error is not None:
+        _log.warning(
+            event_name,
+            worktree_path=str(reask_worktree.source_worktree),
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=cleanup_error,
+        )
 
 
 async def _remove_isolated_reask_worktree(
