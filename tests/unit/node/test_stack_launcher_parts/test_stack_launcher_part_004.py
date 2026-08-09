@@ -277,7 +277,9 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
     )
     environment = (
         ("OPENAI_API_KEY", openai_credentials.target),
+        ("OPENAI_BASE_URL", "http://openai-sidecar:4000/v1"),
         ("ANTHROPIC_API_KEY", anthropic_credentials.target),
+        ("ANTHROPIC_BASE_URL", "http://anthropic-sidecar:4001"),
         ("GEMINI_API_KEY", gemini_credentials.target),
         ("XAI_API_KEY", xai_credentials.target),
     )
@@ -307,6 +309,7 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
 
     assert clarification_environment == (
         ("OPENAI_API_KEY", "/home/agent/.awf/clarification-auth/0"),
+        ("OPENAI_BASE_URL", "http://openai-sidecar:4000/v1"),
     )
     assert clarification_mounts == (
         AuthMount(
@@ -314,6 +317,30 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
             target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
+    )
+
+
+@pytest.mark.unit
+def test_opencode_clarification_retains_selected_anthropic_provider_base_url() -> None:
+    """An Anthropic OpenCode re-ask keeps its endpoint but not OpenAI's."""
+    environment = (
+        ("OPENAI_API_KEY", "openai-key"),
+        ("OPENAI_BASE_URL", "http://openai-sidecar:4000/v1"),
+        ("ANTHROPIC_API_KEY", "anthropic-key"),
+        ("ANTHROPIC_BASE_URL", "http://anthropic-sidecar:4001"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="anthropic/claude-sonnet",
+    )
+
+    assert clarification_environment == (
+        ("ANTHROPIC_API_KEY", "anthropic-key"),
+        ("ANTHROPIC_BASE_URL", "http://anthropic-sidecar:4001"),
     )
 
 

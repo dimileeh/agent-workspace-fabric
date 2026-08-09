@@ -146,8 +146,8 @@ _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES: dict[str, frozenset[str]] = {
             "OLLAMA_API_KEY",
         }
     ),
-    "openai": frozenset({"OPENAI_API_KEY"}),
-    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}),
+    "openai": frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL"}),
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}),
     "gemini": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
     "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
     "xai": frozenset({"XAI_API_KEY"}),
