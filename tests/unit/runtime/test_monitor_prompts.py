@@ -1088,9 +1088,9 @@ class TestReadyToMergeComment:
                     "path": "src/[critical].py\n## forged heading",
                     "line": 42,
                     "url": "https://github.example/reviews/T1)\n[forged](https://evil.example)",
-                    "body": "Read [this](https://evil.example)\n## forged body",
+                    "body": "Read [this](https://evil.example)\n## forged body ~~struck excerpt~~",
                     "verdict": "needs_human",
-                    "agent_verdict_reason": "Use `safe`\n- forged reason",
+                    "agent_verdict_reason": "Use `safe`\n- forged reason ~~struck reason~~",
                 },
                 {
                     "kind": "review",
@@ -1107,8 +1107,11 @@ class TestReadyToMergeComment:
         )
 
         assert "src/\\[critical\\].py \\#\\# forged heading:42" in body
-        assert "Read \\[this\\]\\(https://evil.example\\) \\#\\# forged body" in body
-        assert "-> reason: Use \\`safe\\` - forged reason" in body
+        assert (
+            "Read \\[this\\]\\(https://evil.example\\) \\#\\# forged body \\~\\~struck excerpt\\~\\~"
+            in body
+        )
+        assert "-> reason: Use \\`safe\\` - forged reason \\~\\~struck reason\\~\\~" in body
         assert "[alice \\#\\# forged author](https://github.example/reviews/R1)" in body
         assert (
             "https://github.example/reviews/T1%29%0A%5Bforged%5D%28https://evil.example%29" in body
