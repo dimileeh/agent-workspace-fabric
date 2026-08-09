@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.adapters.base import AgentRunResult
-from awf.runtime.pr_monitor_runner import comments
+from awf.runtime.pr_monitor_runner import comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -28,10 +28,15 @@ from awf.runtime.pr_monitor_runner.types import (
         _MonitorPolicyBlockedError("policy blocked"),
     ),
 )
+@pytest.mark.parametrize("cleanup_fails", (False, True))
 async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
     error: Exception,
+    cleanup_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Terminal repair failures must reach the fix-cycle reason-code handlers."""
+    cleanup_calls: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         raise error
@@ -39,12 +44,182 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
         pytest.fail("terminal re-ask error must not be replaced with a missing reason")
 
+    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+        cleanup_calls.append(kwargs)
+        if cleanup_fails:
+            return SimpleNamespace(
+                ok=False,
+                reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
+                message="could not remove re-ask edits",
+            )
+        return SimpleNamespace(ok=True)
+
     runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
     )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
 
     with pytest.raises(type(error)) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head="a" * 40,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value is error
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "a" * 40,
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clarification re-ask must discard edits instead of committing them."""
+    committed_messages: list[str] = []
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: NEEDS_HUMAN: select the deployment region",
+            stderr="",
+        )
+
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        committed_messages.append(str(kwargs["message"]))
+        return True
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+        cleanup_calls.append(kwargs)
+        return SimpleNamespace(ok=True)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+    (tmp_path / "ws_1").mkdir()
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        return await comments._invoke_cli_for_verdict_result(runner, **kwargs)
+
+    runner._invoke_cli_for_verdict_result = _invoke_cli_for_verdict_result
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="b" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert committed_messages == []
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "b" * 40,
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed re-ask cleanup must stop the cycle before another item can commit it."""
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
+        cleanup_calls.append(_kwargs)
+        return SimpleNamespace(
+            ok=False,
+            reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
+            message="could not remove re-ask edits",
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "c" * 40
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="could not remove re-ask edits") as raised:
         await comments._enforce_needs_human_reason(
             runner,
             result=VerdictResult(verdict="needs_human"),
@@ -69,75 +244,64 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
             monitor_log=None,
         )
 
-    assert raised.value is error
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "c" * 40,
+        }
+    ]
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
+async def test_needs_human_reason_reask_requires_a_restore_ref(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A clarification re-ask must not turn unexpected edits into a PR commit."""
-    committed_messages: list[str] = []
+    """Do not run the re-ask when its non-mutating cleanup cannot be anchored."""
+    invoked = False
 
-    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
-        return False
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        nonlocal invoked
+        invoked = True
+        return VerdictResult(verdict="needs_human", reason="select a region")
 
-    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
-        return AgentRunResult(
-            returncode=0,
-            stdout="AWF-VERDICT: NEEDS_HUMAN: select the deployment region",
-            stderr="",
-        )
-
-    async def _commit_dirty_worktree(**kwargs: object) -> bool:
-        committed_messages.append(str(kwargs["message"]))
-        return True
-
-    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+    async def _rev_parse_head(_worktree_path: Path) -> None:
         return None
 
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
-        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
-        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
-        _commit_dirty_worktree=_commit_dirty_worktree,
-        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
-    )
-    (tmp_path / "ws_1").mkdir()
-
-    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
-        return await comments._invoke_cli_for_verdict_result(runner, **kwargs)
-
-    runner._invoke_cli_for_verdict_result = _invoke_cli_for_verdict_result
-    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
-
-    result = await comments._enforce_needs_human_reason(
-        runner,
-        result=VerdictResult(verdict="needs_human"),
-        original_prompt="original review task",
-        workspace_id="ws_1",
-        pr_number=1,
-        item_id="thread_1",
-        item_kind="thread",
-        item_author=None,
-        item_path=None,
-        item_line=None,
-        commit_message="fix: address thread_1",
-        compose_project="project",
-        compose_file=Path("compose.yml"),
-        state=None,
-        task_tag=None,
-        operation_start_head=None,
-        base_branch="main",
-        remote_branch="awf/ws_1",
-        operation_id=None,
-        operation_type=None,
-        monitor_log=None,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
     )
 
-    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
-    assert committed_messages == []
+    with pytest.raises(
+        _MonitorPolicyBlockedError, match="Could not capture a worktree restore ref"
+    ):
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert invoked is False
 
 
 @pytest.mark.unit

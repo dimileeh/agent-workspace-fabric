@@ -310,10 +310,46 @@ async def _enforce_needs_human_reason(
         _needs_human_reason_missing,
         _sanitize_verdict_reason,
     )
+    from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
     result = replace(result, reason=_sanitize_verdict_reason(result.reason))
     if not _needs_human_reason_missing(result):
         return result
+
+    worktree_path = runner._worktrees_root / workspace_id
+    reask_restore_ref = operation_start_head
+    if reask_restore_ref is None:
+        reask_restore_ref = await runner._rev_parse_head(worktree_path)
+    if reask_restore_ref is None:
+        raise _MonitorPolicyBlockedError(
+            "Could not capture a worktree restore ref before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    async def _cleanup_reask_worktree() -> None:
+        # The re-ask only collects a reason and must not leave edits for the
+        # next item in the fix cycle to commit under a different message.
+        from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+
+        cleanup = await _ppv._pre_push_validation_cleanup(
+            runner,
+            worktree_path=worktree_path,
+            restore_ref=reask_restore_ref,
+        )
+        if cleanup.ok:
+            return
+        _log.warning(
+            "monitor.needs_human_reason_reask_cleanup_failed",
+            workspace_id=workspace_id,
+            restore_ref=reask_restore_ref,
+            reason_code=cleanup.reason_code,
+            message=cleanup.message[:400],
+        )
+        raise _MonitorPolicyBlockedError(
+            f"Could not clean NEEDS_HUMAN reason re-ask worktree: {cleanup.message}",
+            reason_code=cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
@@ -338,8 +374,19 @@ async def _enforce_needs_human_reason(
         _MonitorMirrorHooksPathRepairFailedError,
         _MonitorPolicyBlockedError,
     ):
+        try:
+            await _cleanup_reask_worktree()
+        except Exception as cleanup_exc:
+            # Preserve the terminal result that already stops the fix cycle;
+            # cleanup failure is recorded but cannot permit another item to run.
+            _log.warning(
+                "monitor.needs_human_reason_reask_cleanup_failed_after_terminal_error",
+                workspace_id=workspace_id,
+                error=redact_audit_text(str(cleanup_exc), limit=240),
+            )
         raise
     except Exception as exc:
+        await _cleanup_reask_worktree()
         _log.warning(
             "monitor.needs_human_reason_reask_failed",
             workspace_id=workspace_id,
@@ -349,6 +396,7 @@ async def _enforce_needs_human_reason(
             error=redact_audit_text(str(exc), limit=240),
         )
     else:
+        await _cleanup_reask_worktree()
         reask_result = replace(
             reask_result,
             reason=_sanitize_verdict_reason(reask_result.reason),
