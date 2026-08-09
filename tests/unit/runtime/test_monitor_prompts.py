@@ -906,6 +906,18 @@ class TestReadyToMergeComment:
         assert "ask @acme/security to approve" not in body
 
     @pytest.mark.unit
+    def test_blocker_reason_truncates_long_agent_reason(self) -> None:
+        long_reason = "z" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason=long_reason,
+        )
+
+        assert f"because {'z' * 160}…" in body
+        assert "z" * 161 not in body
+
+    @pytest.mark.unit
     def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
         long_body = "x" * 200
         body = ready_to_merge_comment(
@@ -946,6 +958,31 @@ class TestReadyToMergeComment:
         assert "-> reason: Choose whether this remains blocking." in body
         assert "[src/other.py:7](https://github.example/reviews/T2)" in body
         assert "-> ⚠ no reason given by agent" in body
+
+    @pytest.mark.unit
+    def test_blocker_item_truncates_long_agent_verdict_reason(self) -> None:
+        long_reason = "y" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": long_reason,
+                },
+            ),
+        )
+
+        assert f"-> reason: {'y' * 160}…" in body
+        assert "y" * 161 not in body
 
     @pytest.mark.unit
     def test_blocker_items_render_path_without_line_anchor(self) -> None:

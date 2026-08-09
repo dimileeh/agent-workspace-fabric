@@ -465,7 +465,9 @@ def ready_to_merge_comment(
     gates are green.
     """
     if blocker_reason:
-        safe_blocker_reason = _redact_and_escape_markdown_inline(blocker_reason)
+        safe_blocker_reason = _redact_and_escape_markdown_inline(
+            _truncate_blocker_excerpt(redact_secrets(blocker_reason))
+        )
         body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
             f"AWF did not auto-merge because {safe_blocker_reason}.\n\n"
@@ -554,7 +556,9 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
     excerpt = _redact_and_escape_markdown_inline(
         _truncate_blocker_excerpt(redact_secrets(_item_text(item, "body")))
     )
-    reason = _redact_and_escape_markdown_inline(_item_text(item, "agent_verdict_reason"))
+    reason = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "agent_verdict_reason")))
+    )
     if verdict == "changes_requested":
         return f"- {location_text} [{verdict}] {excerpt}"
     reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
