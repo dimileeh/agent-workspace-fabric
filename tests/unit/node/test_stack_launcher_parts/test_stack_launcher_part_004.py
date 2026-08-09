@@ -169,6 +169,37 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
 
 
 @pytest.mark.unit
+def test_clarification_environment_computes_provider_names_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clarification reuses provider names while staging its selected mounts."""
+    calls = 0
+    original = stack_launcher_mod._clarification_model_provider_environment_names  # noqa: SLF001
+
+    def _record_provider_names(
+        agent_environment: tuple[tuple[str, str], ...],
+    ) -> frozenset[str]:
+        nonlocal calls
+        calls += 1
+        return original(agent_environment)
+
+    monkeypatch.setattr(
+        stack_launcher_mod,
+        "_clarification_model_provider_environment_names",
+        _record_provider_names,
+    )
+
+    environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        (("OPENAI_API_KEY", "token"),),
+        auth_mounts=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+    )
+
+    assert environment == (("OPENAI_API_KEY", "token"),)
+    assert calls == 1
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_launch_notifies_compose_up_started_once() -> None:
     """The compose-start callback fires once when the first compose up starts."""
     compose = _RecordingCompose()

@@ -123,16 +123,14 @@ def _clarification_agent_environment(
 ) -> tuple[tuple[str, str], ...]:
     """Keep only model-provider settings and rewrite staged file references."""
 
+    provider_environment_names = _clarification_model_provider_environment_names(agent_environment)
     source_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
         agent_environment=agent_environment,
         mirror_target=mirror_target,
+        provider_environment_names=provider_environment_names,
     )
-    staged_mounts = _clarification_auth_mounts(
-        auth_mounts,
-        agent_environment=agent_environment,
-        mirror_target=mirror_target,
-    )
+    staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
     staged_targets = {
         source.target: staged.target
         for source, staged in zip(source_mounts, staged_mounts, strict=True)
@@ -142,8 +140,7 @@ def _clarification_agent_environment(
     return tuple(
         (name, staged_targets.get(value, value))
         for name, value in agent_environment
-        if name in _clarification_model_provider_environment_names(agent_environment)
-        and not _is_clarification_git_auth_environment(name)
+        if name in provider_environment_names and not _is_clarification_git_auth_environment(name)
     )
 
 
@@ -182,19 +179,27 @@ def _clarification_auth_mounts(
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
 
+    return _clarification_staged_provider_auth_mounts(
+        _clarification_provider_auth_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=mirror_target,
+        )
+    )
+
+
+def _clarification_staged_provider_auth_mounts(
+    provider_auth_mounts: Sequence[AuthMount],
+) -> tuple[AuthMount, ...]:
+    """Stage selected provider mounts beneath the clarification agent home."""
+
     return tuple(
         replace(
             mount,
             mode="ro",
             target=_clarification_auth_target(mount.target, index=index),
         )
-        for index, mount in enumerate(
-            _clarification_provider_auth_mounts(
-                auth_mounts,
-                agent_environment=agent_environment,
-                mirror_target=mirror_target,
-            )
-        )
+        for index, mount in enumerate(provider_auth_mounts)
     )
 
 
@@ -203,10 +208,14 @@ def _clarification_provider_auth_mounts(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
+    provider_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return model-provider authentication mounts available to clarification."""
 
-    provider_mount_targets = _clarification_model_provider_auth_mount_targets(agent_environment)
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        provider_environment_names=provider_environment_names,
+    )
 
     return tuple(
         mount
@@ -217,16 +226,17 @@ def _clarification_provider_auth_mounts(
 
 def _clarification_model_provider_auth_mount_targets(
     agent_environment: tuple[tuple[str, str], ...],
+    *,
+    provider_environment_names: frozenset[str] | None = None,
 ) -> frozenset[str]:
     """Return known and environment-referenced model-provider mount targets."""
 
+    names = provider_environment_names or _clarification_model_provider_environment_names(
+        agent_environment
+    )
     return (
         _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS
-        | frozenset(
-            value
-            for name, value in agent_environment
-            if name in _clarification_model_provider_environment_names(agent_environment)
-        )
+        | frozenset(value for name, value in agent_environment if name in names)
     ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 
 
