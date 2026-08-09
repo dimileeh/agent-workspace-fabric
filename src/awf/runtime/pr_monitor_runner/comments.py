@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import stat
 import tempfile
@@ -602,6 +603,18 @@ async def _enforce_needs_human_reason(
             # cleanup failure is recorded but cannot permit another item to run.
             _log.warning(
                 "monitor.needs_human_reason_reask_cleanup_failed_after_terminal_error",
+                workspace_id=workspace_id,
+                error=redact_audit_text(str(cleanup_exc), limit=240),
+            )
+        raise
+    except asyncio.CancelledError:
+        try:
+            await _cleanup_reask_worktree()
+        except Exception as cleanup_exc:
+            # Cancellation still owns control flow, but record a cleanup failure
+            # so stranded clarification edits cannot be mistaken for intentional.
+            _log.warning(
+                "monitor.needs_human_reason_reask_cleanup_failed_after_cancellation",
                 workspace_id=workspace_id,
                 error=redact_audit_text(str(cleanup_exc), limit=240),
             )

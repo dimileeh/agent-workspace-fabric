@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -542,6 +543,129 @@ async def test_needs_human_reason_reask_restores_ignored_files_before_continuing
     assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
     assert not generated.exists()
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Cancellation must not leave clarification edits for the next fix-cycle item."""
+    workspace_id = "ws_cancelled_reask"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    config = worktree / ".env"
+    config.write_text("MODE=original\n", encoding="utf-8")
+    generated = worktree / "generated.env"
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        config.write_text("MODE=clarification-edit\n", encoding="utf-8")
+        generated.write_text("GENERATED=during-reask\n", encoding="utf-8")
+        raise asyncio.CancelledError
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert config.read_text(encoding="utf-8") == "MODE=original\n"
+    assert not generated.exists()
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_reraises_cancellation_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure must not replace the monitor's cancellation signal."""
+    cleanup_calls: list[dict[str, object]] = []
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        raise asyncio.CancelledError
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "e" * 40
+
+    async def _cleanup_reask_worktree(_runner: object, **kwargs: object) -> SimpleNamespace:
+        cleanup_calls.append(kwargs)
+        return SimpleNamespace(
+            ok=False,
+            reason_code="VALIDATION_WORKTREE_CLEANUP_FAILED",
+            message="could not remove re-ask edits",
+        )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "e" * 40,
+        }
+    ]
 
 
 @pytest.mark.unit
