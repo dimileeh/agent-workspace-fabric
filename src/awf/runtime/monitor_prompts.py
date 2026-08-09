@@ -532,7 +532,7 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
     path = _redact_and_escape_markdown_inline(_item_text(item, "path"))
     line = item.get("line")
     line_text = _redact_and_escape_markdown_inline(str(line)) if line is not None else ""
-    location = f"{path}:{line_text}" if path and line is not None else author
+    location = f"{path}:{line_text}" if path and line is not None else path or author
     url = _item_text(item, "url")
     location_text = (
         f"[{location}]({_escape_markdown_link_destination(redact_secrets(url))})"

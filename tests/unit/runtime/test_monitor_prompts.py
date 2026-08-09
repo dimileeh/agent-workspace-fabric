@@ -937,6 +937,29 @@ class TestReadyToMergeComment:
         assert "-> ⚠ no reason given by agent" in body
 
     @pytest.mark.unit
+    def test_blocker_items_render_path_without_line_anchor(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": None,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose whether this remains blocking.",
+                },
+            ),
+        )
+
+        assert "[src/monitor.py](https://github.example/reviews/T1)" in body
+
+    @pytest.mark.unit
     def test_blocker_items_cap_combined_groups_at_eight(self) -> None:
         blocker_items = tuple(
             {
