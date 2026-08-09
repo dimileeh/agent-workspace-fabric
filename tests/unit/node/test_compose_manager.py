@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import (
     AuthMount,
     CompanionService,
@@ -106,6 +107,7 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     assert upgrade_persisted_clarification_service(
         compose_file=compose_file,
         workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.codex,
     )
 
     upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -119,23 +121,19 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     assert clarification["environment"] == {
         "OPENAI_API_KEY": "${OPENAI_API_KEY}",
         "OPENAI_BASE_URL": str(tmp_path / "mirror.git"),
-        "CLAUDE_CODE_USE_BEDROCK": "1",
-        "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
-        "GOOGLE_APPLICATION_CREDENTIALS": "/home/agent/.awf/clarification-auth/2",
         "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.codex",
-        "AWF_CLARIFICATION_AUTH_TARGET_1": "/home/agent/.config/gcloud",
-        "AWF_CLARIFICATION_AUTH_TARGET_2": "/home/agent/.awf/clarification-auth/2",
     }
     assert clarification["volumes"] == [
         f"{tmp_path / 'codex'}:/run/awf/clarification-auth/0:ro",
-        f"{tmp_path / 'gcloud'}:/run/awf/clarification-auth/1:ro",
-        f"{tmp_path / 'adc.json'}:/run/awf/clarification-auth/2:ro",
     ]
     assert str(tmp_path / "worktree") not in "\n".join(clarification["volumes"])
     assert str(tmp_path / "mirror.git") not in "\n".join(clarification["volumes"])
     assert str(tmp_path / "gh") not in "\n".join(clarification["volumes"])
     assert "GITHUB_TOKEN" not in clarification["environment"]
     assert "GIT_ASKPASS" not in clarification["environment"]
+    assert "CLAUDE_CODE_USE_BEDROCK" not in clarification["environment"]
+    assert "AWS_SECRET_ACCESS_KEY" not in clarification["environment"]
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in clarification["environment"]
     assert upgraded["networks"]["clarification_egress_net"] == {
         "name": "awf-ws_legacy-clarification-egress-net",
         "internal": True,
@@ -143,6 +141,7 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     assert not upgrade_persisted_clarification_service(
         compose_file=compose_file,
         workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.codex,
     )
 
 

@@ -36,7 +36,7 @@ from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import pr_adoption_is_hosted
-from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
+from awf.db.enums import AgentRuntime, EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -341,6 +341,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
@@ -579,6 +580,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,

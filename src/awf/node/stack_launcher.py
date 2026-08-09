@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from awf.common.git_auth import apply_bitbucket_agent_git_auth
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
+from awf.db.enums import AgentRuntime
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_images import CompanionImageBuilder
 from awf.node.companion_services import (
@@ -40,7 +41,6 @@ from awf.node.secret_mounts import (
     SecretLeaseResolutionError,
 )
 from awf.profiles.compose import (
-    AGENT_AUTH_ENV_VARS,
     agent_environment_with_declared_secret_leases,
     agent_environment_with_host_auth,
     profile_agent_environment,
@@ -90,7 +90,61 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
-_CLARIFICATION_MODEL_PROVIDER_ENV_NAMES = frozenset(AGENT_AUTH_ENV_VARS)
+_CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
+    AgentRuntime.codex: frozenset(
+        {
+            "OPENAI_API_KEY",
+            "OPENAI_API_TOKEN",
+            "CODEX_API_KEY",
+            "CODEX_AUTH_TOKEN",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_ORGANIZATION",
+            "OPENAI_PROJECT",
+            "OPENAI_PROJECT_ID",
+        }
+    ),
+    AgentRuntime.claude_code: frozenset(
+        {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        }
+    ),
+    AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
+    AgentRuntime.gemini: frozenset(
+        {
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_AUTH_MECHANISM",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+        }
+    ),
+    AgentRuntime.opencode: frozenset(
+        {
+            "AWF_OPENCODE_OLLAMA_BASE_URL",
+            "OLLAMA_HOST",
+            "OLLAMA_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "XAI_API_KEY",
+            "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        }
+    ),
+    AgentRuntime.grok: frozenset({"XAI_API_KEY"}),
+}
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES = frozenset(
     {
         "AWS_ACCESS_KEY_ID",
@@ -110,11 +164,17 @@ _CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
     {
         "ANTHROPIC_VERTEX_PROJECT_ID",
         "CLOUD_ML_REGION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
-_CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS = (
-    frozenset(_HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
-)
+_CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = {
+    AgentRuntime.codex: frozenset({"/home/agent/.codex"}),
+    AgentRuntime.claude_code: frozenset({"/home/agent/.claude", "/home/agent/.claude.json"}),
+    AgentRuntime.cursor: frozenset(),
+    AgentRuntime.gemini: frozenset({"/home/agent/.config/gcloud", "/home/agent/.gemini"}),
+    AgentRuntime.opencode: frozenset({"/home/agent/.config/opencode", "/home/agent/.ollama"}),
+    AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
+}
 _CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
 _AGENT_HOME = "/home/agent"
 
@@ -124,14 +184,19 @@ def _clarification_agent_environment(
     *,
     auth_mounts: Sequence[AuthMount],
     mirror_target: str,
+    agent_runtime: AgentRuntime,
 ) -> tuple[tuple[str, str], ...]:
     """Keep only model-provider settings and rewrite staged file references."""
 
-    provider_environment_names = _clarification_model_provider_environment_names(agent_environment)
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+    )
     source_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
         agent_environment=agent_environment,
         mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
         provider_environment_names=provider_environment_names,
     )
     staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
@@ -157,20 +222,28 @@ def _is_clarification_git_auth_environment(name: str) -> bool:
 
 def _clarification_model_provider_environment_names(
     agent_environment: tuple[tuple[str, str], ...],
+    *,
+    agent_runtime: AgentRuntime,
 ) -> frozenset[str]:
-    """Return provider env names available to a clarification re-ask.
+    """Return selected runtime env names available to a clarification re-ask.
 
     Claude Code's Bedrock and Vertex toggles need their backend-specific
     credentials and settings. Keep those declared settings only when the
-    corresponding backend is enabled, rather than admitting unrelated AWS or
-    Google configuration to every clarification container.
+    corresponding backend is enabled, and keep every other runtime's settings
+    out of the clarification container.
     """
 
     environment_values = dict(agent_environment)
-    provider_names = set(_CLARIFICATION_MODEL_PROVIDER_ENV_NAMES)
-    if environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+    provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
+    if (
+        agent_runtime is AgentRuntime.claude_code
+        and environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+    ):
         provider_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
-    if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1":
+    if (
+        agent_runtime is AgentRuntime.claude_code
+        and environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
+    ):
         provider_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(provider_names)
 
@@ -180,6 +253,7 @@ def _clarification_auth_mounts(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
+    agent_runtime: AgentRuntime,
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
 
@@ -188,6 +262,7 @@ def _clarification_auth_mounts(
             auth_mounts,
             agent_environment=agent_environment,
             mirror_target=mirror_target,
+            agent_runtime=agent_runtime,
         )
     )
 
@@ -212,12 +287,14 @@ def _clarification_provider_auth_mounts(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
+    agent_runtime: AgentRuntime,
     provider_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return model-provider authentication mounts available to clarification."""
 
     provider_mount_targets = _clarification_model_provider_auth_mount_targets(
         agent_environment,
+        agent_runtime=agent_runtime,
         provider_environment_names=provider_environment_names,
     )
 
@@ -231,15 +308,17 @@ def _clarification_provider_auth_mounts(
 def _clarification_model_provider_auth_mount_targets(
     agent_environment: tuple[tuple[str, str], ...],
     *,
+    agent_runtime: AgentRuntime,
     provider_environment_names: frozenset[str] | None = None,
 ) -> frozenset[str]:
     """Return known and environment-referenced model-provider mount targets."""
 
     names = provider_environment_names or _clarification_model_provider_environment_names(
-        agent_environment
+        agent_environment,
+        agent_runtime=agent_runtime,
     )
     return (
-        _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS
+        _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
         | frozenset(value for name, value in agent_environment if name in names)
     ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 
@@ -259,6 +338,7 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
+    agent_runtime: AgentRuntime = AgentRuntime.codex
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
@@ -520,6 +600,7 @@ class ComposeStackLauncher:
             auth_mounts,
             agent_environment=agent_environment,
             mirror_target=str(layout.mirror_path),
+            agent_runtime=request.agent_runtime,
         )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
@@ -536,6 +617,7 @@ class ComposeStackLauncher:
                 agent_environment,
                 auth_mounts=auth_mounts,
                 mirror_target=str(layout.mirror_path),
+                agent_runtime=request.agent_runtime,
             ),
             clarification_auth_mounts=clarification_auth_mounts,
             git_name=DEFAULT_GIT_AUTHOR_NAME,

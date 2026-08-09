@@ -35,6 +35,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.db.enums import AgentRuntime
 
 _log = get_logger(__name__)
 
@@ -104,7 +105,12 @@ def _legacy_clarification_entrypoint(mount_count: int) -> list[str]:
     return ["sh", "-ec", "\n".join(lines), "--"]
 
 
-def upgrade_persisted_clarification_service(*, compose_file: Path, workspace_id: str) -> bool:
+def upgrade_persisted_clarification_service(
+    *,
+    compose_file: Path,
+    workspace_id: str,
+    agent_runtime: AgentRuntime,
+) -> bool:
     """Add clarification safely to a legacy persisted stack, if needed.
 
     Resume and monitor paths intentionally retain their original rendered stack
@@ -159,11 +165,13 @@ def upgrade_persisted_clarification_service(*, compose_file: Path, workspace_id:
         provider_auth_mounts,
         agent_environment=agent_environment_items,
         mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
     )
     provider_environment = _clarification_agent_environment(
         agent_environment_items,
         auth_mounts=provider_auth_mounts,
         mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
     )
     clarification_environment = dict(provider_environment)
     clarification_volumes: list[str] = []

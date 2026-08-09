@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.db.enums import AgentRuntime
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.companion_services import (
     CompanionEnvironmentSecretRef,
@@ -24,8 +25,8 @@ from tests.unit.node.test_stack_launcher_parts._helpers import (
 
 
 @pytest.mark.unit
-def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
-    """Clarification keeps model credentials but never Git repair credentials."""
+def test_clarification_inputs_retain_only_selected_adapter_credentials() -> None:
+    """Codex clarification cannot read credentials for other coding adapters."""
     mirror = "/host/awf/git/mirrors/repo.git"
     codex_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/codex",
@@ -116,61 +117,81 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         auth_mounts,
         agent_environment=agent_environment,
         mirror_target=mirror,
+        agent_runtime=AgentRuntime.codex,
     )
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         agent_environment,
         auth_mounts=auth_mounts,
         mirror_target=mirror,
+        agent_runtime=AgentRuntime.codex,
     )
 
-    assert environment == (
-        ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+    assert environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert mounts == (AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),)
+
+
+@pytest.mark.unit
+def test_clarification_inputs_retain_selected_claude_backend_credentials() -> None:
+    """Claude clarification preserves only the enabled Claude backend inputs."""
+    claude_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/claude",
+        target="/home/agent/.claude",
+        mode="rw",
+    )
+    aws_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-credentials",
+        target="/run/awf/secrets/aws-credentials",
+        mode="ro",
+    )
+    google_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
+        target="/run/awf/secrets/gcp/credentials.json",
+        mode="ro",
+    )
+    environment = (
+        ("OPENAI_API_KEY", "unrelated-openai-token"),
+        ("ANTHROPIC_API_KEY", "anthropic-token"),
         ("CLAUDE_CODE_USE_BEDROCK", "1"),
-        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
-        ("AWS_SECRET_ACCESS_KEY", "profile-secret"),
-        ("AWS_SESSION_TOKEN", "profile-session-token"),
-        ("AWS_REGION", "us-west-2"),
-        ("AWS_DEFAULT_REGION", "us-west-2"),
-        ("AWS_PROFILE", "awf-bedrock"),
-        (
-            "AWS_SHARED_CREDENTIALS_FILE",
-            "/home/agent/.awf/clarification-auth/2",
-        ),
-        ("AWS_CONFIG_FILE", "/home/agent/.awf/clarification-auth/3"),
-        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
-        (
-            "AWS_WEB_IDENTITY_TOKEN_FILE",
-            "/home/agent/.awf/clarification-auth/4",
-        ),
-        ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
+        ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
+        ("AWS_SHARED_CREDENTIALS_FILE", aws_credentials.target),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
-        ("CLOUD_ML_REGION", "us-central1"),
-        (
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "/home/agent/.awf/clarification-auth/1",
-        ),
+        ("GOOGLE_APPLICATION_CREDENTIALS", google_credentials.target),
     )
-    assert mounts == (
-        AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),
+    mounts = (claude_auth, aws_credentials, google_credentials)
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == (
+        ("ANTHROPIC_API_KEY", "anthropic-token"),
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.awf/clarification-auth/1"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/2"),
+    )
+    assert clarification_mounts == (
+        AuthMount(source=claude_auth.source, target=claude_auth.target, mode="ro"),
         AuthMount(
-            source=provider_credentials.source,
+            source=aws_credentials.source,
             target="/home/agent/.awf/clarification-auth/1",
             mode="ro",
         ),
         AuthMount(
-            source=aws_shared_credentials.source,
+            source=google_credentials.source,
             target="/home/agent/.awf/clarification-auth/2",
-            mode="ro",
-        ),
-        AuthMount(
-            source=aws_config.source,
-            target="/home/agent/.awf/clarification-auth/3",
-            mode="ro",
-        ),
-        AuthMount(
-            source=aws_web_identity_token.source,
-            target="/home/agent/.awf/clarification-auth/4",
             mode="ro",
         ),
     )
@@ -189,6 +210,7 @@ def test_clarification_inputs_exclude_git_mount_selected_by_provider_variable() 
         (git_auth,),
         agent_environment=(("OPENAI_API_KEY", git_auth.target),),
         mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.codex,
     )
 
     assert mounts == ()
@@ -207,6 +229,7 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
         ),
         auth_mounts=(),
         mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
     )
 
     assert environment == (
@@ -225,10 +248,12 @@ def test_clarification_environment_computes_provider_names_once(
 
     def _record_provider_names(
         agent_environment: tuple[tuple[str, str], ...],
+        *,
+        agent_runtime: AgentRuntime,
     ) -> frozenset[str]:
         nonlocal calls
         calls += 1
-        return original(agent_environment)
+        return original(agent_environment, agent_runtime=agent_runtime)
 
     monkeypatch.setattr(
         stack_launcher_mod,
@@ -240,6 +265,7 @@ def test_clarification_environment_computes_provider_names_once(
         (("OPENAI_API_KEY", "token"),),
         auth_mounts=(),
         mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.codex,
     )
 
     assert environment == (("OPENAI_API_KEY", "token"),)

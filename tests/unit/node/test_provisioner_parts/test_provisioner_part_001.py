@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.enums import EgressDecision, WorkspaceStatus
+from awf.db.enums import AgentRuntime, EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -233,7 +233,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="codex",
+                agent="claude_code",
                 test_commands=[],
             )
             await s.commit()
@@ -247,6 +247,7 @@ class TestSuccess:
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
         assert request.layout.branch_name == f"awf/{ws_id}"
         assert request.profile.name == "generic"
+        assert request.agent_runtime is AgentRuntime.claude_code
         assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
 
         async with session_factory() as s:
