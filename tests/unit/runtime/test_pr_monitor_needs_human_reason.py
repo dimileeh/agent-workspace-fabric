@@ -275,6 +275,32 @@ async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Cancellation after Git creates the checkout cannot strand the re-ask worktree."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_create_cancelled")
+
+    class _CancelAfterWorktreeAddRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            result = await super().run(args)
+            if "worktree" in args and "add" in args:
+                raise asyncio.CancelledError
+            return result
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_CancelAfterWorktreeAddRunner()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
     """A failed isolated-checkout teardown remains a policy-blocking cleanup failure."""
     command_runner = FakeCommandRunner()

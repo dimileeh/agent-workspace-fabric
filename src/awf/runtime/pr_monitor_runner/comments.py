@@ -130,26 +130,33 @@ async def _create_isolated_reask_worktree(
 
     await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
     path = worktree_path / f"{_ISOLATED_REASK_WORKTREE_PREFIX}{uuid4().hex}"
-    create = await runner._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "worktree",
-            "add",
-            "--detach",
-            str(path),
-            restore_ref,
-        )
+    reask_worktree = _IsolatedReaskWorktree(
+        source_worktree=worktree_path,
+        path=path,
     )
+    try:
+        create = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "worktree",
+                "add",
+                "--detach",
+                str(path),
+                restore_ref,
+            )
+        )
+    except asyncio.CancelledError:
+        # Git may have registered the worktree before cancellation reaches the
+        # command runner. Remove that checkout before preserving cancellation.
+        await _remove_isolated_reask_worktree(runner, reask_worktree)
+        raise
     if not create.ok:
         raise _MonitorPolicyBlockedError(
             "Could not create an isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
-    return _IsolatedReaskWorktree(
-        source_worktree=worktree_path,
-        path=path,
-    )
+    return reask_worktree
 
 
 async def _remove_isolated_reask_worktree(
