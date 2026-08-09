@@ -51,6 +51,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
+from awf.node.compose_manager import upgrade_persisted_clarification_service
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
@@ -406,6 +407,16 @@ class AgentAdapter(ABC):
                 git_preparation=git_preparation,
                 profile=profile,
                 worktree_path=worktree_path,
+            )
+        if isolated_worktree_host_path is not None and compose_file.exists():
+            # Existing PR monitors deliberately reuse their persisted Compose
+            # definition. Upgrade that file just before the isolated re-ask so
+            # stacks launched before the clarification service existed can
+            # still run the follow-up without re-rendering profile state.
+            await asyncio.to_thread(
+                upgrade_persisted_clarification_service,
+                compose_file=compose_file,
+                workspace_id=workspace_id or compose_project.removeprefix("awf_"),
             )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never

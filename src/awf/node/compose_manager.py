@@ -18,14 +18,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import secrets
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from awf.common.audit import redact_audit_value
@@ -49,6 +52,182 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
     "unknown flag: --remove-orphans",
 )
+
+
+def _legacy_bind_mount(value: object) -> AuthMount | None:
+    """Parse the string bind syntax emitted by older AWF Compose templates."""
+    if not isinstance(value, str):
+        return None
+    parts = value.rsplit(":", 2)
+    if len(parts) == 2:
+        source, target = parts
+        mode = "ro"
+    elif len(parts) == 3:
+        source, target, mode = parts
+    else:
+        return None
+    if not source or not target or not target.startswith("/"):
+        return None
+    return AuthMount(source=source, target=target, mode=mode)
+
+
+def _legacy_shared_git_mirror_target(auth_mounts: list[AuthMount]) -> str:
+    """Return the persisted shared-mirror target, or a harmless sentinel."""
+    return next(
+        (
+            mount.target
+            for mount in auth_mounts
+            if mount.source == mount.target and mount.target.endswith(".git")
+        ),
+        "/__awf_legacy_shared_git_mirror__",
+    )
+
+
+def _legacy_clarification_entrypoint(mount_count: int) -> list[str]:
+    """Copy read-only provider auth into the clarification runtime's home."""
+    lines: list[str] = []
+    for index in range(mount_count):
+        target = f"$AWF_CLARIFICATION_AUTH_TARGET_{index}"
+        source = f"/run/awf/clarification-auth/{index}"
+        lines.extend(
+            (
+                f'mkdir -p "$(dirname "{target}")"',
+                f"if [ -d {source} ]; then",
+                f'  mkdir -p "{target}"',
+                f'  cp -a {source}/. "{target}/"',
+                "else",
+                f'  cp -a {source} "{target}"',
+                "fi",
+            )
+        )
+    lines.append('exec "$@"')
+    return ["sh", "-ec", "\n".join(lines), "--"]
+
+
+def upgrade_persisted_clarification_service(*, compose_file: Path, workspace_id: str) -> bool:
+    """Add clarification safely to a legacy persisted stack, if needed.
+
+    Resume and monitor paths intentionally retain their original rendered stack
+    rather than re-resolving a profile. This narrowly augments those generated
+    files from the persisted agent inputs, preserving services while denying the
+    clarification container the primary worktree and Git credentials.
+    """
+    try:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"could not read persisted Compose file {compose_file}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("persisted Compose file must contain a mapping")
+    services = document.get("services")
+    if not isinstance(services, dict):
+        raise ValueError("persisted Compose file must contain a services mapping")
+    if "clarification" in services:
+        return False
+    agent = services.get("agent")
+    if not isinstance(agent, dict):
+        raise ValueError("persisted Compose file must contain an agent service")
+    image = agent.get("image")
+    if not isinstance(image, str) or not image:
+        raise ValueError("persisted agent service must declare an image")
+    # Import lazily: stack launching imports this manager, while a compatibility
+    # upgrade runs only when an isolated clarification invocation is requested.
+    # Reuse the current allowlist so legacy migration cannot drift from the
+    # regular clarification service's credential isolation policy.
+    from awf.node.stack_launcher import (
+        _clarification_agent_environment,
+        _clarification_auth_mounts,
+    )
+
+    raw_environment = agent.get("environment", {})
+    agent_environment = (
+        {str(name): value for name, value in raw_environment.items() if isinstance(value, str)}
+        if isinstance(raw_environment, Mapping)
+        else {}
+    )
+    raw_volumes = agent.get("volumes", ())
+    auth_mounts = (
+        [mount for value in raw_volumes if (mount := _legacy_bind_mount(value)) is not None]
+        if isinstance(raw_volumes, list)
+        else []
+    )
+    mirror_target = _legacy_shared_git_mirror_target(auth_mounts)
+    agent_environment_items = tuple(agent_environment.items())
+    # Never hand the primary worktree to a reason-only invocation, even if a
+    # malformed legacy environment happens to name it as a provider setting.
+    provider_auth_mounts = [mount for mount in auth_mounts if mount.target != "/workspace"]
+    selected_mounts = _clarification_auth_mounts(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+    )
+    provider_environment = _clarification_agent_environment(
+        agent_environment_items,
+        auth_mounts=provider_auth_mounts,
+        mirror_target=mirror_target,
+    )
+    clarification_environment = dict(provider_environment)
+    clarification_volumes: list[str] = []
+    for index, mount in enumerate(selected_mounts):
+        clarification_environment[f"AWF_CLARIFICATION_AUTH_TARGET_{index}"] = mount.target.replace(
+            "$", "$$"
+        )
+        clarification_volumes.append(f"{mount.source}:/run/awf/clarification-auth/{index}:ro")
+
+    clarification: dict[str, object] = {
+        "image": image,
+        "working_dir": agent.get("working_dir", "/workspace"),
+        "networks": ["clarification_egress_net"],
+        "profiles": ["awf-clarification"],
+        "command": ["sh", "-c", "sleep infinity"],
+        "restart": "no",
+    }
+    if clarification_environment:
+        clarification["environment"] = clarification_environment
+    if clarification_volumes:
+        clarification["volumes"] = clarification_volumes
+        clarification["entrypoint"] = _legacy_clarification_entrypoint(len(selected_mounts))
+    if "host.docker.internal:host-gateway" in agent.get("extra_hosts", []):
+        clarification["extra_hosts"] = ["host.docker.internal:host-gateway"]
+    if isinstance(agent.get("deploy"), Mapping):
+        clarification["deploy"] = copy.deepcopy(agent["deploy"])
+    services["clarification"] = clarification
+
+    raw_networks = document.get("networks")
+    if raw_networks is None:
+        networks: dict[str, object] = {}
+        document["networks"] = networks
+    elif isinstance(raw_networks, dict):
+        networks = raw_networks
+    else:
+        raise ValueError("persisted Compose file networks must be a mapping")
+    clarification_network: dict[str, object] = {
+        "name": f"awf-{workspace_id}-clarification-egress-net"
+    }
+    awf_network = networks.get("awf_net")
+    if isinstance(awf_network, Mapping) and awf_network.get("internal") is True:
+        clarification_network["internal"] = True
+    networks.setdefault("clarification_egress_net", clarification_network)
+
+    temporary_path: Path | None = None
+    try:
+        file_mode = compose_file.stat().st_mode & 0o777
+        fd, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{compose_file.name}.",
+            suffix=".tmp",
+            dir=compose_file.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            yaml.safe_dump(document, temporary_file, sort_keys=False)
+        temporary_path.chmod(file_mode)
+        temporary_path.replace(compose_file)
+    except (OSError, yaml.YAMLError) as exc:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+        raise ValueError(f"could not upgrade persisted Compose file {compose_file}") from exc
+    return True
+
 
 DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200
 """Default number of companion log lines captured on a service-startup failure."""

@@ -19,6 +19,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
     ComposeService,
     WorkspaceComposeSpec,
+    upgrade_persisted_clarification_service,
 )
 from awf.profiles.registry import docker_compose_profile
 
@@ -60,6 +61,89 @@ def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
     omitted_optional = paths.secret_lease_mount_metadata["omitted_optional"]
     with pytest.raises(TypeError):
         omitted_optional[0]["secret_name"] = "changed"
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git_access(
+    tmp_path: Path,
+) -> None:
+    """Legacy stacks gain only the isolated clarification service."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_legacy",
+                    "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                    "OPENAI_BASE_URL": str(tmp_path / "mirror.git"),
+                    "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                    "GIT_ASKPASS": "/run/awf/secrets/bb-askpass.sh",
+                    "CLAUDE_CODE_USE_BEDROCK": "1",
+                    "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/run/awf/adc.json",
+                },
+                "volumes": [
+                    f"{tmp_path / 'worktree'}:/workspace",
+                    f"{tmp_path / 'mirror.git'}:{tmp_path / 'mirror.git'}:rw",
+                    f"{tmp_path / 'codex'}:/home/agent/.codex:rw",
+                    f"{tmp_path / 'gh'}:/home/agent/.config/gh:ro",
+                    f"{tmp_path / 'gcloud'}:/home/agent/.config/gcloud:ro",
+                    f"{tmp_path / 'adc.json'}:/run/awf/adc.json:ro",
+                ],
+                "extra_hosts": ["host.docker.internal:host-gateway"],
+                "networks": ["awf_net"],
+                "deploy": {"resources": {"limits": {"cpus": "4", "memory": "8g"}}},
+            },
+        },
+        "volumes": {},
+        "networks": {"awf_net": {"name": "awf-ws_legacy-net", "internal": True}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    assert upgraded["services"]["agent"] == original["services"]["agent"]
+    assert upgraded["services"]["postgres"] == original["services"]["postgres"]
+    assert clarification["profiles"] == ["awf-clarification"]
+    assert clarification["networks"] == ["clarification_egress_net"]
+    assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    assert clarification["deploy"] == original["services"]["agent"]["deploy"]
+    assert clarification["environment"] == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": str(tmp_path / "mirror.git"),
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/home/agent/.awf/clarification-auth/2",
+        "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.codex",
+        "AWF_CLARIFICATION_AUTH_TARGET_1": "/home/agent/.config/gcloud",
+        "AWF_CLARIFICATION_AUTH_TARGET_2": "/home/agent/.awf/clarification-auth/2",
+    }
+    assert clarification["volumes"] == [
+        f"{tmp_path / 'codex'}:/run/awf/clarification-auth/0:ro",
+        f"{tmp_path / 'gcloud'}:/run/awf/clarification-auth/1:ro",
+        f"{tmp_path / 'adc.json'}:/run/awf/clarification-auth/2:ro",
+    ]
+    assert str(tmp_path / "worktree") not in "\n".join(clarification["volumes"])
+    assert str(tmp_path / "mirror.git") not in "\n".join(clarification["volumes"])
+    assert str(tmp_path / "gh") not in "\n".join(clarification["volumes"])
+    assert "GITHUB_TOKEN" not in clarification["environment"]
+    assert "GIT_ASKPASS" not in clarification["environment"]
+    assert upgraded["networks"]["clarification_egress_net"] == {
+        "name": "awf-ws_legacy-clarification-egress-net",
+        "internal": True,
+    }
+    assert not upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+    )
 
 
 class TestRender:

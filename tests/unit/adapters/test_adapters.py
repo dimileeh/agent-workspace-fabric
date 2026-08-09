@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 import structlog
+import yaml
 
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
@@ -345,6 +346,47 @@ class TestCodexAdapter:
         assert "-e" not in args[run_idx:service_idx]
         assert args[service_idx + 1 : service_idx + 3] == ["sh", "-lc"]
         assert "--skip-git-repo-check" in args[service_idx:]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_upgrades_legacy_persisted_compose_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A monitor re-ask can target clarification after an AWF upgrade."""
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "agent": {
+                            "image": "awf-agent-runtime:latest",
+                            "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                            "volumes": [
+                                f"{tmp_path / 'worktree'}:/workspace",
+                                f"{tmp_path / 'codex'}:/home/agent/.codex:rw",
+                            ],
+                        }
+                    },
+                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        assert rendered["services"]["clarification"]["profiles"] == ["awf-clarification"]
+        args = runner.calls[0].args
+        assert args.index("clarification", args.index("run")) > args.index("run")
 
     @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
