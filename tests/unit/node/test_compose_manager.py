@@ -738,13 +738,22 @@ class TestRender:
     def test_resource_limits_applied_when_set(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
-        """Explicit CPU and memory limits render into deploy resources."""
-        spec = _spec(tmp_path, cpu_limit="4", memory_limit="8g")
+        """Explicit CPU and memory limits apply to agent services."""
+        spec = _spec(
+            tmp_path,
+            clarification_enabled=True,
+            cpu_limit="4",
+            memory_limit="8g",
+        )
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == {
+        expected_limits = {
             "cpus": "4",
             "memory": "8g",
         }
+        assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == expected_limits
+        assert (
+            parsed["services"]["clarification"]["deploy"]["resources"]["limits"] == expected_limits
+        )
 
     @pytest.mark.unit
     def test_resource_limits_apply_default_pair_when_only_one_limit_is_set(

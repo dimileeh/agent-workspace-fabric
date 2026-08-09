@@ -112,6 +112,13 @@ services:
     {% endif %}
     command: ["sh", "-c", "sleep infinity"]
     restart: "no"
+    {% if resources %}
+    deploy:
+      resources:
+        limits:
+          cpus: {{ resources.cpu_limit | tojson }}
+          memory: {{ resources.memory_limit | tojson }}
+    {% endif %}
   {% endif %}
 
 {% if named_volumes %}volumes:
