@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import shlex
 import shutil
 import tempfile
@@ -45,6 +46,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
+from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID
 from awf.service.usage_store import (
     REASON_COMMAND_FAILED,
     REASON_NO_RECORDS,
@@ -709,9 +711,10 @@ def _make_isolated_capture_dir(work_dir: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     capture_dir = Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
     # The root worker bind-mounts this directory into the non-root agent-runtime
-    # container. The wrapper needs to create known sample files but must not list
-    # or read host-collected samples.
-    capture_dir.chmod(0o733)
+    # container. Ownership restricts writes to that identity, while the private
+    # mode prevents other local users from replacing trusted sample files.
+    os.chown(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)
+    capture_dir.chmod(0o700)
     return capture_dir
 
 

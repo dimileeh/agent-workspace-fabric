@@ -15,6 +15,7 @@ import pytest
 
 from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
+from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID
 from awf.service import usage_collection
 from awf.service.usage_collection import (
     CcusageCollector,
@@ -106,14 +107,23 @@ def _ccusage_runner(*stdouts: str) -> FakeCommandRunner:
 
 
 @pytest.mark.unit
-def test_isolated_capture_dir_allows_runtime_agent_writes(tmp_path: Path) -> None:
-    """The root worker's bind mount must let the non-root runtime create captures."""
+def test_isolated_capture_dir_assigns_private_runtime_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The root worker creates private captures for the non-root runtime."""
 
+    ownership_calls: list[tuple[Path, int, int]] = []
+
+    def _record_chown(path: Path, uid: int, gid: int) -> None:
+        ownership_calls.append((path, uid, gid))
+
+    monkeypatch.setattr(usage_collection.os, "chown", _record_chown)
     capture_dir = _make_isolated_capture_dir(tmp_path)
 
-    # The agent needs write + traverse permission to redirect its known capture
-    # filenames, but does not need to read or list host-collected samples.
-    assert S_IMODE(capture_dir.stat().st_mode) == 0o733
+    stat = capture_dir.stat()
+    assert ownership_calls == [(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)]
+    assert S_IMODE(stat.st_mode) == 0o700
 
 
 @pytest.mark.unit
