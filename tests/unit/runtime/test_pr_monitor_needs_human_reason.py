@@ -389,6 +389,86 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "cleanup_error",
+    (
+        GitOperationError(
+            operation="worktree.remove",
+            returncode=1,
+            stdout="",
+            stderr="worktree remove failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+        ),
+        OSError("worktree remove unavailable"),
+        RuntimeError("worktree remove failed"),
+    ),
+)
+async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
+    tmp_path: Path,
+    cleanup_error: Exception,
+) -> None:
+    """A failed-add checkout removal exception cannot become an advisory setup failure."""
+    workspace_id = "ws_reask_create_cleanup_exception"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    audit_events: list[dict[str, object]] = []
+
+    class _NonzeroAfterWorktreeAddWithExceptionalCleanupRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                raise cleanup_error
+            result = await super().run(args)
+            if "worktree" in args and "add" in args:
+                return CommandResult(
+                    returncode=1,
+                    stdout=result.stdout,
+                    stderr="post-checkout hook failed",
+                )
+            return result
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_NonzeroAfterWorktreeAddWithExceptionalCleanupRunner()),
+        _worktrees_root=tmp_path,
+        _rev_parse_head=_rev_parse_head,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert audit_events == []
+    assert list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancelled(
     tmp_path: Path,
 ) -> None:

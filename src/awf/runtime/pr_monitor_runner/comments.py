@@ -227,7 +227,13 @@ async def _cleanup_isolated_reask_worktree_after_creation_failure(
     event_name: str,
 ) -> str | None:
     """Remove and report a checkout Git might create before it signals failure."""
-    cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
+    try:
+        cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
+    except (GitOperationError, OSError, RuntimeError) as exc:
+        # The failed creation may already have placed a nested repository in
+        # the primary worktree. Treat an unconfirmed removal just like a
+        # nonzero removal result so callers apply the terminal cleanup policy.
+        cleanup_error = str(exc) or "`git worktree remove` failed during cleanup"
     if cleanup_error is not None:
         _log.warning(
             event_name,
