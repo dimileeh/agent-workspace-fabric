@@ -31,6 +31,7 @@ from awf.common.github_transient import (
     GitHubErrorDisposition,
     github_error_disposition,
 )
+from awf.common.redaction import redact_secrets
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -368,7 +369,7 @@ def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResu
 def _sanitize_verdict_reason(reason: str | None) -> str | None:
     if reason is None:
         return None
-    cleaned = reason.strip()
+    cleaned = redact_secrets(reason).strip()
     if not cleaned:
         return None
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):

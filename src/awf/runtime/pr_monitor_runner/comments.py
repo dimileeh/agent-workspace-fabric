@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -299,8 +299,12 @@ async def _enforce_needs_human_reason(
     monitor_log: WorkspaceLogSink | None,
 ) -> VerdictResult:
     """Bound one re-ask without changing the original blocking verdict."""
-    from awf.runtime.pr_monitor_runner.helpers import _needs_human_reason_missing
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _needs_human_reason_missing,
+        _sanitize_verdict_reason,
+    )
 
+    result = replace(result, reason=_sanitize_verdict_reason(result.reason))
     if not _needs_human_reason_missing(result):
         return result
     try:
@@ -324,6 +328,10 @@ async def _enforce_needs_human_reason(
             error=redact_audit_text(str(exc), limit=240),
         )
     else:
+        reask_result = replace(
+            reask_result,
+            reason=_sanitize_verdict_reason(reask_result.reason),
+        )
         if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(reask_result):
             return reask_result
     await _record_needs_human_reason_missing(

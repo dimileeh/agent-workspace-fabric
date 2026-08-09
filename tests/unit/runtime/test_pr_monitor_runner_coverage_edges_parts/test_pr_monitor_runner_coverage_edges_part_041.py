@@ -214,6 +214,52 @@ async def test_review_comment_placeholder_reason_reasks_once_and_syncs_the_respo
 
 
 @pytest.mark.unit
+async def test_recovered_needs_human_reason_is_redacted_before_return_and_state_storage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=46)
+    secret = "recoveredVerdictSecret987"
+    raw_reason = f"A maintainer must decide whether to rotate GITHUB_TOKEN={secret}."
+    redacted_reason = "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
+    runner, calls = _runner(
+        factory,
+        tmp_path,
+        [
+            VerdictResult(verdict="needs_human"),
+            VerdictResult(verdict="needs_human", reason=raw_reason),
+        ],
+    )
+    comment = ReviewComment(comment_id="R-secret", body_excerpt="?")
+    state = MonitorState()
+
+    result = await comments._address_review_comment_result(
+        runner,  # type: ignore[arg-type]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=46,
+        comment=comment,
+        compose_project="awf-test",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=(),
+        task_tag=None,
+        base_branch="main",
+        remote_branch="feature",
+        operation_id="op-review-reask-secret",
+        operation_type="comment_repair",
+    )
+    _sync_needs_human_reason(state, comment.comment_id, result)
+
+    assert len(calls) == 2
+    assert result.reason == redacted_reason
+    assert secret not in result.reason
+    assert state.threads_addressed_ids[_needs_human_reason_state_key(comment.comment_id)] == (
+        redacted_reason
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("verdict", ("defer", "false_positive", "fix_committed"))
 async def test_other_verdicts_do_not_trigger_the_needs_human_reask(
     factory: async_sessionmaker[AsyncSession],
