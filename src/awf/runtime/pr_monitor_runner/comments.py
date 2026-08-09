@@ -324,6 +324,7 @@ async def _enforce_needs_human_reason(
             state=state,
             task_tag=task_tag,
             operation_start_head=operation_start_head,
+            commit_dirty_changes=False,
         )
     except (
         ComposeExecCleanupError,
@@ -485,6 +486,7 @@ async def _invoke_cli_for_verdict_result(
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
+    commit_dirty_changes: bool = True,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -572,6 +574,20 @@ async def _invoke_cli_for_verdict_result(
                     **repair_details,
                 )
                 raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        if commit_dirty_changes:
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=commit_message,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                command_evidence=command_evidence,
+                task_tag=task_tag,
+                operation_start_head=operation_start_head,
+            )
+        raise
+
+    committed_dirty_changes = (
         await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=commit_message,
@@ -582,17 +598,8 @@ async def _invoke_cli_for_verdict_result(
             task_tag=task_tag,
             operation_start_head=operation_start_head,
         )
-        raise
-
-    committed_dirty_changes = await runner._commit_dirty_worktree(
-        workspace_id=workspace_id,
-        message=commit_message,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        state=state,
-        command_evidence=command_evidence,
-        task_tag=task_tag,
-        operation_start_head=operation_start_head,
+        if commit_dirty_changes
+        else False
     )
 
     if agent_run_err is not None:
