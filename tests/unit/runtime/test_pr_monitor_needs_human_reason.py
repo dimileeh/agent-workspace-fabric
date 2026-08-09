@@ -301,6 +301,52 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cancellation cleanup is observable without swallowing cancellation."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_create_cancelled_cleanup_failure")
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class _CancelAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            result = await super().run(args)
+            if "worktree" in args and "add" in args:
+                raise asyncio.CancelledError
+            return result
+
+    class _RecordingLogger:
+        def warning(self, event_name: str, **kwargs: object) -> None:
+            warnings.append((event_name, kwargs))
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_CancelAfterWorktreeAddWithFailedCleanupRunner())
+    )
+    monkeypatch.setattr(comments, "_log", _RecordingLogger())
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert warnings == [
+        (
+            "monitor.needs_human_reason_reask_isolated_cleanup_failed_after_creation_cancellation",
+            {
+                "worktree_path": str(worktree),
+                "reason_code": "VALIDATION_WORKTREE_CLEANUP_FAILED",
+                "message": "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
     """A failed isolated-checkout teardown remains a policy-blocking cleanup failure."""
     command_runner = FakeCommandRunner()
