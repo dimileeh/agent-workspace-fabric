@@ -43,6 +43,27 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         mode="ro",
     )
 
+    auth_mounts = (
+        AuthMount(source=mirror, target=mirror, mode="rw"),
+        codex_auth,
+        provider_credentials,
+        bitbucket_askpass,
+        AuthMount(
+            source="/home/agent/.config/gh",
+            target="/home/agent/.config/gh",
+            mode="ro",
+        ),
+        AuthMount(
+            source="/home/agent/.gitconfig",
+            target="/home/agent/.gitconfig",
+            mode="ro",
+        ),
+        AuthMount(source="/home/agent/.ssh", target="/home/agent/.ssh", mode="ro"),
+    )
+    mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        auth_mounts,
+        mirror_target=mirror,
+    )
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         (
             ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
@@ -52,36 +73,25 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
             ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
             ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
             ("SSH_AUTH_SOCK", "/run/ssh-agent.sock"),
-        )
-    )
-    mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        (
-            AuthMount(source=mirror, target=mirror, mode="rw"),
-            codex_auth,
-            provider_credentials,
-            bitbucket_askpass,
-            AuthMount(
-                source="/home/agent/.config/gh",
-                target="/home/agent/.config/gh",
-                mode="ro",
-            ),
-            AuthMount(
-                source="/home/agent/.gitconfig",
-                target="/home/agent/.gitconfig",
-                mode="ro",
-            ),
-            AuthMount(source="/home/agent/.ssh", target="/home/agent/.ssh", mode="ro"),
         ),
+        auth_mounts=auth_mounts,
         mirror_target=mirror,
     )
 
     assert environment == (
         ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
+        (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "/home/agent/.awf/clarification-auth/1",
+        ),
     )
     assert mounts == (
         AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),
-        provider_credentials,
+        AuthMount(
+            source=provider_credentials.source,
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
     )
 
 

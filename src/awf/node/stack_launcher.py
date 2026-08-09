@@ -89,15 +89,34 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
+_AGENT_HOME = "/home/agent"
 
 
 def _clarification_agent_environment(
     agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    mirror_target: str,
 ) -> tuple[tuple[str, str], ...]:
-    """Keep coding-agent settings while excluding Git authentication plumbing."""
+    """Keep coding settings, excluding Git auth and rewriting staged file references."""
+
+    source_mounts = _clarification_provider_auth_mounts(
+        auth_mounts,
+        mirror_target=mirror_target,
+    )
+    staged_mounts = _clarification_auth_mounts(
+        auth_mounts,
+        mirror_target=mirror_target,
+    )
+    staged_targets = {
+        source.target: staged.target
+        for source, staged in zip(source_mounts, staged_mounts, strict=True)
+        if source.target != staged.target
+    }
 
     return tuple(
-        (name, value)
+        (name, staged_targets.get(value, value))
         for name, value in agent_environment
         if not _is_clarification_git_auth_environment(name)
     )
@@ -115,14 +134,41 @@ def _clarification_auth_mounts(
     *,
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
-    """Return read-only provider sources without Git access for clarification."""
+    """Return read-only provider sources staged at destinations writable by ``agent``."""
 
     return tuple(
-        replace(mount, mode="ro")
+        replace(
+            mount,
+            mode="ro",
+            target=_clarification_auth_target(mount.target, index=index),
+        )
+        for index, mount in enumerate(
+            _clarification_provider_auth_mounts(auth_mounts, mirror_target=mirror_target)
+        )
+    )
+
+
+def _clarification_provider_auth_mounts(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    mirror_target: str,
+) -> tuple[AuthMount, ...]:
+    """Return the non-Git authentication mounts available to clarification."""
+
+    return tuple(
+        mount
         for mount in auth_mounts
         if mount.target != mirror_target
         and mount.target not in _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
     )
+
+
+def _clarification_auth_target(target: str, *, index: int) -> str:
+    """Keep agent-home targets and stage all other paths under the agent home."""
+
+    if target == _AGENT_HOME or target.startswith(f"{_AGENT_HOME}/"):
+        return target
+    return f"{_CLARIFICATION_AUTH_STAGING_ROOT}/{index}"
 
 
 @dataclass(frozen=True)
@@ -389,6 +435,10 @@ class ComposeStackLauncher:
                 auth_mounts,
                 _hosted_dynamic_file_auth_mount_targets(agent_environment),
             )
+        clarification_auth_mounts = _clarification_auth_mounts(
+            auth_mounts,
+            mirror_target=str(layout.mirror_path),
+        )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -400,11 +450,12 @@ class ComposeStackLauncher:
             companions=companions,
             auth_mounts=tuple(auth_mounts),
             clarification_enabled=True,
-            clarification_agent_environment=_clarification_agent_environment(agent_environment),
-            clarification_auth_mounts=_clarification_auth_mounts(
-                auth_mounts,
+            clarification_agent_environment=_clarification_agent_environment(
+                agent_environment,
+                auth_mounts=auth_mounts,
                 mirror_target=str(layout.mirror_path),
             ),
+            clarification_auth_mounts=clarification_auth_mounts,
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,
