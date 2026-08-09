@@ -376,6 +376,11 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
     return cleaned
 
 
+def _needs_human_reason_missing(result: VerdictResult) -> bool:
+    """Return whether a blocking needs-human result lacks a usable reason."""
+    return result.verdict == "needs_human" and _sanitize_verdict_reason(result.reason) is None
+
+
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
     return comment.body or comment.body_excerpt or ""
 

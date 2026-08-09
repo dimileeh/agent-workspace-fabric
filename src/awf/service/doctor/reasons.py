@@ -124,6 +124,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
     ),
+    "NEEDS_HUMAN_REASON_MISSING": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        "The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.",
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
+    ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF could not run release-PR sync because the release-PR sync path "

@@ -423,6 +423,14 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
     return f"\n\n{section}"
 
 
+def needs_human_reason_reask_prompt() -> str:
+    """Ask once for the human decision omitted from a NEEDS_HUMAN verdict."""
+    return (
+        "You returned NEEDS_HUMAN without saying what you need. Print AWF-VERDICT: "
+        "NEEDS_HUMAN: <one sentence: exactly what a human must decide>"
+    )
+
+
 def ready_to_merge_comment(
     *,
     pr_number: int,

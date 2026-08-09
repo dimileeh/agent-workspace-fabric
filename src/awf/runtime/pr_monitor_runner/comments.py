@@ -20,6 +20,7 @@ from awf.node.git_manager import (
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
+    needs_human_reason_reask_prompt,
     ready_to_merge_comment,
 )
 from awf.runtime.ownership import (
@@ -27,7 +28,9 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _AUDIT_COMMENT_RESOLUTION_EVENT,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _NEEDS_HUMAN_REASON_MISSING,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
@@ -54,6 +57,7 @@ class VerdictResult:
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
+    from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewComment, ReviewThread
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
@@ -75,6 +79,11 @@ async def _address_thread(
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
+    base_branch: str = "",
+    remote_branch: str | None = None,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -114,6 +123,28 @@ async def _address_thread(
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
     )
+    result = await _enforce_needs_human_reason(
+        runner,
+        result=result,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        item_id=thread.thread_id,
+        item_kind="thread",
+        item_author=getattr(thread, "author", None),
+        item_path=getattr(thread, "path", None),
+        item_line=getattr(thread, "line", None),
+        commit_message=f"fix: address PR review thread {thread.thread_id}",
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+    )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
     # On any defer, overwrite/clear the stored reason so a re-triage with a bare
@@ -142,6 +173,11 @@ async def _address_review_comment(
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
+    base_branch: str = "",
+    remote_branch: str | None = None,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -154,6 +190,11 @@ async def _address_review_comment(
         owned_paths=owned_paths,
         task_tag=task_tag,
         operation_start_head=operation_start_head,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
     )
     return result.verdict
 
@@ -171,6 +212,11 @@ async def _address_review_comment_result(
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
+    base_branch: str = "",
+    remote_branch: str | None = None,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult:
     prompt_owned_paths = (
         owned_paths
@@ -195,7 +241,7 @@ async def _address_review_comment_result(
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
     )
-    return await runner._invoke_cli_for_verdict_result(
+    result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
         prompt=prompt,
         commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -204,6 +250,146 @@ async def _address_review_comment_result(
         state=state,
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
+    )
+    return await _enforce_needs_human_reason(
+        runner,
+        result=result,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        item_id=comment.comment_id,
+        item_kind="review",
+        item_author=getattr(comment, "author", None),
+        item_path=None,
+        item_line=None,
+        commit_message=f"fix: address PR review comment {comment.comment_id}",
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+    )
+
+
+async def _enforce_needs_human_reason(
+    runner: PullRequestMonitorRunner,
+    *,
+    result: VerdictResult,
+    workspace_id: str,
+    pr_number: int,
+    item_id: str,
+    item_kind: str,
+    item_author: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    state: MonitorState | None,
+    task_tag: str | None,
+    operation_start_head: str | None,
+    base_branch: str,
+    remote_branch: str | None,
+    operation_id: str | None,
+    operation_type: str | None,
+    monitor_log: WorkspaceLogSink | None,
+) -> VerdictResult:
+    """Bound one re-ask without changing the original blocking verdict."""
+    from awf.runtime.pr_monitor_runner.helpers import _needs_human_reason_missing
+
+    if not _needs_human_reason_missing(result):
+        return result
+    try:
+        reask_result = await runner._invoke_cli_for_verdict_result(
+            workspace_id=workspace_id,
+            prompt=needs_human_reason_reask_prompt(),
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            task_tag=task_tag,
+            operation_start_head=operation_start_head,
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.needs_human_reason_reask_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            item_id=redact_audit_text(item_id, limit=200),
+            item_kind=item_kind,
+            error=redact_audit_text(str(exc), limit=240),
+        )
+    else:
+        if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(reask_result):
+            return reask_result
+    await _record_needs_human_reason_missing(
+        runner,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        item_id=item_id,
+        item_kind=item_kind,
+        item_author=item_author,
+        item_path=item_path,
+        item_line=item_line,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+    )
+    return result
+
+
+async def _record_needs_human_reason_missing(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    item_id: str,
+    item_kind: str,
+    item_author: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    base_branch: str,
+    remote_branch: str | None,
+    operation_id: str | None,
+    operation_type: str | None,
+    monitor_log: WorkspaceLogSink | None,
+) -> None:
+    """Warn and persist the diagnostic for an unrecoverably reasonless verdict."""
+    evidence = {
+        "item_id": redact_audit_text(item_id, limit=200),
+        "item_kind": item_kind,
+        "item_author": redact_audit_text(item_author or "", limit=200),
+        "item_path": redact_audit_text(item_path or "", limit=400),
+        "item_line": item_line,
+    }
+    _log.warning(
+        "monitor.needs_human_reason_missing",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        reason_code=_NEEDS_HUMAN_REASON_MISSING,
+        operation_id=operation_id,
+        **evidence,
+    )
+    await runner._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action=f"address_{item_kind}",
+        outcome="needs_human",
+        reason_code=_NEEDS_HUMAN_REASON_MISSING,
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+        evidence=evidence,
     )
 
 

@@ -535,10 +535,14 @@ async def test_address_thread_stashes_agent_verdict_reasons(
         async def _resolve_task_tag(_workspace_id: str) -> str | None:
             return None
 
+        async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+            return None
+
         return SimpleNamespace(
             _workspace_runtime_context="",
             _invoke_cli_for_verdict_result=_invoke,
             _resolve_task_tag=_resolve_task_tag,
+            _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
         )
 
     async def _call(runner: object, state: MonitorState | None) -> str:
