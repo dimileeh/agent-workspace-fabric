@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
@@ -328,6 +329,10 @@ async def _enforce_needs_human_reason(
         ProviderRecoveryRetryError,
         _MonitorAgentServiceRecoveryFailedError,
         _MonitorAgentServiceRecoverySupersededError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+        _MonitorPolicyBlockedError,
     ):
         raise
     except Exception as exc:
