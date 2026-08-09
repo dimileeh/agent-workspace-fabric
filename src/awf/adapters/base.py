@@ -503,12 +503,43 @@ class AgentAdapter(ABC):
                     # back the persisted migration. A later re-ask can then
                     # perform the migration again instead of running against
                     # a clarification network with no reachable model.
-                    with contextlib.suppress(OSError):
-                        await asyncio.to_thread(
-                            _restore_compose_file,
-                            compose_file=compose_file,
-                            contents=original_compose_file,
-                        )
+                    # ``compose down`` only removes networks declared by the
+                    # current Compose file. Stop and remove the migrated
+                    # sidecars, then reap their now-unused network before
+                    # restoring the legacy file that does not declare it.
+                    try:
+                        with contextlib.suppress(Exception):
+                            await self._runner.run(
+                                [
+                                    "docker",
+                                    "compose",
+                                    "-p",
+                                    compose_project,
+                                    "-f",
+                                    str(compose_file),
+                                    "rm",
+                                    "--stop",
+                                    "--force",
+                                    *clarification_model_services,
+                                ]
+                            )
+                        with contextlib.suppress(Exception):
+                            await self._runner.run(
+                                [
+                                    "docker",
+                                    "network",
+                                    "rm",
+                                    f"awf-{workspace_id or compose_project.removeprefix('awf_')}-"
+                                    "clarification-model-net",
+                                ]
+                            )
+                    finally:
+                        with contextlib.suppress(OSError):
+                            await asyncio.to_thread(
+                                _restore_compose_file,
+                                compose_file=compose_file,
+                                contents=original_compose_file,
+                            )
                     raise AgentRunError(
                         agent=self.name,
                         result=model_service_update,

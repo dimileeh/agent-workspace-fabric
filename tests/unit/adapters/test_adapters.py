@@ -506,8 +506,26 @@ class TestCodexAdapter:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
-        assert len(runner.calls) == 1
+        assert len(runner.calls) == 3
         assert "run" not in runner.calls[0].args
+        assert runner.calls[1].args == [
+            "docker",
+            "compose",
+            "-p",
+            "awf_ws_legacy",
+            "-f",
+            str(compose_file),
+            "rm",
+            "--stop",
+            "--force",
+            "ollama-sidecar",
+        ]
+        assert runner.calls[2].args == [
+            "docker",
+            "network",
+            "rm",
+            "awf-ws_legacy-clarification-model-net",
+        ]
         assert (
             "clarification"
             not in yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"]
@@ -522,7 +540,7 @@ class TestCodexAdapter:
             isolated_worktree_host_path=tmp_path / "reask",
         )
 
-        assert runner.calls[1].args == [
+        assert runner.calls[3].args == [
             "docker",
             "compose",
             "-p",
@@ -538,8 +556,8 @@ class TestCodexAdapter:
             "300",
             "ollama-sidecar",
         ]
-        assert runner.calls[1].timeout_seconds == 660.0
-        assert "run" in runner.calls[2].args
+        assert runner.calls[3].timeout_seconds == 660.0
+        assert "run" in runner.calls[4].args
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
