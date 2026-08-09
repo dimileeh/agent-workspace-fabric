@@ -707,8 +707,12 @@ def _make_isolated_capture_dir(work_dir: Path) -> Path:
     # The root worker bind-mounts this directory into the non-root agent-runtime
     # container. Ownership restricts writes to that identity, while the private
     # mode prevents other local users from replacing trusted sample files.
-    os.chown(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)
-    capture_dir.chmod(0o700)
+    try:
+        os.chown(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)
+        capture_dir.chmod(0o700)
+    except Exception:
+        shutil.rmtree(capture_dir, ignore_errors=True)
+        raise
     return capture_dir
 
 

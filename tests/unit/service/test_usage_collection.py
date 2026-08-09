@@ -127,6 +127,24 @@ def test_isolated_capture_dir_assigns_private_runtime_ownership(
 
 
 @pytest.mark.unit
+def test_isolated_capture_dir_removes_partial_dir_when_ownership_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed ownership handoff does not leak an unusable capture directory."""
+
+    def _fail_chown(_path: Path, _uid: int, _gid: int) -> None:
+        raise PermissionError("ownership denied")
+
+    monkeypatch.setattr(usage_collection.os, "chown", _fail_chown)
+
+    with pytest.raises(PermissionError, match="ownership denied"):
+        _make_isolated_capture_dir(tmp_path)
+
+    assert list((tmp_path / "usage-captures").iterdir()) == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("provider", "source"),
     [
