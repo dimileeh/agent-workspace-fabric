@@ -562,7 +562,7 @@ async def _enforce_needs_human_reason(
             # checkout. It must stop the fix cycle rather than be downgraded to
             # an unavailable advisory clarification.
             raise
-        except Exception as exc:
+        except (GitOperationError, OSError, RuntimeError, _MonitorPolicyBlockedError) as exc:
             # Clarification is advisory and read-only. A worktree/setup failure
             # must preserve the original blocking verdict instead of blocking
             # the monitor or issuing an unisolated re-ask, and record why the
@@ -628,7 +628,7 @@ async def _enforce_needs_human_reason(
     async def _run_reask_cleanup(*, event_name: str) -> tuple[str | None, bool]:
         try:
             cleanup_error, isolated_cleanup_failed = await _cleanup_reask_worktree()
-        except Exception as exc:
+        except (GitOperationError, OSError, RuntimeError) as exc:
             cleanup_error = str(exc)
             isolated_cleanup_failed = False
         if cleanup_error is not None:
