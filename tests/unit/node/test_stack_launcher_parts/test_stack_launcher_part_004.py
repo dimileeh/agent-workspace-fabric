@@ -243,6 +243,76 @@ def test_clarification_inputs_retain_direct_claude_credentials() -> None:
 
 
 @pytest.mark.unit
+def test_opencode_clarification_uses_selected_provider_credentials_only() -> None:
+    """A provider-qualified OpenCode re-ask cannot read other provider keys."""
+    opencode_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/opencode",
+        target="/home/agent/.config/opencode",
+        mode="rw",
+    )
+    openai_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/openai-key",
+        target="/run/awf/secrets/openai-key",
+        mode="ro",
+    )
+    anthropic_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/anthropic-key",
+        target="/run/awf/secrets/anthropic-key",
+        mode="ro",
+    )
+    gemini_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/gemini-key",
+        target="/run/awf/secrets/gemini-key",
+        mode="ro",
+    )
+    xai_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/xai-key",
+        target="/run/awf/secrets/xai-key",
+        mode="ro",
+    )
+    environment = (
+        ("OPENAI_API_KEY", openai_credentials.target),
+        ("ANTHROPIC_API_KEY", anthropic_credentials.target),
+        ("GEMINI_API_KEY", gemini_credentials.target),
+        ("XAI_API_KEY", xai_credentials.target),
+    )
+    mounts = (
+        opencode_auth,
+        openai_credentials,
+        anthropic_credentials,
+        gemini_credentials,
+        xai_credentials,
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="openai/gpt-5",
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="openai/gpt-5",
+    )
+
+    assert clarification_environment == (
+        ("OPENAI_API_KEY", "/home/agent/.awf/clarification-auth/1"),
+    )
+    assert clarification_mounts == (
+        AuthMount(source=opencode_auth.source, target=opencode_auth.target, mode="ro"),
+        AuthMount(
+            source=openai_credentials.source,
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_exclude_git_mount_selected_by_provider_variable() -> None:
     """A provider environment value cannot reintroduce a Git auth mount."""
     git_auth = AuthMount(
@@ -295,10 +365,15 @@ def test_clarification_environment_computes_provider_names_once(
         agent_environment: tuple[tuple[str, str], ...],
         *,
         agent_runtime: AgentRuntime,
+        agent_model: str | None = None,
     ) -> frozenset[str]:
         nonlocal calls
         calls += 1
-        return original(agent_environment, agent_runtime=agent_runtime)
+        return original(
+            agent_environment,
+            agent_runtime=agent_runtime,
+            agent_model=agent_model,
+        )
 
     monkeypatch.setattr(
         stack_launcher_mod,

@@ -233,8 +233,9 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="claude_code",
+                agent="opencode",
                 test_commands=[],
+                task_policy={"agent_model": "openai/gpt-5"},
             )
             await s.commit()
             ws_id = ws.id
@@ -247,7 +248,8 @@ class TestSuccess:
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
         assert request.layout.branch_name == f"awf/{ws_id}"
         assert request.profile.name == "generic"
-        assert request.agent_runtime is AgentRuntime.claude_code
+        assert request.agent_runtime is AgentRuntime.opencode
+        assert request.agent_model == "openai/gpt-5"
         assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
 
         async with session_factory() as s:

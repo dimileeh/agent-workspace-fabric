@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from awf.adapters.opencode import opencode_provider_for_model
 from awf.common.git_auth import apply_bitbucket_agent_git_auth
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.db.enums import AgentRuntime
@@ -132,19 +133,24 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     ),
     AgentRuntime.opencode: frozenset(
         {
-            "AWF_OPENCODE_OLLAMA_BASE_URL",
-            "OLLAMA_HOST",
-            "OLLAMA_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "XAI_API_KEY",
             "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
         }
     ),
     AgentRuntime.grok: frozenset({"XAI_API_KEY"}),
+}
+_CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES: dict[str, frozenset[str]] = {
+    "ollama": frozenset(
+        {
+            "AWF_OPENCODE_OLLAMA_BASE_URL",
+            "OLLAMA_HOST",
+            "OLLAMA_API_KEY",
+        }
+    ),
+    "openai": frozenset({"OPENAI_API_KEY"}),
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}),
+    "gemini": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "xai": frozenset({"XAI_API_KEY"}),
 }
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES = frozenset(
     {
@@ -186,18 +192,21 @@ def _clarification_agent_environment(
     auth_mounts: Sequence[AuthMount],
     mirror_target: str,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """Keep only model-provider settings and rewrite staged file references."""
 
     provider_environment_names = _clarification_model_provider_environment_names(
         agent_environment,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
     )
     source_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
         agent_environment=agent_environment,
         mirror_target=mirror_target,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
     staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
@@ -225,6 +234,7 @@ def _clarification_model_provider_environment_names(
     agent_environment: tuple[tuple[str, str], ...],
     *,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
 ) -> frozenset[str]:
     """Return selected runtime env names available to a clarification re-ask.
 
@@ -238,6 +248,13 @@ def _clarification_model_provider_environment_names(
         return _clarification_claude_code_environment_names(environment_values)
 
     provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
+    if agent_runtime is AgentRuntime.opencode:
+        provider_names.update(
+            _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(
+                opencode_provider_for_model(agent_model),
+                frozenset(),
+            )
+        )
     return frozenset(provider_names)
 
 
@@ -262,6 +279,7 @@ def _clarification_auth_mounts(
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
 
@@ -271,6 +289,7 @@ def _clarification_auth_mounts(
             agent_environment=agent_environment,
             mirror_target=mirror_target,
             agent_runtime=agent_runtime,
+            agent_model=agent_model,
         )
     )
 
@@ -296,6 +315,7 @@ def _clarification_provider_auth_mounts(
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
     provider_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return model-provider authentication mounts available to clarification."""
@@ -303,6 +323,7 @@ def _clarification_provider_auth_mounts(
     provider_mount_targets = _clarification_model_provider_auth_mount_targets(
         agent_environment,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
 
@@ -317,6 +338,7 @@ def _clarification_model_provider_auth_mount_targets(
     agent_environment: tuple[tuple[str, str], ...],
     *,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
     provider_environment_names: frozenset[str] | None = None,
 ) -> frozenset[str]:
     """Return known and environment-referenced model-provider mount targets."""
@@ -324,6 +346,7 @@ def _clarification_model_provider_auth_mount_targets(
     names = provider_environment_names or _clarification_model_provider_environment_names(
         agent_environment,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
     )
     runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
     if (
@@ -354,6 +377,7 @@ class WorkspaceStackLaunchRequest:
     layout: WorktreeLayout
     profile: WorkspaceProfile
     agent_runtime: AgentRuntime = AgentRuntime.codex
+    agent_model: str | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
@@ -616,6 +640,7 @@ class ComposeStackLauncher:
             agent_environment=agent_environment,
             mirror_target=str(layout.mirror_path),
             agent_runtime=request.agent_runtime,
+            agent_model=request.agent_model,
         )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
@@ -633,6 +658,7 @@ class ComposeStackLauncher:
                 auth_mounts=auth_mounts,
                 mirror_target=str(layout.mirror_path),
                 agent_runtime=request.agent_runtime,
+                agent_model=request.agent_model,
             ),
             clarification_auth_mounts=clarification_auth_mounts,
             git_name=DEFAULT_GIT_AUTHOR_NAME,
