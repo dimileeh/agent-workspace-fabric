@@ -176,6 +176,7 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
         clock=FakeClock(),
+        command_timeout_seconds=3.5,
     )
 
     ctx = await collector.start_isolated(
@@ -187,7 +188,11 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
     )
 
     assert ctx.cli_args[:2] == ["sh", "-lc"]
-    assert "ccusage codex daily --json --offline" in ctx.cli_args[2]
+    wrapper_script = ctx.cli_args[2]
+    assert "ccusage codex daily --json --offline" in wrapper_script
+    assert "timeout 3.5s ccusage codex daily --json --offline" in wrapper_script
+    assert "capture_ccusage baseline" in wrapper_script
+    assert "capture_ccusage final" in wrapper_script
     assert ctx.volume_binds[0][1] == "/tmp/awf-ccusage"
     capture_dir = ctx.volume_binds[0][0]
     for sample, total_tokens in (("baseline", 5), ("final", 8)):
@@ -240,6 +245,7 @@ async def test_isolated_run_records_missing_capture_as_unavailable(tmp_path: Pat
     ("returncode", "stderr", "expected_reason"),
     [
         (127, "sh: ccusage: command not found", "ccusage_unavailable"),
+        (124, "", "ccusage_timeout"),
         (1, "ccusage failed", "ccusage_command_failed"),
     ],
 )

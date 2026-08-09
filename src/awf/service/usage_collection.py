@@ -660,7 +660,10 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         return [
             "sh",
             "-lc",
-            _isolated_ccusage_wrapper_script(source=str(self._source)),
+            _isolated_ccusage_wrapper_script(
+                source=str(self._source),
+                timeout_seconds=self._collector._command_timeout_seconds,
+            ),
             "awf-isolated-ccusage",
             *self._agent_cli_args,
         ]
@@ -709,13 +712,13 @@ def _make_isolated_capture_dir(work_dir: Path) -> Path:
     return capture_dir
 
 
-def _isolated_ccusage_wrapper_script(*, source: str) -> str:
+def _isolated_ccusage_wrapper_script(*, source: str, timeout_seconds: float) -> str:
     quoted_source = shlex.quote(source)
     return f"""
 set +e
 capture_ccusage() {{
   sample_name=$1
-  ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
+  timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
     > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stdout\" \\
     2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stderr\"
   ccusage_status=$?
@@ -740,6 +743,8 @@ def _read_isolated_ccusage_sample(
         stderr = (capture_dir / f"{sample}.stderr").read_text(encoding="utf-8")
     except (OSError, ValueError):
         return None, REASON_COMMAND_FAILED, None
+    if returncode == 124:
+        return None, REASON_TIMEOUT, None
     result = CommandResult(returncode=returncode, stdout=stdout, stderr=stderr)
     if not result.ok:
         failure_reason = REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
