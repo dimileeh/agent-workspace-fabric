@@ -407,9 +407,11 @@ def _sync_needs_human_reason(
     item_id: str,
     result: VerdictResult,
 ) -> None:
-    """Persist or clear the agent's needs-human reason for a review item."""
+    """Persist or clear the agent's blocking-verdict reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
-    if result.verdict == "needs_human" and (reason := _sanitize_verdict_reason(result.reason)):
+    if result.verdict in {"defer", "needs_human"} and (
+        reason := _sanitize_verdict_reason(result.reason)
+    ):
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)

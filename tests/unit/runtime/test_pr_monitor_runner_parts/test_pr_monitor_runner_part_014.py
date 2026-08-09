@@ -15,12 +15,15 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
 )
 from awf.runtime.pr_monitor_runner import MonitorRunnerConfig
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _as_utc,
     _collect_defer_items,
     _is_pending_check,
+    _needs_human_reason_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
+    _sync_needs_human_reason,
 )
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -122,10 +125,22 @@ class TestCollectDeferItems:
             author="greptile-apps[bot]",
         )
         state = MonitorState(threads_addressed_ids={"C1": "defer"})
+        _sync_needs_human_reason(
+            state,
+            c.comment_id,
+            VerdictResult(verdict="defer", reason="needs product decision"),
+        )
+
         bots, humans = _collect_defer_items(_status(reviews=(c,)), state)
+
         assert len(bots) == 1
         assert bots[0]["kind"] == "review"
         assert bots[0]["id"] == "C1"
+        assert bots[0]["agent_verdict_reason"] == "needs product decision"
+        assert (
+            state.threads_addressed_ids[_needs_human_reason_state_key(c.comment_id)]
+            == "needs product decision"
+        )
         assert humans == []
 
 
