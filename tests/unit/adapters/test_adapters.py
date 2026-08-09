@@ -496,6 +496,10 @@ class TestCodexAdapter:
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
         assert len(runner.calls) == 1
         assert "run" not in runner.calls[0].args
+        assert (
+            "clarification"
+            not in yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"]
+        )
 
         await adapter.run(
             compose_project="awf_ws_legacy",

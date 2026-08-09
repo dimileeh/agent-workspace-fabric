@@ -103,29 +103,6 @@ def _attach_persisted_clarification_model_network(
     return tuple(attached_names)
 
 
-def _persisted_clarification_model_services(
-    services: dict[object, object],
-) -> tuple[str, ...]:
-    """Return model sidecars that an existing clarification service needs."""
-    clarification = services.get("clarification")
-    if not isinstance(clarification, dict):
-        return ()
-    clarification_networks = clarification.get("networks")
-    if (
-        not isinstance(clarification_networks, list)
-        or "clarification_model_net" not in clarification_networks
-    ):
-        return ()
-    return tuple(
-        str(name)
-        for name, service in services.items()
-        if name not in {"agent", "clarification"}
-        and isinstance(service, dict)
-        and isinstance(service_networks := service.get("networks"), list)
-        and "clarification_model_net" in service_networks
-    )
-
-
 def _legacy_bind_mount(value: object) -> AuthMount | None:
     """Parse the string bind syntax emitted by older AWF Compose templates."""
     if not isinstance(value, str):
@@ -189,7 +166,8 @@ def upgrade_persisted_clarification_service(
     rather than re-resolving a profile. This narrowly augments those generated
     files from the persisted agent inputs, preserving services while denying the
     clarification container the primary worktree and Git credentials. Returns
-    the model services that need recreation, or ``None`` when none do.
+    the model services whose network declaration changed, or ``None`` when
+    clarification was already present.
     """
     try:
         document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -201,7 +179,7 @@ def upgrade_persisted_clarification_service(
     if not isinstance(services, dict):
         raise ValueError("persisted Compose file must contain a services mapping")
     if "clarification" in services:
-        return _persisted_clarification_model_services(services) or None
+        return None
     agent = services.get("agent")
     if not isinstance(agent, dict):
         raise ValueError("persisted Compose file must contain an agent service")

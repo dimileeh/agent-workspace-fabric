@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +86,25 @@ _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
+
+
+def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
+    """Atomically restore a Compose file after its sidecar update fails."""
+    temporary_path: Path | None = None
+    try:
+        file_mode = compose_file.stat().st_mode & 0o777
+        fd, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{compose_file.name}.", suffix=".tmp", dir=compose_file.parent
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(fd, "wb") as temporary_file:
+            temporary_file.write(contents)
+        temporary_path.chmod(file_mode)
+        temporary_path.replace(compose_file)
+    finally:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -413,6 +433,7 @@ class AgentAdapter(ABC):
             # definition. Upgrade that file just before the isolated re-ask so
             # stacks launched before the clarification service existed can
             # still run the follow-up without re-rendering profile state.
+            original_compose_file = await asyncio.to_thread(compose_file.read_bytes)
             clarification_model_services = await asyncio.to_thread(
                 upgrade_persisted_clarification_service,
                 compose_file=compose_file,
@@ -441,6 +462,16 @@ class AgentAdapter(ABC):
                     ]
                 )
                 if not model_service_update.ok:
+                    # The sidecars did not receive the new network, so roll
+                    # back the persisted migration. A later re-ask can then
+                    # perform the migration again instead of running against
+                    # a clarification network with no reachable model.
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(
+                            _restore_compose_file,
+                            compose_file=compose_file,
+                            contents=original_compose_file,
+                        )
                     raise AgentRunError(
                         agent=self.name,
                         result=model_service_update,
