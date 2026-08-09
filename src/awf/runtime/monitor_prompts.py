@@ -18,12 +18,13 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
+from awf.common.redaction import redact_secrets
 from awf.common.task_tag import task_tag_commit_prefix
-from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread, _is_bot_author
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 _FOOTER = (
@@ -423,7 +424,11 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
 
 
 def ready_to_merge_comment(
-    *, pr_number: int, head_sha: str, blocker_reason: str | None = None
+    *,
+    pr_number: int,
+    head_sha: str,
+    blocker_reason: str | None = None,
+    blocker_items: Sequence[Mapping[str, object]] = (),
 ) -> str:
     """Body used when AWF stops for human action.
 
@@ -433,12 +438,15 @@ def ready_to_merge_comment(
     gates are green.
     """
     if blocker_reason:
-        return (
+        body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
             f"AWF did not auto-merge because {blocker_reason}.\n\n"
             "After the blocker is cleared or a new commit lands, AWF will re-verify "
             "the PR before taking any merge action."
         )
+        if not blocker_items:
+            return body
+        return f"{body}\n\n{_render_blocker_items(blocker_items)}"
     return (
         f"✅ PR #{pr_number} is ready to merge at commit `{head_sha[:10]}`.\n\n"
         "All 5 AWF gates are green:\n"
@@ -451,6 +459,62 @@ def ready_to_merge_comment(
         "If new commits land here, AWF will re-verify all 5 gates and re-post "
         "this message on the new head SHA."
     )
+
+
+def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
+    """Render rich, untrusted human-action context for a public PR comment."""
+    bot_items: list[Mapping[str, object]] = []
+    human_items: list[Mapping[str, object]] = []
+    for item in blocker_items:
+        target = bot_items if _is_bot_author(_item_text(item, "author")) else human_items
+        target.append(item)
+    displayed = 0
+    lines: list[str] = []
+    for label, items in (
+        ("Agent escalated - needs your decision", bot_items),
+        ("Human feedback deferred by agent", human_items),
+    ):
+        lines.append(f"{label} ({len(items)}):")
+        for item in sorted(items, key=_blocker_item_sort_key):
+            if displayed >= 8:
+                continue
+            lines.append(_render_blocker_item(item))
+            displayed += 1
+    remaining = len(blocker_items) - displayed
+    if remaining:
+        lines.append(f"(+{remaining} more)")
+    return redact_secrets("\n".join(lines))
+
+
+def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, str]:
+    path = _item_text(item, "path")
+    line = item.get("line")
+    line_number = line if isinstance(line, int) else 0
+    return (not bool(path), path or "", line_number, _item_text(item, "author").casefold())
+
+
+def _render_blocker_item(item: Mapping[str, object]) -> str:
+    author = _item_text(item, "author") or "unknown author"
+    path = _item_text(item, "path")
+    line = item.get("line")
+    location = f"{path}:{line}" if path and line is not None else author
+    url = _item_text(item, "url")
+    location_text = f"[{location}]({url})" if url else location
+    verdict = _item_text(item, "verdict")
+    excerpt = _truncate_blocker_excerpt(_item_text(item, "body"))
+    reason = _item_text(item, "agent_verdict_reason")
+    reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
+    return f"- {location_text} [{verdict}] {excerpt} {reason_text}"
+
+
+def _item_text(item: Mapping[str, object], key: str) -> str:
+    value = item.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _truncate_blocker_excerpt(excerpt: str) -> str:
+    """Keep the public notification compact even if collection data expands."""
+    return excerpt if len(excerpt) <= 160 else f"{excerpt[:160]}…"
 
 
 def _thread_metadata(
