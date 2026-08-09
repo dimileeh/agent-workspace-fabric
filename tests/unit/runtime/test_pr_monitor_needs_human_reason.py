@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from awf.adapters.base import AgentRunResult
+from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
@@ -17,6 +20,91 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+
+
+def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a real git command in a temporary worktree."""
+    return subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _init_real_worktree(tmp_path: Path, workspace_id: str) -> Path:
+    """Create a committed worktree suitable for the real re-ask cleanup path."""
+    worktree = tmp_path / workspace_id
+    worktree.mkdir()
+    _git(worktree, "init", "-q")
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    (worktree / ".gitignore").write_text("*.env\n", encoding="utf-8")
+    (worktree / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    _git(worktree, "add", ".gitignore", "tracked.py")
+    _git(worktree, "commit", "-qm", "initial")
+    return worktree
+
+
+class _LocalCommandRunner:
+    """Run the PR monitor's git commands against a temporary real worktree."""
+
+    async def run(self, args: list[str]) -> CommandResult:
+        proc = subprocess.run(args, capture_output=True, text=True)
+        return CommandResult(
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+
+@pytest.mark.unit
+def test_ignored_reask_snapshot_helpers_preserve_paths_without_following_links(
+    tmp_path: Path,
+) -> None:
+    """The ignored-file backup must preserve safe content and reject path escapes."""
+    source_root = tmp_path / "source"
+    snapshot_root = tmp_path / "snapshot"
+    source_root.mkdir()
+    nested = source_root / "ignored-dir"
+    nested.mkdir()
+    (nested / "config.env").write_text("MODE=original\n", encoding="utf-8")
+    comments._copy_ignored_snapshot_entry(nested, snapshot_root / nested.name)
+    assert (snapshot_root / nested.name / "config.env").read_text(encoding="utf-8") == (
+        "MODE=original\n"
+    )
+    comments._remove_ignored_snapshot_entry(snapshot_root / nested.name)
+    assert not (snapshot_root / nested.name).exists()
+
+    outside = tmp_path / "outside.env"
+    outside.write_text("outside\n", encoding="utf-8")
+    link = source_root / "ignored-link"
+    link.symlink_to(outside)
+    copied_link = snapshot_root / link.name
+    comments._copy_ignored_snapshot_entry(link, copied_link)
+    assert copied_link.is_symlink()
+    assert copied_link.readlink() == outside
+    comments._remove_ignored_snapshot_entry(copied_link)
+    assert not copied_link.exists()
+    assert outside.exists()
+
+    fifo = source_root / "ignored-fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError, match="unsupported ignored path type"):
+        comments._copy_ignored_snapshot_entry(fifo, snapshot_root / fifo.name)
+    with pytest.raises(ValueError, match="unsafe ignored worktree path"):
+        comments._snapshot_relative_path("../escape.env")
+    assert comments._collapsed_snapshot_paths(("ignored-dir/child.env", "ignored-dir/")) == (
+        "ignored-dir/",
+    )
+
+    symlink_parent = source_root / "linked-parent"
+    symlink_parent.symlink_to(tmp_path)
+    with pytest.raises(OSError, match="restore parent is a symlink"):
+        comments._safe_restore_destination(
+            source_root,
+            comments._snapshot_relative_path("linked-parent/config.env"),
+        )
 
 
 @pytest.mark.unit
@@ -323,6 +411,64 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
             "restore_ref": "b" * 40,
         }
     ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_restores_ignored_files_before_continuing(
+    tmp_path: Path,
+) -> None:
+    """A clarification re-ask must not leak ignored config changes into the next repair."""
+    workspace_id = "ws_ignored_reask"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    config = worktree / ".env"
+    config.write_text("MODE=original\n", encoding="utf-8")
+    generated = worktree / "generated.env"
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        config.write_text("MODE=clarification-edit\n", encoding="utf-8")
+        generated.write_text("GENERATED=during-reask\n", encoding="utf-8")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert config.read_text(encoding="utf-8") == "MODE=original\n"
+    assert not generated.exists()
 
 
 @pytest.mark.unit

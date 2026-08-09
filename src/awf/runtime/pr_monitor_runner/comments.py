@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
+import stat
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
@@ -36,6 +40,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
@@ -48,6 +53,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
@@ -69,6 +75,159 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+
+
+@dataclass(frozen=True)
+class _IgnoredWorktreeSnapshot:
+    """Temporary backup of ignored paths present before a clarification re-ask."""
+
+    root: Path
+    paths: tuple[str, ...]
+
+
+def _snapshot_relative_path(path: str) -> PurePosixPath:
+    """Return a safe worktree-relative path reported by git status."""
+    relative = PurePosixPath(path.rstrip("/"))
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"unsafe ignored worktree path: {path!r}")
+    return relative
+
+
+def _collapsed_snapshot_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep only top-level ignored paths so directory snapshots do not overlap."""
+    selected: list[str] = []
+    selected_normalized: list[str] = []
+    for path in sorted(paths, key=lambda value: (value.rstrip("/").count("/"), value)):
+        normalized = path.rstrip("/")
+        if not normalized or any(
+            normalized == parent or normalized.startswith(f"{parent}/")
+            for parent in selected_normalized
+        ):
+            continue
+        selected.append(path)
+        selected_normalized.append(normalized)
+    return tuple(selected)
+
+
+def _copy_ignored_snapshot_entry(source: Path, destination: Path) -> None:
+    """Copy one ignored path without dereferencing an agent-controlled symlink."""
+    source_mode = source.lstat().st_mode
+    if stat.S_ISLNK(source_mode):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source.readlink())
+        shutil.copystat(source, destination, follow_symlinks=False)
+    elif stat.S_ISDIR(source_mode):
+        shutil.copytree(source, destination, symlinks=True)
+    elif stat.S_ISREG(source_mode):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=False)
+    else:
+        raise OSError(f"unsupported ignored path type: {source}")
+
+
+def _remove_ignored_snapshot_entry(path: Path) -> None:
+    """Remove one path without following a symlink that a re-ask may have planted."""
+    try:
+        path_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(path_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _safe_restore_destination(worktree_path: Path, relative: PurePosixPath) -> Path:
+    """Refuse to write a backup through a symlinked worktree parent."""
+    destination = worktree_path.joinpath(*relative.parts)
+    parent = worktree_path
+    for part in relative.parts[:-1]:
+        parent /= part
+        if parent.is_symlink():
+            raise OSError(f"ignored snapshot restore parent is a symlink: {parent}")
+    return destination
+
+
+async def _snapshot_reask_ignored_paths(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+) -> _IgnoredWorktreeSnapshot | None:
+    """Snapshot ignored paths so a reason-only re-ask cannot persist edits to them."""
+    if not (worktree_path / ".git").exists():
+        # Lightweight test doubles do not have a worktree that can contain
+        # side effects. Real AWF worktrees always contain a .git control file.
+        return None
+
+    from awf.runtime.validation_worktree import check_validation_worktree_clean
+
+    async def _run_git(args: list[str]) -> CommandResult:
+        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        ignore_all_ignored=True,
+    )
+    if check.reason_code is not None:
+        raise _MonitorPolicyBlockedError(
+            "Could not snapshot ignored worktree paths before the NEEDS_HUMAN reason re-ask.",
+            reason_code=check.reason_code,
+        )
+
+    paths = _collapsed_snapshot_paths(check.ignored_paths)
+    if not paths:
+        return None
+
+    snapshot_root = Path(tempfile.mkdtemp(prefix="awf-needs-human-reask-ignored-"))
+    try:
+        for path in paths:
+            relative = _snapshot_relative_path(path)
+            source = worktree_path.joinpath(*relative.parts)
+            if not source.exists() and not source.is_symlink():
+                raise FileNotFoundError(source)
+            _copy_ignored_snapshot_entry(source, snapshot_root.joinpath(*relative.parts))
+    except (OSError, ValueError) as exc:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise _MonitorPolicyBlockedError(
+            "Could not snapshot ignored worktree paths before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
+    return _IgnoredWorktreeSnapshot(root=snapshot_root, paths=paths)
+
+
+async def _restore_reask_ignored_paths(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    snapshot: _IgnoredWorktreeSnapshot | None,
+) -> str | None:
+    """Delete re-ask ignored output and restore the ignored state captured before it."""
+    if not (worktree_path / ".git").exists():
+        return None
+
+    clean = await runner._deps.runner.run(git_worktree_command(worktree_path, "clean", "-ffdX"))
+    failure: str | None = None
+    if not clean.ok:
+        failure = "`git clean -ffdX` could not remove ignored re-ask side effects"
+    try:
+        if snapshot is not None:
+            for path in snapshot.paths:
+                relative = _snapshot_relative_path(path)
+                destination = _safe_restore_destination(worktree_path, relative)
+                _remove_ignored_snapshot_entry(destination)
+                _copy_ignored_snapshot_entry(snapshot.root.joinpath(*relative.parts), destination)
+    except (OSError, ValueError) as exc:
+        failure = "Could not restore ignored worktree paths after the NEEDS_HUMAN reason re-ask"
+        _log.warning(
+            "monitor.needs_human_reason_reask_ignored_restore_failed",
+            worktree_path=str(worktree_path),
+            error=redact_audit_text(str(exc), limit=240),
+        )
+    finally:
+        if snapshot is not None:
+            shutil.rmtree(snapshot.root, ignore_errors=True)
+    return failure
 
 
 async def _address_thread(
@@ -311,7 +470,6 @@ async def _enforce_needs_human_reason(
         _needs_human_reason_missing,
         _sanitize_verdict_reason,
     )
-    from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
     result = replace(result, reason=_sanitize_verdict_reason(result.reason))
     if not _needs_human_reason_missing(result):
@@ -352,6 +510,10 @@ async def _enforce_needs_human_reason(
             "Could not capture a worktree restore ref before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
+    reask_ignored_snapshot = await _snapshot_reask_ignored_paths(
+        runner,
+        worktree_path=worktree_path,
+    )
 
     async def _cleanup_reask_worktree() -> None:
         # The re-ask only collects a reason and must not leave edits for the
@@ -363,6 +525,22 @@ async def _enforce_needs_human_reason(
             worktree_path=worktree_path,
             restore_ref=reask_restore_ref,
         )
+        ignored_cleanup_failure = await _restore_reask_ignored_paths(
+            runner,
+            worktree_path=worktree_path,
+            snapshot=reask_ignored_snapshot,
+        )
+        if ignored_cleanup_failure is not None:
+            _log.warning(
+                "monitor.needs_human_reason_reask_ignored_cleanup_failed",
+                workspace_id=workspace_id,
+                restore_ref=reask_restore_ref,
+                message=ignored_cleanup_failure,
+            )
+            raise _MonitorPolicyBlockedError(
+                f"Could not clean NEEDS_HUMAN reason re-ask worktree: {ignored_cleanup_failure}",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
         if cleanup.ok:
             return
         _log.warning(
