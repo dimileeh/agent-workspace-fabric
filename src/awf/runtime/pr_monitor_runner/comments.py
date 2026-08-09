@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
@@ -36,6 +37,8 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
@@ -318,6 +321,15 @@ async def _enforce_needs_human_reason(
             task_tag=task_tag,
             operation_start_head=operation_start_head,
         )
+    except (
+        ComposeExecCleanupError,
+        ProviderRecoveryAuthError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryRetryError,
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+    ):
+        raise
     except Exception as exc:
         _log.warning(
             "monitor.needs_human_reason_reask_failed",

@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceEventRepository
 from awf.db.session import make_session_factory
@@ -18,6 +19,13 @@ from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
     _sync_needs_human_reason,
+)
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -167,6 +175,53 @@ async def test_thread_refusal_or_reask_error_keeps_blocking_verdict_and_records_
     assert events[0].payload["operation_id"] == "op-reask-missing"
     assert events[0].payload["evidence"]["item_id"] == thread.thread_id
     assert events[0].payload["evidence"]["item_kind"] == "thread"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "recovery_error",
+    [
+        ProviderRecoveryRetryError(),
+        ProviderRecoveryFallbackError(),
+        ProviderRecoveryAuthError(),
+        _MonitorAgentServiceRecoveryFailedError("agent service recovery failed"),
+        _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded"),
+        ComposeExecCleanupError(
+            invocation_id="awf-reask-cleanup",
+            source="agent",
+            label="monitor",
+            message="cleanup failed",
+        ),
+    ],
+)
+async def test_thread_reask_reraises_loop_recovery_exceptions(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    recovery_error: Exception,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=46)
+    runner, calls = _runner(
+        factory,
+        tmp_path,
+        [VerdictResult(verdict="needs_human"), recovery_error],
+    )
+    thread = ReviewThread(thread_id="T-recovery", path="src/recovery.py", line=7, body_excerpt="?")
+
+    with pytest.raises(type(recovery_error)):
+        await comments._address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="example", name="repo"),
+            pr_number=46,
+            thread=thread,
+            compose_project="awf-test",
+            compose_file=tmp_path / "compose.yml",
+            owned_paths=(),
+            task_tag=None,
+        )
+
+    assert len(calls) == 2
+    assert await _reason_events(factory, workspace_id) == []
 
 
 @pytest.mark.unit
