@@ -134,7 +134,9 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
     """Claude backend credentials stay out unless that backend is enabled."""
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         (
+            ("CLAUDE_CODE_USE_BEDROCK", "0"),
             ("AWS_SECRET_ACCESS_KEY", "unselected-backend-secret"),
+            ("CLAUDE_CODE_USE_VERTEX", "0"),
             ("ANTHROPIC_VERTEX_PROJECT_ID", "unselected-vertex-project"),
             ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
         ),
@@ -142,7 +144,10 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
         mirror_target="/host/awf/git/mirrors/repo.git",
     )
 
-    assert environment == ()
+    assert environment == (
+        ("CLAUDE_CODE_USE_BEDROCK", "0"),
+        ("CLAUDE_CODE_USE_VERTEX", "0"),
+    )
 
 
 @pytest.mark.unit

@@ -165,11 +165,11 @@ def _clarification_model_provider_environment_names(
     Google configuration to every clarification container.
     """
 
-    environment_names = {name for name, _value in agent_environment}
+    environment_values = dict(agent_environment)
     provider_names = set(_CLARIFICATION_MODEL_PROVIDER_ENV_NAMES)
-    if "CLAUDE_CODE_USE_BEDROCK" in environment_names:
+    if environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1":
         provider_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
-    if "CLAUDE_CODE_USE_VERTEX" in environment_names:
+    if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1":
         provider_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(provider_names)
 
