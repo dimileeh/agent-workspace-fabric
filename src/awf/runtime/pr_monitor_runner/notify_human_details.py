@@ -86,10 +86,24 @@ def _collect_defer_items(
 
 
 def _notification_items_digest(items: Sequence[Mapping[str, object]]) -> str:
-    """Return an order-independent identity for blocking item verdicts."""
+    """Return an order-independent digest of public blocking-item content."""
     item_details = sorted(
         json.dumps(
-            {field: item.get(field) for field in ("kind", "id", "verdict")},
+            {
+                field: item.get(field)
+                for field in (
+                    "kind",
+                    "id",
+                    "author",
+                    "is_bot",
+                    "path",
+                    "line",
+                    "url",
+                    "body",
+                    "verdict",
+                    "agent_verdict_reason",
+                )
+            },
             sort_keys=True,
             separators=(",", ":"),
         )

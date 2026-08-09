@@ -29,7 +29,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _notification_key,
     _notify_human_blocker_items,
 )
-from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _needs_human_reason_state_key,
+    _notification_items_digest,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
 
@@ -65,6 +68,29 @@ class _RecordingGh:
 
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
         self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
+@pytest.mark.unit
+def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> None:
+    item = {
+        "kind": "thread",
+        "id": "T-rendered",
+        "author": "human-reviewer",
+        "is_bot": False,
+        "path": "src/monitor.py",
+        "line": 91,
+        "url": "https://github.example/reviews/T-rendered",
+        "body": "Initial blocker detail.",
+        "verdict": "needs_human",
+        "agent_verdict_reason": "Initial triage reason.",
+    }
+    body_changed = {**item, "body": "Updated blocker detail."}
+    reason_changed = {**item, "agent_verdict_reason": "Updated triage reason."}
+
+    digest = _notification_items_digest((item,))
+
+    assert _notification_items_digest((body_changed,)) != digest
+    assert _notification_items_digest((reason_changed,)) != digest
 
 
 @pytest.mark.unit
@@ -249,7 +275,7 @@ async def test_human_notification_dedup_includes_order_independent_item_ids(
 
 
 @pytest.mark.unit
-async def test_human_notification_dedup_ignores_same_id_blocker_body_changes(
+async def test_human_notification_dedup_posts_when_same_id_blocker_content_changes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -294,6 +320,11 @@ async def test_human_notification_dedup_ignores_same_id_blocker_body_changes(
         status=first_status,
         state=state,
     )
+    first_bot_items, first_human_items = _collect_defer_items(first_status, state)
+    first_digest = _notification_items_digest(first_bot_items + first_human_items)
+    state.threads_addressed_ids[_needs_human_reason_state_key("T-updated")] = (
+        "Updated triage reason."
+    )
     await runner._post_human_notification_once(
         repo=RepoRef(owner="example", name="repo"),
         pr_number=46,
@@ -301,11 +332,13 @@ async def test_human_notification_dedup_ignores_same_id_blocker_body_changes(
         state=state,
     )
 
-    first_items, _ = _collect_defer_items(first_status, state)
-    second_items, _ = _collect_defer_items(second_status, state)
-    assert _notification_items_digest(first_items) == _notification_items_digest(second_items)
-    assert len(gh.posts) == 1
+    second_bot_items, second_human_items = _collect_defer_items(second_status, state)
+    second_digest = _notification_items_digest(second_bot_items + second_human_items)
+    assert first_digest != second_digest
+    assert len(gh.posts) == 2
     assert "Initial blocker detail." in str(gh.posts[0]["body"])
+    assert "Updated blocker detail." in str(gh.posts[1]["body"])
+    assert "Updated triage reason." in str(gh.posts[1]["body"])
 
 
 @pytest.mark.unit
