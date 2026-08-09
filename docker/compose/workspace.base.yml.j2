@@ -136,3 +136,5 @@ networks:
     {% endif %}
   clarification_egress_net:
     name: {{ ("awf-" ~ workspace_id ~ "-clarification-egress-net") | tojson }}
+    {% if network_internal %}internal: true
+    {% endif %}

@@ -202,6 +202,7 @@ class TestRender:
         )
 
         assert parsed["networks"]["awf_net"]["internal"] is True
+        assert parsed["networks"]["clarification_egress_net"]["internal"] is True
         assert "extra_hosts" not in parsed["services"]["agent"]
 
     @pytest.mark.unit
