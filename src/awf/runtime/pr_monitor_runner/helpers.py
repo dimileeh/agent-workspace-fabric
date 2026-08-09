@@ -212,7 +212,8 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
-    rf"^(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?{re.escape(_REDACTION)}\s*[,;]?\s*)+$",
+    rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
+    rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")

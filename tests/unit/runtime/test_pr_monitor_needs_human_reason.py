@@ -258,6 +258,8 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     (
         "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
         "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        "ghp_abcdefghijklmnopqrstuvwxyz1234567890.",
+        '"ghp_abcdefghijklmnopqrstuvwxyz1234567890"',
     ),
 )
 def test_sanitize_verdict_reason_treats_credential_only_reason_as_missing(
