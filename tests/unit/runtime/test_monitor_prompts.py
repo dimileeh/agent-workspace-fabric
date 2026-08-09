@@ -894,6 +894,216 @@ class TestReadyToMergeComment:
         assert "review was skipped" in body
         assert "All 5 AWF gates are green" not in body
 
+    @pytest.mark.unit
+    def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
+        long_body = "x" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": long_body,
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose whether this remains blocking.",
+                },
+                {
+                    "kind": "thread",
+                    "id": "T2",
+                    "author": "review-bot[bot]",
+                    "path": "src/other.py",
+                    "line": 7,
+                    "url": "https://github.example/reviews/T2",
+                    "body": "A decision is required.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Agent escalated - needs your decision (2):" in body
+        assert "[src/monitor.py:42](https://github.example/reviews/T1)" in body
+        assert "[needs_human]" in body
+        assert "x" * 160 in body
+        assert "x" * 161 not in body
+        assert "-> reason: Choose whether this remains blocking." in body
+        assert "[src/other.py:7](https://github.example/reviews/T2)" in body
+        assert "-> ⚠ no reason given by agent" in body
+
+    @pytest.mark.unit
+    def test_blocker_items_cap_combined_groups_at_eight(self) -> None:
+        blocker_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T{number}",
+                "body": f"body {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+            }
+            for number in range(9)
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=blocker_items,
+        )
+
+        assert body.count("-> ⚠ no reason given by agent") == 8
+        assert "(+1 more)" in body
+        assert "body 8" not in body
+
+    @pytest.mark.unit
+    def test_blocker_items_use_group_labels_and_deterministic_location_ordering(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-z",
+                    "author": "zoe",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-z",
+                    "body": "review-level z",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "thread",
+                    "id": "T-b",
+                    "author": "review-bot[bot]",
+                    "path": "src/b.py",
+                    "line": 1,
+                    "url": "https://github.example/reviews/T-b",
+                    "body": "bot b",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "review",
+                    "id": "R-a",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-a",
+                    "body": "review-level a",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "thread",
+                    "id": "T-a",
+                    "author": "review-bot[bot]",
+                    "path": "src/a.py",
+                    "line": 2,
+                    "url": "https://github.example/reviews/T-a",
+                    "body": "bot a",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Agent escalated - needs your decision (2):" in body
+        assert "Human feedback deferred by agent (2):" in body
+        assert body.index("bot a") < body.index("bot b")
+        assert body.index("review-level a") < body.index("review-level z")
+        assert "[alice](https://github.example/reviews/R-a)" in body
+
+    @pytest.mark.unit
+    def test_blocker_item_section_redacts_agent_reason_secrets(self) -> None:
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCD"
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "needs a decision",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": f"Approve using GH_TOKEN={secret}",
+                },
+            ),
+        )
+
+        assert secret not in body
+        assert "GH_TOKEN=<redacted>" in body
+
+    @pytest.mark.unit
+    def test_empty_blocker_items_preserve_existing_comment_byte_for_byte(self) -> None:
+        expected = (
+            "⚠️ PR #1 needs human attention at commit `aaaaaaaaaa`.\n\n"
+            "AWF did not auto-merge because review feedback needs human input.\n\n"
+            "After the blocker is cleared or a new commit lands, AWF will re-verify "
+            "the PR before taking any merge action."
+        )
+
+        assert (
+            ready_to_merge_comment(
+                pr_number=1,
+                head_sha="a" * 40,
+                blocker_reason="review feedback needs human input",
+                blocker_items=(),
+            )
+            == expected
+        )
+
+    @pytest.mark.unit
+    def test_incident_replay_renders_all_reasonless_needs_human_items(self) -> None:
+        blocker_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"incident-{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/incident_{number}.py",
+                "line": number + 1,
+                "url": f"https://github.example/reviews/incident-{number}",
+                "body": f"incident blocker {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=46,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input and remains unresolved on GitHub",
+            blocker_items=blocker_items,
+        )
+
+        assert "Agent escalated - needs your decision (8):" in body
+        assert body.count("-> ⚠ no reason given by agent") == 8
+        for number in range(8):
+            assert f"incident blocker {number}" in body
+        assert body != (
+            "⚠️ PR #46 needs human attention at commit `aaaaaaaaaa`.\n\n"
+            "AWF did not auto-merge because review feedback needs human input and remains "
+            "unresolved on GitHub.\n\n"
+            "After the blocker is cleared or a new commit lands, AWF will re-verify "
+            "the PR before taking any merge action."
+        )
+
 
 class TestReasoningGuidance:
     """Deliberate-decision, coverage, and scope-discipline guidance (#304 follow-up).
