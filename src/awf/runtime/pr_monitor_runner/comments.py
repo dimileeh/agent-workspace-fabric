@@ -22,6 +22,7 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -164,10 +165,20 @@ async def _snapshot_reask_ignored_paths(
     async def _run_git(args: list[str]) -> CommandResult:
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
 
+    # Use the same benign-worktree normalizations as the pre-push guard. A
+    # clarification re-ask must not be blocked by agent runtime scratch or an
+    # empty directory left when a prior repair deleted its final file.
+    adapter = getattr(runner._deps, "adapter", None)
+    await apply_agent_scratch_excludes(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        scratch_paths=getattr(adapter, "runtime_scratch_paths", ()),
+    )
     check = await check_validation_worktree_clean(
         run_git=_run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
     )
     if check.reason_code is not None:
         raise _MonitorPolicyBlockedError(

@@ -59,6 +59,43 @@ class _LocalCommandRunner:
 
 
 @pytest.mark.unit
+async def test_ignored_reask_snapshot_normalizes_agent_scratch_and_empty_directories(
+    tmp_path: Path,
+) -> None:
+    """A benign post-repair tree must not block the clarification re-ask."""
+    worktree = _init_real_worktree(tmp_path, "ws_snapshot_normalization")
+    scratch = worktree / ".agent-scratch" / "session.txt"
+    scratch.parent.mkdir()
+    scratch.write_text("runtime state\n", encoding="utf-8")
+    empty_output_dir = worktree / "removed-output"
+    empty_output_dir.mkdir()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            runner=_LocalCommandRunner(),
+            adapter=SimpleNamespace(runtime_scratch_paths=(".agent-scratch/",)),
+        )
+    )
+
+    snapshot = await comments._snapshot_reask_ignored_paths(
+        runner,
+        worktree_path=worktree,
+    )
+
+    assert snapshot is not None
+    assert snapshot.paths == (".agent-scratch/",)
+    assert not empty_output_dir.exists()
+    assert (
+        await comments._restore_reask_ignored_paths(
+            runner,
+            worktree_path=worktree,
+            snapshot=snapshot,
+        )
+        is None
+    )
+    assert scratch.read_text(encoding="utf-8") == "runtime state\n"
+
+
+@pytest.mark.unit
 def test_ignored_reask_snapshot_helpers_preserve_paths_without_following_links(
     tmp_path: Path,
 ) -> None:
