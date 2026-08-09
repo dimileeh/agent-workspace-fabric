@@ -489,7 +489,13 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     """Render rich, untrusted human-action context for a public PR comment."""
     bot_items: list[Mapping[str, object]] = []
     human_items: list[Mapping[str, object]] = []
+    blocking_review_items: list[Mapping[str, object]] = []
     for item in blocker_items:
+        if _item_text(item, "verdict") == "changes_requested":
+            # Effective changes-requested reviews block merge independently of
+            # agent triage. Do not present them as a deferral or escalation.
+            blocking_review_items.append(item)
+            continue
         is_bot = item.get("is_bot")
         if not isinstance(is_bot, bool):
             is_bot = _is_bot_author(_item_text(item, "author"))
@@ -500,6 +506,7 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     for label, items in (
         ("Agent escalated - needs your decision", bot_items),
         ("Human feedback deferred by agent", human_items),
+        ("Merge-blocking changes-requested reviews", blocking_review_items),
     ):
         lines.append(f"{label} ({len(items)}):")
         for item in sorted(items, key=_blocker_item_sort_key):
@@ -537,6 +544,8 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
         _truncate_blocker_excerpt(_item_text(item, "body"))
     )
     reason = _redact_and_escape_markdown_inline(_item_text(item, "agent_verdict_reason"))
+    if verdict == "changes_requested":
+        return f"- {location_text} [{verdict}] {excerpt}"
     reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
     return f"- {location_text} [{verdict}] {excerpt} {reason_text}"
 

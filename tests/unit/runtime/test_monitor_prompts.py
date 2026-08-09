@@ -1025,6 +1025,43 @@ class TestReadyToMergeComment:
         assert "[alice](https://github.example/reviews/R-a)" in body
 
     @pytest.mark.unit
+    def test_blocker_items_render_effective_changes_reviews_separately_from_deferrals(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="a merge-blocking changes-requested review remains unresolved",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-deferred",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-deferred",
+                    "body": "Track this separately.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": "Needs a tracked follow-up.",
+                },
+                {
+                    "kind": "review",
+                    "id": "R-blocking",
+                    "author": "bob",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-blocking",
+                    "body": "Changes are still required.",
+                    "verdict": "changes_requested",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Human feedback deferred by agent (1):" in body
+        assert "Merge-blocking changes-requested reviews (1):" in body
+        assert "[changes_requested]" in body
+        assert "Changes are still required. -> ⚠ no reason given by agent" not in body
+
+    @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
         body = ready_to_merge_comment(
             pr_number=1,
