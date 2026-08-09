@@ -299,6 +299,27 @@ class TestCodexAdapter:
         assert 'model_reasoning_effort="xhigh"' in args
 
     @pytest.mark.unit
+    async def test_uses_requested_compose_exec_workdir(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workdir="/workspace/.awf-needs-human-reask-test",
+        )
+
+        args = runner.calls[0].args
+        exec_idx = args.index("exec")
+        assert args[exec_idx : exec_idx + 4] == [
+            "exec",
+            "-T",
+            "-w",
+            "/workspace/.awf-needs-human-reask-test",
+        ]
+
+    @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")

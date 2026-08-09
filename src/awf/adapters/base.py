@@ -35,6 +35,7 @@ from awf.common.commands import (
     StreamCallback,
 )
 from awf.common.compose_exec import (
+    DEFAULT_AGENT_WORKDIR,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
     cleanup_compose_exec_invocation_after_cancellation,
@@ -353,6 +354,7 @@ class AgentAdapter(ABC):
         git_preparation: AgentRuntimeGitPreparation | None = None,
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
+        workdir: str = DEFAULT_AGENT_WORKDIR,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -399,6 +401,7 @@ class AgentAdapter(ABC):
             cli_args=cli_args,
             source=log_source,
             label=self.name.value,
+            workdir=workdir,
             preserve_stdin=True,
             env_passthrough=env_passthrough,
         )

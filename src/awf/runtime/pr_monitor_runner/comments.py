@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-import stat
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -77,98 +75,29 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+_ISOLATED_REASK_WORKTREE_PREFIX = ".awf-needs-human-reask-"
 
 
 @dataclass(frozen=True)
-class _IgnoredWorktreeSnapshot:
-    """Temporary backup of ignored paths present before a clarification re-ask."""
+class _IsolatedReaskWorktree:
+    """Tracked-only worktree used by one local NEEDS_HUMAN clarification re-ask."""
 
-    root: Path
-    paths: tuple[str, ...]
-
-
-def _snapshot_relative_path(path: str) -> PurePosixPath:
-    """Return a safe worktree-relative path reported by git status."""
-    relative = PurePosixPath(path.rstrip("/"))
-    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"unsafe ignored worktree path: {path!r}")
-    return relative
+    source_worktree: Path
+    path: Path
+    agent_workdir: str
 
 
-def _collapsed_snapshot_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Keep only top-level ignored paths so directory snapshots do not overlap."""
-    selected: list[str] = []
-    selected_normalized: list[str] = []
-    for path in sorted(paths, key=lambda value: (value.rstrip("/").count("/"), value)):
-        normalized = path.rstrip("/")
-        if not normalized or any(
-            normalized == parent or normalized.startswith(f"{parent}/")
-            for parent in selected_normalized
-        ):
-            continue
-        selected.append(path)
-        selected_normalized.append(normalized)
-    return tuple(selected)
-
-
-def _copy_ignored_snapshot_entry(source: Path, destination: Path) -> None:
-    """Copy one ignored path without dereferencing an agent-controlled symlink."""
-    source_mode = source.lstat().st_mode
-    if stat.S_ISLNK(source_mode):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.symlink_to(source.readlink())
-        shutil.copystat(source, destination, follow_symlinks=False)
-    elif stat.S_ISDIR(source_mode):
-        shutil.copytree(source, destination, symlinks=True)
-    elif stat.S_ISREG(source_mode):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination, follow_symlinks=False)
-    else:
-        raise OSError(f"unsupported ignored path type: {source}")
-
-
-def _remove_ignored_snapshot_entry(path: Path) -> None:
-    """Remove one path without following a symlink that a re-ask may have planted."""
-    try:
-        path_mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if stat.S_ISDIR(path_mode):
-        shutil.rmtree(path)
-    else:
-        path.unlink()
-
-
-def _safe_restore_destination(worktree_path: Path, relative: PurePosixPath) -> Path:
-    """Refuse to write a backup through a symlinked worktree parent."""
-    destination = worktree_path.joinpath(*relative.parts)
-    parent = worktree_path
-    for part in relative.parts[:-1]:
-        parent /= part
-        if parent.is_symlink():
-            raise OSError(f"ignored snapshot restore parent is a symlink: {parent}")
-    return destination
-
-
-async def _snapshot_reask_ignored_paths(
+async def _prepare_reask_primary_worktree(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
-) -> _IgnoredWorktreeSnapshot | None:
-    """Snapshot ignored paths so a reason-only re-ask cannot persist edits to them."""
-    if not (worktree_path / ".git").exists():
-        # Lightweight test doubles do not have a worktree that can contain
-        # side effects. Real AWF worktrees always contain a .git control file.
-        return None
-
+) -> None:
+    """Preserve the primary-worktree cleanliness guard before a re-ask starts."""
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
     async def _run_git(args: list[str]) -> CommandResult:
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
 
-    # Use the same benign-worktree normalizations as the pre-push guard. A
-    # clarification re-ask must not be blocked by agent runtime scratch or an
-    # empty directory left when a prior repair deleted its final file.
     adapter = getattr(runner._deps, "adapter", None)
     await apply_agent_scratch_excludes(
         run_git=_run_git,
@@ -183,68 +112,68 @@ async def _snapshot_reask_ignored_paths(
     )
     if check.reason_code is not None:
         raise _MonitorPolicyBlockedError(
-            "Could not snapshot ignored worktree paths before the NEEDS_HUMAN reason re-ask.",
+            "Could not prepare an isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=check.reason_code,
         )
 
-    paths = _collapsed_snapshot_paths(check.ignored_paths)
-    if not paths:
-        return None
 
-    snapshot_root = Path(tempfile.mkdtemp(prefix="awf-needs-human-reask-ignored-"))
-    try:
-        for path in paths:
-            relative = _snapshot_relative_path(path)
-            source = worktree_path.joinpath(*relative.parts)
-            if not source.exists() and not source.is_symlink():
-                raise FileNotFoundError(source)
-            _copy_ignored_snapshot_entry(source, snapshot_root.joinpath(*relative.parts))
-    except (OSError, ValueError) as exc:
-        shutil.rmtree(snapshot_root, ignore_errors=True)
-        raise _MonitorPolicyBlockedError(
-            "Could not snapshot ignored worktree paths before the NEEDS_HUMAN reason re-ask.",
-            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-        ) from exc
-    return _IgnoredWorktreeSnapshot(root=snapshot_root, paths=paths)
-
-
-async def _restore_reask_ignored_paths(
+async def _create_isolated_reask_worktree(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
-    snapshot: _IgnoredWorktreeSnapshot | None,
-) -> str | None:
-    """Delete re-ask ignored output and restore the ignored state captured before it."""
+    restore_ref: str,
+) -> _IsolatedReaskWorktree | None:
+    """Create a temporary tracked-only checkout for a local clarification re-ask."""
     if not (worktree_path / ".git").exists():
+        # Lightweight test doubles do not have a worktree that can contain side
+        # effects. Real AWF worktrees always contain a .git control file.
         return None
 
-    clean = await runner._deps.runner.run(git_worktree_command(worktree_path, "clean", "-ffdX"))
-    failure: str | None = None
-    restore_succeeded = False
-    if not clean.ok:
-        failure = "`git clean -ffdX` could not remove ignored re-ask side effects"
-    try:
-        if snapshot is not None:
-            for path in snapshot.paths:
-                relative = _snapshot_relative_path(path)
-                destination = _safe_restore_destination(worktree_path, relative)
-                _remove_ignored_snapshot_entry(destination)
-                _copy_ignored_snapshot_entry(snapshot.root.joinpath(*relative.parts), destination)
-        restore_succeeded = True
-    except (OSError, ValueError) as exc:
-        failure = "Could not restore ignored worktree paths after the NEEDS_HUMAN reason re-ask"
-        if snapshot is not None:
-            failure += f"; recovery snapshot retained at {snapshot.root}"
-        _log.warning(
-            "monitor.needs_human_reason_reask_ignored_restore_failed",
-            worktree_path=str(worktree_path),
-            snapshot_root=str(snapshot.root) if snapshot is not None else None,
-            error=redact_audit_text(str(exc), limit=240),
+    await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
+    path = worktree_path / f"{_ISOLATED_REASK_WORKTREE_PREFIX}{uuid4().hex}"
+    create = await runner._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "worktree",
+            "add",
+            "--detach",
+            str(path),
+            restore_ref,
         )
-    finally:
-        if snapshot is not None and restore_succeeded:
-            shutil.rmtree(snapshot.root, ignore_errors=True)
-    return failure
+    )
+    if not create.ok:
+        raise _MonitorPolicyBlockedError(
+            "Could not create an isolated worktree before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    return _IsolatedReaskWorktree(
+        source_worktree=worktree_path,
+        path=path,
+        agent_workdir=f"/workspace/{path.name}",
+    )
+
+
+async def _remove_isolated_reask_worktree(
+    runner: PullRequestMonitorRunner,
+    reask_worktree: _IsolatedReaskWorktree | None,
+) -> str | None:
+    """Remove a clarification checkout before the primary-worktree cleanup runs."""
+    if reask_worktree is None:
+        return None
+
+    remove = await runner._deps.runner.run(
+        git_worktree_command(
+            reask_worktree.source_worktree,
+            "worktree",
+            "remove",
+            "--force",
+            str(reask_worktree.path),
+        )
+    )
+    if remove.ok:
+        return None
+    return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
 
 
 async def _address_thread(
@@ -527,37 +456,35 @@ async def _enforce_needs_human_reason(
             "Could not capture a worktree restore ref before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
-    reask_ignored_snapshot = await _snapshot_reask_ignored_paths(
+    reask_worktree = await _create_isolated_reask_worktree(
         runner,
         worktree_path=worktree_path,
+        restore_ref=reask_restore_ref,
     )
 
     async def _cleanup_reask_worktree() -> None:
-        # The re-ask only collects a reason and must not leave edits for the
-        # next item in the fix cycle to commit under a different message.
+        # The re-ask only collects a reason. Remove its tracked-only checkout
+        # before cleaning the primary worktree, so it cannot be mistaken for an
+        # untracked side effect.
         from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
+        isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
+        if isolated_cleanup_failure is not None:
+            _log.warning(
+                "monitor.needs_human_reason_reask_isolated_cleanup_failed",
+                workspace_id=workspace_id,
+                restore_ref=reask_restore_ref,
+                message=isolated_cleanup_failure,
+            )
+            raise _MonitorPolicyBlockedError(
+                f"Could not clean NEEDS_HUMAN reason re-ask worktree: {isolated_cleanup_failure}",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
         cleanup = await _ppv._pre_push_validation_cleanup(
             runner,
             worktree_path=worktree_path,
             restore_ref=reask_restore_ref,
         )
-        ignored_cleanup_failure = await _restore_reask_ignored_paths(
-            runner,
-            worktree_path=worktree_path,
-            snapshot=reask_ignored_snapshot,
-        )
-        if ignored_cleanup_failure is not None:
-            _log.warning(
-                "monitor.needs_human_reason_reask_ignored_cleanup_failed",
-                workspace_id=workspace_id,
-                restore_ref=reask_restore_ref,
-                message=ignored_cleanup_failure,
-            )
-            raise _MonitorPolicyBlockedError(
-                f"Could not clean NEEDS_HUMAN reason re-ask worktree: {ignored_cleanup_failure}",
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-            )
         if cleanup.ok:
             return
         _log.warning(
@@ -583,6 +510,7 @@ async def _enforce_needs_human_reason(
             task_tag=task_tag,
             operation_start_head=operation_start_head,
             commit_dirty_changes=False,
+            agent_workdir=(reask_worktree.agent_workdir if reask_worktree is not None else None),
         )
     except (
         ComposeExecCleanupError,
@@ -778,6 +706,7 @@ async def _invoke_cli_for_verdict_result(
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
     commit_dirty_changes: bool = True,
+    agent_workdir: str | None = None,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -818,16 +747,29 @@ async def _invoke_cli_for_verdict_result(
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
-        result = await runner._run_monitor_agent_with_service_recovery(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            prompt=prompt,
-            log_source="recovery",
-            command_evidence=command_evidence,
-            operation_start_head=operation_start_head,
-            state=state,
-        )
+        if agent_workdir is not None:
+            result = await runner._run_monitor_agent_with_service_recovery(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                log_source="recovery",
+                command_evidence=command_evidence,
+                operation_start_head=operation_start_head,
+                state=state,
+                agent_workdir=agent_workdir,
+            )
+        else:
+            result = await runner._run_monitor_agent_with_service_recovery(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                log_source="recovery",
+                command_evidence=command_evidence,
+                operation_start_head=operation_start_head,
+                state=state,
+            )
         result_stdout = result.stdout
     except AgentRunError as exc:
         cli_failed = True

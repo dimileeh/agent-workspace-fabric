@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.adapters.base import AgentRunResult
-from awf.common.commands import CommandResult
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.runtime.pr_monitor_runner import comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
@@ -61,11 +59,17 @@ class _LocalCommandRunner:
 
 
 @pytest.mark.unit
-async def test_ignored_reask_snapshot_normalizes_agent_scratch_and_empty_directories(
+async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies(
     tmp_path: Path,
 ) -> None:
-    """A benign post-repair tree must not block the clarification re-ask."""
-    worktree = _init_real_worktree(tmp_path, "ws_snapshot_normalization")
+    """The clarification checkout contains tracked source, not ignored dependency trees."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_isolation")
+    (worktree / ".gitignore").write_text("*.env\n.venv/\n", encoding="utf-8")
+    _git(worktree, "add", ".gitignore")
+    _git(worktree, "commit", "-qm", "ignore dependencies")
+    dependency = worktree / ".venv" / "lib" / "dependency.py"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("large dependency tree\n", encoding="utf-8")
     scratch = worktree / ".agent-scratch" / "session.txt"
     scratch.parent.mkdir()
     scratch.write_text("runtime state\n", encoding="utf-8")
@@ -78,107 +82,80 @@ async def test_ignored_reask_snapshot_normalizes_agent_scratch_and_empty_directo
         )
     )
 
-    snapshot = await comments._snapshot_reask_ignored_paths(
+    reask_worktree = await comments._create_isolated_reask_worktree(
         runner,
         worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
     )
 
-    assert snapshot is not None
-    assert snapshot.paths == (".agent-scratch/",)
+    assert reask_worktree is not None
+    assert reask_worktree.path.parent == worktree
+    assert reask_worktree.agent_workdir == f"/workspace/{reask_worktree.path.name}"
+    assert (reask_worktree.path / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not (reask_worktree.path / ".venv").exists()
+    assert not (reask_worktree.path / ".agent-scratch").exists()
+    assert dependency.exists()
+    assert scratch.exists()
     assert not empty_output_dir.exists()
-    assert (
-        await comments._restore_reask_ignored_paths(
-            runner,
-            worktree_path=worktree,
-            snapshot=snapshot,
-        )
-        is None
-    )
-    assert scratch.read_text(encoding="utf-8") == "runtime state\n"
+
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+    assert not reask_worktree.path.exists()
 
 
 @pytest.mark.unit
-async def test_ignored_reask_restore_failure_retains_snapshot_for_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed restore must leave the only original ignored-file copy recoverable."""
-    worktree = _init_real_worktree(tmp_path, "ws_restore_failure")
-    config = worktree / ".env"
-    config.write_text("MODE=original\n", encoding="utf-8")
+async def test_isolated_reask_worktree_preserves_dirty_primary_worktree(tmp_path: Path) -> None:
+    """A clarification checkout must not turn pre-existing primary-worktree edits into cleanup."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_dirty_primary")
+    (worktree / "preexisting.txt").write_text("do not delete\n", encoding="utf-8")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
-    snapshot = await comments._snapshot_reask_ignored_paths(
-        runner,
-        worktree_path=worktree,
-    )
-    assert snapshot is not None
 
-    def _copy_failure(_source: Path, _destination: Path) -> None:
-        raise OSError("destination is unwritable")
-
-    monkeypatch.setattr(comments, "_copy_ignored_snapshot_entry", _copy_failure)
-    try:
-        failure = await comments._restore_reask_ignored_paths(
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not prepare an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
             runner,
             worktree_path=worktree,
-            snapshot=snapshot,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-        assert failure is not None
-        assert str(snapshot.root) in failure
-        assert snapshot.root.exists()
-        assert not config.exists()
-    finally:
-        shutil.rmtree(snapshot.root, ignore_errors=True)
+    assert (worktree / "preexisting.txt").read_text(encoding="utf-8") == "do not delete\n"
 
 
 @pytest.mark.unit
-def test_ignored_reask_snapshot_helpers_preserve_paths_without_following_links(
+async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
     tmp_path: Path,
 ) -> None:
-    """The ignored-file backup must preserve safe content and reject path escapes."""
-    source_root = tmp_path / "source"
-    snapshot_root = tmp_path / "snapshot"
-    source_root.mkdir()
-    nested = source_root / "ignored-dir"
-    nested.mkdir()
-    (nested / "config.env").write_text("MODE=original\n", encoding="utf-8")
-    comments._copy_ignored_snapshot_entry(nested, snapshot_root / nested.name)
-    assert (snapshot_root / nested.name / "config.env").read_text(encoding="utf-8") == (
-        "MODE=original\n"
-    )
-    comments._remove_ignored_snapshot_entry(snapshot_root / nested.name)
-    assert not (snapshot_root / nested.name).exists()
+    """Do not start a re-ask when Git cannot create its isolated checkout."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_create_failure")
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=0)  # primary-worktree status
+    command_runner.queue_result(returncode=1, stderr="worktree add failed")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
-    outside = tmp_path / "outside.env"
-    outside.write_text("outside\n", encoding="utf-8")
-    link = source_root / "ignored-link"
-    link.symlink_to(outside)
-    copied_link = snapshot_root / link.name
-    comments._copy_ignored_snapshot_entry(link, copied_link)
-    assert copied_link.is_symlink()
-    assert copied_link.readlink() == outside
-    comments._remove_ignored_snapshot_entry(copied_link)
-    assert not copied_link.exists()
-    assert outside.exists()
-
-    fifo = source_root / "ignored-fifo"
-    os.mkfifo(fifo)
-    with pytest.raises(OSError, match="unsupported ignored path type"):
-        comments._copy_ignored_snapshot_entry(fifo, snapshot_root / fifo.name)
-    with pytest.raises(ValueError, match="unsafe ignored worktree path"):
-        comments._snapshot_relative_path("../escape.env")
-    assert comments._collapsed_snapshot_paths(("ignored-dir/child.env", "ignored-dir/")) == (
-        "ignored-dir/",
-    )
-
-    symlink_parent = source_root / "linked-parent"
-    symlink_parent.symlink_to(tmp_path)
-    with pytest.raises(OSError, match="restore parent is a symlink"):
-        comments._safe_restore_destination(
-            source_root,
-            comments._snapshot_relative_path("linked-parent/config.env"),
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not create an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
+
+    assert "worktree" in command_runner.calls[1].args
+    assert "add" in command_runner.calls[1].args
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
+    """A failed isolated-checkout teardown remains a policy-blocking cleanup failure."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=1, stderr="worktree remove failed")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    reask_worktree = comments._IsolatedReaskWorktree(
+        source_worktree=Path("/worktree"),
+        path=Path("/worktree/.awf-needs-human-reask-test"),
+        agent_workdir="/workspace/.awf-needs-human-reask-test",
+    )
+
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) == (
+        "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+    )
 
 
 @pytest.mark.unit
@@ -488,19 +465,29 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_restores_ignored_files_before_continuing(
+async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing(
     tmp_path: Path,
 ) -> None:
-    """A clarification re-ask must not leak ignored config changes into the next repair."""
+    """A clarification re-ask must not see or alter ignored primary-worktree files."""
     workspace_id = "ws_ignored_reask"
     worktree = _init_real_worktree(tmp_path, workspace_id)
     config = worktree / ".env"
     config.write_text("MODE=original\n", encoding="utf-8")
-    generated = worktree / "generated.env"
+    dependency = worktree / ".venv" / "dependency.py"
+    dependency.parent.mkdir()
+    dependency.write_text("dependency\n", encoding="utf-8")
+    (worktree / ".gitignore").write_text("*.env\n.venv/\n", encoding="utf-8")
+    _git(worktree, "add", ".gitignore")
+    _git(worktree, "commit", "-qm", "ignore dependencies")
+    reask_workdirs: list[str] = []
 
-    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
-        config.write_text("MODE=clarification-edit\n", encoding="utf-8")
-        generated.write_text("GENERATED=during-reask\n", encoding="utf-8")
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        agent_workdir = str(kwargs["agent_workdir"])
+        reask_workdirs.append(agent_workdir)
+        reask = worktree / Path(agent_workdir).relative_to("/workspace")
+        assert not (reask / ".venv").exists()
+        (reask / ".env").write_text("MODE=clarification-edit\n", encoding="utf-8")
+        (reask / "generated.env").write_text("GENERATED=during-reask\n", encoding="utf-8")
         return VerdictResult(
             verdict="needs_human",
             reason="select the deployment region",
@@ -541,8 +528,10 @@ async def test_needs_human_reason_reask_restores_ignored_files_before_continuing
     )
 
     assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert len(reask_workdirs) == 1
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
-    assert not generated.exists()
+    assert dependency.exists()
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -554,12 +543,12 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
     worktree = _init_real_worktree(tmp_path, workspace_id)
     config = worktree / ".env"
     config.write_text("MODE=original\n", encoding="utf-8")
-    generated = worktree / "generated.env"
 
-    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
-        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
-        config.write_text("MODE=clarification-edit\n", encoding="utf-8")
-        generated.write_text("GENERATED=during-reask\n", encoding="utf-8")
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = worktree / Path(str(kwargs["agent_workdir"])).relative_to("/workspace")
+        (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        (reask / ".env").write_text("MODE=clarification-edit\n", encoding="utf-8")
+        (reask / "generated.env").write_text("GENERATED=during-reask\n", encoding="utf-8")
         raise asyncio.CancelledError
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
@@ -599,7 +588,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
 
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
-    assert not generated.exists()
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit

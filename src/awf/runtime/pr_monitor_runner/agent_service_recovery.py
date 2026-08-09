@@ -92,6 +92,7 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    agent_workdir: str | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -135,13 +136,23 @@ async def _run_monitor_agent_with_service_recovery(
                     hosted_run_kwargs["git_preparation"] = git_preparation
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
-                result = await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source=log_source,
-                )
+                if agent_workdir is not None:
+                    result = await self._deps.adapter.run(
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        prompt=prompt,
+                        workspace_id=workspace_id,
+                        log_source=log_source,
+                        workdir=agent_workdir,
+                    )
+                else:
+                    result = await self._deps.adapter.run(
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        prompt=prompt,
+                        workspace_id=workspace_id,
+                        log_source=log_source,
+                    )
         except AgentRunError as exc:
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
