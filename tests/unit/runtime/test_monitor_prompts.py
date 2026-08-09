@@ -895,6 +895,17 @@ class TestReadyToMergeComment:
         assert "All 5 AWF gates are green" not in body
 
     @pytest.mark.unit
+    def test_blocker_reason_neutralizes_untrusted_mentions(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="ask @acme/security to approve",
+        )
+
+        assert "ask &#64;acme/security to approve" in body
+        assert "ask @acme/security to approve" not in body
+
+    @pytest.mark.unit
     def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
         long_body = "x" * 200
         body = ready_to_merge_comment(

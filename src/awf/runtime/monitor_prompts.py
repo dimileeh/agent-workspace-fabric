@@ -465,9 +465,10 @@ def ready_to_merge_comment(
     gates are green.
     """
     if blocker_reason:
+        safe_blocker_reason = _redact_and_escape_markdown_inline(blocker_reason)
         body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
-            f"AWF did not auto-merge because {blocker_reason}.\n\n"
+            f"AWF did not auto-merge because {safe_blocker_reason}.\n\n"
             "After the blocker is cleared or a new commit lands, AWF will re-verify "
             "the PR before taking any merge action."
         )
