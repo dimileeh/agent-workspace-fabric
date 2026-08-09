@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.adapters.base import AgentRunResult
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
+from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import agent_service_recovery, comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -97,6 +99,97 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
             "isolated_worktree_host_path": reask_worktree,
         }
     ]
+
+
+@pytest.mark.unit
+async def test_isolated_reask_agent_error_does_not_restart_persistent_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reason-only re-ask makes one attempt, even when the agent times out."""
+    calls = 0
+
+    class _Adapter:
+        is_hosted = False
+
+        async def run(self, **_kwargs: object) -> AgentRunResult:
+            nonlocal calls
+            calls += 1
+            raise AgentRunError(
+                agent=AgentRuntime.codex,
+                result=CommandResult(returncode=1, stdout="", stderr="timed out"),
+                reason_code="AGENT_TIMEOUT",
+            )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
+
+    async def _unexpected_recovery(_runner: object, **_kwargs: object) -> None:
+        raise AssertionError("isolated clarification must not enter service recovery")
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_error",
+        _unexpected_recovery,
+    )
+
+    with pytest.raises(AgentRunError, match="timed out"):
+        await agent_service_recovery._run_monitor_agent_with_service_recovery(
+            runner,
+            workspace_id="ws_reask",
+            compose_project="awf_ws_reask",
+            compose_file=tmp_path / "compose.yml",
+            prompt="state the reason",
+            log_source="recovery",
+            isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.unit
+async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reason-only re-ask does not retry after isolated-run cleanup fails."""
+    calls = 0
+
+    class _Adapter:
+        is_hosted = False
+
+        async def run(self, **_kwargs: object) -> AgentRunResult:
+            nonlocal calls
+            calls += 1
+            raise ComposeExecCleanupError(
+                invocation_id="reask",
+                source="agent",
+                label="clarification",
+                message="cleanup failed",
+            )
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
+
+    async def _unexpected_recovery(_runner: object, **_kwargs: object) -> None:
+        raise AssertionError("isolated clarification must not enter service recovery")
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_recover_monitor_agent_service_after_cleanup_error",
+        _unexpected_recovery,
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="cleanup failed"):
+        await agent_service_recovery._run_monitor_agent_with_service_recovery(
+            runner,
+            workspace_id="ws_reask",
+            compose_project="awf_ws_reask",
+            compose_file=tmp_path / "compose.yml",
+            prompt="state the reason",
+            log_source="recovery",
+            isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
+        )
+
+    assert calls == 1
 
 
 @pytest.mark.unit

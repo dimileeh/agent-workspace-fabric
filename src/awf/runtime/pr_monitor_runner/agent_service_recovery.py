@@ -147,6 +147,10 @@ async def _run_monitor_agent_with_service_recovery(
                     local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
+            if isolated_worktree_host_path is not None:
+                # A clarification re-ask gets exactly one isolated invocation;
+                # never restart the persistent service and re-run it.
+                raise
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
@@ -197,6 +201,10 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
+            if isolated_worktree_host_path is not None:
+                # The isolated clarification container must not trigger a
+                # persistent-agent recovery retry after cleanup failure.
+                raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
