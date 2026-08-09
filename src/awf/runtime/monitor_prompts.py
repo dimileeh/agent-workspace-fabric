@@ -504,9 +504,9 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     displayed = 0
     lines: list[str] = []
     for label, items in (
+        ("Merge-blocking changes-requested reviews", blocking_review_items),
         ("Agent escalated - needs your decision", bot_items),
         ("Human feedback deferred by agent", human_items),
-        ("Merge-blocking changes-requested reviews", blocking_review_items),
     ):
         lines.append(f"{label} ({len(items)}):")
         for item in sorted(items, key=_blocker_item_sort_key):

@@ -1062,6 +1062,45 @@ class TestReadyToMergeComment:
         assert "Changes are still required. -> ⚠ no reason given by agent" not in body
 
     @pytest.mark.unit
+    def test_blocker_items_prioritize_changes_requested_reviews_within_cap(self) -> None:
+        deferred_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T-deferred-{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/deferred_{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T-deferred-{number}",
+                "body": f"deferred blocker {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        blocking_review = {
+            "kind": "review",
+            "id": "R-blocking",
+            "author": "blocking reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-blocking",
+            "body": "Changes are still required.",
+            "verdict": "changes_requested",
+            "agent_verdict_reason": None,
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="a merge-blocking changes-requested review remains unresolved",
+            blocker_items=(*deferred_items, blocking_review),
+        )
+
+        assert "blocking reviewer" in body
+        assert "[blocking reviewer](https://github.example/reviews/R-blocking)" in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
         body = ready_to_merge_comment(
             pr_number=1,
