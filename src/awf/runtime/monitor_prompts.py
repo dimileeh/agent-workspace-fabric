@@ -530,7 +530,9 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     remaining = len(blocker_items) - displayed
     if remaining:
         lines.append(f"(+{remaining} more)")
-    return redact_secrets("\n".join(lines))
+    return redact_secrets("\n".join(lines)).replace(
+        REDACTION_MARKER, _escape_markdown_inline(REDACTION_MARKER)
+    )
 
 
 def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, str]:
@@ -579,7 +581,7 @@ def _escape_markdown_inline(value: str) -> str:
 def _redact_and_escape_markdown_inline(value: str) -> str:
     """Remove secrets before escaping untrusted text for public Markdown."""
     redacted = redact_secrets(value)
-    return REDACTION_MARKER.join(
+    return _escape_markdown_inline(REDACTION_MARKER).join(
         _escape_markdown_inline(part) for part in redacted.split(REDACTION_MARKER)
     )
 

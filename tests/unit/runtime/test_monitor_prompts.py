@@ -1255,7 +1255,8 @@ class TestReadyToMergeComment:
         )
 
         assert secret not in body
-        assert "GH_TOKEN=<redacted>" in body
+        assert r"GH_TOKEN=\<redacted\>" in body
+        assert "GH_TOKEN=<redacted>" not in body
 
     @pytest.mark.unit
     def test_blocker_item_excerpt_redacts_url_credentials_before_truncating(self) -> None:
@@ -1280,7 +1281,8 @@ class TestReadyToMergeComment:
         )
 
         assert password[:12] not in body
-        assert "<redacted>" in body
+        assert r"\<redacted\>" in body
+        assert "<redacted>" not in body
 
     @pytest.mark.unit
     def test_blocker_items_escape_untrusted_markdown_and_link_destinations(self) -> None:
