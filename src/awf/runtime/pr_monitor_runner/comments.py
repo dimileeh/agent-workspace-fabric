@@ -601,7 +601,12 @@ async def _enforce_needs_human_reason(
         if worktree_path is None or reask_restore_ref is None:
             return None, False
 
-        isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
+        try:
+            isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
+        except (GitOperationError, OSError, RuntimeError) as exc:
+            # A command-runner exception leaves the isolated checkout's removal
+            # unconfirmed, so preserve its policy-blocking cleanup phase.
+            isolated_cleanup_failure = str(exc)
         if isolated_cleanup_failure is not None:
             _log.warning(
                 "monitor.needs_human_reason_reask_isolated_cleanup_failed",
