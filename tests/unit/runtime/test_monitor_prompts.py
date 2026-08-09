@@ -1151,6 +1151,31 @@ class TestReadyToMergeComment:
         assert "GH_TOKEN=<redacted>" in body
 
     @pytest.mark.unit
+    def test_blocker_item_excerpt_redacts_url_credentials_before_truncating(self) -> None:
+        password = "credential-that-crosses-the-boundary"
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": f"{'x' * 130} https://username:{password}@example.com/details",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert password[:12] not in body
+        assert "<redacted>" in body
+
+    @pytest.mark.unit
     def test_blocker_items_escape_untrusted_markdown_and_link_destinations(self) -> None:
         body = ready_to_merge_comment(
             pr_number=1,

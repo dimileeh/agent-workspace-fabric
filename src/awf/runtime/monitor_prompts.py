@@ -541,7 +541,7 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
     )
     verdict = _redact_and_escape_markdown_inline(_item_text(item, "verdict"))
     excerpt = _redact_and_escape_markdown_inline(
-        _truncate_blocker_excerpt(_item_text(item, "body"))
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "body")))
     )
     reason = _redact_and_escape_markdown_inline(_item_text(item, "agent_verdict_reason"))
     if verdict == "changes_requested":
