@@ -86,6 +86,10 @@ class _IsolatedReaskWorktree:
     path: Path
 
 
+class _IsolatedReaskWorktreeCleanupFailedError(_MonitorPolicyBlockedError):
+    """Raised when an unsuccessfully created re-ask checkout cannot be removed."""
+
+
 async def _prepare_reask_primary_worktree(
     runner: PullRequestMonitorRunner,
     *,
@@ -187,13 +191,18 @@ async def _create_isolated_reask_worktree(
         # Git can register and populate the checkout before reporting an error
         # (for example, when a post-checkout hook fails). Do not leave that
         # nested repository behind while treating clarification as unavailable.
-        await _cleanup_isolated_reask_worktree_after_creation_failure(
+        cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
             runner,
             reask_worktree=reask_worktree,
             event_name=(
                 "monitor.needs_human_reason_reask_isolated_cleanup_failed_after_creation_failure"
             ),
         )
+        if cleanup_error is not None:
+            raise _IsolatedReaskWorktreeCleanupFailedError(
+                cleanup_error,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
         raise _MonitorPolicyBlockedError(
             "Could not create an isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -207,7 +216,7 @@ async def _cleanup_isolated_reask_worktree_after_creation_failure(
     *,
     reask_worktree: _IsolatedReaskWorktree,
     event_name: str,
-) -> None:
+) -> str | None:
     """Remove and report a checkout Git might create before it signals failure."""
     cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
     if cleanup_error is not None:
@@ -217,6 +226,7 @@ async def _cleanup_isolated_reask_worktree_after_creation_failure(
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             message=cleanup_error,
         )
+    return cleanup_error
 
 
 async def _remove_isolated_reask_worktree(
@@ -537,6 +547,11 @@ async def _enforce_needs_human_reason(
                 raise RuntimeError("worktree has no Git control file")
             else:
                 reask_restore_ref = await runner._rev_parse_head(worktree_path)
+        except _IsolatedReaskWorktreeCleanupFailedError:
+            # A failed cleanup can leave a nested repository in the primary
+            # checkout. It must stop the fix cycle rather than be downgraded to
+            # an unavailable advisory clarification.
+            raise
         except Exception as exc:
             # Clarification is advisory and read-only. A worktree/setup failure
             # must preserve the original blocking verdict instead of blocking
