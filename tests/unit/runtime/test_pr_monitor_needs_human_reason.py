@@ -10,6 +10,7 @@ import pytest
 from awf.adapters.base import AgentRunResult
 from awf.runtime.pr_monitor_runner import comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
@@ -181,6 +182,30 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
             "restore_ref": "b" * 40,
         }
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "credential_only_reason",
+    (
+        "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    ),
+)
+def test_sanitize_verdict_reason_treats_credential_only_reason_as_missing(
+    credential_only_reason: str,
+) -> None:
+    """A redacted credential alone is not an actionable operator decision."""
+    assert _sanitize_verdict_reason(credential_only_reason) is None
+
+
+@pytest.mark.unit
+def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details() -> None:
+    reason = "A maintainer must decide whether to rotate GITHUB_TOKEN=secretValue123456."
+
+    assert _sanitize_verdict_reason(reason) == (
+        "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
+    )
 
 
 @pytest.mark.unit

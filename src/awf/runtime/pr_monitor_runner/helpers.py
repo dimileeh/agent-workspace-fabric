@@ -211,6 +211,10 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
     re.IGNORECASE,
 )
+_VERDICT_REASON_REDACTION_ONLY = re.compile(
+    rf"^(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?{re.escape(_REDACTION)}\s*[,;]?\s*)+$",
+    re.IGNORECASE,
+)
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
 
 
@@ -372,6 +376,8 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
         return None
     cleaned = redact_secrets(reason).strip()
     if not cleaned:
+        return None
+    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
         return None
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
         return None
