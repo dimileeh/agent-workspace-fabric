@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from awf.node.compose_manager import (
+    AuthMount,
     CompanionService,
     ComposeManager,
     ComposeProjectPaths,
@@ -85,6 +86,48 @@ class TestRender:
         parsed = yaml.safe_load(paths.compose_file.read_text())
         volumes = parsed["services"]["agent"]["volumes"]
         assert volumes == [f"{spec.worktree_host_path}:/workspace"]
+
+    @pytest.mark.unit
+    def test_renders_clarification_service_without_shared_git_access(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification runs retain coding auth but never inherit Git access."""
+        shared_mirror = tmp_path / "mirrors" / "repo.git"
+        codex_auth = tmp_path / "auth" / "codex"
+        spec = _spec(
+            tmp_path,
+            agent_environment=(
+                ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+                ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+                ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
+            ),
+            clarification_enabled=True,
+            clarification_agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+            auth_mounts=(
+                AuthMount(source=str(shared_mirror), target=str(shared_mirror), mode="rw"),
+                AuthMount(source=str(codex_auth), target="/home/agent/.codex", mode="rw"),
+                AuthMount(
+                    source=str(tmp_path / "gitconfig"),
+                    target="/home/agent/.gitconfig",
+                    mode="ro",
+                ),
+            ),
+            clarification_auth_mounts=(
+                AuthMount(source=str(codex_auth), target="/home/agent/.codex", mode="rw"),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        clarification = parsed["services"]["clarification"]
+
+        assert clarification["profiles"] == ["awf-clarification"]
+        assert clarification["environment"] == {
+            "WORKSPACE_ID": "ws_test123",
+            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        }
+        assert clarification["volumes"] == [f"{codex_auth}:/home/agent/.codex:rw"]
+        assert str(shared_mirror) not in "\n".join(clarification["volumes"])
+        assert "/home/agent/.gitconfig" not in "\n".join(clarification["volumes"])
 
     @pytest.mark.unit
     def test_agent_can_reach_host_gateway_for_host_services(

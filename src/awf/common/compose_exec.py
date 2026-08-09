@@ -150,12 +150,11 @@ def build_isolated_tracked_compose_run(
     source: str,
     label: str,
     worktree_host_path: Path,
-    service: str = "agent",
+    service: str = "clarification",
     invocation_id: str | None = None,
     preserve_stdin: bool = False,
-    env_passthrough: Sequence[str] = (),
 ) -> TrackedIsolatedComposeRun:
-    """Build a one-off run that mounts only ``worktree_host_path`` at `/workspace`."""
+    """Build a one-off run with a child worktree and restricted clarification service."""
 
     if not cli_args:
         raise ValueError("cli_args must not be empty")
@@ -183,7 +182,6 @@ def build_isolated_tracked_compose_run(
         # mount instead of adding another reachable checkout.
         "-v",
         f"{worktree_host_path}:{DEFAULT_AGENT_WORKDIR}",
-        *[arg for name in _unique_env_passthrough(env_passthrough) for arg in ("-e", name)],
         service,
         "sh",
         "-lc",

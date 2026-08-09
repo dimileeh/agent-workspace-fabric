@@ -81,6 +81,27 @@ services:
           memory: {{ resources.memory_limit | tojson }}
     {% endif %}
 
+  {% if clarification_enabled %}
+  clarification:
+    image: {{ agent_runtime_image | tojson }}
+    working_dir: /workspace
+    environment:
+      WORKSPACE_ID: {{ workspace_id | tojson }}
+      {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
+      {% endfor %}
+    {% if clarification_auth_mounts %}volumes:
+      {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":" ~ m.target ~ ":" ~ (m.mode | default('ro'))) | tojson }}
+      {% endfor %}
+    {% endif %}{% if host_gateway_enabled %}extra_hosts:
+      - "host.docker.internal:host-gateway"
+    {% endif %}networks:
+      - awf_net
+    profiles:
+      - awf-clarification
+    command: ["sh", "-c", "sleep infinity"]
+    restart: "no"
+  {% endif %}
+
 {% if named_volumes %}volumes:
   {% for v in named_volumes %}{{ v | tojson }}:
     name: {{ ("awf-" ~ workspace_id ~ "-" ~ v) | tojson }}

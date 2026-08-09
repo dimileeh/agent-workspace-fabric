@@ -80,6 +80,52 @@ _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 _HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
+_CLARIFICATION_AGENT_AUTH_MOUNT_TARGETS = frozenset(
+    {
+        "/home/agent/.claude",
+        "/home/agent/.claude.json",
+        "/home/agent/.codex",
+        "/home/agent/.config/gcloud",
+        "/home/agent/.config/opencode",
+        "/home/agent/.gemini",
+        "/home/agent/.grok",
+        "/home/agent/.ollama",
+    }
+)
+_CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+
+
+def _clarification_agent_environment(
+    agent_environment: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Keep coding-agent settings while excluding Git authentication plumbing."""
+
+    return tuple(
+        (name, value)
+        for name, value in agent_environment
+        if not _is_clarification_git_auth_environment(name)
+    )
+
+
+def _is_clarification_git_auth_environment(name: str) -> bool:
+    normalized = name.upper()
+    return normalized == "SSH_AUTH_SOCK" or normalized.startswith(
+        _CLARIFICATION_GIT_AUTH_ENV_PREFIXES
+    )
+
+
+def _clarification_auth_mounts(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    mirror_target: str,
+) -> tuple[AuthMount, ...]:
+    """Return only per-workspace coding-agent credentials for clarification runs."""
+
+    return tuple(
+        mount
+        for mount in auth_mounts
+        if mount.target != mirror_target and mount.target in _CLARIFICATION_AGENT_AUTH_MOUNT_TARGETS
+    )
 
 
 @dataclass(frozen=True)
@@ -356,6 +402,12 @@ class ComposeStackLauncher:
             services=services,
             companions=companions,
             auth_mounts=tuple(auth_mounts),
+            clarification_enabled=True,
+            clarification_agent_environment=_clarification_agent_environment(agent_environment),
+            clarification_auth_mounts=_clarification_auth_mounts(
+                auth_mounts,
+                mirror_target=str(layout.mirror_path),
+            ),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,

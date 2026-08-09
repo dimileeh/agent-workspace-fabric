@@ -339,8 +339,9 @@ class TestCodexAdapter:
         assert args[args.index("-v", run_idx) + 1] == (
             "/worktrees/ws_xyz/.awf-needs-human-reask-test:/workspace"
         )
-        service_idx = args.index("agent", run_idx)
+        service_idx = args.index("clarification", run_idx)
         assert service_idx > args.index("-v", run_idx)
+        assert "-e" not in args[run_idx:service_idx]
         assert args[service_idx + 1 : service_idx + 3] == ["sh", "-lc"]
 
     @pytest.mark.unit

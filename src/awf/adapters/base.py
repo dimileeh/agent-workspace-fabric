@@ -420,7 +420,6 @@ class AgentAdapter(ABC):
                 label=self.name.value,
                 worktree_host_path=isolated_worktree_host_path,
                 preserve_stdin=True,
-                env_passthrough=env_passthrough,
             )
         args = invocation.args
         _log.info(

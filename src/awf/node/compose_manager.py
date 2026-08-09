@@ -225,6 +225,9 @@ class WorkspaceComposeSpec:
     cpu_limit: str | None = None
     memory_limit: str | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_enabled: bool = False
+    clarification_agent_environment: tuple[tuple[str, str], ...] = ()
+    clarification_auth_mounts: tuple[AuthMount, ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -370,6 +373,12 @@ class ComposeManager:
             resources=resources,
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
+            ],
+            clarification_enabled=spec.clarification_enabled,
+            clarification_agent_environment=spec.clarification_agent_environment,
+            clarification_auth_mounts=[
+                {"source": m.source, "target": m.target, "mode": m.mode}
+                for m in spec.clarification_auth_mounts
             ],
             git_name=spec.git_name,
             git_email=spec.git_email,

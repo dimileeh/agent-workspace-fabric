@@ -24,6 +24,49 @@ from tests.unit.node.test_stack_launcher_parts._helpers import (
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
+    """Git mirror/auth inputs never flow from the repair agent into a re-ask."""
+    mirror = "/host/awf/git/mirrors/repo.git"
+    codex_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/codex",
+        target="/home/agent/.codex",
+        mode="rw",
+    )
+
+    environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        (
+            ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+            ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
+            ("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),
+            ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+            ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
+            ("SSH_AUTH_SOCK", "/run/ssh-agent.sock"),
+        )
+    )
+    mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (
+            AuthMount(source=mirror, target=mirror, mode="rw"),
+            codex_auth,
+            AuthMount(
+                source="/home/agent/.config/gh",
+                target="/home/agent/.config/gh",
+                mode="ro",
+            ),
+            AuthMount(
+                source="/home/agent/.gitconfig",
+                target="/home/agent/.gitconfig",
+                mode="ro",
+            ),
+            AuthMount(source="/home/agent/.ssh", target="/home/agent/.ssh", mode="ro"),
+        ),
+        mirror_target=mirror,
+    )
+
+    assert environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert mounts == (codex_auth,)
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_launch_notifies_compose_up_started_once() -> None:
     """The compose-start callback fires once when the first compose up starts."""
     compose = _RecordingCompose()

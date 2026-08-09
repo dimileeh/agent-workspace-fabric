@@ -501,8 +501,8 @@ def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:
     assert "unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES" in wrapper
 
 
-def test_isolated_compose_run_replaces_the_workspace_mount() -> None:
-    """A re-ask container sees only its tracked-only checkout at /workspace."""
+def test_isolated_compose_run_uses_restricted_clarification_service() -> None:
+    """A re-ask uses the restricted service with only its child worktree mount."""
     invocation = compose_exec.build_isolated_tracked_compose_run(
         compose_project="awf_ws_123",
         compose_file=Path("/tmp/ws/compose.yml"),
@@ -527,7 +527,9 @@ def test_isolated_compose_run_replaces_the_workspace_mount() -> None:
         "-v",
         "/worktrees/ws_123/.awf-needs-human-reask-test:/workspace",
     ]
-    assert invocation.args[run_idx + 10] == "agent"
+    assert invocation.args[run_idx + 10] == "clarification"
+    assert invocation.service == "clarification"
+    assert "-e" not in invocation.args
     assert "/workspace/.awf-needs-human-reask-test" not in invocation.args
     assert invocation.cleanup_args == [
         "docker",
