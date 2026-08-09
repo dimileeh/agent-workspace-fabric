@@ -142,8 +142,10 @@ async def _run_monitor_agent_with_service_recovery(
                     "prompt": prompt,
                     "workspace_id": workspace_id,
                     "log_source": log_source,
-                    "profile": getattr(self, "_workspace_profile", None),
                 }
+                profile = getattr(self, "_workspace_profile", None)
+                if profile is not None:
+                    local_run_kwargs["profile"] = profile
                 if isolated_worktree_host_path is not None:
                     local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
                 result = await self._deps.adapter.run(**local_run_kwargs)
