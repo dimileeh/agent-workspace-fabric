@@ -580,14 +580,6 @@ class ComposeManager:
         services = [
             self._render_service(s, postgres_password=password) for s in self._services_for(spec)
         ]
-        clarification_model_services = (
-            _clarification_model_service_names(
-                spec.clarification_agent_environment,
-                service_names=(service.name for service in spec.services),
-            )
-            if spec.clarification_enabled
-            else ()
-        )
         named_volumes = self._named_volumes_for(services)
 
         # Backwards-compatible companion input. Companions become ordinary
@@ -619,6 +611,14 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
+        clarification_model_services = (
+            _clarification_model_service_names(
+                spec.clarification_agent_environment,
+                service_names=(str(service["name"]) for service in services),
+            )
+            if spec.clarification_enabled
+            else ()
+        )
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services

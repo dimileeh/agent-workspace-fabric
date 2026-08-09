@@ -367,6 +367,43 @@ class TestRender:
         }
 
     @pytest.mark.unit
+    def test_clarification_reaches_selected_companion_model_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion-backed model endpoint gets the clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama-companion:11434"),
+                    ),
+                    companions=(
+                        CompanionService(
+                            name="ollama-companion",
+                            image="ollama/ollama:latest",
+                            build_context=str(tmp_path / "ollama-companion"),
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["ollama-companion"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_test123-clarification-model-net",
+            "internal": True,
+        }
+
+    @pytest.mark.unit
     def test_clarification_auth_target_is_not_rendered_as_shell_source(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
