@@ -66,7 +66,6 @@ class CodexAdapter(AgentAdapter):
             "codex",
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
         ]
         selected_model = model or self._default_model
         if selected_model:
@@ -74,4 +73,10 @@ class CodexAdapter(AgentAdapter):
         if self._default_effort:
             args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
         args.append("-")
+        return args
+
+    def _isolated_cli_args(self, *, model: str | None) -> list[str]:
+        """Bypass Codex's repository guard only for disposable re-ask checkouts."""
+        args = self._cli_args(model=model)
+        args.insert(-1, "--skip-git-repo-check")
         return args

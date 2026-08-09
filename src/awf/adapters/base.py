@@ -346,6 +346,10 @@ class AgentAdapter(ABC):
         effort-derived defaults.
         """
 
+    def _isolated_cli_args(self, *, model: str | None) -> list[str]:
+        """Return CLI arguments for a disposable isolated worktree run."""
+        return self._cli_args(model=model)
+
     def _selected_model_for_run(self, *, model: str | None) -> str | None:
         """Return the model explicitly selected for this run, if any."""
         return model or self._default_model
@@ -383,7 +387,11 @@ class AgentAdapter(ABC):
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
-        cli_args = self._cli_args(model=model)
+        cli_args = (
+            self._isolated_cli_args(model=model)
+            if isolated_worktree_host_path is not None
+            else self._cli_args(model=model)
+        )
         if self._runtime_executor is not None:
             return await self._run_hosted(
                 compose_project=compose_project,

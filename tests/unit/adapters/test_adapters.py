@@ -318,6 +318,7 @@ class TestCodexAdapter:
             "-w",
             "/workspace/.awf-needs-human-reask-test",
         ]
+        assert "--skip-git-repo-check" not in args
 
     @pytest.mark.unit
     async def test_uses_one_off_container_for_isolated_reask_worktree(self) -> None:
