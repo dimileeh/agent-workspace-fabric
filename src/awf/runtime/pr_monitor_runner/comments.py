@@ -545,6 +545,18 @@ async def _enforce_needs_human_reason(
             )
         return cleanup_error
 
+    async def _run_reask_cleanup_after_cancellation(*, event_name: str) -> None:
+        """Complete re-ask cleanup despite repeated worker-shutdown cancellation."""
+        cleanup_task = asyncio.create_task(_run_reask_cleanup(event_name=event_name))
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                return
+            except asyncio.CancelledError:
+                if cleanup_task.done():
+                    cleanup_task.result()
+                    return
+
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
@@ -581,7 +593,7 @@ async def _enforce_needs_human_reason(
     except asyncio.CancelledError:
         # Cancellation still owns control flow, but record a cleanup failure so
         # stranded clarification edits cannot be mistaken for intentional.
-        await _run_reask_cleanup(
+        await _run_reask_cleanup_after_cancellation(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_cancellation"
         )
         raise
