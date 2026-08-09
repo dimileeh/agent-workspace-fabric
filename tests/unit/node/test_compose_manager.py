@@ -104,10 +104,13 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     }
     compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
 
-    assert upgrade_persisted_clarification_service(
-        compose_file=compose_file,
-        workspace_id="ws_legacy",
-        agent_runtime=AgentRuntime.codex,
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        == ()
     )
 
     upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -166,11 +169,14 @@ def test_upgrade_persisted_clarification_service_keeps_opencode_model_credential
         encoding="utf-8",
     )
 
-    assert upgrade_persisted_clarification_service(
-        compose_file=compose_file,
-        workspace_id="ws_legacy",
-        agent_runtime=AgentRuntime.opencode,
-        agent_model="openai/gpt-5.3-codex",
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.opencode,
+            agent_model="openai/gpt-5.3-codex",
+        )
+        == ()
     )
 
     upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -214,7 +220,7 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_model_servic
         workspace_id="ws_legacy",
         agent_runtime=AgentRuntime.opencode,
         agent_model="ollama/kimi-k2.6:cloud",
-    )
+    ) == ("ollama-sidecar",)
 
     upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     assert upgraded["services"]["clarification"]["networks"] == [

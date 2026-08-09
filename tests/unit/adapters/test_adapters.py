@@ -392,6 +392,112 @@ class TestCodexAdapter:
         assert args.index("clarification", args.index("run")) > args.index("run")
 
     @pytest.mark.unit
+    async def test_isolated_reask_recreates_selected_legacy_model_service_before_clarification(
+        self, tmp_path: Path
+    ) -> None:
+        """A legacy sidecar receives its new model network before the re-ask."""
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "ollama-sidecar": {
+                            "image": "ollama/ollama:latest",
+                            "networks": ["awf_net"],
+                        },
+                        "agent": {
+                            "image": "awf-agent-runtime:latest",
+                            "environment": {
+                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                            },
+                            "networks": ["awf_net"],
+                        },
+                    },
+                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert runner.calls[0].args == [
+            "docker",
+            "compose",
+            "-p",
+            "awf_ws_legacy",
+            "-f",
+            str(compose_file),
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "ollama-sidecar",
+        ]
+        assert "run" in runner.calls[1].args
+        assert runner.calls[1].args[runner.calls[1].args.index("run") + 1 :][0:3] == [
+            "--rm",
+            "--no-deps",
+            "-T",
+        ]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_stops_when_legacy_model_service_recreation_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """Do not launch an unreachable clarification container after a failed update."""
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "ollama-sidecar": {
+                            "image": "ollama/ollama:latest",
+                            "networks": ["awf_net"],
+                        },
+                        "agent": {
+                            "image": "awf-agent-runtime:latest",
+                            "environment": {
+                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                            },
+                            "networks": ["awf_net"],
+                        },
+                    },
+                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
+        assert len(runner.calls) == 1
+        assert "run" not in runner.calls[0].args
+
+    @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")

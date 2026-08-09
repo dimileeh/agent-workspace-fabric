@@ -159,13 +159,15 @@ def upgrade_persisted_clarification_service(
     workspace_id: str,
     agent_runtime: AgentRuntime,
     agent_model: str | None = None,
-) -> bool:
+) -> tuple[str, ...] | None:
     """Add clarification safely to a legacy persisted stack, if needed.
 
     Resume and monitor paths intentionally retain their original rendered stack
     rather than re-resolving a profile. This narrowly augments those generated
     files from the persisted agent inputs, preserving services while denying the
-    clarification container the primary worktree and Git credentials.
+    clarification container the primary worktree and Git credentials. Returns
+    the model services whose network declaration changed, or ``None`` when
+    clarification was already present.
     """
     try:
         document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -177,7 +179,7 @@ def upgrade_persisted_clarification_service(
     if not isinstance(services, dict):
         raise ValueError("persisted Compose file must contain a services mapping")
     if "clarification" in services:
-        return False
+        return None
     agent = services.get("agent")
     if not isinstance(agent, dict):
         raise ValueError("persisted Compose file must contain an agent service")
@@ -307,7 +309,7 @@ def upgrade_persisted_clarification_service(
             with contextlib.suppress(OSError):
                 temporary_path.unlink()
         raise ValueError(f"could not upgrade persisted Compose file {compose_file}") from exc
-    return True
+    return clarification_model_services
 
 
 DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200

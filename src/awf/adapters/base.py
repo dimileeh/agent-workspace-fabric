@@ -413,13 +413,40 @@ class AgentAdapter(ABC):
             # definition. Upgrade that file just before the isolated re-ask so
             # stacks launched before the clarification service existed can
             # still run the follow-up without re-rendering profile state.
-            await asyncio.to_thread(
+            clarification_model_services = await asyncio.to_thread(
                 upgrade_persisted_clarification_service,
                 compose_file=compose_file,
                 workspace_id=workspace_id or compose_project.removeprefix("awf_"),
                 agent_runtime=self.name,
                 agent_model=selected_model,
             )
+            if clarification_model_services:
+                # ``docker compose run --no-deps`` below starts only the
+                # clarification container. Recreate the selected legacy model
+                # services first so Docker applies the newly-rendered dedicated
+                # model network to their already-running containers.
+                model_service_update = await self._runner.run(
+                    [
+                        "docker",
+                        "compose",
+                        "-p",
+                        compose_project,
+                        "-f",
+                        str(compose_file),
+                        "up",
+                        "-d",
+                        "--no-deps",
+                        "--force-recreate",
+                        *clarification_model_services,
+                    ]
+                )
+                if not model_service_update.ok:
+                    raise AgentRunError(
+                        agent=self.name,
+                        result=model_service_update,
+                        reason_code="CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED",
+                        details={"services": clarification_model_services},
+                    )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
         # stalls the event loop when concurrent agent runs overlap.
