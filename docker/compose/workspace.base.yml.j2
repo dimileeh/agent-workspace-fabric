@@ -90,7 +90,7 @@ services:
       {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}
     {% if clarification_auth_mounts %}volumes:
-      {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":" ~ m.target ~ ":" ~ (m.mode | default('ro'))) | tojson }}
+      {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
       {% endfor %}
     {% endif %}{% if host_gateway_enabled %}extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -98,6 +98,21 @@ services:
       - awf_net
     profiles:
       - awf-clarification
+    {% if clarification_auth_mounts %}entrypoint:
+      - "sh"
+      - "-ec"
+      - |
+        {% for m in clarification_auth_mounts %}clarification_auth_target_{{ loop.index0 }}={{ m.target | tojson }}
+        mkdir -p "$(dirname "$clarification_auth_target_{{ loop.index0 }}")"
+        if [ -d /run/awf/clarification-auth/{{ loop.index0 }} ]; then
+          mkdir -p "$clarification_auth_target_{{ loop.index0 }}"
+          cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$clarification_auth_target_{{ loop.index0 }}/"
+        else
+          cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$clarification_auth_target_{{ loop.index0 }}"
+        fi
+        {% endfor %}exec "$@"
+      - "--"
+    {% endif %}
     command: ["sh", "-c", "sleep infinity"]
     restart: "no"
   {% endif %}

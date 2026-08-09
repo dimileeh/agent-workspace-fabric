@@ -119,10 +119,10 @@ def _clarification_auth_mounts(
     *,
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
-    """Return only per-workspace coding-agent credentials for clarification runs."""
+    """Return read-only coding-agent sources for clarification copy-on-write."""
 
     return tuple(
-        mount
+        replace(mount, mode="ro")
         for mount in auth_mounts
         if mount.target != mirror_target and mount.target in _CLARIFICATION_AGENT_AUTH_MOUNT_TARGETS
     )

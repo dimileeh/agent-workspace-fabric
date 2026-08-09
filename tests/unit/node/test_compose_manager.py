@@ -125,9 +125,19 @@ class TestRender:
             "WORKSPACE_ID": "ws_test123",
             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
         }
-        assert clarification["volumes"] == [f"{codex_auth}:/home/agent/.codex:rw"]
+        assert clarification["volumes"] == [f"{codex_auth}:/run/awf/clarification-auth/0:ro"]
         assert str(shared_mirror) not in "\n".join(clarification["volumes"])
         assert "/home/agent/.gitconfig" not in "\n".join(clarification["volumes"])
+        assert "/home/agent/.codex" not in "\n".join(clarification["volumes"])
+        assert clarification["entrypoint"][:2] == ["sh", "-ec"]
+        assert (
+            'clarification_auth_target_0="/home/agent/.codex"' in (clarification["entrypoint"][2])
+        )
+        assert (
+            'cp -a /run/awf/clarification-auth/0/. "$clarification_auth_target_0/"'
+            in (clarification["entrypoint"][2])
+        )
+        assert clarification["entrypoint"][-1] == "--"
 
     @pytest.mark.unit
     def test_agent_can_reach_host_gateway_for_host_services(

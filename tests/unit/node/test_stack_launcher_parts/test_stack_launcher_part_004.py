@@ -63,7 +63,7 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
     )
 
     assert environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
-    assert mounts == (codex_auth,)
+    assert mounts == (AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),)
 
 
 @pytest.mark.unit
