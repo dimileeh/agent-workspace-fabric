@@ -415,19 +415,32 @@ async def _post_human_notification_once(
     """
     from awf.runtime.pr_monitor_runner.helpers import (
         _notification_key,
+        _notify_human_blocker_items,
         _notify_human_reason,
         _sanitize_verdict_reason,
     )
+    from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 
+    bot_items, human_items = _notify_human_blocker_items(status, state)
+    items = bot_items + human_items
+    items_digest = _notification_items_digest(items) if items else None
     raw_reason = (
-        blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
+        blocker_reason
+        if blocker_reason is not None
+        else _notify_human_reason(status, state, blocker_items=(bot_items, human_items))
     )
     reason = _sanitize_verdict_reason(raw_reason)
     if reason is None and blocker_reason is not None:
-        reason = _sanitize_verdict_reason(_notify_human_reason(status, state))
+        reason = _sanitize_verdict_reason(
+            _notify_human_reason(status, state, blocker_items=(bot_items, human_items))
+        )
     if reason is None and blocker_reason is not None:
         reason = _GENERIC_HUMAN_BLOCKER_REASON
-    key = _notification_key(head_sha=status.head_sha, blocker_reason=reason)
+    key = _notification_key(
+        head_sha=status.head_sha,
+        blocker_reason=reason,
+        items_digest=items_digest,
+    )
     if state.threads_addressed_ids.get(key) == "notified":
         _log.info(
             "monitor.notify_human_already_posted",
@@ -443,6 +456,7 @@ async def _post_human_notification_once(
             pr_number=pr_number,
             head_sha=status.head_sha,
             blocker_reason=reason,
+            blocker_items=items,
         ),
     )
     state.mark_addressed(key, "notified")

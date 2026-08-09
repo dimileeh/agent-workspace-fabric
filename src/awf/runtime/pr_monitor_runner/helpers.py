@@ -81,8 +81,6 @@ from awf.runtime.pr_monitor import (
     _agent_can_triage_review_comment,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
-    _is_bot_author,
-    _is_bot_review_thread,
     _needs_comment_attention,
     _review_thread_body_hash,
     _review_thread_body_state_key,
@@ -115,6 +113,12 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
+)
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _collect_defer_items as _collect_defer_items_impl,
+)
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _needs_human_reason_state_key,
 )
 from awf.runtime.pr_monitor_runner.path_helpers import (
     _changed_paths_from_name_only_z as _changed_paths_from_name_only_z,
@@ -165,6 +169,14 @@ from awf.runtime.pr_monitor_runner.target_reconcile import (
     _truncate_target_reconcile_failure_payload as _truncate_target_reconcile_failure_payload,
 )
 from awf.runtime.pr_monitor_runner.types import BaseFetchError
+
+
+def _collect_defer_items(
+    status: PRStatus, state: MonitorState
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Compatibility delegate for deferred-review consumers."""
+    return _collect_defer_items_impl(status, state)
+
 
 _datetime_iso = _reviewer_settle._datetime_iso
 _non_check_reviewer_activity_settle_decision = (
@@ -381,10 +393,6 @@ def _defer_reason_state_key(thread_id: str) -> str:
     the GitHub thread conversation.
     """
     return f"__defer_reason__:{thread_id}"
-
-
-def _needs_human_reason_state_key(item_id: str) -> str:
-    return f"__needs_human_reason__:{item_id}"
 
 
 def _sync_needs_human_reason(
@@ -655,12 +663,24 @@ def _awaiting_required_checks_grace(
     return (now_ts - first_seen < grace_seconds, False)
 
 
-def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
+def _notify_human_blocker_items(
+    status: PRStatus, state: MonitorState
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Return the single notification item collection for a monitor poll."""
+    return _collect_defer_items(status, state)
+
+
+def _notify_human_reason(
+    status: PRStatus,
+    state: MonitorState,
+    *,
+    blocker_items: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None,
+) -> str | None:
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
     if reason := _first_needs_human_reason(status, state):
         return reason
-    bot_items, human_deferred = _collect_defer_items(status, state)
+    bot_items, human_deferred = blocker_items or _notify_human_blocker_items(status, state)
     if human_deferred:
         return "human review feedback was deferred by the agent and remains unresolved"
     # #305: a bot inline thread (``defer``/``needs_human``) or a bot
@@ -987,9 +1007,12 @@ def _base_fetch_retry_wait_seconds(
     )
 
 
-def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
+def _notification_key(
+    *, head_sha: str, blocker_reason: str | None, items_digest: str | None = None
+) -> str:
     reason = blocker_reason or "ready-to-merge"
-    return f"__awf_notify__:{head_sha}:{reason}"
+    key = f"__awf_notify__:{head_sha}:{reason}"
+    return f"{key}:{items_digest}" if items_digest else key
 
 
 def _protected_block_violations_digest(violations: Sequence[QualityGateViolation]) -> str:
@@ -1269,66 +1292,6 @@ def _initial_review_grace_wait_seconds(
         return 0.0
 
     return min(poll_interval_seconds, remaining_seconds)
-
-
-def _collect_defer_items(
-    status: PRStatus, state: MonitorState
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Collect deferred / needs-human threads/comments, partitioned by author.
-
-    Returns ``(bot_items, human_items)``. Items whose author classifies
-    as a bot per ``pr_monitor._is_bot_author`` go into the first list;
-    the rest (including unknown-author items, which the merge gate
-    treats as human for safety) go into the second — the artifact
-    mirrors that classification so orchestrators see the same picture.
-
-    Both ``defer`` and ``needs_human`` verdicts are collected (#305): a
-    ``needs_human`` item blocks the merge just as a ``defer`` one does, so
-    dropping it would let the terminal artifact and notification under-report
-    the open feedback. Each item carries its ``verdict`` so consumers can tell
-    the two apart.
-    """
-    bot_items: list[dict[str, object]] = []
-    human_items: list[dict[str, object]] = []
-    for t in status.unresolved_inline_threads:
-        verdict = state.threads_addressed_ids.get(t.thread_id)
-        if verdict not in {"defer", "needs_human"}:
-            continue
-        bucket = bot_items if _is_bot_review_thread(t) else human_items
-        bucket.append(
-            {
-                "kind": "thread",
-                "id": t.thread_id,
-                "author": t.author,
-                "path": t.path,
-                "line": t.line,
-                "body": t.body_excerpt,
-                "verdict": verdict,
-                "agent_verdict_reason": state.threads_addressed_ids.get(
-                    _needs_human_reason_state_key(t.thread_id)
-                ),
-            }
-        )
-    for c in status.unresolved_review_comments:
-        verdict = state.threads_addressed_ids.get(c.comment_id)
-        if verdict not in {"defer", "needs_human"}:
-            continue
-        bucket = bot_items if _is_bot_author(c.author) else human_items
-        bucket.append(
-            {
-                "kind": "review",
-                "id": c.comment_id,
-                "author": c.author,
-                "path": None,
-                "line": None,
-                "body": c.body_excerpt,
-                "verdict": verdict,
-                "agent_verdict_reason": state.threads_addressed_ids.get(
-                    _needs_human_reason_state_key(c.comment_id)
-                ),
-            }
-        )
-    return bot_items, human_items
 
 
 def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int:
