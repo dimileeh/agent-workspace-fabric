@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from awf.adapters import base as base_module
 from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult
@@ -158,6 +159,34 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     assert "clarification" in args
     assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
     assert "wrapped-agent-cli" in args
+
+
+@pytest.mark.unit
+async def test_isolated_sampler_finalized_when_invocation_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    def _fail_invocation_construction(**_kwargs: Any) -> None:
+        raise ValueError("invalid isolated invocation")
+
+    monkeypatch.setattr(
+        base_module, "build_isolated_tracked_compose_run", _fail_invocation_construction
+    )
+
+    with pytest.raises(ValueError, match="invalid isolated invocation"):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_builder_fail",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_builder_fail/reask"),
+        )
+
+    assert events == ["start_isolated", "finalize:failed"]
 
 
 @pytest.mark.unit

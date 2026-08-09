@@ -415,44 +415,6 @@ class AgentAdapter(ABC):
             )
             if isolated_sampler_ctx is not None:
                 cli_args = isolated_sampler_ctx.cli_args
-        invocation: TrackedComposeExec | TrackedIsolatedComposeRun
-        if isolated_worktree_host_path is None:
-            invocation = build_tracked_compose_exec(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=cli_args,
-                source=log_source,
-                label=self.name.value,
-                workdir=workdir,
-                preserve_stdin=True,
-                env_passthrough=env_passthrough,
-            )
-        else:
-            invocation = build_isolated_tracked_compose_run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=cli_args,
-                source=log_source,
-                label=self.name.value,
-                worktree_host_path=isolated_worktree_host_path,
-                preserve_stdin=True,
-                extra_volume_binds=(
-                    () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
-                ),
-            )
-        args = invocation.args
-        _log.info(
-            "agent.run.start",
-            agent=self.name.value,
-            compose_project=compose_project,
-            workspace_id=workspace_id,
-            model=selected_model,
-            effort=self._default_effort,
-            wall_timeout_seconds=self._agent_wall_timeout_seconds,
-            idle_timeout_seconds=self._agent_idle_timeout_seconds,
-            source=log_source,
-            prompt_bytes=len(prompt_input),
-        )
         # Wrap the agent run with optional usage sampling. Ordinary sampling
         # captures a baseline + periodic samples; isolated clarification sampling
         # instead prepares an in-container capture before the invocation is built.
@@ -465,6 +427,44 @@ class AgentAdapter(ABC):
         sampler_ctx: UsageSampleContext | None = isolated_sampler_ctx
         final_status = "failed"
         try:
+            invocation: TrackedComposeExec | TrackedIsolatedComposeRun
+            if isolated_worktree_host_path is None:
+                invocation = build_tracked_compose_exec(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    cli_args=cli_args,
+                    source=log_source,
+                    label=self.name.value,
+                    workdir=workdir,
+                    preserve_stdin=True,
+                    env_passthrough=env_passthrough,
+                )
+            else:
+                invocation = build_isolated_tracked_compose_run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    cli_args=cli_args,
+                    source=log_source,
+                    label=self.name.value,
+                    worktree_host_path=isolated_worktree_host_path,
+                    preserve_stdin=True,
+                    extra_volume_binds=(
+                        () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
+                    ),
+                )
+            args = invocation.args
+            _log.info(
+                "agent.run.start",
+                agent=self.name.value,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                model=selected_model,
+                effort=self._default_effort,
+                wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                source=log_source,
+                prompt_bytes=len(prompt_input),
+            )
             if sampler_ctx is None:
                 sampler_ctx = await self._start_usage_sampling(
                     compose_project=compose_project,
