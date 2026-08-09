@@ -102,6 +102,38 @@ _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
         "CLAUDE_CODE_USE_VERTEX",
     }
 )
+_CLARIFICATION_GEMINI_ENV_NAMES: dict[str, frozenset[str]] = {
+    "api_key": frozenset(
+        {
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_AUTH_MECHANISM",
+            "GOOGLE_API_KEY",
+        }
+    ),
+    "google_cloud": frozenset(
+        {
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        }
+    ),
+    "access_token": frozenset(
+        {
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        }
+    ),
+    "file": frozenset(),
+}
+_CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS: dict[str, frozenset[str]] = {
+    "api_key": frozenset(),
+    "google_cloud": frozenset({"/home/agent/.config/gcloud"}),
+    "access_token": frozenset(),
+    "file": frozenset({"/home/agent/.gemini"}),
+}
 _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.codex: frozenset(
         {
@@ -118,19 +150,7 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     ),
     AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
     AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
-    AgentRuntime.gemini: frozenset(
-        {
-            "GEMINI_API_KEY",
-            "GEMINI_API_KEY_AUTH_MECHANISM",
-            "GOOGLE_API_KEY",
-            "GOOGLE_GENAI_USE_VERTEXAI",
-            "GOOGLE_GENAI_USE_GCA",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_CLOUD_LOCATION",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLE_CLOUD_ACCESS_TOKEN",
-        }
-    ),
+    AgentRuntime.gemini: frozenset(),
     AgentRuntime.opencode: frozenset(
         {
             "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
@@ -239,13 +259,18 @@ def _clarification_model_provider_environment_names(
     """Return selected runtime env names available to a clarification re-ask.
 
     Claude Code's Bedrock and Vertex toggles select their own credentials and
-    settings rather than adding to direct Anthropic authentication. Keep every
-    other runtime's settings out of the clarification container.
+    settings rather than adding to direct Anthropic authentication. Gemini
+    similarly selects one API-key, Google Cloud, access-token, or CLI-file
+    source. Keep every other runtime's settings out of clarification.
     """
 
     environment_values = dict(agent_environment)
     if agent_runtime is AgentRuntime.claude_code:
         return _clarification_claude_code_environment_names(environment_values)
+    if agent_runtime is AgentRuntime.gemini:
+        return _CLARIFICATION_GEMINI_ENV_NAMES[
+            _clarification_gemini_auth_source(environment_values)
+        ]
 
     provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
     if agent_runtime is AgentRuntime.opencode:
@@ -271,6 +296,24 @@ def _clarification_claude_code_environment_names(
         backend_names.add("CLAUDE_CODE_USE_VERTEX")
         backend_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(backend_names) or _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+
+
+def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str:
+    """Return the single Gemini credential source selected for clarification."""
+
+    mechanism = environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", "").lower()
+    if mechanism in {"api", "api-key", "api_key"}:
+        return "api_key"
+    if any(
+        environment_values.get(name, "").lower() in {"1", "true", "yes"}
+        for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
+    ):
+        return "google_cloud"
+    if environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN"):
+        return "access_token"
+    if any(environment_values.get(name) for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")):
+        return "api_key"
+    return "file"
 
 
 def _clarification_auth_mounts(
@@ -355,6 +398,10 @@ def _clarification_model_provider_auth_mount_targets(
         != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
     ):
         runtime_auth_mount_targets = frozenset()
+    if agent_runtime is AgentRuntime.gemini:
+        runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[
+            _clarification_gemini_auth_source(dict(agent_environment))
+        ]
     if agent_runtime is AgentRuntime.opencode:
         provider = opencode_provider_for_model(agent_model)
         if provider == "ollama":
