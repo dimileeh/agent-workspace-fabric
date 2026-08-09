@@ -417,6 +417,7 @@ async def _enforce_needs_human_reason(
                 workspace_id=workspace_id,
                 error=redact_audit_text(str(cleanup_exc), limit=240),
             )
+            raise cleanup_exc from exc
         _log.warning(
             "monitor.needs_human_reason_reask_failed",
             workspace_id=workspace_id,
