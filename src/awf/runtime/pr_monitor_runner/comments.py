@@ -130,6 +130,7 @@ async def _address_thread(
     result = await _enforce_needs_human_reason(
         runner,
         result=result,
+        original_prompt=prompt,
         workspace_id=workspace_id,
         pr_number=pr_number,
         item_id=thread.thread_id,
@@ -258,6 +259,7 @@ async def _address_review_comment_result(
     return await _enforce_needs_human_reason(
         runner,
         result=result,
+        original_prompt=prompt,
         workspace_id=workspace_id,
         pr_number=pr_number,
         item_id=comment.comment_id,
@@ -283,6 +285,7 @@ async def _enforce_needs_human_reason(
     runner: PullRequestMonitorRunner,
     *,
     result: VerdictResult,
+    original_prompt: str,
     workspace_id: str,
     pr_number: int,
     item_id: str,
@@ -314,7 +317,7 @@ async def _enforce_needs_human_reason(
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
-            prompt=needs_human_reason_reask_prompt(),
+            prompt=needs_human_reason_reask_prompt(original_prompt=original_prompt),
             commit_message=commit_message,
             compose_project=compose_project,
             compose_file=compose_file,

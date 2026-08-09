@@ -35,11 +35,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 
-_REASK_PROMPT = (
-    "You returned NEEDS_HUMAN without saying what you need. Print AWF-VERDICT: "
-    "NEEDS_HUMAN: <one sentence: exactly what a human must decide>"
-)
-
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
@@ -126,7 +121,9 @@ async def test_thread_reasonless_needs_human_reasks_once_and_stores_sanitized_re
 
     assert verdict == "needs_human"
     assert len(calls) == 2
-    assert calls[1]["prompt"] == _REASK_PROMPT
+    assert "PR #46 (example/repo)" in calls[1]["prompt"]
+    assert "thread id T-checkout" in calls[1]["prompt"]
+    assert "AWF-EVIDENCE> ?" in calls[1]["prompt"]
     assert state.threads_addressed_ids[_needs_human_reason_state_key(thread.thread_id)] == (
         "A maintainer must choose the checkout policy."
     )
@@ -260,7 +257,9 @@ async def test_review_comment_placeholder_reason_reasks_once_and_syncs_the_respo
     _sync_needs_human_reason(state, comment.comment_id, result)
 
     assert len(calls) == 2
-    assert calls[1]["prompt"] == _REASK_PROMPT
+    assert "PR #46 (example/repo)" in calls[1]["prompt"]
+    assert "comment id R-api" in calls[1]["prompt"]
+    assert "AWF-EVIDENCE> ?" in calls[1]["prompt"]
     assert result.reason == "A maintainer must choose the API shape."
     assert state.threads_addressed_ids[_needs_human_reason_state_key(comment.comment_id)] == (
         "A maintainer must choose the API shape."

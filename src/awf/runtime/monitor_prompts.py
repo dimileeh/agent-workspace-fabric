@@ -429,11 +429,21 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
     return f"\n\n{section}"
 
 
-def needs_human_reason_reask_prompt() -> str:
-    """Ask once for the human decision omitted from a NEEDS_HUMAN verdict."""
+def needs_human_reason_reask_prompt(*, original_prompt: str) -> str:
+    """Ask once for the human decision omitted from a NEEDS_HUMAN verdict.
+
+    The re-ask is a new agent invocation, so include the original review task
+    with its item identity and quoted evidence rather than assuming prior
+    process context survives.
+    """
     return (
-        "You returned NEEDS_HUMAN without saying what you need. Print AWF-VERDICT: "
-        "NEEDS_HUMAN: <one sentence: exactly what a human must decide>"
+        "You returned NEEDS_HUMAN without saying what you need. The original review task "
+        "is included below so you can identify the decision that was omitted.\n\n"
+        "### Original review task\n\n"
+        f"{original_prompt}\n\n"
+        "This is a clarification only: do not inspect or alter files, and do not make a "
+        "commit. Print AWF-VERDICT: NEEDS_HUMAN: <one sentence: exactly what a human "
+        "must decide>"
     )
 
 

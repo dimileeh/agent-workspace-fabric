@@ -47,6 +47,7 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
         await comments._enforce_needs_human_reason(
             runner,
             result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
             workspace_id="ws_1",
             pr_number=1,
             item_id="thread_1",
