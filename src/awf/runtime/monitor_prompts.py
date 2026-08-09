@@ -466,7 +466,7 @@ def ready_to_merge_comment(
     """
     if blocker_reason:
         safe_blocker_reason = _redact_and_escape_markdown_inline(
-            _truncate_blocker_excerpt(redact_secrets(blocker_reason))
+            _truncate_blocker_reason(redact_secrets(blocker_reason))
         )
         body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
@@ -591,9 +591,19 @@ def _escape_markdown_link_destination(url: str) -> str:
     return quote(url, safe=":/?&=#%+~,-._@!$'*,;")
 
 
-def _truncate_blocker_excerpt(excerpt: str) -> str:
+def _truncate_blocker_reason(reason: str) -> str:
+    """Retain complete actionable details for structured merge blockers."""
+    detailed_prefixes = (
+        "MERGE_METHOD_MISMATCH:",
+        "GitHub rejected the workflow-file push because",
+    )
+    limit = 500 if reason.startswith(detailed_prefixes) else 160
+    return _truncate_blocker_excerpt(reason, limit=limit)
+
+
+def _truncate_blocker_excerpt(excerpt: str, *, limit: int = 160) -> str:
     """Keep the public notification compact even if collection data expands."""
-    return excerpt if len(excerpt) <= 160 else f"{excerpt[:160]}…"
+    return excerpt if len(excerpt) <= limit else f"{excerpt[:limit]}…"
 
 
 def _thread_metadata(
