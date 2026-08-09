@@ -1515,7 +1515,9 @@ def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("reask_raises", (False, True))
 async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails(
+    reask_raises: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1524,6 +1526,8 @@ async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails
     audit_events: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        if reask_raises:
+            raise RuntimeError("re-ask failed")
         return VerdictResult(
             verdict="needs_human",
             reason="select the deployment region",

@@ -702,7 +702,7 @@ async def _enforce_needs_human_reason(
         )
         raise
     except Exception as exc:
-        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
+        cleanup_error, _isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_error"
         )
         _log.warning(
@@ -713,7 +713,7 @@ async def _enforce_needs_human_reason(
             item_kind=item_kind,
             error=redact_audit_text(str(exc), limit=240),
         )
-        if isolated_cleanup_failed:
+        if cleanup_error is not None:
             raise _MonitorPolicyBlockedError(
                 cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
