@@ -133,6 +133,25 @@ def test_notify_human_blocker_items_classifies_bot_blocking_review() -> None:
 
 
 @pytest.mark.unit
+def test_notify_human_blocker_items_excludes_advisory_bot_review_defer() -> None:
+    review = ReviewComment(
+        comment_id="R-advisory",
+        body_excerpt="Consider documenting this follow-up.",
+        author="review-bot[bot]",
+    )
+    status = _status(reviews=(review,))
+    state = MonitorState(threads_addressed_ids={"R-advisory": "defer"})
+
+    terminal_bot_items, terminal_human_items = _collect_defer_items(status, state)
+    notification_bot_items, notification_human_items = _notify_human_blocker_items(status, state)
+
+    assert [item["id"] for item in terminal_bot_items] == ["R-advisory"]
+    assert terminal_human_items == []
+    assert notification_bot_items == []
+    assert notification_human_items == []
+
+
+@pytest.mark.unit
 async def test_human_notification_includes_effective_blocking_reviews_in_details_and_digest(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

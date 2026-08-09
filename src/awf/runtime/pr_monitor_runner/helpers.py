@@ -689,6 +689,10 @@ def _notify_human_blocker_items(
     ``unresolved_review_comments`` at all. Include them in the rendered
     notification and its digest. When a triaged review is also an effective
     blocker, retain its single item but render the blocking verdict.
+
+    Advisory bot review-level deferrals do not block merge and belong only in
+    the terminal defer artifact, not a human-attention notification. A bot
+    review promoted to ``changes_requested`` remains a notification blocker.
     """
     bot_items, human_items = _collect_defer_items(status, state)
     items_by_id = {str(item["id"]): item for item in bot_items + human_items}
@@ -712,6 +716,9 @@ def _notify_human_blocker_items(
         }
         bucket.append(item)
         items_by_id[review.comment_id] = item
+    bot_items = [
+        item for item in bot_items if item["kind"] != "review" or item.get("verdict") != "defer"
+    ]
     return bot_items, human_items
 
 
