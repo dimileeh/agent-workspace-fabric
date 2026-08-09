@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor_runner import notify_human_loop
 from awf.runtime.pr_monitor_runner.helpers import (
     _collect_defer_items,
     _notification_key,
+    _notify_human_blocker_items,
 )
 from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 from tests.postgres import postgres_test_engine
@@ -40,7 +41,10 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 def _status(
-    *, threads: tuple[ReviewThread, ...] = (), reviews: tuple[ReviewComment, ...] = ()
+    *,
+    threads: tuple[ReviewThread, ...] = (),
+    reviews: tuple[ReviewComment, ...] = (),
+    blocking_reviews: tuple[ReviewComment, ...] = (),
 ) -> PRStatus:
     return PRStatus(
         number=46,
@@ -49,7 +53,7 @@ def _status(
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=threads,
         unresolved_review_comments=reviews,
-        blocking_reviews=(),
+        blocking_reviews=blocking_reviews,
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
     )
@@ -61,6 +65,105 @@ class _RecordingGh:
 
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
         self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
+@pytest.mark.unit
+def test_notify_human_blocker_items_does_not_duplicate_deferred_blocking_review() -> None:
+    review = ReviewComment(
+        comment_id="R-deferred",
+        body_excerpt="Please revise the error handling.",
+        author="human-reviewer",
+        blocks_merge=True,
+    )
+    status = _status(reviews=(review,), blocking_reviews=(review,))
+    state = MonitorState(threads_addressed_ids={"R-deferred": "defer"})
+
+    bot_items, human_items = _notify_human_blocker_items(status, state)
+
+    assert bot_items == []
+    assert [item["id"] for item in human_items] == ["R-deferred"]
+    assert human_items[0]["verdict"] == "defer"
+
+
+@pytest.mark.unit
+def test_notify_human_blocker_items_classifies_bot_blocking_review() -> None:
+    review = ReviewComment(
+        comment_id="R-bot",
+        body_excerpt="",
+        author="review-bot[bot]",
+        blocks_merge=True,
+    )
+
+    bot_items, human_items = _notify_human_blocker_items(
+        _status(blocking_reviews=(review,)), MonitorState()
+    )
+
+    assert [item["id"] for item in bot_items] == ["R-bot"]
+    assert bot_items[0]["verdict"] == "changes_requested"
+    assert human_items == []
+
+
+@pytest.mark.unit
+async def test_human_notification_includes_effective_blocking_reviews_in_details_and_digest(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    triaged_review = ReviewComment(
+        comment_id="R-triaged",
+        body_excerpt="Please update the release notes.",
+        author="human-reviewer",
+        blocks_merge=True,
+        state="CHANGES_REQUESTED",
+        url="https://github.example/reviews/R-triaged",
+    )
+    empty_review = ReviewComment(
+        comment_id="R-empty",
+        body_excerpt="",
+        author="second-reviewer",
+        blocks_merge=True,
+        state="CHANGES_REQUESTED",
+        url="https://github.example/reviews/R-empty",
+    )
+    status = _status(
+        reviews=(triaged_review,),
+        blocking_reviews=(triaged_review, empty_review),
+    )
+    state = MonitorState(threads_addressed_ids={"R-triaged": "fix_committed"})
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=46,
+        status=status,
+        state=state,
+    )
+
+    bot_items, human_items = _notify_human_blocker_items(status, state)
+    items = bot_items + human_items
+    items_digest = _notification_items_digest(items)
+    assert [item["id"] for item in human_items] == ["R-triaged", "R-empty"]
+    assert all(item["verdict"] == "changes_requested" for item in human_items)
+    assert len(gh.posts) == 1
+    assert "https://github.example/reviews/R-triaged" in str(gh.posts[0]["body"])
+    assert "https://github.example/reviews/R-empty" in str(gh.posts[0]["body"])
+    assert (
+        state.threads_addressed_ids[
+            _notification_key(
+                head_sha=status.head_sha,
+                blocker_reason="a merge-blocking changes-requested review remains unresolved",
+                items_digest=items_digest,
+            )
+        ]
+        == "notified"
+    )
 
 
 @pytest.mark.unit

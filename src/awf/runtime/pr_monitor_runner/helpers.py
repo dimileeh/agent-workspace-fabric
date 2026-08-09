@@ -82,6 +82,7 @@ from awf.runtime.pr_monitor import (
     _agent_can_triage_review_comment,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
+    _is_bot_author,
     _needs_comment_attention,
     _review_thread_body_hash,
     _review_thread_body_state_key,
@@ -672,8 +673,37 @@ def _awaiting_required_checks_grace(
 def _notify_human_blocker_items(
     status: PRStatus, state: MonitorState
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Return the single notification item collection for a monitor poll."""
-    return _collect_defer_items(status, state)
+    """Return every feedback item that currently requires human attention.
+
+    Effective changes-requested reviews are merge blockers independently of
+    their triage verdict and can have an empty body, so they may not appear in
+    ``unresolved_review_comments`` at all. Include them in the rendered
+    notification and its digest, while retaining any already-collected deferred
+    item when the same review ID appears in both feeds.
+    """
+    bot_items, human_items = _collect_defer_items(status, state)
+    collected_ids = {str(item["id"]) for item in bot_items + human_items}
+    for review in status.blocking_reviews:
+        if review.comment_id in collected_ids:
+            continue
+        is_bot = _is_bot_author(review.author)
+        bucket = bot_items if is_bot else human_items
+        bucket.append(
+            {
+                "kind": "review",
+                "id": review.comment_id,
+                "author": review.author,
+                "is_bot": is_bot,
+                "path": None,
+                "line": None,
+                "url": review.url,
+                "body": review.body_excerpt,
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+        )
+        collected_ids.add(review.comment_id)
+    return bot_items, human_items
 
 
 def _notify_human_reason(
