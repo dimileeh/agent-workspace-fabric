@@ -673,16 +673,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             return ()
         return ((self._capture_dir, _ISOLATED_CCUSAGE_CAPTURE_DIR),)
 
-    async def finalize(self, *, status: str) -> None:
-        if self._finalized:
-            return
-        self._finalized = True
-        final_task = asyncio.create_task(self._finalize_isolated(status))
-        while not final_task.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(final_task)
-
-    async def _finalize_isolated(self, status: str) -> None:
+    async def _finalize_inner(self, status: str) -> None:
         try:
             if self._source is None:
                 await self._safe_sample(phase="final", run_status=status)
