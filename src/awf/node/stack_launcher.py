@@ -90,6 +90,17 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    }
+)
 _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.codex: frozenset(
         {
@@ -104,17 +115,7 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
             "OPENAI_PROJECT_ID",
         }
     ),
-    AgentRuntime.claude_code: frozenset(
-        {
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_SMALL_FAST_MODEL",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-        }
-    ),
+    AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
     AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
     AgentRuntime.gemini: frozenset(
         {
@@ -227,25 +228,32 @@ def _clarification_model_provider_environment_names(
 ) -> frozenset[str]:
     """Return selected runtime env names available to a clarification re-ask.
 
-    Claude Code's Bedrock and Vertex toggles need their backend-specific
-    credentials and settings. Keep those declared settings only when the
-    corresponding backend is enabled, and keep every other runtime's settings
-    out of the clarification container.
+    Claude Code's Bedrock and Vertex toggles select their own credentials and
+    settings rather than adding to direct Anthropic authentication. Keep every
+    other runtime's settings out of the clarification container.
     """
 
     environment_values = dict(agent_environment)
+    if agent_runtime is AgentRuntime.claude_code:
+        return _clarification_claude_code_environment_names(environment_values)
+
     provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
-    if (
-        agent_runtime is AgentRuntime.claude_code
-        and environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
-    ):
-        provider_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
-    if (
-        agent_runtime is AgentRuntime.claude_code
-        and environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
-    ):
-        provider_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(provider_names)
+
+
+def _clarification_claude_code_environment_names(
+    environment_values: dict[str, str],
+) -> frozenset[str]:
+    """Return direct Claude auth or each explicitly enabled managed backend."""
+
+    backend_names = set()
+    if environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+        backend_names.add("CLAUDE_CODE_USE_BEDROCK")
+        backend_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
+    if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1":
+        backend_names.add("CLAUDE_CODE_USE_VERTEX")
+        backend_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
+    return frozenset(backend_names) or _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
 
 
 def _clarification_auth_mounts(
@@ -317,8 +325,15 @@ def _clarification_model_provider_auth_mount_targets(
         agent_environment,
         agent_runtime=agent_runtime,
     )
+    runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
+    if (
+        agent_runtime is AgentRuntime.claude_code
+        and _clarification_claude_code_environment_names(dict(agent_environment))
+        != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+    ):
+        runtime_auth_mount_targets = frozenset()
     return (
-        _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
+        runtime_auth_mount_targets
         | frozenset(value for name, value in agent_environment if name in names)
     ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 

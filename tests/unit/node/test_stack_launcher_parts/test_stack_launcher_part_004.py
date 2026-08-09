@@ -132,7 +132,7 @@ def test_clarification_inputs_retain_only_selected_adapter_credentials() -> None
 
 @pytest.mark.unit
 def test_clarification_inputs_retain_selected_claude_backend_credentials() -> None:
-    """Claude clarification preserves only the enabled Claude backend inputs."""
+    """Bedrock and Vertex clarification excludes inactive direct Claude auth."""
     claude_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/claude",
         target="/home/agent/.claude",
@@ -151,6 +151,10 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
     environment = (
         ("OPENAI_API_KEY", "unrelated-openai-token"),
         ("ANTHROPIC_API_KEY", "anthropic-token"),
+        ("ANTHROPIC_AUTH_TOKEN", "anthropic-auth-token"),
+        ("ANTHROPIC_BASE_URL", "https://anthropic.example.test"),
+        ("ANTHROPIC_SMALL_FAST_MODEL", "claude-fast"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-token"),
         ("CLAUDE_CODE_USE_BEDROCK", "1"),
         ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
         ("AWS_SHARED_CREDENTIALS_FILE", aws_credentials.target),
@@ -174,26 +178,67 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
     )
 
     assert clarification_environment == (
-        ("ANTHROPIC_API_KEY", "anthropic-token"),
         ("CLAUDE_CODE_USE_BEDROCK", "1"),
         ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
-        ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.awf/clarification-auth/1"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.awf/clarification-auth/0"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/2"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/1"),
     )
     assert clarification_mounts == (
-        AuthMount(source=claude_auth.source, target=claude_auth.target, mode="ro"),
         AuthMount(
             source=aws_credentials.source,
-            target="/home/agent/.awf/clarification-auth/1",
+            target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
         AuthMount(
             source=google_credentials.source,
-            target="/home/agent/.awf/clarification-auth/2",
+            target="/home/agent/.awf/clarification-auth/1",
             mode="ro",
         ),
+    )
+
+
+@pytest.mark.unit
+def test_clarification_inputs_retain_direct_claude_credentials() -> None:
+    """Direct Anthropic clarification retains its credentials and auth mount."""
+    claude_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/claude",
+        target="/home/agent/.claude",
+        mode="rw",
+    )
+    aws_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-credentials",
+        target="/run/awf/secrets/aws-credentials",
+        mode="ro",
+    )
+    environment = (
+        ("ANTHROPIC_API_KEY", "anthropic-token"),
+        ("ANTHROPIC_AUTH_TOKEN", "anthropic-auth-token"),
+        ("ANTHROPIC_BASE_URL", "https://anthropic.example.test"),
+        ("ANTHROPIC_SMALL_FAST_MODEL", "claude-fast"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-token"),
+        ("CLAUDE_CODE_USE_BEDROCK", "0"),
+        ("CLAUDE_CODE_USE_VERTEX", "0"),
+        ("AWS_SHARED_CREDENTIALS_FILE", aws_credentials.target),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(claude_auth, aws_credentials),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (claude_auth, aws_credentials),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == environment[:-1]
+    assert clarification_mounts == (
+        AuthMount(source=claude_auth.source, target=claude_auth.target, mode="ro"),
     )
 
 
