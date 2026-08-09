@@ -43,6 +43,9 @@ services:
     {% endif %}{% if s.source_metadata %}x-awf-companion-source: {{ s.source_metadata | tojson }}
     {% endif %}networks:
       - awf_net
+    {% if s.name in clarification_model_services %}
+      - clarification_model_net
+    {% endif %}
     restart: "no"
 
   {% endfor %}
@@ -99,6 +102,9 @@ services:
       - "host.docker.internal:host-gateway"
     {% endif %}networks:
       - clarification_egress_net
+    {% if clarification_model_services %}
+      - clarification_model_net
+    {% endif %}
     profiles:
       - awf-clarification
     {% if clarification_auth_mounts %}entrypoint:
@@ -142,3 +148,8 @@ networks:
     name: {{ ("awf-" ~ workspace_id ~ "-clarification-egress-net") | tojson }}
     {% if network_internal %}internal: true
     {% endif %}
+  {% if clarification_model_services %}
+  clarification_model_net:
+    name: {{ ("awf-" ~ workspace_id ~ "-clarification-model-net") | tojson }}
+    internal: true
+  {% endif %}

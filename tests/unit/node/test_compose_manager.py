@@ -179,6 +179,59 @@ def test_upgrade_persisted_clarification_service_keeps_opencode_model_credential
     }
 
 
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_routes_to_selected_model_service(
+    tmp_path: Path,
+) -> None:
+    """Legacy clarification can reach only its configured model sidecar."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "ollama-sidecar": {
+                        "image": "ollama/ollama:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["networks"] == [
+        "clarification_egress_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["ollama-sidecar"]["networks"] == [
+        "awf_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["postgres"]["networks"] == ["awf_net"]
+    assert upgraded["networks"]["clarification_model_net"] == {
+        "name": "awf-ws_legacy-clarification-model-net",
+        "internal": True,
+    }
+
+
 class TestRender:
     """Tests for rendering workspace compose specifications."""
 
@@ -264,6 +317,47 @@ class TestRender:
         assert clarification["entrypoint"][-1] == "--"
         assert parsed["networks"]["clarification_egress_net"] == {
             "name": "awf-ws_test123-clarification-egress-net"
+        }
+
+    @pytest.mark.unit
+    def test_clarification_reaches_only_selected_profile_model_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS model endpoint gets a dedicated clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama-sidecar:11434"),
+                        ("OLLAMA_HOST", "http://not-selected-sidecar:11434"),
+                    ),
+                    services=(
+                        ComposeService(name="ollama-sidecar", image="ollama/ollama:latest"),
+                        ComposeService(
+                            name="not-selected-sidecar",
+                            image="ollama/ollama:latest",
+                        ),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["ollama-sidecar"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["not-selected-sidecar"]["networks"] == ["awf_net"]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+        assert parsed["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_test123-clarification-model-net",
+            "internal": True,
         }
 
     @pytest.mark.unit

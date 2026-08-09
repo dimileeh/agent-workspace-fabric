@@ -23,10 +23,11 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -53,6 +54,53 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
     "unknown flag: --remove-orphans",
 )
+_CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+
+
+def _clarification_model_service_names(
+    clarification_environment: Iterable[tuple[str, str]], *, service_names: Iterable[str]
+) -> tuple[str, ...]:
+    """Return profile model services selected by clarification's provider URL."""
+
+    environment = dict(clarification_environment)
+    endpoint_names: tuple[str, ...] = _CLARIFICATION_BASE_URL_ENV_NAMES
+    if environment.get("AWF_OPENCODE_OLLAMA_BASE_URL"):
+        endpoint_names += ("AWF_OPENCODE_OLLAMA_BASE_URL",)
+    elif environment.get("OLLAMA_HOST"):
+        endpoint_names += ("OLLAMA_HOST",)
+    names = tuple(service_names)
+    names_by_hostname = {name.lower(): name for name in names}
+    selected_names: set[str] = set()
+    for endpoint_name in endpoint_names:
+        endpoint = environment.get(endpoint_name, "")
+        if endpoint_name.endswith("OLLAMA_BASE_URL") or endpoint_name == "OLLAMA_HOST":
+            endpoint = endpoint if "://" in endpoint else f"//{endpoint}"
+        try:
+            hostname = urlsplit(endpoint).hostname
+        except ValueError:
+            continue
+        if hostname and (service_name := names_by_hostname.get(hostname.lower())):
+            selected_names.add(service_name)
+    return tuple(name for name in names if name in selected_names)
+
+
+def _attach_persisted_clarification_model_network(
+    services: dict[object, object],
+    model_service_names: Iterable[str],
+) -> tuple[str, ...]:
+    """Attach legacy rendered model services to clarification's dedicated route."""
+
+    attached_names: list[str] = []
+    for name in model_service_names:
+        service = services.get(name)
+        if not isinstance(service, dict):
+            continue
+        service_networks = service.get("networks")
+        if not isinstance(service_networks, list) or "awf_net" not in service_networks:
+            continue
+        service["networks"] = [*service_networks, "clarification_model_net"]
+        attached_names.append(name)
+    return tuple(attached_names)
 
 
 def _legacy_bind_mount(value: object) -> AuthMount | None:
@@ -183,11 +231,25 @@ def upgrade_persisted_clarification_service(
             "$", "$$"
         )
         clarification_volumes.append(f"{mount.source}:/run/awf/clarification-auth/{index}:ro")
+    clarification_model_services = _attach_persisted_clarification_model_network(
+        services,
+        _clarification_model_service_names(
+            clarification_environment.items(),
+            service_names=(
+                str(name)
+                for name, service in services.items()
+                if name != "agent" and isinstance(service, dict)
+            ),
+        ),
+    )
 
     clarification: dict[str, object] = {
         "image": image,
         "working_dir": agent.get("working_dir", "/workspace"),
-        "networks": ["clarification_egress_net"],
+        "networks": [
+            "clarification_egress_net",
+            *(("clarification_model_net",) if clarification_model_services else ()),
+        ],
         "profiles": ["awf-clarification"],
         "command": ["sh", "-c", "sleep infinity"],
         "restart": "no",
@@ -218,6 +280,14 @@ def upgrade_persisted_clarification_service(
     if isinstance(awf_network, Mapping) and awf_network.get("internal") is True:
         clarification_network["internal"] = True
     networks.setdefault("clarification_egress_net", clarification_network)
+    if clarification_model_services:
+        networks.setdefault(
+            "clarification_model_net",
+            {
+                "name": f"awf-{workspace_id}-clarification-model-net",
+                "internal": True,
+            },
+        )
 
     temporary_path: Path | None = None
     try:
@@ -508,6 +578,14 @@ class ComposeManager:
         services = [
             self._render_service(s, postgres_password=password) for s in self._services_for(spec)
         ]
+        clarification_model_services = (
+            _clarification_model_service_names(
+                spec.clarification_agent_environment,
+                service_names=(service.name for service in spec.services),
+            )
+            if spec.clarification_enabled
+            else ()
+        )
         named_volumes = self._named_volumes_for(services)
 
         # Backwards-compatible companion input. Companions become ordinary
@@ -565,6 +643,7 @@ class ComposeManager:
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
             clarification_enabled=spec.clarification_enabled,
+            clarification_model_services=clarification_model_services,
             clarification_agent_environment=spec.clarification_agent_environment,
             clarification_auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode}
