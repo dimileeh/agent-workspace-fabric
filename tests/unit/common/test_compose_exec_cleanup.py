@@ -499,3 +499,94 @@ def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:
 
     wrapper = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
     assert "unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES" in wrapper
+
+
+def test_isolated_compose_run_replaces_the_workspace_mount() -> None:
+    """A re-ask container sees only its tracked-only checkout at /workspace."""
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="reask_mount_test",
+        preserve_stdin=True,
+    )
+
+    run_idx = invocation.args.index("run")
+    assert invocation.args[run_idx : run_idx + 10] == [
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--name",
+        invocation.container_name,
+        "-w",
+        "/workspace",
+        "-v",
+        "/worktrees/ws_123/.awf-needs-human-reask-test:/workspace",
+    ]
+    assert invocation.args[run_idx + 10] == "agent"
+    assert "/workspace/.awf-needs-human-reask-test" not in invocation.args
+    assert invocation.cleanup_args == [
+        "docker",
+        "container",
+        "rm",
+        "--force",
+        invocation.container_name,
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    (
+        (0, ""),
+        (1, "Error response from daemon: No such container: awf-reask-awf_absent"),
+    ),
+)
+async def test_isolated_compose_run_cleanup_removes_only_its_container(
+    returncode: int,
+    stderr: str,
+) -> None:
+    """A completed `--rm` cleanup race is harmless and cannot affect the primary agent."""
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=returncode, stderr=stderr)
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_absent",
+    )
+
+    result = await cleanup_compose_exec_invocation(
+        runner,
+        invocation,
+        workspace_id="ws_123",
+    )
+
+    assert result.returncode == returncode
+    assert runner.calls[0].args == invocation.cleanup_args
+    assert "agent" not in runner.calls[0].args
+
+
+@pytest.mark.unit
+async def test_isolated_compose_run_cleanup_raises_when_container_remains() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="daemon unavailable")
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_cleanup_failure",
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="daemon unavailable"):
+        await cleanup_compose_exec_invocation(runner, invocation)

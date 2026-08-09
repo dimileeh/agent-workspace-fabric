@@ -11,7 +11,7 @@ import pytest
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.runtime.pr_monitor_runner import comments, pre_push_validation
+from awf.runtime.pr_monitor_runner import agent_service_recovery, comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
 from awf.runtime.pr_monitor_runner.types import (
@@ -59,6 +59,46 @@ class _LocalCommandRunner:
 
 
 @pytest.mark.unit
+async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> None:
+    """Recovery preserves the one-off mount request through to the local adapter."""
+    calls: list[dict[str, object]] = []
+
+    class _Adapter:
+        is_hosted = False
+
+        async def run(self, **kwargs: object) -> AgentRunResult:
+            calls.append(dict(kwargs))
+            return AgentRunResult(
+                returncode=0, stdout="AWF-VERDICT: NEEDS_HUMAN: reason", stderr=""
+            )
+
+    reask_worktree = tmp_path / ".awf-needs-human-reask-test"
+    runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
+
+    result = await agent_service_recovery._run_monitor_agent_with_service_recovery(
+        runner,
+        workspace_id="ws_reask",
+        compose_project="awf_ws_reask",
+        compose_file=tmp_path / "compose.yml",
+        prompt="state the reason",
+        log_source="recovery",
+        isolated_worktree_host_path=reask_worktree,
+    )
+
+    assert result.stdout.endswith("reason")
+    assert calls == [
+        {
+            "compose_project": "awf_ws_reask",
+            "compose_file": tmp_path / "compose.yml",
+            "prompt": "state the reason",
+            "workspace_id": "ws_reask",
+            "log_source": "recovery",
+            "isolated_worktree_host_path": reask_worktree,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies(
     tmp_path: Path,
 ) -> None:
@@ -90,7 +130,6 @@ async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies
 
     assert reask_worktree is not None
     assert reask_worktree.path.parent == worktree
-    assert reask_worktree.agent_workdir == f"/workspace/{reask_worktree.path.name}"
     assert (reask_worktree.path / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
     assert not (reask_worktree.path / ".venv").exists()
     assert not (reask_worktree.path / ".agent-scratch").exists()
@@ -150,7 +189,6 @@ async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
     reask_worktree = comments._IsolatedReaskWorktree(
         source_worktree=Path("/worktree"),
         path=Path("/worktree/.awf-needs-human-reask-test"),
-        agent_workdir="/workspace/.awf-needs-human-reask-test",
     )
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) == (
@@ -479,12 +517,12 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     (worktree / ".gitignore").write_text("*.env\n.venv/\n", encoding="utf-8")
     _git(worktree, "add", ".gitignore")
     _git(worktree, "commit", "-qm", "ignore dependencies")
-    reask_workdirs: list[str] = []
+    reask_worktree_paths: list[Path] = []
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
-        agent_workdir = str(kwargs["agent_workdir"])
-        reask_workdirs.append(agent_workdir)
-        reask = worktree / Path(agent_workdir).relative_to("/workspace")
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        reask_worktree_paths.append(reask)
         assert not (reask / ".venv").exists()
         (reask / ".env").write_text("MODE=clarification-edit\n", encoding="utf-8")
         (reask / "generated.env").write_text("GENERATED=during-reask\n", encoding="utf-8")
@@ -528,7 +566,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     )
 
     assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
-    assert len(reask_workdirs) == 1
+    assert reask_worktree_paths[0].parent == worktree
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
     assert dependency.exists()
     assert not list(worktree.glob(".awf-needs-human-reask-*"))
@@ -545,7 +583,8 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
     config.write_text("MODE=original\n", encoding="utf-8")
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
-        reask = worktree / Path(str(kwargs["agent_workdir"])).relative_to("/workspace")
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
         (reask / ".env").write_text("MODE=clarification-edit\n", encoding="utf-8")
         (reask / "generated.env").write_text("GENERATED=during-reask\n", encoding="utf-8")

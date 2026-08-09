@@ -320,6 +320,30 @@ class TestCodexAdapter:
         ]
 
     @pytest.mark.unit
+    async def test_uses_one_off_container_for_isolated_reask_worktree(self) -> None:
+        """A clarification re-ask must not share the primary agent mount namespace."""
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+        )
+
+        args = runner.calls[0].args
+        run_idx = args.index("run")
+        assert args[run_idx : run_idx + 4] == ["run", "--rm", "--no-deps", "-T"]
+        assert args[args.index("-w", run_idx) + 1] == "/workspace"
+        assert args[args.index("-v", run_idx) + 1] == (
+            "/worktrees/ws_xyz/.awf-needs-human-reask-test:/workspace"
+        )
+        service_idx = args.index("agent", run_idx)
+        assert service_idx > args.index("-v", run_idx)
+        assert args[service_idx + 1 : service_idx + 3] == ["sh", "-lc"]
+
+    @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")
@@ -541,6 +565,30 @@ services:
         assert "AWF_EXEC_INVOCATION_ID" in agent_args[agent_args.index("-lc") + 1]
         assert "pkill codex" not in cleanup_args[cleanup_args.index("-lc") + 1]
         assert "pkill claude" not in cleanup_args[cleanup_args.index("-lc") + 1]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_timeout_removes_its_one_off_container(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command idle timeout",
+            reason_code="COMMAND_IDLE_TIMEOUT",
+        )
+        runner.queue_result(returncode=0, stdout="removed")
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_isolated_timeout",
+                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+            )
+
+        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
+        assert runner.calls[0].args[runner.calls[0].args.index("run")] == "run"
+        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
 
     @pytest.mark.unit
     async def test_cleanup_failure_surfaces_distinct_error(self) -> None:

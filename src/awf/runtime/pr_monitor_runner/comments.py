@@ -84,7 +84,6 @@ class _IsolatedReaskWorktree:
 
     source_worktree: Path
     path: Path
-    agent_workdir: str
 
 
 async def _prepare_reask_primary_worktree(
@@ -150,7 +149,6 @@ async def _create_isolated_reask_worktree(
     return _IsolatedReaskWorktree(
         source_worktree=worktree_path,
         path=path,
-        agent_workdir=f"/workspace/{path.name}",
     )
 
 
@@ -510,7 +508,9 @@ async def _enforce_needs_human_reason(
             task_tag=task_tag,
             operation_start_head=operation_start_head,
             commit_dirty_changes=False,
-            agent_workdir=(reask_worktree.agent_workdir if reask_worktree is not None else None),
+            isolated_worktree_host_path=(
+                reask_worktree.path if reask_worktree is not None else None
+            ),
         )
     except (
         ComposeExecCleanupError,
@@ -706,7 +706,7 @@ async def _invoke_cli_for_verdict_result(
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
     operation_start_head: str | None = None,
     commit_dirty_changes: bool = True,
-    agent_workdir: str | None = None,
+    isolated_worktree_host_path: Path | None = None,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -747,7 +747,7 @@ async def _invoke_cli_for_verdict_result(
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
-        if agent_workdir is not None:
+        if isolated_worktree_host_path is not None:
             result = await runner._run_monitor_agent_with_service_recovery(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -757,7 +757,7 @@ async def _invoke_cli_for_verdict_result(
                 command_evidence=command_evidence,
                 operation_start_head=operation_start_head,
                 state=state,
-                agent_workdir=agent_workdir,
+                isolated_worktree_host_path=isolated_worktree_host_path,
             )
         else:
             result = await runner._run_monitor_agent_with_service_recovery(

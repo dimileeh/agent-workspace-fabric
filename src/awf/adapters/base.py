@@ -36,6 +36,9 @@ from awf.common.commands import (
 )
 from awf.common.compose_exec import (
     DEFAULT_AGENT_WORKDIR,
+    TrackedComposeExec,
+    TrackedIsolatedComposeRun,
+    build_isolated_tracked_compose_run,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
     cleanup_compose_exec_invocation_after_cancellation,
@@ -355,6 +358,7 @@ class AgentAdapter(ABC):
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
         workdir: str = DEFAULT_AGENT_WORKDIR,
+        isolated_worktree_host_path: Path | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -395,16 +399,29 @@ class AgentAdapter(ABC):
         env_passthrough = await asyncio.to_thread(
             agent_exec_env_passthrough, compose_file=compose_file
         )
-        invocation = build_tracked_compose_exec(
-            compose_project=compose_project,
-            compose_file=compose_file,
-            cli_args=cli_args,
-            source=log_source,
-            label=self.name.value,
-            workdir=workdir,
-            preserve_stdin=True,
-            env_passthrough=env_passthrough,
-        )
+        invocation: TrackedComposeExec | TrackedIsolatedComposeRun
+        if isolated_worktree_host_path is None:
+            invocation = build_tracked_compose_exec(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=cli_args,
+                source=log_source,
+                label=self.name.value,
+                workdir=workdir,
+                preserve_stdin=True,
+                env_passthrough=env_passthrough,
+            )
+        else:
+            invocation = build_isolated_tracked_compose_run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=cli_args,
+                source=log_source,
+                label=self.name.value,
+                worktree_host_path=isolated_worktree_host_path,
+                preserve_stdin=True,
+                env_passthrough=env_passthrough,
+            )
         args = invocation.args
         _log.info(
             "agent.run.start",

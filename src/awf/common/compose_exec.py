@@ -1,9 +1,11 @@
-"""Tracked ``docker compose exec`` helpers.
+"""Tracked ``docker compose exec`` and isolated-run helpers.
 
 ``docker compose exec`` has two process trees: the local docker-compose client
 and the command running inside the container. Killing the local client on a
 timeout does not guarantee the in-container process tree is gone, so AWF wraps
 container commands with an invocation id and uses that id for targeted cleanup.
+Clarification re-asks use a one-off container instead, so their child worktree
+can replace the primary `/workspace` bind mount.
 """
 
 from __future__ import annotations
@@ -74,6 +76,22 @@ class TrackedComposeExec:
     cleanup_script: str
 
 
+@dataclass(frozen=True)
+class TrackedIsolatedComposeRun:
+    """One-off compose run whose sole workspace mount is a child worktree."""
+
+    args: list[str]
+    invocation_id: str
+    compose_project: str
+    compose_file: Path
+    service: str
+    source: str
+    label: str
+    wrapper_script: str
+    container_name: str
+    cleanup_args: list[str]
+
+
 def build_tracked_compose_exec(
     *,
     compose_project: str,
@@ -124,6 +142,70 @@ def build_tracked_compose_exec(
     )
 
 
+def build_isolated_tracked_compose_run(
+    *,
+    compose_project: str,
+    compose_file: Path,
+    cli_args: list[str],
+    source: str,
+    label: str,
+    worktree_host_path: Path,
+    service: str = "agent",
+    invocation_id: str | None = None,
+    preserve_stdin: bool = False,
+    env_passthrough: Sequence[str] = (),
+) -> TrackedIsolatedComposeRun:
+    """Build a one-off run that mounts only ``worktree_host_path`` at `/workspace`."""
+
+    if not cli_args:
+        raise ValueError("cli_args must not be empty")
+    invocation_id = invocation_id or _new_invocation_id()
+    _validate_invocation_id(invocation_id)
+    wrapper_script = _tracked_exec_wrapper_script(preserve_stdin=preserve_stdin)
+    container_name = f"awf-reask-{invocation_id}"
+    args = [
+        "docker",
+        "compose",
+        "-p",
+        compose_project,
+        "-f",
+        str(compose_file),
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--name",
+        container_name,
+        "-w",
+        DEFAULT_AGENT_WORKDIR,
+        # Compose resolves service volumes by their container target; this
+        # run-level bind therefore replaces the primary worktree's /workspace
+        # mount instead of adding another reachable checkout.
+        "-v",
+        f"{worktree_host_path}:{DEFAULT_AGENT_WORKDIR}",
+        *[arg for name in _unique_env_passthrough(env_passthrough) for arg in ("-e", name)],
+        service,
+        "sh",
+        "-lc",
+        wrapper_script,
+        "awf-exec",
+        invocation_id,
+        *cli_args,
+    ]
+    return TrackedIsolatedComposeRun(
+        args=args,
+        invocation_id=invocation_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        service=service,
+        source=source,
+        label=label,
+        wrapper_script=wrapper_script,
+        container_name=container_name,
+        cleanup_args=["docker", "container", "rm", "--force", container_name],
+    )
+
+
 def build_cleanup_compose_exec(invocation: TrackedComposeExec) -> list[str]:
     """Build the targeted cleanup command for a tracked invocation."""
 
@@ -144,11 +226,58 @@ def build_cleanup_compose_exec(invocation: TrackedComposeExec) -> list[str]:
 
 async def cleanup_compose_exec_invocation(
     runner: AsyncCommandRunner,
-    invocation: TrackedComposeExec,
+    invocation: TrackedComposeExec | TrackedIsolatedComposeRun,
     *,
     workspace_id: str | None = None,
 ) -> CommandResult:
-    """Run targeted cleanup and raise if tagged processes remain."""
+    """Run targeted cleanup and raise if the tracked process or container remains."""
+
+    if isinstance(invocation, TrackedIsolatedComposeRun):
+        _log.warning(
+            "compose_exec.isolated_cleanup.start",
+            workspace_id=workspace_id,
+            compose_project=invocation.compose_project,
+            service=invocation.service,
+            source=invocation.source,
+            label=invocation.label,
+            invocation_id=invocation.invocation_id,
+            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+        )
+        result = await runner.run(invocation.cleanup_args)
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        if result.ok or "no such container" in output:
+            _log.info(
+                "compose_exec.isolated_cleanup.succeeded",
+                workspace_id=workspace_id,
+                compose_project=invocation.compose_project,
+                service=invocation.service,
+                source=invocation.source,
+                label=invocation.label,
+                invocation_id=invocation.invocation_id,
+                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
+            return result
+
+        stderr = _bounded(result.stderr.strip() or result.stdout.strip() or "<no cleanup output>")
+        _log.error(
+            "compose_exec.isolated_cleanup.failed",
+            workspace_id=workspace_id,
+            compose_project=invocation.compose_project,
+            service=invocation.service,
+            source=invocation.source,
+            label=invocation.label,
+            invocation_id=invocation.invocation_id,
+            returncode=result.returncode,
+            stderr=stderr,
+            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+        )
+        raise ComposeExecCleanupError(
+            invocation_id=invocation.invocation_id,
+            source=invocation.source,
+            label=invocation.label,
+            message=stderr,
+            cleanup_result=result,
+        )
 
     _log.warning(
         "compose_exec.cleanup.start",
@@ -201,7 +330,7 @@ async def cleanup_compose_exec_invocation(
 
 async def cleanup_compose_exec_invocation_after_cancellation(
     runner: AsyncCommandRunner,
-    invocation: TrackedComposeExec,
+    invocation: TrackedComposeExec | TrackedIsolatedComposeRun,
     *,
     workspace_id: str | None = None,
 ) -> CommandResult:
