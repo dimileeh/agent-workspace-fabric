@@ -130,6 +130,24 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_inputs_exclude_git_mount_selected_by_provider_variable() -> None:
+    """A provider environment value cannot reintroduce a Git auth mount."""
+    git_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/ssh",
+        target="/home/agent/.ssh",
+        mode="ro",
+    )
+
+    mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (git_auth,),
+        agent_environment=(("OPENAI_API_KEY", git_auth.target),),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+    )
+
+    assert mounts == ()
+
+
+@pytest.mark.unit
 def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> None:
     """Claude backend credentials stay out unless that backend is enabled."""
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001

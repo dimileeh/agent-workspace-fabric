@@ -220,11 +220,14 @@ def _clarification_model_provider_auth_mount_targets(
 ) -> frozenset[str]:
     """Return known and environment-referenced model-provider mount targets."""
 
-    return _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS | frozenset(
-        value
-        for name, value in agent_environment
-        if name in _clarification_model_provider_environment_names(agent_environment)
-    )
+    return (
+        _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS
+        | frozenset(
+            value
+            for name, value in agent_environment
+            if name in _clarification_model_provider_environment_names(agent_environment)
+        )
+    ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 
 
 def _clarification_auth_target(target: str, *, index: int) -> str:
