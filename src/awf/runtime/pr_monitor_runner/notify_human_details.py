@@ -21,13 +21,14 @@ def _needs_human_reason_state_key(item_id: str) -> str:
 def _collect_defer_items(
     status: PRStatus, state: MonitorState
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Collect deferred / needs-human threads/comments, partitioned by author.
+    """Collect deferred / needs-human threads/comments for notification groups.
 
-    Returns ``(bot_items, human_items)``. Items whose author classifies
-    as a bot per ``pr_monitor._is_bot_author`` go into the first list;
-    the rest (including unknown-author items, which the merge gate
-    treats as human for safety) go into the second — the artifact
-    mirrors that classification so orchestrators see the same picture.
+    Returns ``(bot_items, human_items)``. Inline threads are classified using
+    their complete comment history via ``pr_monitor._is_bot_review_thread``;
+    review comments use ``pr_monitor._is_bot_author``. All other items
+    (including unknown-author items, which the merge gate treats as human for
+    safety) go into the second list — the artifact mirrors that classification
+    so orchestrators see the same picture.
 
     Both ``defer`` and ``needs_human`` verdicts are collected (#305): a
     ``needs_human`` item blocks the merge just as a ``defer`` one does, so
@@ -41,12 +42,14 @@ def _collect_defer_items(
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if verdict not in {"defer", "needs_human"}:
             continue
-        bucket = bot_items if _is_bot_review_thread(thread) else human_items
+        is_bot = _is_bot_review_thread(thread)
+        bucket = bot_items if is_bot else human_items
         bucket.append(
             {
                 "kind": "thread",
                 "id": thread.thread_id,
                 "author": thread.author,
+                "is_bot": is_bot,
                 "path": thread.path,
                 "line": thread.line,
                 "url": thread.url,
@@ -61,12 +64,14 @@ def _collect_defer_items(
         verdict = state.threads_addressed_ids.get(comment.comment_id)
         if verdict not in {"defer", "needs_human"}:
             continue
-        bucket = bot_items if _is_bot_author(comment.author) else human_items
+        is_bot = _is_bot_author(comment.author)
+        bucket = bot_items if is_bot else human_items
         bucket.append(
             {
                 "kind": "review",
                 "id": comment.comment_id,
                 "author": comment.author,
+                "is_bot": is_bot,
                 "path": None,
                 "line": None,
                 "url": comment.url,

@@ -474,7 +474,10 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     bot_items: list[Mapping[str, object]] = []
     human_items: list[Mapping[str, object]] = []
     for item in blocker_items:
-        target = bot_items if _is_bot_author(_item_text(item, "author")) else human_items
+        is_bot = item.get("is_bot")
+        if not isinstance(is_bot, bool):
+            is_bot = _is_bot_author(_item_text(item, "author"))
+        target = bot_items if is_bot else human_items
         target.append(item)
     displayed = 0
     lines: list[str] = []

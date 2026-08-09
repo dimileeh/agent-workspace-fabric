@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
 )
 from awf.runtime.pr_monitor_runner import MonitorRunnerConfig
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -61,6 +62,30 @@ class TestCollectDeferItems:
         assert bots == []
         assert len(humans) == 1
         assert humans[0]["id"] == "T2"
+
+    @pytest.mark.unit
+    def test_bot_originated_thread_with_human_reply_stays_in_human_bucket(self) -> None:
+        thread = ReviewThread(
+            thread_id="T-mixed",
+            path="src/monitor.py",
+            line=42,
+            body_excerpt="bot report",
+            author="reviewer-bot[bot]",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="C-bot", body="bot report", author="reviewer-bot[bot]"
+                ),
+                ReviewThreadComment(comment_id="C-human", body="please defer", author="dimileeh"),
+            ),
+        )
+        state = MonitorState(threads_addressed_ids={"T-mixed": "defer"})
+
+        bots, humans = _collect_defer_items(_status(inline=(thread,)), state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == "T-mixed"
+        assert humans[0]["is_bot"] is False
 
     @pytest.mark.unit
     def test_non_deferred_items_are_excluded(self) -> None:

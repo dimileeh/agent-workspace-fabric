@@ -1025,6 +1025,31 @@ class TestReadyToMergeComment:
         assert "[alice](https://github.example/reviews/R-a)" in body
 
     @pytest.mark.unit
+    def test_blocker_items_honor_collected_thread_classification(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T-mixed",
+                    "author": "review-bot[bot]",
+                    "is_bot": False,
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T-mixed",
+                    "body": "a human replied to the bot thread",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Agent escalated - needs your decision (0):" in body
+        assert "Human feedback deferred by agent (1):" in body
+
+    @pytest.mark.unit
     def test_blocker_item_section_redacts_agent_reason_secrets(self) -> None:
         secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCD"
         body = ready_to_merge_comment(
