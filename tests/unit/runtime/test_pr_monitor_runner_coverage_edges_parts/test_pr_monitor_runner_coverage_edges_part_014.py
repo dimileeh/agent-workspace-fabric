@@ -1248,7 +1248,8 @@ async def test_post_human_notification_redacts_needs_human_reason_before_posting
     )
     secret = "legacyNeedsHumanSecret987"
     raw_reason = f"A maintainer must decide whether to rotate GITHUB_TOKEN={secret}."
-    redacted_reason = "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
+    redacted_reason = r"A maintainer must decide whether to rotate GITHUB_TOKEN=\<redacted\>"
+    dedupe_reason = "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
     thread = ReviewThread(
         thread_id="T_secret",
         path="apps/api/checkout_policy.py",
@@ -1280,13 +1281,14 @@ async def test_post_human_notification_redacts_needs_human_reason_before_posting
     assert len(gh.posts) == 1
     assert secret not in str(gh.posts[0]["body"])
     assert redacted_reason in str(gh.posts[0]["body"])
+    assert "GITHUB_TOKEN=<redacted>" not in str(gh.posts[0]["body"])
     notification_keys = [
         key
         for key, value in state.threads_addressed_ids.items()
         if key.startswith(f"__awf_notify__:{status.head_sha}:") and value == "notified"
     ]
     assert len(notification_keys) == 1
-    assert redacted_reason in notification_keys[0]
+    assert dedupe_reason in notification_keys[0]
     assert secret not in notification_keys[0]
 
 
