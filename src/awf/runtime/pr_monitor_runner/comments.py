@@ -386,7 +386,14 @@ async def _enforce_needs_human_reason(
             )
         raise
     except Exception as exc:
-        await _cleanup_reask_worktree()
+        try:
+            await _cleanup_reask_worktree()
+        except Exception as cleanup_exc:
+            _log.warning(
+                "monitor.needs_human_reason_reask_cleanup_failed_after_error",
+                workspace_id=workspace_id,
+                error=redact_audit_text(str(cleanup_exc), limit=240),
+            )
         _log.warning(
             "monitor.needs_human_reason_reask_failed",
             workspace_id=workspace_id,
