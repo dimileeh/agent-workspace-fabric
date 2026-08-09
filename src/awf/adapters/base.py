@@ -581,7 +581,7 @@ class AgentAdapter(ABC):
                 source=log_source,
                 prompt_bytes=len(prompt_input),
             )
-            if sampler_ctx is None:
+            if sampler_ctx is None and isolated_worktree_host_path is None:
                 sampler_ctx = await self._start_usage_sampling(
                     compose_project=compose_project,
                     compose_file=compose_file,

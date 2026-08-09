@@ -181,16 +181,29 @@ class CcusageCollector(UsageSampler):
         """Capture a one-off clarification container's usage before ``--rm`` removes it."""
 
         source = provider_ccusage_source(provider)
-        prior_snapshot = await asyncio.to_thread(
-            read_latest_usage_snapshot,
-            workspace_id,
-            work_dir=self._work_dir,
-        )
-        capture_dir = (
-            await asyncio.to_thread(_make_isolated_capture_dir, self._work_dir)
-            if source is not None
-            else None
-        )
+        capture_unavailable_reason: str | None = None
+        try:
+            prior_snapshot = await asyncio.to_thread(
+                read_latest_usage_snapshot,
+                workspace_id,
+                work_dir=self._work_dir,
+            )
+            capture_dir = (
+                await asyncio.to_thread(_make_isolated_capture_dir, self._work_dir)
+                if source is not None
+                else None
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.isolated_setup_error",
+                workspace_id=workspace_id,
+                exc_info=True,
+            )
+            prior_snapshot = None
+            capture_dir = None
+            capture_unavailable_reason = REASON_COMMAND_FAILED
         return _IsolatedCcusageSampleContext(
             collector=self,
             compose_project=compose_project,
@@ -202,6 +215,7 @@ class CcusageCollector(UsageSampler):
             prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
             cli_args=cli_args,
             capture_dir=capture_dir,
+            capture_unavailable_reason=capture_unavailable_reason,
         )
 
 
@@ -636,6 +650,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         prior_ccusage_source: str | None,
         cli_args: list[str],
         capture_dir: Path | None,
+        capture_unavailable_reason: str | None,
     ) -> None:
         super().__init__(
             collector=collector,
@@ -649,6 +664,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         )
         self._agent_cli_args = list(cli_args)
         self._capture_dir = capture_dir
+        self._capture_unavailable_reason = capture_unavailable_reason
         self._capture_sample = "baseline"
 
     @property
@@ -692,7 +708,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
         capture_dir = self._capture_dir
         if capture_dir is None:
-            return None, REASON_SOURCE_UNSUPPORTED, None
+            return None, self._capture_unavailable_reason or REASON_SOURCE_UNSUPPORTED, None
         return await asyncio.to_thread(
             _read_isolated_ccusage_sample,
             capture_dir,

@@ -65,9 +65,15 @@ class _IsolatedRecordingContext(_RecordingContext):
 
 
 class _IsolatedRecordingSampler(_RecordingSampler):
+    def __init__(self, events: list[str], *, start_error: Exception | None = None) -> None:
+        super().__init__(events)
+        self._isolated_start_error = start_error
+
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
         self._events.append("start_isolated")
         self.start_kwargs = kwargs
+        if self._isolated_start_error is not None:
+            raise self._isolated_start_error
         return _IsolatedRecordingContext(self._events)
 
 
@@ -162,6 +168,38 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     assert "clarification" in args
     assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
     assert "wrapped-agent-cli" in args
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("sampler", "expected_events"),
+    [
+        (_RecordingSampler, ["agent"]),
+        (
+            lambda events: _IsolatedRecordingSampler(
+                events, start_error=RuntimeError("isolated sampler down")
+            ),
+            ["start_isolated", "agent"],
+        ),
+    ],
+)
+async def test_isolated_run_does_not_fall_back_to_persistent_usage_sampling(
+    sampler: Any, expected_events: list[str]
+) -> None:
+    events: list[str] = []
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler(events))
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated_sampling_unavailable",
+        isolated_worktree_host_path=Path("/worktrees/ws_isolated_sampling_unavailable/reask"),
+    )
+
+    assert result.ok
+    assert events == expected_events
 
 
 @pytest.mark.unit

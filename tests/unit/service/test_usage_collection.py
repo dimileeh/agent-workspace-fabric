@@ -259,6 +259,39 @@ async def test_isolated_run_records_missing_capture_as_unavailable(tmp_path: Pat
 
 
 @pytest.mark.unit
+async def test_isolated_run_records_capture_setup_failure_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail_capture_setup(_work_dir: Path) -> Path:
+        raise PermissionError("capture ownership denied")
+
+    monkeypatch.setattr(usage_collection, "_make_isolated_capture_dir", _fail_capture_setup)
+    collector = CcusageCollector(
+        runner=FakeCommandRunner(),
+        work_dir=tmp_path,
+        clock=FakeClock(),
+    )
+
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_capture_setup_failure",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+
+    assert ctx.cli_args == ["codex", "exec", "-"]
+    assert ctx.volume_binds == ()
+    await ctx.finalize(status="success")
+
+    snapshot = read_latest_usage_snapshot("ws_capture_setup_failure", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.status == "unavailable"
+    assert snapshot.reason == "ccusage_command_failed"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("returncode", "stderr", "expected_reason"),
     [
