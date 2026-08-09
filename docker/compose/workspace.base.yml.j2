@@ -92,6 +92,9 @@ services:
     {% endif %}{% if clarification_auth_mounts %}volumes:
       {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
       {% endfor %}
+    {% endif %}{% if host_gateway_enabled -%}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     {% endif %}networks:
       - clarification_egress_net
     profiles:

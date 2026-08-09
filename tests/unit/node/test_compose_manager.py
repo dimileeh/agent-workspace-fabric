@@ -129,7 +129,7 @@ class TestRender:
         assert clarification["profiles"] == ["awf-clarification"]
         assert clarification["networks"] == ["clarification_egress_net"]
         assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
-        assert "extra_hosts" not in clarification
+        assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
         assert clarification["environment"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}
         assert clarification["volumes"] == [f"{codex_auth}:/run/awf/clarification-auth/0:ro"]
         assert str(shared_mirror) not in "\n".join(clarification["volumes"])
@@ -194,16 +194,22 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
-        """Offline egress renders an internal network without host gateway access."""
+        """Offline egress renders internal networks without host gateway access."""
         parsed = yaml.safe_load(
             manager.render(
-                _spec(tmp_path, network_internal=True, host_gateway_enabled=False)
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    network_internal=True,
+                    host_gateway_enabled=False,
+                )
             ).compose_file.read_text()
         )
 
         assert parsed["networks"]["awf_net"]["internal"] is True
         assert parsed["networks"]["clarification_egress_net"]["internal"] is True
         assert "extra_hosts" not in parsed["services"]["agent"]
+        assert "extra_hosts" not in parsed["services"]["clarification"]
 
     @pytest.mark.unit
     def test_offline_egress_policy_keeps_agent_and_services_on_awf_network(
