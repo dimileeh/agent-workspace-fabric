@@ -37,6 +37,11 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         target="/run/awf/secrets/gcp/credentials.json",
         mode="ro",
     )
+    database_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/database-password",
+        target="/run/awf/secrets/database-password",
+        mode="ro",
+    )
     bitbucket_askpass = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/bb-askpass.sh",
         target="/run/awf/secrets/bb-askpass.sh",
@@ -47,6 +52,7 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         AuthMount(source=mirror, target=mirror, mode="rw"),
         codex_auth,
         provider_credentials,
+        database_credentials,
         bitbucket_askpass,
         AuthMount(
             source="/home/agent/.config/gh",
@@ -60,20 +66,26 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         ),
         AuthMount(source="/home/agent/.ssh", target="/home/agent/.ssh", mode="ro"),
     )
+    agent_environment = (
+        ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
+        ("AWF_DATABASE_URL", "postgresql+asyncpg://awf@postgres:5432/awf"),
+        ("AWF_TEST_DATABASE_URL", "postgresql+asyncpg://awf@postgres:5432/awf"),
+        ("DOCKER_HOST", "tcp://docker:2375"),
+        ("SERVICE_TOKEN", "workspace-service-token"),
+        ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
+        ("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),
+        ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+        ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
+        ("SSH_AUTH_SOCK", "/run/ssh-agent.sock"),
+    )
     mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
         auth_mounts,
+        agent_environment=agent_environment,
         mirror_target=mirror,
     )
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        (
-            ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
-            ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
-            ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
-            ("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),
-            ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
-            ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
-            ("SSH_AUTH_SOCK", "/run/ssh-agent.sock"),
-        ),
+        agent_environment,
         auth_mounts=auth_mounts,
         mirror_target=mirror,
     )

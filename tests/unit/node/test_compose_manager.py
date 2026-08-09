@@ -103,6 +103,12 @@ class TestRender:
             ),
             clarification_enabled=True,
             clarification_agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+            services=(
+                ComposeService(
+                    name="postgres",
+                    image="postgres:16-alpine",
+                ),
+            ),
             auth_mounts=(
                 AuthMount(source=str(shared_mirror), target=str(shared_mirror), mode="rw"),
                 AuthMount(source=str(codex_auth), target="/home/agent/.codex", mode="rw"),
@@ -121,10 +127,10 @@ class TestRender:
         clarification = parsed["services"]["clarification"]
 
         assert clarification["profiles"] == ["awf-clarification"]
-        assert clarification["environment"] == {
-            "WORKSPACE_ID": "ws_test123",
-            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        }
+        assert clarification["networks"] == ["clarification_egress_net"]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+        assert "extra_hosts" not in clarification
+        assert clarification["environment"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}
         assert clarification["volumes"] == [f"{codex_auth}:/run/awf/clarification-auth/0:ro"]
         assert str(shared_mirror) not in "\n".join(clarification["volumes"])
         assert "/home/agent/.gitconfig" not in "\n".join(clarification["volumes"])
@@ -138,6 +144,20 @@ class TestRender:
             in (clarification["entrypoint"][2])
         )
         assert clarification["entrypoint"][-1] == "--"
+        assert parsed["networks"]["clarification_egress_net"] == {
+            "name": "awf-ws_test123-clarification-egress-net"
+        }
+
+    @pytest.mark.unit
+    def test_clarification_omits_empty_environment(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification does not render a null environment without provider config."""
+        parsed = yaml.safe_load(
+            manager.render(_spec(tmp_path, clarification_enabled=True)).compose_file.read_text()
+        )
+
+        assert "environment" not in parsed["services"]["clarification"]
 
     @pytest.mark.unit
     def test_agent_can_reach_host_gateway_for_host_services(

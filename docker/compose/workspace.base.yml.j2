@@ -85,17 +85,14 @@ services:
   clarification:
     image: {{ agent_runtime_image | tojson }}
     working_dir: /workspace
-    environment:
-      WORKSPACE_ID: {{ workspace_id | tojson }}
+    {% if clarification_agent_environment %}environment:
       {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}
-    {% if clarification_auth_mounts %}volumes:
+    {% endif %}{% if clarification_auth_mounts %}volumes:
       {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
       {% endfor %}
-    {% endif %}{% if host_gateway_enabled %}extra_hosts:
-      - "host.docker.internal:host-gateway"
     {% endif %}networks:
-      - awf_net
+      - clarification_egress_net
     profiles:
       - awf-clarification
     {% if clarification_auth_mounts %}entrypoint:
@@ -129,3 +126,5 @@ networks:
     name: {{ ("awf-" ~ workspace_id ~ "-net") | tojson }}
     {% if network_internal %}internal: true
     {% endif %}
+  clarification_egress_net:
+    name: {{ ("awf-" ~ workspace_id ~ "-clarification-egress-net") | tojson }}

@@ -40,6 +40,7 @@ from awf.node.secret_mounts import (
     SecretLeaseResolutionError,
 )
 from awf.profiles.compose import (
+    AGENT_AUTH_ENV_VARS,
     agent_environment_with_declared_secret_leases,
     agent_environment_with_host_auth,
     profile_agent_environment,
@@ -89,6 +90,10 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_MODEL_PROVIDER_ENV_NAMES = frozenset(AGENT_AUTH_ENV_VARS)
+_CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS = (
+    frozenset(_HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
+)
 _CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
 _AGENT_HOME = "/home/agent"
 
@@ -99,14 +104,16 @@ def _clarification_agent_environment(
     auth_mounts: Sequence[AuthMount],
     mirror_target: str,
 ) -> tuple[tuple[str, str], ...]:
-    """Keep coding settings, excluding Git auth and rewriting staged file references."""
+    """Keep only model-provider settings and rewrite staged file references."""
 
     source_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
+        agent_environment=agent_environment,
         mirror_target=mirror_target,
     )
     staged_mounts = _clarification_auth_mounts(
         auth_mounts,
+        agent_environment=agent_environment,
         mirror_target=mirror_target,
     )
     staged_targets = {
@@ -118,7 +125,8 @@ def _clarification_agent_environment(
     return tuple(
         (name, staged_targets.get(value, value))
         for name, value in agent_environment
-        if not _is_clarification_git_auth_environment(name)
+        if _is_clarification_model_provider_environment(name)
+        and not _is_clarification_git_auth_environment(name)
     )
 
 
@@ -129,9 +137,16 @@ def _is_clarification_git_auth_environment(name: str) -> bool:
     )
 
 
+def _is_clarification_model_provider_environment(name: str) -> bool:
+    """Return whether an environment entry configures an agent model provider."""
+
+    return name in _CLARIFICATION_MODEL_PROVIDER_ENV_NAMES
+
+
 def _clarification_auth_mounts(
     auth_mounts: Sequence[AuthMount],
     *,
+    agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
@@ -143,7 +158,11 @@ def _clarification_auth_mounts(
             target=_clarification_auth_target(mount.target, index=index),
         )
         for index, mount in enumerate(
-            _clarification_provider_auth_mounts(auth_mounts, mirror_target=mirror_target)
+            _clarification_provider_auth_mounts(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=mirror_target,
+            )
         )
     )
 
@@ -151,15 +170,29 @@ def _clarification_auth_mounts(
 def _clarification_provider_auth_mounts(
     auth_mounts: Sequence[AuthMount],
     *,
+    agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
-    """Return the non-Git authentication mounts available to clarification."""
+    """Return model-provider authentication mounts available to clarification."""
+
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(agent_environment)
 
     return tuple(
         mount
         for mount in auth_mounts
-        if mount.target != mirror_target
-        and mount.target not in _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
+        if mount.target != mirror_target and mount.target in provider_mount_targets
+    )
+
+
+def _clarification_model_provider_auth_mount_targets(
+    agent_environment: tuple[tuple[str, str], ...],
+) -> frozenset[str]:
+    """Return known and environment-referenced model-provider mount targets."""
+
+    return _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS | frozenset(
+        value
+        for name, value in agent_environment
+        if _is_clarification_model_provider_environment(name)
     )
 
 
@@ -437,6 +470,7 @@ class ComposeStackLauncher:
             )
         clarification_auth_mounts = _clarification_auth_mounts(
             auth_mounts,
+            agent_environment=agent_environment,
             mirror_target=str(layout.mirror_path),
         )
         spec = WorkspaceComposeSpec(
