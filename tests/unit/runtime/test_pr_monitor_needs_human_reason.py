@@ -206,8 +206,6 @@ async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies
     scratch = worktree / ".agent-scratch" / "session.txt"
     scratch.parent.mkdir()
     scratch.write_text("runtime state\n", encoding="utf-8")
-    empty_output_dir = worktree / "removed-output"
-    empty_output_dir.mkdir()
     runner = SimpleNamespace(
         _deps=SimpleNamespace(
             runner=_LocalCommandRunner(),
@@ -228,7 +226,6 @@ async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies
     assert not (reask_worktree.path / ".agent-scratch").exists()
     assert dependency.exists()
     assert scratch.exists()
-    assert not empty_output_dir.exists()
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
     assert not reask_worktree.path.exists()
@@ -249,6 +246,26 @@ async def test_isolated_reask_worktree_preserves_dirty_primary_worktree(tmp_path
         )
 
     assert (worktree / "preexisting.txt").read_text(encoding="utf-8") == "do not delete\n"
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_preserves_empty_primary_worktree_dir(
+    tmp_path: Path,
+) -> None:
+    """A cleanliness preflight must not delete unrelated empty directories."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_empty_primary")
+    empty_output_dir = worktree / "operator-output"
+    empty_output_dir.mkdir()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not prepare an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert empty_output_dir.exists()
 
 
 @pytest.mark.unit

@@ -111,7 +111,6 @@ async def _prepare_reask_primary_worktree(
         run_git=_run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
-        remove_empty_untracked_dirs=True,
     )
     if check.reason_code is not None:
         raise _MonitorPolicyBlockedError(
