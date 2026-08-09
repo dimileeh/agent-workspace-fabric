@@ -488,6 +488,7 @@ def ready_to_merge_comment(
 def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     """Render rich, untrusted human-action context for a public PR comment."""
     bot_items: list[Mapping[str, object]] = []
+    human_escalation_items: list[Mapping[str, object]] = []
     human_items: list[Mapping[str, object]] = []
     blocking_review_items: list[Mapping[str, object]] = []
     for item in blocker_items:
@@ -499,13 +500,19 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
         is_bot = item.get("is_bot")
         if not isinstance(is_bot, bool):
             is_bot = _is_bot_author(_item_text(item, "author"))
-        target = bot_items if is_bot else human_items
+        if is_bot:
+            target = bot_items
+        elif _item_text(item, "verdict") == "needs_human":
+            target = human_escalation_items
+        else:
+            target = human_items
         target.append(item)
     displayed = 0
     lines: list[str] = []
     for label, items in (
         ("Merge-blocking changes-requested reviews", blocking_review_items),
         ("Agent escalated - needs your decision", bot_items),
+        ("Human feedback escalated - needs your decision", human_escalation_items),
         ("Human feedback deferred by agent", human_items),
     ):
         lines.append(f"{label} ({len(items)}):")

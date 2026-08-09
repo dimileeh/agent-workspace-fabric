@@ -1048,6 +1048,42 @@ class TestReadyToMergeComment:
         assert "[alice](https://github.example/reviews/R-a)" in body
 
     @pytest.mark.unit
+    def test_blocker_items_render_human_needs_human_as_an_escalation(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-escalated",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-escalated",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose the preferred behavior.",
+                },
+                {
+                    "kind": "review",
+                    "id": "R-deferred",
+                    "author": "bob",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-deferred",
+                    "body": "Track this separately.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": "Needs a tracked follow-up.",
+                },
+            ),
+        )
+
+        assert "Human feedback escalated - needs your decision (1):" in body
+        assert "Human feedback deferred by agent (1):" in body
+        assert body.index("A decision is required.") < body.index("Track this separately.")
+
+    @pytest.mark.unit
     def test_blocker_items_render_effective_changes_reviews_separately_from_deferrals(self) -> None:
         body = ready_to_merge_comment(
             pr_number=1,
