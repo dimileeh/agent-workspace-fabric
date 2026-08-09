@@ -249,7 +249,7 @@ async def test_human_notification_dedup_includes_order_independent_item_ids(
 
 
 @pytest.mark.unit
-async def test_human_notification_dedup_includes_same_id_blocker_detail_changes(
+async def test_human_notification_dedup_ignores_same_id_blocker_body_changes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -301,9 +301,11 @@ async def test_human_notification_dedup_includes_same_id_blocker_detail_changes(
         state=state,
     )
 
-    assert len(gh.posts) == 2
+    first_items, _ = _collect_defer_items(first_status, state)
+    second_items, _ = _collect_defer_items(second_status, state)
+    assert _notification_items_digest(first_items) == _notification_items_digest(second_items)
+    assert len(gh.posts) == 1
     assert "Initial blocker detail." in str(gh.posts[0]["body"])
-    assert "Updated blocker detail." in str(gh.posts[1]["body"])
 
 
 @pytest.mark.unit
