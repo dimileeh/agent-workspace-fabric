@@ -86,8 +86,10 @@ services:
   clarification:
     image: {{ agent_runtime_image | tojson }}
     working_dir: /workspace
-    {% if clarification_agent_environment %}environment:
+    {% if clarification_agent_environment or clarification_auth_mounts %}environment:
       {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
+      {% endfor %}
+      {% for m in clarification_auth_mounts %}AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}: {{ m.target | replace("$", "$$") | tojson }}
       {% endfor %}
     {% endif %}{% if clarification_auth_mounts %}volumes:
       {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
@@ -103,13 +105,12 @@ services:
       - "sh"
       - "-ec"
       - |
-        {% for m in clarification_auth_mounts %}clarification_auth_target_{{ loop.index0 }}={{ m.target | tojson }}
-        mkdir -p "$(dirname "$clarification_auth_target_{{ loop.index0 }}")"
+        {% for m in clarification_auth_mounts %}mkdir -p "$(dirname "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}")"
         if [ -d /run/awf/clarification-auth/{{ loop.index0 }} ]; then
-          mkdir -p "$clarification_auth_target_{{ loop.index0 }}"
-          cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$clarification_auth_target_{{ loop.index0 }}/"
+          mkdir -p "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
+          cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
         else
-          cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$clarification_auth_target_{{ loop.index0 }}"
+          cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
         fi
         {% endfor %}exec "$@"
       - "--"

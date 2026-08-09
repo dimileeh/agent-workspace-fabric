@@ -130,23 +130,52 @@ class TestRender:
         assert clarification["networks"] == ["clarification_egress_net"]
         assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
         assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
-        assert clarification["environment"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}
+        assert clarification["environment"] == {
+            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+            "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.codex",
+        }
         assert clarification["volumes"] == [f"{codex_auth}:/run/awf/clarification-auth/0:ro"]
         assert str(shared_mirror) not in "\n".join(clarification["volumes"])
         assert "/home/agent/.gitconfig" not in "\n".join(clarification["volumes"])
         assert "/home/agent/.codex" not in "\n".join(clarification["volumes"])
         assert clarification["entrypoint"][:2] == ["sh", "-ec"]
+        assert "clarification_auth_target_0=" not in clarification["entrypoint"][2]
         assert (
-            'clarification_auth_target_0="/home/agent/.codex"' in (clarification["entrypoint"][2])
-        )
-        assert (
-            'cp -a /run/awf/clarification-auth/0/. "$clarification_auth_target_0/"'
+            'cp -a /run/awf/clarification-auth/0/. "$AWF_CLARIFICATION_AUTH_TARGET_0/"'
             in (clarification["entrypoint"][2])
         )
         assert clarification["entrypoint"][-1] == "--"
         assert parsed["networks"]["clarification_egress_net"] == {
             "name": "awf-ws_test123-clarification-egress-net"
         }
+
+    @pytest.mark.unit
+    def test_clarification_auth_target_is_not_rendered_as_shell_source(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Auth target metacharacters remain Compose data, not shell source."""
+        hostile_target = "/home/agent/$(id)-${HOME}-`whoami`"
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(tmp_path / "credentials"),
+                            target=hostile_target,
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification = parsed["services"]["clarification"]
+
+        assert clarification["environment"] == {
+            "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/$$(id)-$${HOME}-`whoami`"
+        }
+        assert hostile_target not in clarification["entrypoint"][2]
+        assert '"$AWF_CLARIFICATION_AUTH_TARGET_0"' in clarification["entrypoint"][2]
 
     @pytest.mark.unit
     def test_clarification_omits_empty_environment(
