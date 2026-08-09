@@ -534,11 +534,45 @@ class AgentAdapter(ABC):
                                 ]
                             )
                     finally:
-                        with contextlib.suppress(OSError):
+                        restored_legacy_compose = False
+                        try:
                             await asyncio.to_thread(
                                 _restore_compose_file,
                                 compose_file=compose_file,
                                 contents=original_compose_file,
+                            )
+                        except OSError:
+                            pass
+                        else:
+                            restored_legacy_compose = True
+                    if restored_legacy_compose:
+                        # The migrated containers were deliberately removed
+                        # before their dedicated network. Start replacements
+                        # only after restoring the legacy definition so a
+                        # failed re-ask does not strand the workspace without
+                        # its original model sidecar.
+                        with contextlib.suppress(Exception):
+                            await self._runner.run(
+                                [
+                                    "docker",
+                                    "compose",
+                                    "-p",
+                                    compose_project,
+                                    "-f",
+                                    str(compose_file),
+                                    "up",
+                                    "-d",
+                                    "--no-deps",
+                                    "--force-recreate",
+                                    "--wait",
+                                    "--wait-timeout",
+                                    str(readiness_timeout_seconds),
+                                    *clarification_model_services,
+                                ],
+                                timeout_seconds=compose_up_capture_timeout_seconds(
+                                    readiness_timeout_seconds,
+                                    wait=True,
+                                ),
                             )
                     raise AgentRunError(
                         agent=self.name,

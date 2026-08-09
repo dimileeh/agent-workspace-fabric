@@ -23,6 +23,7 @@ import yaml
 
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
+from awf.adapters import base as adapter_base
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
@@ -506,7 +507,7 @@ class TestCodexAdapter:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
-        assert len(runner.calls) == 3
+        assert len(runner.calls) == 4
         assert "run" not in runner.calls[0].args
         assert runner.calls[1].args == [
             "docker",
@@ -526,20 +527,6 @@ class TestCodexAdapter:
             "rm",
             "awf-ws_legacy-clarification-model-net",
         ]
-        assert (
-            "clarification"
-            not in yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"]
-        )
-
-        await adapter.run(
-            compose_project="awf_ws_legacy",
-            compose_file=compose_file,
-            prompt=_PROMPT,
-            model="ollama/kimi-k2.6:cloud",
-            workspace_id="ws_legacy",
-            isolated_worktree_host_path=tmp_path / "reask",
-        )
-
         assert runner.calls[3].args == [
             "docker",
             "compose",
@@ -557,7 +544,89 @@ class TestCodexAdapter:
             "ollama-sidecar",
         ]
         assert runner.calls[3].timeout_seconds == 660.0
-        assert "run" in runner.calls[4].args
+        assert (
+            "clarification"
+            not in yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"]
+        )
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert runner.calls[4].args == [
+            "docker",
+            "compose",
+            "-p",
+            "awf_ws_legacy",
+            "-f",
+            str(compose_file),
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "300",
+            "ollama-sidecar",
+        ]
+        assert runner.calls[4].timeout_seconds == 660.0
+        assert "run" in runner.calls[5].args
+
+    @pytest.mark.unit
+    async def test_isolated_reask_does_not_start_model_sidecar_when_legacy_restore_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Do not recreate from the migrated definition if legacy restore fails."""
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "ollama-sidecar": {
+                            "image": "ollama/ollama:latest",
+                            "networks": ["awf_net"],
+                        },
+                        "agent": {
+                            "image": "awf-agent-runtime:latest",
+                            "environment": {
+                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                            },
+                            "networks": ["awf_net"],
+                        },
+                    },
+                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        adapter = OpenCodeAdapter(runner=runner)
+
+        def fail_restore(*, compose_file: Path, contents: bytes) -> None:
+            del compose_file, contents
+            raise OSError("disk full")
+
+        monkeypatch.setattr(adapter_base, "_restore_compose_file", fail_restore)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
+        assert len(runner.calls) == 3
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
