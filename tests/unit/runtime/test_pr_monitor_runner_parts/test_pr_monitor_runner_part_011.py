@@ -39,6 +39,7 @@ class TestNotificationAndGraceHelpers:
             author="human",
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
+        reasonless_escalation_state = MonitorState(threads_addressed_ids={"C-human": "needs_human"})
 
         assert "merge-blocking changes-requested review" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
@@ -66,6 +67,13 @@ class TestNotificationAndGraceHelpers:
                 deferred_state,
             )
             == "human review feedback was deferred by the agent and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
+                _status(reviews=(deferred_review,)),
+                reasonless_escalation_state,
+            )
+            == "human review feedback needs human input and remains unresolved"
         )
         assert _notify_human_reason(_status(), MonitorState()) is None
 

@@ -725,8 +725,10 @@ def _notify_human_reason(
         return "a merge-blocking changes-requested review remains unresolved"
     if reason := _first_needs_human_reason(status, state):
         return reason
-    bot_items, human_deferred = blocker_items or _notify_human_blocker_items(status, state)
-    if human_deferred:
+    bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
+    if any(item.get("verdict") == "needs_human" for item in human_items):
+        return "human review feedback needs human input and remains unresolved"
+    if human_items:
         return "human review feedback was deferred by the agent and remains unresolved"
     # #305: a bot inline thread (``defer``/``needs_human``) or a bot
     # ``needs_human`` comment also blocks the merge in ``pr_monitor.decide``
