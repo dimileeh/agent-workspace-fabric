@@ -10,7 +10,7 @@ service layer imports adapters). The concrete implementation lives in
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from awf.db.enums import AgentRuntime
 
@@ -40,3 +40,30 @@ class UsageSampler(Protocol):
         workspace_id: str,
         provider: AgentRuntime,
     ) -> UsageSampleContext: ...
+
+
+class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
+    """Usage capture configuration for a disposable clarification container."""
+
+    @property
+    def cli_args(self) -> list[str]:
+        """Return the agent command wrapped with in-container usage collection."""
+
+    @property
+    def volume_binds(self) -> tuple[tuple[Path, str], ...]:
+        """Return AWF-owned host paths the isolated invocation may write to."""
+
+
+@runtime_checkable
+class IsolatedUsageSampler(Protocol):
+    """Optionally samples usage from an isolated one-off container."""
+
+    async def start_isolated(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        cli_args: list[str],
+    ) -> IsolatedUsageSampleContext: ...

@@ -153,8 +153,9 @@ def build_isolated_tracked_compose_run(
     service: str = "clarification",
     invocation_id: str | None = None,
     preserve_stdin: bool = False,
+    extra_volume_binds: Sequence[tuple[Path, str]] = (),
 ) -> TrackedIsolatedComposeRun:
-    """Build a one-off run with a child worktree and restricted clarification service."""
+    """Build a one-off clarification run with a child worktree and AWF output mounts."""
 
     if not cli_args:
         raise ValueError("cli_args must not be empty")
@@ -182,6 +183,11 @@ def build_isolated_tracked_compose_run(
         # mount instead of adding another reachable checkout.
         "-v",
         f"{worktree_host_path}:{DEFAULT_AGENT_WORKDIR}",
+        *(
+            option
+            for host_path, container_path in extra_volume_binds
+            for option in ("-v", f"{host_path}:{container_path}:rw")
+        ),
         service,
         "sh",
         "-lc",

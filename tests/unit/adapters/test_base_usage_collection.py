@@ -53,12 +53,30 @@ class _RecordingSampler:
         return _RecordingContext(self._events, finalize_error=self._finalize_error)
 
 
+class _IsolatedRecordingContext(_RecordingContext):
+    @property
+    def cli_args(self) -> list[str]:
+        return ["wrapped-agent-cli"]
+
+    @property
+    def volume_binds(self) -> tuple[tuple[Path, str], ...]:
+        return ((Path("/tmp/awf-usage-capture"), "/tmp/awf-ccusage"),)
+
+
+class _IsolatedRecordingSampler(_RecordingSampler):
+    async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
+        self._events.append("start_isolated")
+        self.start_kwargs = kwargs
+        return _IsolatedRecordingContext(self._events)
+
+
 class _EventRunner:
     def __init__(self, events: list[str], *, result: CommandResult, cancel: bool = False) -> None:
         self._events = events
         self._result = result
         self._cancel = cancel
         self.calls: list[list[str]] = []
+        self.streaming_calls: list[list[str]] = []
 
     async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
         # Targeted cleanup on timeout/cancellation funnels through here.
@@ -68,6 +86,7 @@ class _EventRunner:
 
     async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
         self._events.append("agent")
+        self.streaming_calls.append(list(args))
         if self._cancel:
             raise asyncio.CancelledError
         return self._result
@@ -93,6 +112,32 @@ async def test_sampler_started_before_agent_and_finalized_on_success() -> None:
     assert sampler.start_kwargs["provider"] is AgentRuntime.codex
     assert sampler.start_kwargs["compose_project"] == "proj"
     assert sampler.start_kwargs["workspace_id"] == "ws_ok"
+
+
+@pytest.mark.unit
+async def test_isolated_sampler_captures_usage_inside_clarification_container() -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated",
+        isolated_worktree_host_path=Path("/worktrees/ws_isolated/reask"),
+    )
+
+    assert result.ok
+    assert events == ["start_isolated", "agent", "finalize:success"]
+    assert sampler.start_kwargs is not None
+    assert sampler.start_kwargs["provider"] is AgentRuntime.codex
+    assert sampler.start_kwargs["cli_args"][:2] == ["codex", "exec"]
+    args = runner.streaming_calls[0]
+    assert "clarification" in args
+    assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
+    assert "wrapped-agent-cli" in args
 
 
 @pytest.mark.unit

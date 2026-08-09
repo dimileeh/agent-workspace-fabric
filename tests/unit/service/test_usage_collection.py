@@ -141,6 +141,144 @@ async def test_ccusage_argv_per_provider(
 
 
 @pytest.mark.unit
+async def test_isolated_run_imports_ccusage_samples_before_container_removal(
+    tmp_path: Path,
+) -> None:
+    """A clarification re-ask reads its disposable copied auth state, not ``agent``."""
+    collector = CcusageCollector(
+        runner=FakeCommandRunner(),
+        work_dir=tmp_path,
+        clock=FakeClock(),
+    )
+
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+
+    assert ctx.cli_args[:2] == ["sh", "-lc"]
+    assert "ccusage codex daily --json --offline" in ctx.cli_args[2]
+    assert ctx.volume_binds[0][1] == "/tmp/awf-ccusage"
+    capture_dir = ctx.volume_binds[0][0]
+    for sample, total_tokens in (("baseline", 5), ("final", 8)):
+        (capture_dir / f"{sample}.status").write_text("0\n", encoding="utf-8")
+        (capture_dir / f"{sample}.stdout").write_text(
+            json.dumps({"totals": {"totalTokens": total_tokens}}), encoding="utf-8"
+        )
+        (capture_dir / f"{sample}.stderr").write_text("", encoding="utf-8")
+
+    await ctx.finalize(status="success")
+
+    snapshot = read_latest_usage_snapshot("ws_isolated", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.status == "available"
+    assert snapshot.total_tokens == 3
+    assert not capture_dir.exists()
+    await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_isolated_run_records_missing_capture_as_unavailable(tmp_path: Path) -> None:
+    """A timed-out re-ask cannot report stale usage when its final capture is absent."""
+    collector = CcusageCollector(
+        runner=FakeCommandRunner(),
+        work_dir=tmp_path,
+        clock=FakeClock(),
+    )
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_missing_capture",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    capture_dir = ctx.volume_binds[0][0]
+
+    await ctx.finalize(status="timeout")
+
+    snapshot = read_latest_usage_snapshot("ws_missing_capture", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.status == "unavailable"
+    assert snapshot.reason == "ccusage_command_failed"
+    assert not capture_dir.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected_reason"),
+    [
+        (127, "sh: ccusage: command not found", "ccusage_unavailable"),
+        (1, "ccusage failed", "ccusage_command_failed"),
+    ],
+)
+async def test_isolated_run_preserves_ccusage_failure_reason(
+    tmp_path: Path,
+    returncode: int,
+    stderr: str,
+    expected_reason: str,
+) -> None:
+    collector = CcusageCollector(
+        runner=FakeCommandRunner(),
+        work_dir=tmp_path,
+        clock=FakeClock(),
+    )
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id=f"ws_capture_failure_{returncode}",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    capture_dir = ctx.volume_binds[0][0]
+    for sample in ("baseline", "final"):
+        (capture_dir / f"{sample}.status").write_text(f"{returncode}\n", encoding="utf-8")
+        (capture_dir / f"{sample}.stdout").write_text("", encoding="utf-8")
+        (capture_dir / f"{sample}.stderr").write_text(stderr, encoding="utf-8")
+
+    await ctx.finalize(status="failed")
+
+    snapshot = read_latest_usage_snapshot(f"ws_capture_failure_{returncode}", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.status == "unavailable"
+    assert snapshot.reason == expected_reason
+
+
+@pytest.mark.unit
+async def test_isolated_run_preserves_unsupported_source_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(usage_collection, "provider_ccusage_source", lambda _provider: None)
+    collector = CcusageCollector(
+        runner=FakeCommandRunner(),
+        work_dir=tmp_path,
+        clock=FakeClock(),
+    )
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_unsupported",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+
+    assert ctx.cli_args == ["codex", "exec", "-"]
+    assert ctx.volume_binds == ()
+    await ctx.finalize(status="success")
+
+    snapshot = read_latest_usage_snapshot("ws_isolated_unsupported", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.status == "unavailable"
+    assert snapshot.reason == "ccusage_source_unsupported"
+
+
+@pytest.mark.unit
 async def test_baseline_subtracted_from_final_sample(tmp_path: Path) -> None:
     runner = _ccusage_runner(
         json.dumps({"totals": {"totalTokens": 5, "inputTokens": 3, "outputTokens": 2}}),

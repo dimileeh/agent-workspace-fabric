@@ -26,7 +26,12 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
     AgentRuntimeGitPreparation,
 )
-from awf.adapters.usage import UsageSampleContext, UsageSampler
+from awf.adapters.usage import (
+    IsolatedUsageSampleContext,
+    IsolatedUsageSampler,
+    UsageSampleContext,
+    UsageSampler,
+)
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -399,6 +404,16 @@ class AgentAdapter(ABC):
         env_passthrough = await asyncio.to_thread(
             agent_exec_env_passthrough, compose_file=compose_file
         )
+        isolated_sampler_ctx: IsolatedUsageSampleContext | None = None
+        if isolated_worktree_host_path is not None:
+            isolated_sampler_ctx = await self._start_isolated_usage_sampling(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                cli_args=cli_args,
+            )
+            if isolated_sampler_ctx is not None:
+                cli_args = isolated_sampler_ctx.cli_args
         invocation: TrackedComposeExec | TrackedIsolatedComposeRun
         if isolated_worktree_host_path is None:
             invocation = build_tracked_compose_exec(
@@ -420,6 +435,9 @@ class AgentAdapter(ABC):
                 label=self.name.value,
                 worktree_host_path=isolated_worktree_host_path,
                 preserve_stdin=True,
+                extra_volume_binds=(
+                    () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
+                ),
             )
         args = invocation.args
         _log.info(
@@ -434,21 +452,24 @@ class AgentAdapter(ABC):
             source=log_source,
             prompt_bytes=len(prompt_input),
         )
-        # Wrap the agent run with optional usage sampling. The sampler captures a
-        # baseline + periodic samples and is finalized in *every* exit path so the
-        # final usage sample is recorded on success, failure/timeout, and
-        # cancellation — never masking the agent outcome. _start_usage_sampling
-        # stays *inside* the try: cancellation during baseline capture re-raises
-        # CancelledError (a BaseException its own except-Exception guard can't
-        # catch), so only the enclosing try/finally still reaches finalization.
-        sampler_ctx: UsageSampleContext | None = None
+        # Wrap the agent run with optional usage sampling. Ordinary sampling
+        # captures a baseline + periodic samples; isolated clarification sampling
+        # instead prepares an in-container capture before the invocation is built.
+        # Either context is finalized in *every* exit path, so the final usage
+        # sample is recorded on success, failure/timeout, and cancellation — never
+        # masking the agent outcome. _start_usage_sampling stays *inside* the try:
+        # cancellation during baseline capture re-raises CancelledError (a
+        # BaseException its own except-Exception guard can't catch), so only the
+        # enclosing try/finally still reaches finalization.
+        sampler_ctx: UsageSampleContext | None = isolated_sampler_ctx
         final_status = "failed"
         try:
-            sampler_ctx = await self._start_usage_sampling(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                workspace_id=workspace_id,
-            )
+            if sampler_ctx is None:
+                sampler_ctx = await self._start_usage_sampling(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    workspace_id=workspace_id,
+                )
             result = await self._run_agent_cli(
                 invocation=invocation,
                 args=args,
@@ -493,6 +514,35 @@ class AgentAdapter(ABC):
                 agent=self.name.value,
                 workspace_id=workspace_id,
                 phase="start",
+                exc_info=True,
+            )
+            return None
+
+    async def _start_isolated_usage_sampling(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str | None,
+        cli_args: list[str],
+    ) -> IsolatedUsageSampleContext | None:
+        sampler = self._usage_sampler
+        if sampler is None or workspace_id is None or not isinstance(sampler, IsolatedUsageSampler):
+            return None
+        try:
+            return await sampler.start_isolated(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                provider=self.name,
+                cli_args=cli_args,
+            )
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                phase="start_isolated",
                 exc_info=True,
             )
             return None

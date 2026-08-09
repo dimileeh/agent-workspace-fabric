@@ -20,11 +20,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import shlex
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
-from awf.adapters.usage import UsageSampleContext, UsageSampler
+from awf.adapters.usage import (
+    IsolatedUsageSampleContext,
+    UsageSampleContext,
+    UsageSampler,
+)
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -79,6 +86,7 @@ DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 # config), so the isolation holds regardless; the baked empty file additionally
 # guards against a future pin that might reject a missing ``--config`` target.
 _CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
+_ISOLATED_CCUSAGE_CAPTURE_DIR: Final = "/tmp/awf-ccusage"
 
 
 class _Clock(Protocol):
@@ -158,6 +166,41 @@ class CcusageCollector(UsageSampler):
         await ctx._capture_baseline()
         ctx._task = asyncio.create_task(ctx._run_loop())
         return ctx
+
+    async def start_isolated(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        cli_args: list[str],
+    ) -> IsolatedUsageSampleContext:
+        """Capture a one-off clarification container's usage before ``--rm`` removes it."""
+
+        source = provider_ccusage_source(provider)
+        prior_snapshot = await asyncio.to_thread(
+            read_latest_usage_snapshot,
+            workspace_id,
+            work_dir=self._work_dir,
+        )
+        capture_dir = (
+            await asyncio.to_thread(_make_isolated_capture_dir, self._work_dir)
+            if source is not None
+            else None
+        )
+        return _IsolatedCcusageSampleContext(
+            collector=self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            provider=provider,
+            source=source,
+            accumulated_usage_at_run_start=snapshot_usage_metrics(prior_snapshot),
+            prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
+            cli_args=cli_args,
+            capture_dir=capture_dir,
+        )
 
 
 class _CcusageSampleContext(UsageSampleContext):
@@ -573,3 +616,134 @@ class _CcusageSampleContext(UsageSampleContext):
                 invocation_id=invocation.invocation_id,
                 exc_info=True,
             )
+
+
+class _IsolatedCcusageSampleContext(_CcusageSampleContext):
+    """Imports ccusage readings collected inside one disposable container."""
+
+    def __init__(
+        self,
+        *,
+        collector: CcusageCollector,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        source: str | None,
+        accumulated_usage_at_run_start: NormalizedUsage | None,
+        prior_ccusage_source: str | None,
+        cli_args: list[str],
+        capture_dir: Path | None,
+    ) -> None:
+        super().__init__(
+            collector=collector,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            provider=provider,
+            source=source,
+            accumulated_usage_at_run_start=accumulated_usage_at_run_start,
+            prior_ccusage_source=prior_ccusage_source,
+        )
+        self._agent_cli_args = list(cli_args)
+        self._capture_dir = capture_dir
+        self._capture_sample = "baseline"
+
+    @property
+    def cli_args(self) -> list[str]:
+        """Wrap the agent CLI so both readings use its copied provider home."""
+
+        if self._capture_dir is None:
+            return list(self._agent_cli_args)
+        return [
+            "sh",
+            "-lc",
+            _isolated_ccusage_wrapper_script(source=str(self._source)),
+            "awf-isolated-ccusage",
+            *self._agent_cli_args,
+        ]
+
+    @property
+    def volume_binds(self) -> tuple[tuple[Path, str], ...]:
+        """Expose the AWF-owned result mount for the disposable container."""
+
+        if self._capture_dir is None:
+            return ()
+        return ((self._capture_dir, _ISOLATED_CCUSAGE_CAPTURE_DIR),)
+
+    async def finalize(self, *, status: str) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        final_task = asyncio.create_task(self._finalize_isolated(status))
+        while not final_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(final_task)
+
+    async def _finalize_isolated(self, status: str) -> None:
+        try:
+            if self._source is None:
+                await self._safe_sample(phase="final", run_status=status)
+                return
+            self._capture_sample = "baseline"
+            await self._capture_baseline()
+            self._capture_sample = "final"
+            await self._safe_sample(phase="final", run_status=status)
+        finally:
+            if self._capture_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, self._capture_dir, ignore_errors=True)
+
+    async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
+        capture_dir = self._capture_dir
+        if capture_dir is None:
+            return None, REASON_SOURCE_UNSUPPORTED, None
+        return await asyncio.to_thread(
+            _read_isolated_ccusage_sample,
+            capture_dir,
+            sample=self._capture_sample,
+        )
+
+
+def _make_isolated_capture_dir(work_dir: Path) -> Path:
+    root = work_dir / "usage-captures"
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
+
+
+def _isolated_ccusage_wrapper_script(*, source: str) -> str:
+    quoted_source = shlex.quote(source)
+    return f"""
+set +e
+capture_ccusage() {{
+  sample_name=$1
+  ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
+    > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stdout\" \\
+    2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stderr\"
+  ccusage_status=$?
+  printf '%s\\n' \"$ccusage_status\" > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.status\"
+}}
+capture_ccusage baseline
+\"$@\"
+agent_status=$?
+capture_ccusage final
+exit \"$agent_status\"
+""".strip()
+
+
+def _read_isolated_ccusage_sample(
+    capture_dir: Path,
+    *,
+    sample: str,
+) -> tuple[NormalizedUsage | None, str | None, str | None]:
+    try:
+        returncode = int((capture_dir / f"{sample}.status").read_text(encoding="utf-8").strip())
+        stdout = (capture_dir / f"{sample}.stdout").read_text(encoding="utf-8")
+        stderr = (capture_dir / f"{sample}.stderr").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None, REASON_COMMAND_FAILED, None
+    result = CommandResult(returncode=returncode, stdout=stdout, stderr=stderr)
+    if not result.ok:
+        failure_reason = REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
+        return None, failure_reason, None
+    usage, reason = normalize_ccusage_json(result.stdout)
+    return usage, reason, None if usage is None else usage.model
