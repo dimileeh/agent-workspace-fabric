@@ -244,7 +244,7 @@ def test_clarification_inputs_retain_direct_claude_credentials() -> None:
 
 @pytest.mark.unit
 def test_opencode_clarification_uses_selected_provider_credentials_only() -> None:
-    """A provider-qualified OpenCode re-ask cannot read other provider keys."""
+    """A provider-qualified OpenCode re-ask omits shared provider auth stores."""
     opencode_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/opencode",
         target="/home/agent/.config/opencode",
@@ -254,6 +254,11 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
         source="/host/awf/secret-leases/ws_launcher/openai-key",
         target="/run/awf/secrets/openai-key",
         mode="ro",
+    )
+    ollama_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/ollama",
+        target="/home/agent/.ollama",
+        mode="rw",
     )
     anthropic_credentials = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/anthropic-key",
@@ -278,6 +283,7 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
     )
     mounts = (
         opencode_auth,
+        ollama_auth,
         openai_credentials,
         anthropic_credentials,
         gemini_credentials,
@@ -300,12 +306,60 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
     )
 
     assert clarification_environment == (
-        ("OPENAI_API_KEY", "/home/agent/.awf/clarification-auth/1"),
+        ("OPENAI_API_KEY", "/home/agent/.awf/clarification-auth/0"),
     )
     assert clarification_mounts == (
-        AuthMount(source=opencode_auth.source, target=opencode_auth.target, mode="ro"),
         AuthMount(
             source=openai_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_opencode_ollama_clarification_omits_shared_opencode_store() -> None:
+    """Ollama re-asks retain Ollama auth without mounting multi-provider config."""
+    opencode_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/opencode",
+        target="/home/agent/.config/opencode",
+        mode="rw",
+    )
+    ollama_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/ollama",
+        target="/home/agent/.ollama",
+        mode="rw",
+    )
+    ollama_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/ollama-key",
+        target="/run/awf/secrets/ollama-key",
+        mode="ro",
+    )
+    environment = (("OLLAMA_API_KEY", ollama_credentials.target),)
+    mounts = (opencode_auth, ollama_auth, ollama_credentials)
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    )
+
+    assert clarification_environment == (
+        ("OLLAMA_API_KEY", "/home/agent/.awf/clarification-auth/1"),
+    )
+    assert clarification_mounts == (
+        AuthMount(source=ollama_auth.source, target=ollama_auth.target, mode="ro"),
+        AuthMount(
+            source=ollama_credentials.source,
             target="/home/agent/.awf/clarification-auth/1",
             mode="ro",
         ),

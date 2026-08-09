@@ -179,7 +179,7 @@ _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = 
     AgentRuntime.claude_code: frozenset({"/home/agent/.claude", "/home/agent/.claude.json"}),
     AgentRuntime.cursor: frozenset(),
     AgentRuntime.gemini: frozenset({"/home/agent/.config/gcloud", "/home/agent/.gemini"}),
-    AgentRuntime.opencode: frozenset({"/home/agent/.config/opencode", "/home/agent/.ollama"}),
+    AgentRuntime.opencode: frozenset(),
     AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
 }
 _CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
@@ -355,6 +355,11 @@ def _clarification_model_provider_auth_mount_targets(
         != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
     ):
         runtime_auth_mount_targets = frozenset()
+    if (
+        agent_runtime is AgentRuntime.opencode
+        and opencode_provider_for_model(agent_model) == "ollama"
+    ):
+        runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
     return (
         runtime_auth_mount_targets
         | frozenset(value for name, value in agent_environment if name in names)
