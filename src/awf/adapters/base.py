@@ -418,6 +418,7 @@ class AgentAdapter(ABC):
                 compose_file=compose_file,
                 workspace_id=workspace_id or compose_project.removeprefix("awf_"),
                 agent_runtime=self.name,
+                agent_model=selected_model,
             )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never

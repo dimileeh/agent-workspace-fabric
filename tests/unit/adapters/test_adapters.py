@@ -348,10 +348,10 @@ class TestCodexAdapter:
         assert "--skip-git-repo-check" in args[service_idx:]
 
     @pytest.mark.unit
-    async def test_isolated_reask_upgrades_legacy_persisted_compose_file(
+    async def test_isolated_reask_upgrade_keeps_selected_opencode_provider_credentials(
         self, tmp_path: Path
     ) -> None:
-        """A monitor re-ask can target clarification after an AWF upgrade."""
+        """A legacy OpenCode re-ask keeps credentials for its selected provider."""
         compose_file = tmp_path / "compose.yml"
         compose_file.write_text(
             yaml.safe_dump(
@@ -373,18 +373,21 @@ class TestCodexAdapter:
             encoding="utf-8",
         )
         runner = FakeCommandRunner()
-        adapter = CodexAdapter(runner=runner)
+        adapter = OpenCodeAdapter(runner=runner)
 
         await adapter.run(
             compose_project="awf_ws_legacy",
             compose_file=compose_file,
             prompt=_PROMPT,
+            model="openai/gpt-5.3-codex",
             workspace_id="ws_legacy",
             isolated_worktree_host_path=tmp_path / "reask",
         )
 
         rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-        assert rendered["services"]["clarification"]["profiles"] == ["awf-clarification"]
+        clarification = rendered["services"]["clarification"]
+        assert clarification["profiles"] == ["awf-clarification"]
+        assert clarification["environment"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}
         args = runner.calls[0].args
         assert args.index("clarification", args.index("run")) > args.index("run")
 

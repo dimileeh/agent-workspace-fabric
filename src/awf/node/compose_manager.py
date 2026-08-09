@@ -110,6 +110,7 @@ def upgrade_persisted_clarification_service(
     compose_file: Path,
     workspace_id: str,
     agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
 ) -> bool:
     """Add clarification safely to a legacy persisted stack, if needed.
 
@@ -166,12 +167,14 @@ def upgrade_persisted_clarification_service(
         agent_environment=agent_environment_items,
         mirror_target=mirror_target,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
     )
     provider_environment = _clarification_agent_environment(
         agent_environment_items,
         auth_mounts=provider_auth_mounts,
         mirror_target=mirror_target,
         agent_runtime=agent_runtime,
+        agent_model=agent_model,
     )
     clarification_environment = dict(provider_environment)
     clarification_volumes: list[str] = []

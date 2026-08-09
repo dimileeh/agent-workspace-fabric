@@ -145,6 +145,40 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     )
 
 
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_keeps_opencode_model_credentials(
+    tmp_path: Path,
+) -> None:
+    """Legacy OpenCode upgrades retain credentials for the selected provider."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="openai/gpt-5.3-codex",
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["environment"] == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+    }
+
+
 class TestRender:
     """Tests for rendering workspace compose specifications."""
 
