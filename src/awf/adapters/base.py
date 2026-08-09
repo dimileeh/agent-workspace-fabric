@@ -110,6 +110,42 @@ def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
                 temporary_path.unlink()
 
 
+async def _reap_persisted_clarification_model_migration(
+    runner: AsyncCommandRunner,
+    *,
+    compose_project: str,
+    compose_file: Path,
+    workspace_id: str | None,
+    clarification_model_services: tuple[str, ...],
+) -> None:
+    """Remove migrated model sidecars and their dedicated legacy network."""
+    with contextlib.suppress(Exception):
+        await runner.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                compose_project,
+                "-f",
+                str(compose_file),
+                "rm",
+                "--stop",
+                "--force",
+                *clarification_model_services,
+            ]
+        )
+    with contextlib.suppress(Exception):
+        await runner.run(
+            [
+                "docker",
+                "network",
+                "rm",
+                f"awf-{workspace_id or compose_project.removeprefix('awf_')}-"
+                "clarification-model-net",
+            ]
+        )
+
+
 # Prepended to every agent prompt. Encodes contract invariants the
 # agent must honour inside an AWF workspace.
 _AWF_PROMPT_PREAMBLE = """\
@@ -478,9 +514,24 @@ class AgentAdapter(ABC):
                 except asyncio.CancelledError:
                     # The persisted network migration is not complete until
                     # Compose has recreated the selected model sidecars. This
-                    # bounded local restore intentionally runs synchronously:
+                    # cleanup completes before restoring the legacy definition:
                     # a second shutdown cancellation cannot interrupt it and
-                    # strand a legacy stack with an unreachable model service.
+                    # strand the migrated network because the restored Compose
+                    # file no longer declares it.
+                    cleanup_task = asyncio.create_task(
+                        _reap_persisted_clarification_model_migration(
+                            self._runner,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            workspace_id=workspace_id,
+                            clarification_model_services=clarification_model_services,
+                        )
+                    )
+                    while not cleanup_task.done():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.shield(cleanup_task)
+                    with contextlib.suppress(asyncio.CancelledError):
+                        cleanup_task.result()
                     with contextlib.suppress(OSError):
                         _restore_compose_file(
                             compose_file=compose_file,
@@ -508,31 +559,13 @@ class AgentAdapter(ABC):
                     # sidecars, then reap their now-unused network before
                     # restoring the legacy file that does not declare it.
                     try:
-                        with contextlib.suppress(Exception):
-                            await self._runner.run(
-                                [
-                                    "docker",
-                                    "compose",
-                                    "-p",
-                                    compose_project,
-                                    "-f",
-                                    str(compose_file),
-                                    "rm",
-                                    "--stop",
-                                    "--force",
-                                    *clarification_model_services,
-                                ]
-                            )
-                        with contextlib.suppress(Exception):
-                            await self._runner.run(
-                                [
-                                    "docker",
-                                    "network",
-                                    "rm",
-                                    f"awf-{workspace_id or compose_project.removeprefix('awf_')}-"
-                                    "clarification-model-net",
-                                ]
-                            )
+                        await _reap_persisted_clarification_model_migration(
+                            self._runner,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            workspace_id=workspace_id,
+                            clarification_model_services=clarification_model_services,
+                        )
                     finally:
                         restored_legacy_compose = False
                         try:

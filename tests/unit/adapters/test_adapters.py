@@ -630,7 +630,7 @@ class TestCodexAdapter:
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Cancellation cannot leave a legacy sidecar off the model network."""
         compose_file = tmp_path / "compose.yml"
@@ -660,11 +660,24 @@ class TestCodexAdapter:
 
         class _CancellingSidecarUpdateRunner(FakeCommandRunner):
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                await super().run(args, **kwargs)
-                raise asyncio.CancelledError
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 1:
+                    raise asyncio.CancelledError
+                return result
 
         runner = _CancellingSidecarUpdateRunner()
         adapter = OpenCodeAdapter(runner=runner)
+        original_shield = asyncio.shield
+        shield_calls = 0
+
+        async def cancel_cleanup_shield_once(task: asyncio.Future[Any]) -> Any:
+            nonlocal shield_calls
+            shield_calls += 1
+            if shield_calls == 1:
+                raise asyncio.CancelledError
+            return await original_shield(task)
+
+        monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_cleanup_shield_once)
 
         with pytest.raises(asyncio.CancelledError):
             await adapter.run(
@@ -676,7 +689,26 @@ class TestCodexAdapter:
                 isolated_worktree_host_path=tmp_path / "reask",
             )
 
-        assert len(runner.calls) == 1
+        assert shield_calls == 2
+        assert len(runner.calls) == 3
+        assert runner.calls[1].args == [
+            "docker",
+            "compose",
+            "-p",
+            "awf_ws_legacy",
+            "-f",
+            str(compose_file),
+            "rm",
+            "--stop",
+            "--force",
+            "ollama-sidecar",
+        ]
+        assert runner.calls[2].args == [
+            "docker",
+            "network",
+            "rm",
+            "awf-ws_legacy-clarification-model-net",
+        ]
         assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
