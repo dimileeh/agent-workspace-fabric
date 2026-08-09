@@ -281,6 +281,13 @@ async def _run_fix_cycle(
                     publish_dependent_ids.append(t.thread_id)
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
                 elif captured is False:
+                    # The prior ``defer`` reason describes work that was meant
+                    # for a tracking issue, not why this thread now needs human
+                    # attention. Clear it so the notification does not conceal
+                    # the permanent deferred-capture failure.
+                    _sync_needs_human_reason(
+                        state, t.thread_id, VerdictResult(verdict="needs_human")
+                    )
                     _mark_review_thread_addressed(state, t, "needs_human")
                 # captured is None: a transient capture failure already cleared
                 # the verdict so the next poll re-attempts capture — don't

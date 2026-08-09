@@ -382,6 +382,82 @@ async def test_deferred_capture_permanent_bitbucket_failure_downgrades(
 
 
 @pytest.mark.unit
+async def test_permanent_deferred_capture_downgrade_clears_deferral_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capture failure must not present the original defer reason as needs-human."""
+    from awf.runtime.pr_monitor_runner import fix_cycle
+    from awf.runtime.pr_monitor_runner.comments import VerdictResult
+    from awf.runtime.pr_monitor_runner.helpers import _sync_needs_human_reason
+    from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_capture_failure", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _sync_needs_human_reason(
+        state,
+        thread.thread_id,
+        VerdictResult(verdict="defer", reason="follow up in another change"),
+    )
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return ("start", None)
+
+    async def _defer(**_kwargs: object) -> str:
+        return "defer"
+
+    async def _permanent_capture_failure(_runner: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _clean_status(**_kwargs: object) -> PRStatus:
+        return _status_for_helpers()
+
+    async def _no_protected_scope_block(**_kwargs: object) -> None:
+        return None
+
+    async def _successful_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_address_thread", _defer)
+    monkeypatch.setattr(fix_cycle, "_capture_deferred_review_thread", _permanent_capture_failure)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _clean_status)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_protected_scope_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _successful_push)
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="start",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids[thread.thread_id] == "needs_human"
+    assert f"__needs_human_reason__:{thread.thread_id}" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
