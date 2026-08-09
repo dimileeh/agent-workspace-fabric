@@ -1119,31 +1119,32 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
         _rev_parse_head=_rev_parse_head,
     )
 
-    result = await comments._enforce_needs_human_reason(
-        runner,
-        result=VerdictResult(verdict="needs_human"),
-        original_prompt="original review task",
-        workspace_id=workspace_id,
-        pr_number=1,
-        item_id="thread_1",
-        item_kind="thread",
-        item_author=None,
-        item_path=None,
-        item_line=None,
-        commit_message="fix: address thread_1",
-        compose_project="project",
-        compose_file=Path("compose.yml"),
-        state=None,
-        task_tag=None,
-        operation_start_head=None,
-        base_branch="main",
-        remote_branch=f"awf/{workspace_id}",
-        operation_id=None,
-        operation_type=None,
-        monitor_log=None,
-    )
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
 
-    assert result == VerdictResult(verdict="needs_human")
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
     assert primary_output.read_text(encoding="utf-8") == "created independently\n"
     assert not list(worktree.glob(".awf-needs-human-reask-*"))
@@ -1182,31 +1183,32 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
         _rev_parse_head=_rev_parse_head,
     )
 
-    result = await comments._enforce_needs_human_reason(
-        runner,
-        result=VerdictResult(verdict="needs_human"),
-        original_prompt="original review task",
-        workspace_id=workspace_id,
-        pr_number=1,
-        item_id="thread_1",
-        item_kind="thread",
-        item_author=None,
-        item_path=None,
-        item_line=None,
-        commit_message="fix: address thread_1",
-        compose_project="project",
-        compose_file=Path("compose.yml"),
-        state=None,
-        task_tag=None,
-        operation_start_head=None,
-        base_branch="main",
-        remote_branch=f"awf/{workspace_id}",
-        operation_id=None,
-        operation_type=None,
-        monitor_log=None,
-    )
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
 
-    assert result == VerdictResult(verdict="needs_human")
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
     assert not list(worktree.glob(".awf-needs-human-reask-*"))
@@ -1513,11 +1515,11 @@ def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fails(
+async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed read-only cleanup must retain the original blocking verdict."""
+    """A failed primary-worktree check must stop the fix cycle."""
     cleanup_calls: list[dict[str, object]] = []
     audit_events: list[dict[str, object]] = []
 
@@ -1549,32 +1551,33 @@ async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fa
         _check_reask_primary_worktree_clean,
     )
 
-    result = await comments._enforce_needs_human_reason(
-        runner,
-        result=VerdictResult(verdict="needs_human"),
-        original_prompt="original review task",
-        workspace_id="ws_1",
-        pr_number=1,
-        item_id="thread_1",
-        item_kind="thread",
-        item_author=None,
-        item_path=None,
-        item_line=None,
-        commit_message="fix: address thread_1",
-        compose_project="project",
-        compose_file=Path("compose.yml"),
-        state=None,
-        task_tag=None,
-        operation_start_head="a" * 40,
-        base_branch="main",
-        remote_branch="awf/ws_1",
-        operation_id=None,
-        operation_type=None,
-        monitor_log=None,
-    )
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head="a" * 40,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
 
-    assert result == VerdictResult(verdict="needs_human")
-    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert audit_events == []
     assert cleanup_calls == [
         {
             "worktree_path": tmp_path / "ws_1",
