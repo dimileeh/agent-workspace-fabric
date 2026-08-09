@@ -74,8 +74,9 @@ class _IsolatedRecordingSampler(_RecordingSampler):
 class _DelayedIsolatedRecordingSampler(_RecordingSampler):
     """Simulate an isolated capture worker that keeps running after cancellation."""
 
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, start_error: Exception | None = None) -> None:
         super().__init__(events)
+        self._isolated_start_error = start_error
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -86,6 +87,8 @@ class _DelayedIsolatedRecordingSampler(_RecordingSampler):
         async def _complete_capture_setup() -> _IsolatedRecordingContext:
             self.started.set()
             await self.release.wait()
+            if self._isolated_start_error is not None:
+                raise self._isolated_start_error
             return _IsolatedRecordingContext(self._events)
 
         return await asyncio.shield(asyncio.create_task(_complete_capture_setup()))
@@ -216,6 +219,35 @@ async def test_isolated_sampler_finalized_when_startup_is_cancelled() -> None:
 
     assert cancellation_waits_for_cleanup
     assert events == ["start_isolated", "finalize:cancelled"]
+
+
+@pytest.mark.unit
+async def test_isolated_sampler_startup_failure_does_not_mask_cancellation() -> None:
+    events: list[str] = []
+    sampler = _DelayedIsolatedRecordingSampler(
+        events, start_error=RuntimeError("isolated sampler down")
+    )
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_cancel_failure",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_cancel_failure/reask"),
+        )
+    )
+    await sampler.started.wait()
+    run_task.cancel()
+    await asyncio.sleep(0)
+    sampler.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    assert events == ["start_isolated"]
 
 
 @pytest.mark.unit

@@ -546,7 +546,7 @@ class AgentAdapter(ABC):
             # thread. Keep the task alive through cancellation so a context
             # returned after that worker finishes can remove the directory.
             while not start_task.done():
-                with contextlib.suppress(asyncio.CancelledError):
+                with contextlib.suppress(BaseException):
                     await asyncio.shield(start_task)
             try:
                 sampler_ctx = start_task.result()
