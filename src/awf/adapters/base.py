@@ -52,7 +52,10 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.node.compose_manager import upgrade_persisted_clarification_service
+from awf.node.compose_manager import (
+    compose_up_capture_timeout_seconds,
+    upgrade_persisted_clarification_service,
+)
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
@@ -446,6 +449,9 @@ class AgentAdapter(ABC):
                 # clarification container. Recreate the selected legacy model
                 # services first so Docker applies the newly-rendered dedicated
                 # model network to their already-running containers.
+                readiness_timeout_seconds = (
+                    profile.docker.startup_timeout_seconds if profile is not None else 300
+                )
                 model_service_update = await self._runner.run(
                     [
                         "docker",
@@ -459,8 +465,14 @@ class AgentAdapter(ABC):
                         "--no-deps",
                         "--force-recreate",
                         "--wait",
+                        "--wait-timeout",
+                        str(readiness_timeout_seconds),
                         *clarification_model_services,
-                    ]
+                    ],
+                    timeout_seconds=compose_up_capture_timeout_seconds(
+                        readiness_timeout_seconds,
+                        wait=True,
+                    ),
                 )
                 if not model_service_update.ok:
                     # The sidecars did not receive the new network, so roll

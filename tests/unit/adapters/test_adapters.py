@@ -38,6 +38,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import agent_exec_env_passthrough
+from awf.profiles.models import WorkspaceProfile
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
@@ -421,6 +422,12 @@ class TestCodexAdapter:
         )
         runner = FakeCommandRunner()
         adapter = OpenCodeAdapter(runner=runner)
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "bounded-sidecar-readiness",
+                "docker": {"startup_timeout_seconds": 123},
+            }
+        )
 
         await adapter.run(
             compose_project="awf_ws_legacy",
@@ -428,6 +435,7 @@ class TestCodexAdapter:
             prompt=_PROMPT,
             model="ollama/kimi-k2.6:cloud",
             workspace_id="ws_legacy",
+            profile=profile,
             isolated_worktree_host_path=tmp_path / "reask",
         )
 
@@ -443,8 +451,11 @@ class TestCodexAdapter:
             "--no-deps",
             "--force-recreate",
             "--wait",
+            "--wait-timeout",
+            "123",
             "ollama-sidecar",
         ]
+        assert runner.calls[0].timeout_seconds == 306.0
         assert "run" in runner.calls[1].args
         assert runner.calls[1].args[runner.calls[1].args.index("run") + 1 :][0:3] == [
             "--rm",
@@ -523,8 +534,11 @@ class TestCodexAdapter:
             "--no-deps",
             "--force-recreate",
             "--wait",
+            "--wait-timeout",
+            "300",
             "ollama-sidecar",
         ]
+        assert runner.calls[1].timeout_seconds == 660.0
         assert "run" in runner.calls[2].args
 
     @pytest.mark.unit
