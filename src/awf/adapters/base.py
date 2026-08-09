@@ -487,6 +487,17 @@ class AgentAdapter(ABC):
                             contents=original_compose_file,
                         )
                     raise
+                except Exception:
+                    # Runner failures also mean the model sidecars may not
+                    # have received the new network. Restore the persisted
+                    # migration so a later re-ask can retry it safely.
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(
+                            _restore_compose_file,
+                            compose_file=compose_file,
+                            contents=original_compose_file,
+                        )
+                    raise
                 if not model_service_update.ok:
                     # The sidecars did not receive the new network, so roll
                     # back the persisted migration. A later re-ask can then
