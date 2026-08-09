@@ -81,6 +81,7 @@ services:
           memory: {{ resources.memory_limit | tojson }}
     {% endif %}
 
+  {# awf-j2-tojson-allow: loop.index0 -- Jinja-generated numeric identifier used in shell variable names and mount paths. #}
   {% if clarification_enabled %}
   clarification:
     image: {{ agent_runtime_image | tojson }}

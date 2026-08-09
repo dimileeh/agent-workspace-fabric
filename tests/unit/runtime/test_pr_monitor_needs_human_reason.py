@@ -11,6 +11,7 @@ import pytest
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import agent_service_recovery, comments, pre_push_validation
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
@@ -347,6 +348,64 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
     assert invoked is False
     assert cleanup_called is False
     assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_skips_when_primary_worktree_loses_git_control_file(
+    tmp_path: Path,
+) -> None:
+    """A real workspace without Git metadata never falls back to an unisolated run."""
+    invoked = False
+    audit_events: list[dict[str, object]] = []
+    workspace_id = "ws_reask_missing_git_control_file"
+    (tmp_path / workspace_id).mkdir()
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        nonlocal invoked
+        invoked = True
+        return VerdictResult(verdict="needs_human", reason="must not be used")
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        pytest.fail("missing Git metadata must skip the clarification re-ask")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert invoked is False
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
 
 
 @pytest.mark.unit
@@ -723,12 +782,13 @@ def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
+async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed re-ask cleanup must stop the cycle before another item can commit it."""
+    """A failed read-only cleanup must retain the original blocking verdict."""
     cleanup_calls: list[dict[str, object]] = []
+    audit_events: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         return VerdictResult(
@@ -747,9 +807,13 @@ async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "c" * 40
 
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
         _rev_parse_head=_rev_parse_head,
     )
     monkeypatch.setattr(
@@ -758,32 +822,32 @@ async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
         _cleanup_reask_worktree,
     )
 
-    with pytest.raises(_MonitorPolicyBlockedError, match="could not remove re-ask edits") as raised:
-        await comments._enforce_needs_human_reason(
-            runner,
-            result=VerdictResult(verdict="needs_human"),
-            original_prompt="original review task",
-            workspace_id="ws_1",
-            pr_number=1,
-            item_id="thread_1",
-            item_kind="thread",
-            item_author=None,
-            item_path=None,
-            item_line=None,
-            commit_message="fix: address thread_1",
-            compose_project="project",
-            compose_file=Path("compose.yml"),
-            state=None,
-            task_tag=None,
-            operation_start_head="a" * 40,
-            base_branch="main",
-            remote_branch="awf/ws_1",
-            operation_id=None,
-            operation_type=None,
-            monitor_log=None,
-        )
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="a" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
 
-    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert result == VerdictResult(verdict="needs_human")
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
     assert cleanup_calls == [
         {
             "worktree_path": tmp_path / "ws_1",
@@ -793,11 +857,11 @@ async def test_needs_human_reason_reask_blocks_when_dirty_cleanup_fails(
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
+async def test_needs_human_reason_reask_retains_original_verdict_when_cleanup_fails_after_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed cleanup after an error must stop the next fix-cycle item."""
+    """A failed cleanup after an error must not block the monitor."""
     audit_events: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
@@ -828,35 +892,32 @@ async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
         _cleanup_reask_worktree,
     )
 
-    with pytest.raises(_MonitorPolicyBlockedError, match="could not remove re-ask edits") as raised:
-        await comments._enforce_needs_human_reason(
-            runner,
-            result=VerdictResult(verdict="needs_human"),
-            original_prompt="original review task",
-            workspace_id="ws_1",
-            pr_number=1,
-            item_id="thread_1",
-            item_kind="thread",
-            item_author=None,
-            item_path=None,
-            item_line=None,
-            commit_message="fix: address thread_1",
-            compose_project="project",
-            compose_file=Path("compose.yml"),
-            state=None,
-            task_tag=None,
-            operation_start_head="d" * 40,
-            base_branch="main",
-            remote_branch="awf/ws_1",
-            operation_id=None,
-            operation_type=None,
-            monitor_log=None,
-        )
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="d" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
 
-    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
-    assert isinstance(raised.value.__cause__, RuntimeError)
-    assert str(raised.value.__cause__) == "re-ask failed"
-    assert audit_events == []
+    assert result == VerdictResult(verdict="needs_human")
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
 
 
 @pytest.mark.unit
@@ -865,6 +926,11 @@ async def test_needs_human_reason_reask_requires_a_restore_ref(
 ) -> None:
     """Do not run the re-ask when its non-mutating cleanup cannot be anchored."""
     invoked = False
+    audit_events: list[dict[str, object]] = []
+    worktree = tmp_path / "ws_1"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: unavailable\n", encoding="utf-8")
+    state = MonitorState()
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         nonlocal invoked
@@ -874,40 +940,44 @@ async def test_needs_human_reason_reask_requires_a_restore_ref(
     async def _rev_parse_head(_worktree_path: Path) -> None:
         return None
 
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
         _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
         _rev_parse_head=_rev_parse_head,
     )
 
-    with pytest.raises(
-        _MonitorPolicyBlockedError, match="Could not capture a worktree restore ref"
-    ):
-        await comments._enforce_needs_human_reason(
-            runner,
-            result=VerdictResult(verdict="needs_human"),
-            original_prompt="original review task",
-            workspace_id="ws_1",
-            pr_number=1,
-            item_id="thread_1",
-            item_kind="thread",
-            item_author=None,
-            item_path=None,
-            item_line=None,
-            commit_message="fix: address thread_1",
-            compose_project="project",
-            compose_file=Path("compose.yml"),
-            state=None,
-            task_tag=None,
-            operation_start_head=None,
-            base_branch="main",
-            remote_branch="awf/ws_1",
-            operation_id=None,
-            operation_type=None,
-            monitor_log=None,
-        )
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=state,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
 
+    assert result == VerdictResult(verdict="needs_human")
     assert invoked is False
+    assert state.threads_addressed_ids == {}
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
 
 
 @pytest.mark.unit

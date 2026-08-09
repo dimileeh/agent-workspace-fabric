@@ -33,8 +33,11 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
 from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
+    _notification_key,
+    _notify_human_blocker_items,
     _review_comment_body_state_key,
 )
+from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _protected_history_directive_reblock_key,
 )
@@ -1219,9 +1222,14 @@ async def test_post_human_notification_sanitizes_placeholder_reason_before_posti
     body = str(gh.posts[0]["body"])
     assert "<what you need>" not in body
     assert generic_reason in body
-    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{generic_reason}"] == (
-        "notified"
-    )
+    bot_items, human_items = _notify_human_blocker_items(status, state)
+    assert state.threads_addressed_ids[
+        _notification_key(
+            head_sha=status.head_sha,
+            blocker_reason=generic_reason,
+            items_digest=_notification_items_digest(bot_items + human_items),
+        )
+    ] == ("notified")
 
 
 @pytest.mark.unit
