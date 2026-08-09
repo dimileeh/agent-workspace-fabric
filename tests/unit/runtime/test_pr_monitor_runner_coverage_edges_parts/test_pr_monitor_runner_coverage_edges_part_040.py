@@ -244,6 +244,64 @@ async def test_human_notification_dedup_includes_order_independent_item_ids(
 
 
 @pytest.mark.unit
+async def test_human_notification_dedup_includes_same_id_blocker_detail_changes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState(threads_addressed_ids={"T-updated": "defer"})
+    first_status = _status(
+        threads=(
+            ReviewThread(
+                thread_id="T-updated",
+                path="src/monitor.py",
+                line=91,
+                body_excerpt="Initial blocker detail.",
+                author="human-reviewer",
+                url="https://github.example/reviews/T-updated",
+            ),
+        )
+    )
+    second_status = _status(
+        threads=(
+            ReviewThread(
+                thread_id="T-updated",
+                path="src/monitor.py",
+                line=91,
+                body_excerpt="Updated blocker detail.",
+                author="human-reviewer",
+                url="https://github.example/reviews/T-updated",
+            ),
+        )
+    )
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=46,
+        status=first_status,
+        state=state,
+    )
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=46,
+        status=second_status,
+        state=state,
+    )
+
+    assert len(gh.posts) == 2
+    assert "Initial blocker detail." in str(gh.posts[0]["body"])
+    assert "Updated blocker detail." in str(gh.posts[1]["body"])
+
+
+@pytest.mark.unit
 def test_deferred_item_collection_keeps_existing_forge_urls() -> None:
     thread = ReviewThread(
         thread_id="T-url",

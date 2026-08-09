@@ -86,7 +86,7 @@ def _collect_defer_items(
 
 
 def _notification_items_digest(items: Sequence[Mapping[str, object]]) -> str:
-    """Return the stable, order-independent notification identity for item IDs."""
-    item_ids = sorted(str(item.get("id", "")) for item in items)
-    payload = json.dumps(item_ids, separators=(",", ":"))
+    """Return an order-independent identity for rendered notification details."""
+    item_details = sorted(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in items)
+    payload = json.dumps(item_details, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
