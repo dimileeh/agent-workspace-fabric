@@ -395,7 +395,7 @@ class TestCodexAdapter:
     async def test_isolated_reask_recreates_selected_legacy_model_service_before_clarification(
         self, tmp_path: Path
     ) -> None:
-        """A legacy sidecar receives its new model network before the re-ask."""
+        """A legacy sidecar is ready on its new model network before the re-ask."""
         compose_file = tmp_path / "compose.yml"
         compose_file.write_text(
             yaml.safe_dump(
@@ -442,6 +442,7 @@ class TestCodexAdapter:
             "-d",
             "--no-deps",
             "--force-recreate",
+            "--wait",
             "ollama-sidecar",
         ]
         assert "run" in runner.calls[1].args
@@ -521,6 +522,7 @@ class TestCodexAdapter:
             "-d",
             "--no-deps",
             "--force-recreate",
+            "--wait",
             "ollama-sidecar",
         ]
         assert "run" in runner.calls[2].args

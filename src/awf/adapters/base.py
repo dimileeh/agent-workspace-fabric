@@ -458,6 +458,7 @@ class AgentAdapter(ABC):
                         "-d",
                         "--no-deps",
                         "--force-recreate",
+                        "--wait",
                         *clarification_model_services,
                     ]
                 )
