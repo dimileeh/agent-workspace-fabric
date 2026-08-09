@@ -17,7 +17,7 @@ from awf.common.companions import (
 )
 from awf.node.compose_manager import CompanionService, ComposeService
 from awf.node.git_manager import WorktreeLayout
-from awf.profiles.models import DockerMode
+from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, DockerMode
 from awf.profiles.resolver import ProfileResolutionError
 
 COMPANION_ENV_SECRET_SOURCE_EMPTY = "COMPANION_ENV_SECRET_SOURCE_EMPTY"
@@ -171,6 +171,12 @@ def validate_companion_service_graph(
         )
 
     companion_names = {_companion_graph_spec(companion).name for companion in companions}
+    if MANAGED_CLARIFICATION_SERVICE_NAME in companion_names:
+        raise ProfileResolutionError(
+            f"companion service name {MANAGED_CLARIFICATION_SERVICE_NAME!r} is reserved for "
+            "the managed clarification service",
+            reason_code="COMPANION_SERVICE_NAME_COLLISION",
+        )
     collisions = sorted(profile_names & companion_names)
     if collisions:
         raise ProfileResolutionError(

@@ -1016,6 +1016,25 @@ def test_validate_companion_service_graph_rejects_duplicate_companion_names(
 
 
 @pytest.mark.unit
+def test_validate_companion_service_graph_rejects_companion_named_clarification() -> None:
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=(),
+            companions=(
+                WorkspaceCompanionSpec(
+                    name="clarification",
+                    repo_url="git@example.com:clarification.git",
+                    base_branch="main",
+                ),
+            ),
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
+    assert "reserved for the managed clarification service" in str(exc.value)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("profile_services", "companions"),
     [
