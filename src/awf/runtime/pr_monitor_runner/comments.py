@@ -178,14 +178,24 @@ async def _create_isolated_reask_worktree(
     except asyncio.CancelledError:
         # Git may have registered the worktree before cancellation reaches the
         # command runner. Remove that checkout before preserving cancellation.
-        await _cleanup_isolated_reask_worktree_after_creation_failure(
-            runner,
-            reask_worktree=reask_worktree,
-            event_name=(
-                "monitor.needs_human_reason_reask_"
-                "isolated_cleanup_failed_after_creation_cancellation"
-            ),
+        cleanup_task = asyncio.create_task(
+            _cleanup_isolated_reask_worktree_after_creation_failure(
+                runner,
+                reask_worktree=reask_worktree,
+                event_name=(
+                    "monitor.needs_human_reason_reask_"
+                    "isolated_cleanup_failed_after_creation_cancellation"
+                ),
+            )
         )
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError:
+                if cleanup_task.done():
+                    cleanup_task.result()
+                    break
         raise
     if not create.ok:
         # Git can register and populate the checkout before reporting an error

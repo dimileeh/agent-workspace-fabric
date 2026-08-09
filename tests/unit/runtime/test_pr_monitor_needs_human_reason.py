@@ -399,6 +399,50 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancellation(
+    tmp_path: Path,
+) -> None:
+    """A second shutdown cancel cannot strand a checkout created before cancellation."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_create_second_cancelled")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class _CancelAfterWorktreeAddWithBlockingCleanupRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                result = await super().run(args)
+                cleanup_finished.set()
+                return result
+            result = await super().run(args)
+            if "worktree" in args and "add" in args:
+                raise asyncio.CancelledError
+            return result
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_CancelAfterWorktreeAddWithBlockingCleanupRunner())
+    )
+    task = asyncio.create_task(
+        comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=5.0)
+    task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert cleanup_finished.is_set()
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
