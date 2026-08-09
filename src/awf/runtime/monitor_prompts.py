@@ -36,7 +36,10 @@ _FOOTER = (
 )
 
 _MARKDOWN_INLINE_ESCAPES = str.maketrans(
-    {character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|~"}
+    {
+        **{character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|~"},
+        "@": "&#64;",
+    }
 )
 
 

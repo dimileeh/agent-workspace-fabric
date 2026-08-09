@@ -1281,6 +1281,34 @@ class TestReadyToMergeComment:
         assert "[forged](https://evil.example)" not in body
 
     @pytest.mark.unit
+    def test_blocker_items_neutralize_mentions_in_untrusted_excerpt_and_reason(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "Please ask @reviewer and @acme/security.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Confirm with @maintainer first.",
+                },
+            ),
+        )
+
+        assert "&#64;reviewer" in body
+        assert "&#64;acme/security" in body
+        assert "&#64;maintainer" in body
+        assert "@reviewer" not in body
+        assert "@acme/security" not in body
+        assert "@maintainer" not in body
+
+    @pytest.mark.unit
     def test_empty_blocker_items_preserve_existing_comment_byte_for_byte(self) -> None:
         expected = (
             "⚠️ PR #1 needs human attention at commit `aaaaaaaaaa`.\n\n"
