@@ -91,6 +91,23 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
 _CLARIFICATION_MODEL_PROVIDER_ENV_NAMES = frozenset(AGENT_AUTH_ENV_VARS)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+    }
+)
+_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+    }
+)
 _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS = (
     frozenset(_HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 )
@@ -125,7 +142,7 @@ def _clarification_agent_environment(
     return tuple(
         (name, staged_targets.get(value, value))
         for name, value in agent_environment
-        if _is_clarification_model_provider_environment(name)
+        if name in _clarification_model_provider_environment_names(agent_environment)
         and not _is_clarification_git_auth_environment(name)
     )
 
@@ -137,10 +154,24 @@ def _is_clarification_git_auth_environment(name: str) -> bool:
     )
 
 
-def _is_clarification_model_provider_environment(name: str) -> bool:
-    """Return whether an environment entry configures an agent model provider."""
+def _clarification_model_provider_environment_names(
+    agent_environment: tuple[tuple[str, str], ...],
+) -> frozenset[str]:
+    """Return provider env names available to a clarification re-ask.
 
-    return name in _CLARIFICATION_MODEL_PROVIDER_ENV_NAMES
+    Claude Code's Bedrock and Vertex toggles need their backend-specific
+    credentials and settings. Keep those declared settings only when the
+    corresponding backend is enabled, rather than admitting unrelated AWS or
+    Google configuration to every clarification container.
+    """
+
+    environment_names = {name for name, _value in agent_environment}
+    provider_names = set(_CLARIFICATION_MODEL_PROVIDER_ENV_NAMES)
+    if "CLAUDE_CODE_USE_BEDROCK" in environment_names:
+        provider_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
+    if "CLAUDE_CODE_USE_VERTEX" in environment_names:
+        provider_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
+    return frozenset(provider_names)
 
 
 def _clarification_auth_mounts(
@@ -192,7 +223,7 @@ def _clarification_model_provider_auth_mount_targets(
     return _CLARIFICATION_MODEL_PROVIDER_AUTH_MOUNT_TARGETS | frozenset(
         value
         for name, value in agent_environment
-        if _is_clarification_model_provider_environment(name)
+        if name in _clarification_model_provider_environment_names(agent_environment)
     )
 
 

@@ -68,6 +68,17 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
     )
     agent_environment = (
         ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+        ("AWS_SECRET_ACCESS_KEY", "profile-secret"),
+        ("AWS_SESSION_TOKEN", "profile-session-token"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_DEFAULT_REGION", "us-west-2"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("CLOUD_ML_REGION", "us-central1"),
         ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
         ("AWF_DATABASE_URL", "postgresql+asyncpg://awf@postgres:5432/awf"),
         ("AWF_TEST_DATABASE_URL", "postgresql+asyncpg://awf@postgres:5432/awf"),
@@ -92,6 +103,17 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
 
     assert environment == (
         ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+        ("AWS_SECRET_ACCESS_KEY", "profile-secret"),
+        ("AWS_SESSION_TOKEN", "profile-session-token"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_DEFAULT_REGION", "us-west-2"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("CLOUD_ML_REGION", "us-central1"),
         (
             "GOOGLE_APPLICATION_CREDENTIALS",
             "/home/agent/.awf/clarification-auth/1",
@@ -105,6 +127,22 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
             mode="ro",
         ),
     )
+
+
+@pytest.mark.unit
+def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> None:
+    """Claude backend credentials stay out unless that backend is enabled."""
+    environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        (
+            ("AWS_SECRET_ACCESS_KEY", "unselected-backend-secret"),
+            ("ANTHROPIC_VERTEX_PROJECT_ID", "unselected-vertex-project"),
+            ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
+        ),
+        auth_mounts=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+    )
+
+    assert environment == ()
 
 
 @pytest.mark.unit
