@@ -707,7 +707,12 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
 def _make_isolated_capture_dir(work_dir: Path) -> Path:
     root = work_dir / "usage-captures"
     root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
+    capture_dir = Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
+    # The root worker bind-mounts this directory into the non-root agent-runtime
+    # container. The wrapper needs to create known sample files but must not list
+    # or read host-collected samples.
+    capture_dir.chmod(0o733)
+    return capture_dir
 
 
 def _isolated_ccusage_wrapper_script(*, source: str) -> str:

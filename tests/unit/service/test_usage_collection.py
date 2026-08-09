@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from stat import S_IMODE
 from typing import Any
 
 import pytest
@@ -15,7 +16,12 @@ import pytest
 from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
 from awf.service import usage_collection
-from awf.service.usage_collection import CcusageCollector, _is_missing_binary, _RealClock
+from awf.service.usage_collection import (
+    CcusageCollector,
+    _is_missing_binary,
+    _make_isolated_capture_dir,
+    _RealClock,
+)
 from awf.service.usage_store import (
     NormalizedUsage,
     UsageSnapshot,
@@ -97,6 +103,17 @@ def _ccusage_runner(*stdouts: str) -> FakeCommandRunner:
     for stdout in stdouts:
         runner.queue_result(returncode=0, stdout=stdout)
     return runner
+
+
+@pytest.mark.unit
+def test_isolated_capture_dir_allows_runtime_agent_writes(tmp_path: Path) -> None:
+    """The root worker's bind mount must let the non-root runtime create captures."""
+
+    capture_dir = _make_isolated_capture_dir(tmp_path)
+
+    # The agent needs write + traverse permission to redirect its known capture
+    # filenames, but does not need to read or list host-collected samples.
+    assert S_IMODE(capture_dir.stat().st_mode) == 0o733
 
 
 @pytest.mark.unit
