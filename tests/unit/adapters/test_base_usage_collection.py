@@ -70,6 +70,26 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         return _IsolatedRecordingContext(self._events)
 
 
+class _DelayedIsolatedRecordingSampler(_RecordingSampler):
+    """Simulate an isolated capture worker that keeps running after cancellation."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
+        self._events.append("start_isolated")
+        self.start_kwargs = kwargs
+
+        async def _complete_capture_setup() -> _IsolatedRecordingContext:
+            self.started.set()
+            await self.release.wait()
+            return _IsolatedRecordingContext(self._events)
+
+        return await asyncio.shield(asyncio.create_task(_complete_capture_setup()))
+
+
 class _EventRunner:
     def __init__(self, events: list[str], *, result: CommandResult, cancel: bool = False) -> None:
         self._events = events
@@ -138,6 +158,35 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     assert "clarification" in args
     assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
     assert "wrapped-agent-cli" in args
+
+
+@pytest.mark.unit
+async def test_isolated_sampler_finalized_when_startup_is_cancelled() -> None:
+    events: list[str] = []
+    sampler = _DelayedIsolatedRecordingSampler(events)
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_cancel",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_cancel/reask"),
+        )
+    )
+    await sampler.started.wait()
+    run_task.cancel()
+    await asyncio.sleep(0)
+    cancellation_waits_for_cleanup = not run_task.done()
+    sampler.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    assert cancellation_waits_for_cleanup
+    assert events == ["start_isolated", "finalize:cancelled"]
 
 
 @pytest.mark.unit

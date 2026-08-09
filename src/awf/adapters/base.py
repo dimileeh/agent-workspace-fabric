@@ -11,6 +11,7 @@ It just runs the CLI, captures stdout/stderr, and returns a structured result.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -529,14 +530,38 @@ class AgentAdapter(ABC):
         sampler = self._usage_sampler
         if sampler is None or workspace_id is None or not isinstance(sampler, IsolatedUsageSampler):
             return None
-        try:
-            return await sampler.start_isolated(
+        start_task = asyncio.create_task(
+            sampler.start_isolated(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 workspace_id=workspace_id,
                 provider=self.name,
                 cli_args=cli_args,
             )
+        )
+        try:
+            return await asyncio.shield(start_task)
+        except asyncio.CancelledError:
+            # ``start_isolated`` creates its capture directory in a worker
+            # thread. Keep the task alive through cancellation so a context
+            # returned after that worker finishes can remove the directory.
+            while not start_task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(start_task)
+            try:
+                sampler_ctx = start_task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            else:
+                finalize_task = asyncio.create_task(
+                    self._finalize_usage_sampling(
+                        sampler_ctx, status="cancelled", workspace_id=workspace_id
+                    )
+                )
+                while not finalize_task.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(finalize_task)
+            raise
         except Exception:
             _log.warning(
                 "usage.collect.error",
