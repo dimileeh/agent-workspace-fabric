@@ -639,17 +639,22 @@ async def _enforce_needs_human_reason(
             )
         return cleanup_error, isolated_cleanup_failed
 
-    async def _run_reask_cleanup_after_cancellation(*, event_name: str) -> None:
-        """Complete re-ask cleanup despite repeated worker-shutdown cancellation."""
+    async def _run_reask_cleanup_cancellation_safe(*, event_name: str) -> tuple[str | None, bool]:
+        """Complete re-ask cleanup before propagating any worker cancellation."""
         cleanup_task = asyncio.create_task(_run_reask_cleanup(event_name=event_name))
+        cancellation: asyncio.CancelledError | None = None
         while True:
             try:
-                await asyncio.shield(cleanup_task)
-                return
-            except asyncio.CancelledError:
+                cleanup_result = await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
                 if cleanup_task.done():
                     cleanup_task.result()
-                    return
+                    raise
+            else:
+                if cancellation is not None:
+                    raise cancellation
+                return cleanup_result
 
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
@@ -680,19 +685,19 @@ async def _enforce_needs_human_reason(
     ):
         # Preserve the terminal result that already stops the fix cycle;
         # cleanup failure is recorded but cannot permit another item to run.
-        await _run_reask_cleanup(
+        await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_terminal_error"
         )
         raise
     except asyncio.CancelledError:
         # Cancellation still owns control flow, but record a cleanup failure so
         # stranded clarification edits cannot be mistaken for intentional.
-        await _run_reask_cleanup_after_cancellation(
+        await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_cancellation"
         )
         raise
     except Exception as exc:
-        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup(
+        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_error"
         )
         _log.warning(
@@ -709,7 +714,7 @@ async def _enforce_needs_human_reason(
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             ) from exc
     else:
-        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup(
+        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success"
         )
         if isolated_cleanup_failed:

@@ -1261,6 +1261,89 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("outcome", ("success", "terminal_error", "error"))
+async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancellation(
+    outcome: str,
+    tmp_path: Path,
+) -> None:
+    """Every post-invocation cleanup must finish before cancellation escapes."""
+    workspace_id = f"ws_reask_post_invocation_cancel_{outcome}"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class _BlockingWorktreeRemoveRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                result = await super().run(args)
+                cleanup_finished.set()
+                return result
+            return await super().run(args)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        if outcome == "success":
+            return VerdictResult(verdict="needs_human", reason="select a deployment region")
+        if outcome == "terminal_error":
+            raise _MonitorPolicyBlockedError("terminal re-ask failure")
+        raise RuntimeError("ordinary re-ask failure")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_BlockingWorktreeRemoveRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    task = asyncio.create_task(
+        comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=5.0)
+    task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert cleanup_finished.is_set()
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_reraises_cancellation_when_cleanup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
