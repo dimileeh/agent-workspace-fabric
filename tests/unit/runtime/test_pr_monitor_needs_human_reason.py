@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,41 @@ async def test_ignored_reask_snapshot_normalizes_agent_scratch_and_empty_directo
         is None
     )
     assert scratch.read_text(encoding="utf-8") == "runtime state\n"
+
+
+@pytest.mark.unit
+async def test_ignored_reask_restore_failure_retains_snapshot_for_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed restore must leave the only original ignored-file copy recoverable."""
+    worktree = _init_real_worktree(tmp_path, "ws_restore_failure")
+    config = worktree / ".env"
+    config.write_text("MODE=original\n", encoding="utf-8")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+    snapshot = await comments._snapshot_reask_ignored_paths(
+        runner,
+        worktree_path=worktree,
+    )
+    assert snapshot is not None
+
+    def _copy_failure(_source: Path, _destination: Path) -> None:
+        raise OSError("destination is unwritable")
+
+    monkeypatch.setattr(comments, "_copy_ignored_snapshot_entry", _copy_failure)
+    try:
+        failure = await comments._restore_reask_ignored_paths(
+            runner,
+            worktree_path=worktree,
+            snapshot=snapshot,
+        )
+
+        assert failure is not None
+        assert str(snapshot.root) in failure
+        assert snapshot.root.exists()
+        assert not config.exists()
+    finally:
+        shutil.rmtree(snapshot.root, ignore_errors=True)
 
 
 @pytest.mark.unit

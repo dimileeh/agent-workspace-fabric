@@ -219,6 +219,7 @@ async def _restore_reask_ignored_paths(
 
     clean = await runner._deps.runner.run(git_worktree_command(worktree_path, "clean", "-ffdX"))
     failure: str | None = None
+    restore_succeeded = False
     if not clean.ok:
         failure = "`git clean -ffdX` could not remove ignored re-ask side effects"
     try:
@@ -228,15 +229,19 @@ async def _restore_reask_ignored_paths(
                 destination = _safe_restore_destination(worktree_path, relative)
                 _remove_ignored_snapshot_entry(destination)
                 _copy_ignored_snapshot_entry(snapshot.root.joinpath(*relative.parts), destination)
+        restore_succeeded = True
     except (OSError, ValueError) as exc:
         failure = "Could not restore ignored worktree paths after the NEEDS_HUMAN reason re-ask"
+        if snapshot is not None:
+            failure += f"; recovery snapshot retained at {snapshot.root}"
         _log.warning(
             "monitor.needs_human_reason_reask_ignored_restore_failed",
             worktree_path=str(worktree_path),
+            snapshot_root=str(snapshot.root) if snapshot is not None else None,
             error=redact_audit_text(str(exc), limit=240),
         )
     finally:
-        if snapshot is not None:
+        if snapshot is not None and restore_succeeded:
             shutil.rmtree(snapshot.root, ignore_errors=True)
     return failure
 
