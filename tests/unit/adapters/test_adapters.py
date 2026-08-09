@@ -497,6 +497,30 @@ class TestCodexAdapter:
         assert len(runner.calls) == 1
         assert "run" not in runner.calls[0].args
 
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert runner.calls[1].args == [
+            "docker",
+            "compose",
+            "-p",
+            "awf_ws_legacy",
+            "-f",
+            str(compose_file),
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "ollama-sidecar",
+        ]
+        assert "run" in runner.calls[2].args
+
     @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
         runner = FakeCommandRunner()
