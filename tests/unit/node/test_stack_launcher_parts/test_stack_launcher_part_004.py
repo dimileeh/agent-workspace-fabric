@@ -37,6 +37,16 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         target="/run/awf/secrets/gcp/credentials.json",
         mode="ro",
     )
+    aws_shared_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-credentials",
+        target="/run/awf/secrets/aws-credentials",
+        mode="ro",
+    )
+    aws_config = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-config",
+        target="/run/awf/secrets/aws-config",
+        mode="ro",
+    )
     database_credentials = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/database-password",
         target="/run/awf/secrets/database-password",
@@ -52,6 +62,8 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         AuthMount(source=mirror, target=mirror, mode="rw"),
         codex_auth,
         provider_credentials,
+        aws_shared_credentials,
+        aws_config,
         database_credentials,
         bitbucket_askpass,
         AuthMount(
@@ -75,6 +87,8 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         ("AWS_REGION", "us-west-2"),
         ("AWS_DEFAULT_REGION", "us-west-2"),
         ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_SHARED_CREDENTIALS_FILE", aws_shared_credentials.target),
+        ("AWS_CONFIG_FILE", aws_config.target),
         ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
@@ -110,6 +124,11 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         ("AWS_REGION", "us-west-2"),
         ("AWS_DEFAULT_REGION", "us-west-2"),
         ("AWS_PROFILE", "awf-bedrock"),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "/home/agent/.awf/clarification-auth/2",
+        ),
+        ("AWS_CONFIG_FILE", "/home/agent/.awf/clarification-auth/3"),
         ("AWS_BEARER_TOKEN_BEDROCK", "profile-bedrock-token"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
@@ -124,6 +143,16 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         AuthMount(
             source=provider_credentials.source,
             target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+        AuthMount(
+            source=aws_shared_credentials.source,
+            target="/home/agent/.awf/clarification-auth/2",
+            mode="ro",
+        ),
+        AuthMount(
+            source=aws_config.source,
+            target="/home/agent/.awf/clarification-auth/3",
             mode="ro",
         ),
     )
