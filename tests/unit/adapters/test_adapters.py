@@ -590,7 +590,7 @@ services:
             )
 
         assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
-        assert runner.calls[0].args[runner.calls[0].args.index("run")] == "run"
+        assert "run" in runner.calls[0].args
         assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
 
     @pytest.mark.unit
