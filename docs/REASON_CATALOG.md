@@ -502,8 +502,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
 
 ### NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
-**Problem:** A hosted review-repair agent requested human input without saying what to decide.
-**Likely Cause:** AWF did not make the usual clarification follow-up because hosted execution cannot guarantee a read-only agent run.
+**Problem:** A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.
+**Likely Cause:** AWF did not make the usual clarification follow-up because hosted execution cannot guarantee a read-only agent run or the local worktree could not be prepared as an isolated checkout.
 **Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_clarification_unavailable](#needs_human_reason_clarification_unavailable)

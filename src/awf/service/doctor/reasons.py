@@ -132,11 +132,12 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
     ),
     "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE": _ReasonText(
-        "A hosted review-repair agent requested human input without saying what to decide.",
+        "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
         "Read the unresolved review item and make the decision, then remonitor the workspace.",
         (
             "AWF did not make the usual clarification follow-up because hosted execution "
-            "cannot guarantee a read-only agent run."
+            "cannot guarantee a read-only agent run or the local worktree could not be "
+            "prepared as an isolated checkout."
         ),
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),

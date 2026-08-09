@@ -473,7 +473,8 @@ async def _enforce_needs_human_reason(
         except Exception as exc:
             # Clarification is advisory and read-only. A worktree/setup failure
             # must preserve the original blocking verdict instead of blocking
-            # the monitor or issuing an unisolated re-ask.
+            # the monitor or issuing an unisolated re-ask, and record why the
+            # clarification follow-up was unavailable.
             _log.warning(
                 "monitor.needs_human_reason_reask_setup_failed",
                 workspace_id=workspace_id,
@@ -496,6 +497,7 @@ async def _enforce_needs_human_reason(
                 operation_id=operation_id,
                 operation_type=operation_type,
                 monitor_log=monitor_log,
+                reason_code=_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE,
             )
             return result
 

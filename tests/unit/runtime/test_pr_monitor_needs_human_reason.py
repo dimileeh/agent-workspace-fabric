@@ -479,7 +479,7 @@ async def test_needs_human_reason_reask_skips_when_primary_worktree_loses_git_co
 
     assert result == VerdictResult(verdict="needs_human")
     assert invoked is False
-    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
 
 
 @pytest.mark.unit
@@ -1130,7 +1130,7 @@ async def test_needs_human_reason_reask_requires_a_restore_ref(
     assert result == VerdictResult(verdict="needs_human")
     assert invoked is False
     assert state.threads_addressed_ids == {}
-    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
 
 
 @pytest.mark.unit
