@@ -397,7 +397,13 @@ def _clarification_model_provider_auth_mount_targets(
         and _clarification_claude_code_environment_names(dict(agent_environment))
         != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
     ):
-        runtime_auth_mount_targets = frozenset()
+        # Vertex uses the standard gcloud ADC file when no explicit credential
+        # path is configured; do not expose the inactive Claude file-auth stores.
+        runtime_auth_mount_targets = (
+            frozenset({"/home/agent/.config/gcloud"})
+            if dict(agent_environment).get("CLAUDE_CODE_USE_VERTEX") == "1"
+            else frozenset()
+        )
     if agent_runtime is AgentRuntime.gemini:
         runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[
             _clarification_gemini_auth_source(dict(agent_environment))

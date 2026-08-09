@@ -200,6 +200,37 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_vertex_adc_directory() -> None:
+    """Vertex clarification retains ADC without exposing Claude file auth."""
+    claude_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/claude",
+        target="/home/agent/.claude",
+        mode="rw",
+    )
+    gcloud_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gcloud",
+        target="/home/agent/.config/gcloud",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("CLOUD_ML_REGION", "us-central1"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (claude_auth, gcloud_auth),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_direct_claude_credentials() -> None:
     """Direct Anthropic clarification retains its credentials and auth mount."""
     claude_auth = AuthMount(
