@@ -198,6 +198,80 @@ async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("reask_raises", (False, True))
+async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fails(
+    tmp_path: Path,
+    reask_raises: bool,
+) -> None:
+    """A stranded nested checkout must stop later review-repair items."""
+    workspace_id = "ws_reask_remove_failure"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+
+    class _FailingWorktreeRemoveRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                return CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="worktree remove failed",
+                )
+            return await super().run(args)
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        if reask_raises:
+            raise RuntimeError("re-ask failed")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_FailingWorktreeRemoveRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+
+    with pytest.raises(
+        _MonitorPolicyBlockedError,
+        match="git worktree remove.*could not remove",
+    ) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "error",
     (

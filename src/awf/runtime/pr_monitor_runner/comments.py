@@ -499,12 +499,12 @@ async def _enforce_needs_human_reason(
             )
             return result
 
-    async def _cleanup_reask_worktree() -> str | None:
+    async def _cleanup_reask_worktree() -> tuple[str | None, bool]:
         # The re-ask only collects a reason. Remove its tracked-only checkout
         # before cleaning the primary worktree, so it cannot be mistaken for an
         # untracked side effect.
         if worktree_path is None or reask_restore_ref is None:
-            return None
+            return None, False
         from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
         isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
@@ -515,14 +515,14 @@ async def _enforce_needs_human_reason(
                 restore_ref=reask_restore_ref,
                 message=isolated_cleanup_failure,
             )
-            return isolated_cleanup_failure
+            return isolated_cleanup_failure, True
         cleanup = await _ppv._pre_push_validation_cleanup(
             runner,
             worktree_path=worktree_path,
             restore_ref=reask_restore_ref,
         )
         if cleanup.ok:
-            return None
+            return None, False
         _log.warning(
             "monitor.needs_human_reason_reask_cleanup_failed",
             workspace_id=workspace_id,
@@ -530,20 +530,21 @@ async def _enforce_needs_human_reason(
             reason_code=cleanup.reason_code,
             message=cleanup.message[:400],
         )
-        return cleanup.message
+        return cleanup.message, False
 
-    async def _run_reask_cleanup(*, event_name: str) -> str | None:
+    async def _run_reask_cleanup(*, event_name: str) -> tuple[str | None, bool]:
         try:
-            cleanup_error = await _cleanup_reask_worktree()
+            cleanup_error, isolated_cleanup_failed = await _cleanup_reask_worktree()
         except Exception as exc:
             cleanup_error = str(exc)
+            isolated_cleanup_failed = False
         if cleanup_error is not None:
             _log.warning(
                 event_name,
                 workspace_id=workspace_id,
                 error=redact_audit_text(cleanup_error, limit=240),
             )
-        return cleanup_error
+        return cleanup_error, isolated_cleanup_failed
 
     async def _run_reask_cleanup_after_cancellation(*, event_name: str) -> None:
         """Complete re-ask cleanup despite repeated worker-shutdown cancellation."""
@@ -598,7 +599,7 @@ async def _enforce_needs_human_reason(
         )
         raise
     except Exception as exc:
-        await _run_reask_cleanup(
+        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_error"
         )
         _log.warning(
@@ -609,10 +610,20 @@ async def _enforce_needs_human_reason(
             item_kind=item_kind,
             error=redact_audit_text(str(exc), limit=240),
         )
+        if isolated_cleanup_failed:
+            raise _MonitorPolicyBlockedError(
+                cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            ) from exc
     else:
-        cleanup_error = await _run_reask_cleanup(
+        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success"
         )
+        if isolated_cleanup_failed:
+            raise _MonitorPolicyBlockedError(
+                cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
         if cleanup_error is None:
             reask_result = replace(
                 reask_result,
