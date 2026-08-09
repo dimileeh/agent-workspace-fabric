@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentDefaults
 from awf.db.enums import AgentRuntime, EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -260,6 +261,54 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
+    async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_default_model"),
+                    compose_file=Path("/tmp/awf-compose/ws_default_model/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(
+                node_id="test-node-01",
+                agent_defaults={
+                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
+                },
+            ),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="implicit OpenCode model",
+                task_prompt="p",
+                agent="opencode",
+                test_commands=[],
+                task_policy={},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1
+        assert launcher.requests[0].agent_model == "openai/gpt-5"
+
+    @pytest.mark.unit
     async def test_hosted_pr_adoption_provisions_git_metadata_without_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -287,7 +336,12 @@ class TestSuccess:
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
-            config=ProvisionerConfig(node_id="test-node-01"),
+            config=ProvisionerConfig(
+                node_id="test-node-01",
+                agent_defaults={
+                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
+                },
+            ),
         )
         _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
         async with session_factory() as s:
@@ -296,7 +350,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="adopt hosted",
                 task_prompt="p",
-                agent="codex",
+                agent="opencode",
                 task_kind="sync_feature_pr",
                 test_commands=[],
                 task_policy={
@@ -317,6 +371,7 @@ class TestSuccess:
         assert launcher.launch_requests == []
         assert len(launcher.render_requests) == 1
         assert launcher.render_requests[0].workspace_id == ws_id
+        assert launcher.render_requests[0].agent_model == "openai/gpt-5"
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
