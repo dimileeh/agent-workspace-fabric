@@ -1075,6 +1075,49 @@ class TestReadyToMergeComment:
         assert "GH_TOKEN=<redacted>" in body
 
     @pytest.mark.unit
+    def test_blocker_items_escape_untrusted_markdown_and_link_destinations(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/[critical].py\n## forged heading",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1)\n[forged](https://evil.example)",
+                    "body": "Read [this](https://evil.example)\n## forged body",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Use `safe`\n- forged reason",
+                },
+                {
+                    "kind": "review",
+                    "id": "R1",
+                    "author": "alice\n## forged author",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R1",
+                    "body": "review-level feedback",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "src/\\[critical\\].py \\#\\# forged heading:42" in body
+        assert "Read \\[this\\]\\(https://evil.example\\) \\#\\# forged body" in body
+        assert "-> reason: Use \\`safe\\` - forged reason" in body
+        assert "[alice \\#\\# forged author](https://github.example/reviews/R1)" in body
+        assert (
+            "https://github.example/reviews/T1%29%0A%5Bforged%5D%28https://evil.example%29" in body
+        )
+        assert "\n## forged" not in body
+        assert "\n- forged" not in body
+        assert "[forged](https://evil.example)" not in body
+
+    @pytest.mark.unit
     def test_empty_blocker_items_preserve_existing_comment_byte_for_byte(self) -> None:
         expected = (
             "⚠️ PR #1 needs human attention at commit `aaaaaaaaaa`.\n\n"

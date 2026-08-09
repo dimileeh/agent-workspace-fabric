@@ -18,11 +18,13 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from urllib.parse import quote
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
-from awf.common.redaction import redact_secrets
+from awf.common.redaction import REDACTION_MARKER, redact_secrets
 from awf.common.task_tag import task_tag_commit_prefix
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread, _is_bot_author
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
@@ -31,6 +33,10 @@ _FOOTER = (
     "\n\nDo NOT push — AWF handles the push once this fix cycle settles.\n"
     "Commit locally using conventional commits; each thread/comment fix is "
     "its own commit so the diff is easy to review."
+)
+
+_MARKDOWN_INLINE_ESCAPES = str.maketrans(
+    {character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|"}
 )
 
 
@@ -505,15 +511,22 @@ def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, 
 
 
 def _render_blocker_item(item: Mapping[str, object]) -> str:
-    author = _item_text(item, "author") or "unknown author"
-    path = _item_text(item, "path")
+    author = _redact_and_escape_markdown_inline(_item_text(item, "author") or "unknown author")
+    path = _redact_and_escape_markdown_inline(_item_text(item, "path"))
     line = item.get("line")
-    location = f"{path}:{line}" if path and line is not None else author
+    line_text = _redact_and_escape_markdown_inline(str(line)) if line is not None else ""
+    location = f"{path}:{line_text}" if path and line is not None else author
     url = _item_text(item, "url")
-    location_text = f"[{location}]({url})" if url else location
-    verdict = _item_text(item, "verdict")
-    excerpt = _truncate_blocker_excerpt(_item_text(item, "body"))
-    reason = _item_text(item, "agent_verdict_reason")
+    location_text = (
+        f"[{location}]({_escape_markdown_link_destination(redact_secrets(url))})"
+        if url
+        else location
+    )
+    verdict = _redact_and_escape_markdown_inline(_item_text(item, "verdict"))
+    excerpt = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(_item_text(item, "body"))
+    )
+    reason = _redact_and_escape_markdown_inline(_item_text(item, "agent_verdict_reason"))
     reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
     return f"- {location_text} [{verdict}] {excerpt} {reason_text}"
 
@@ -521,6 +534,25 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
 def _item_text(item: Mapping[str, object], key: str) -> str:
     value = item.get(key)
     return value if isinstance(value, str) else ""
+
+
+def _escape_markdown_inline(value: str) -> str:
+    """Render untrusted text as one literal Markdown inline span."""
+    escaped = " ".join(value.splitlines()).translate(_MARKDOWN_INLINE_ESCAPES)
+    return re.sub(r"(?<=\w)\\_(?=\w)", "_", escaped)
+
+
+def _redact_and_escape_markdown_inline(value: str) -> str:
+    """Remove secrets before escaping untrusted text for public Markdown."""
+    redacted = redact_secrets(value)
+    return REDACTION_MARKER.join(
+        _escape_markdown_inline(part) for part in redacted.split(REDACTION_MARKER)
+    )
+
+
+def _escape_markdown_link_destination(url: str) -> str:
+    """Encode untrusted URL characters that could terminate a Markdown link."""
+    return quote(url, safe=":/?&=#%+~,-._@!$'*,;")
 
 
 def _truncate_blocker_excerpt(excerpt: str) -> str:
