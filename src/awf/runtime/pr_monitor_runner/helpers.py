@@ -687,31 +687,31 @@ def _notify_human_blocker_items(
     Effective changes-requested reviews are merge blockers independently of
     their triage verdict and can have an empty body, so they may not appear in
     ``unresolved_review_comments`` at all. Include them in the rendered
-    notification and its digest, while retaining any already-collected deferred
-    item when the same review ID appears in both feeds.
+    notification and its digest. When a triaged review is also an effective
+    blocker, retain its single item but render the blocking verdict.
     """
     bot_items, human_items = _collect_defer_items(status, state)
-    collected_ids = {str(item["id"]) for item in bot_items + human_items}
+    items_by_id = {str(item["id"]): item for item in bot_items + human_items}
     for review in status.blocking_reviews:
-        if review.comment_id in collected_ids:
+        if existing_item := items_by_id.get(review.comment_id):
+            existing_item["verdict"] = "changes_requested"
             continue
         is_bot = _is_bot_author(review.author)
         bucket = bot_items if is_bot else human_items
-        bucket.append(
-            {
-                "kind": "review",
-                "id": review.comment_id,
-                "author": review.author,
-                "is_bot": is_bot,
-                "path": None,
-                "line": None,
-                "url": review.url,
-                "body": review.body_excerpt,
-                "verdict": "changes_requested",
-                "agent_verdict_reason": None,
-            }
-        )
-        collected_ids.add(review.comment_id)
+        item: dict[str, object] = {
+            "kind": "review",
+            "id": review.comment_id,
+            "author": review.author,
+            "is_bot": is_bot,
+            "path": None,
+            "line": None,
+            "url": review.url,
+            "body": review.body_excerpt,
+            "verdict": "changes_requested",
+            "agent_verdict_reason": None,
+        }
+        bucket.append(item)
+        items_by_id[review.comment_id] = item
     return bot_items, human_items
 
 

@@ -68,7 +68,10 @@ class _RecordingGh:
 
 
 @pytest.mark.unit
-def test_notify_human_blocker_items_does_not_duplicate_deferred_blocking_review() -> None:
+@pytest.mark.parametrize("triage_verdict", ("defer", "needs_human"))
+def test_notify_human_blocker_items_promotes_overlapping_blocking_review(
+    triage_verdict: str,
+) -> None:
     review = ReviewComment(
         comment_id="R-deferred",
         body_excerpt="Please revise the error handling.",
@@ -76,13 +79,13 @@ def test_notify_human_blocker_items_does_not_duplicate_deferred_blocking_review(
         blocks_merge=True,
     )
     status = _status(reviews=(review,), blocking_reviews=(review,))
-    state = MonitorState(threads_addressed_ids={"R-deferred": "defer"})
+    state = MonitorState(threads_addressed_ids={"R-deferred": triage_verdict})
 
     bot_items, human_items = _notify_human_blocker_items(status, state)
 
     assert bot_items == []
     assert [item["id"] for item in human_items] == ["R-deferred"]
-    assert human_items[0]["verdict"] == "defer"
+    assert human_items[0]["verdict"] == "changes_requested"
 
 
 @pytest.mark.unit
@@ -137,7 +140,7 @@ async def test_human_notification_includes_effective_blocking_reviews_in_details
         reviews=(triaged_review,),
         blocking_reviews=(triaged_review, empty_review),
     )
-    state = MonitorState(threads_addressed_ids={"R-triaged": "fix_committed"})
+    state = MonitorState(threads_addressed_ids={"R-triaged": "defer"})
 
     await runner._post_human_notification_once(
         repo=RepoRef(owner="example", name="repo"),
@@ -154,6 +157,8 @@ async def test_human_notification_includes_effective_blocking_reviews_in_details
     assert len(gh.posts) == 1
     assert "https://github.example/reviews/R-triaged" in str(gh.posts[0]["body"])
     assert "https://github.example/reviews/R-empty" in str(gh.posts[0]["body"])
+    assert "Merge-blocking changes-requested reviews (2):" in str(gh.posts[0]["body"])
+    assert "Human feedback deferred by agent (0):" in str(gh.posts[0]["body"])
     assert (
         state.threads_addressed_ids[
             _notification_key(
