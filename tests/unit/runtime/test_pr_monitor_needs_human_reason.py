@@ -101,6 +101,74 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_skips_hosted_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hosted reason-only re-ask must not be able to advance the PR."""
+    invoked = False
+    cleanup_called = False
+    audit_events: list[dict[str, object]] = []
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        nonlocal invoked
+        invoked = True
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
+    async def _cleanup_reask_worktree(_runner: object, **_kwargs: object) -> SimpleNamespace:
+        nonlocal cleanup_called
+        cleanup_called = True
+        return SimpleNamespace(ok=True)
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(adapter=SimpleNamespace(is_hosted=True)),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _cleanup_reask_worktree,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="a" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert invoked is False
+    assert cleanup_called is False
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

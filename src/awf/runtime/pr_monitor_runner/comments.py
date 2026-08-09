@@ -316,6 +316,29 @@ async def _enforce_needs_human_reason(
     if not _needs_human_reason_missing(result):
         return result
 
+    adapter = getattr(getattr(runner, "_deps", None), "adapter", None)
+    if bool(getattr(adapter, "is_hosted", False)):
+        # Hosted execution has remote PR credentials and no read-only run
+        # contract. It can advance the head before it reports a terminal SHA,
+        # which local cleanup cannot reverse. Preserve the blocking verdict
+        # and record the missing reason instead of issuing a reason-only re-ask.
+        await _record_needs_human_reason_missing(
+            runner,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            item_id=item_id,
+            item_kind=item_kind,
+            item_author=item_author,
+            item_path=item_path,
+            item_line=item_line,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+        )
+        return result
+
     worktree_path = runner._worktrees_root / workspace_id
     reask_restore_ref = operation_start_head
     if reask_restore_ref is None:
