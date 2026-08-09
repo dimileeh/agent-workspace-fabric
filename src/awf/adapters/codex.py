@@ -62,7 +62,12 @@ class CodexAdapter(AgentAdapter):
         return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CODEX_OPENAI_ENV_NAMES)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+        args = [
+            "codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+        ]
         selected_model = model or self._default_model
         if selected_model:
             args += ["--model", selected_model]

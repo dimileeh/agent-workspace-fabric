@@ -343,6 +343,7 @@ class TestCodexAdapter:
         assert service_idx > args.index("-v", run_idx)
         assert "-e" not in args[run_idx:service_idx]
         assert args[service_idx + 1 : service_idx + 3] == ["sh", "-lc"]
+        assert "--skip-git-repo-check" in args[service_idx:]
 
     @pytest.mark.unit
     async def test_large_prompt_uses_stdin_not_argv(self) -> None:
