@@ -318,6 +318,28 @@ def test_opencode_clarification_uses_selected_provider_credentials_only() -> Non
 
 
 @pytest.mark.unit
+def test_opencode_clarification_stages_config_auth_without_provider_environment() -> None:
+    """A provider-qualified re-ask retains OpenCode file auth as a fallback."""
+    opencode_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/opencode",
+        target="/home/agent/.config/opencode",
+        mode="rw",
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (opencode_auth,),
+        agent_environment=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="openai/gpt-5",
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=opencode_auth.source, target=opencode_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_opencode_ollama_clarification_omits_shared_opencode_store() -> None:
     """Ollama re-asks retain Ollama auth without mounting multi-provider config."""
     opencode_auth = AuthMount(

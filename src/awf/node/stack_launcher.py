@@ -355,11 +355,19 @@ def _clarification_model_provider_auth_mount_targets(
         != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
     ):
         runtime_auth_mount_targets = frozenset()
-    if (
-        agent_runtime is AgentRuntime.opencode
-        and opencode_provider_for_model(agent_model) == "ollama"
-    ):
-        runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
+    if agent_runtime is AgentRuntime.opencode:
+        provider = opencode_provider_for_model(agent_model)
+        if provider == "ollama":
+            runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
+        elif not any(
+            name in _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(provider, frozenset()) and value
+            for name, value in agent_environment
+        ):
+            # Provider readiness permits OpenCode's file auth when no matching
+            # provider environment key is present. Stage that fallback only for
+            # the selected model, so a direct provider key does not expose the
+            # multi-provider OpenCode store to clarification.
+            runtime_auth_mount_targets = frozenset({"/home/agent/.config/opencode"})
     return (
         runtime_auth_mount_targets
         | frozenset(value for name, value in agent_environment if name in names)
