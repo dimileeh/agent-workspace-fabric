@@ -25,17 +25,28 @@ from tests.unit.node.test_stack_launcher_parts._helpers import (
 
 @pytest.mark.unit
 def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
-    """Git mirror/auth inputs never flow from the repair agent into a re-ask."""
+    """Clarification keeps model credentials but never Git repair credentials."""
     mirror = "/host/awf/git/mirrors/repo.git"
     codex_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/codex",
         target="/home/agent/.codex",
         mode="rw",
     )
+    provider_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
+        target="/run/awf/secrets/gcp/credentials.json",
+        mode="ro",
+    )
+    bitbucket_askpass = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/bb-askpass.sh",
+        target="/run/awf/secrets/bb-askpass.sh",
+        mode="ro",
+    )
 
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         (
             ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
             ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
             ("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),
             ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
@@ -47,6 +58,8 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         (
             AuthMount(source=mirror, target=mirror, mode="rw"),
             codex_auth,
+            provider_credentials,
+            bitbucket_askpass,
             AuthMount(
                 source="/home/agent/.config/gh",
                 target="/home/agent/.config/gh",
@@ -62,8 +75,14 @@ def test_clarification_inputs_retain_only_coding_agent_credentials() -> None:
         mirror_target=mirror,
     )
 
-    assert environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
-    assert mounts == (AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),)
+    assert environment == (
+        ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp/credentials.json"),
+    )
+    assert mounts == (
+        AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),
+        provider_credentials,
+    )
 
 
 @pytest.mark.unit

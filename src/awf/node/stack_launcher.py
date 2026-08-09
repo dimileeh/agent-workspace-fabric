@@ -80,16 +80,12 @@ _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 _HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
-_CLARIFICATION_AGENT_AUTH_MOUNT_TARGETS = frozenset(
+_CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     {
-        "/home/agent/.claude",
-        "/home/agent/.claude.json",
-        "/home/agent/.codex",
-        "/home/agent/.config/gcloud",
-        "/home/agent/.config/opencode",
-        "/home/agent/.gemini",
-        "/home/agent/.grok",
-        "/home/agent/.ollama",
+        "/home/agent/.config/gh",
+        "/home/agent/.gitconfig",
+        "/home/agent/.ssh",
+        "/run/awf/secrets/bb-askpass.sh",
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
@@ -119,12 +115,13 @@ def _clarification_auth_mounts(
     *,
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
-    """Return read-only coding-agent sources for clarification copy-on-write."""
+    """Return read-only provider sources without Git access for clarification."""
 
     return tuple(
         replace(mount, mode="ro")
         for mount in auth_mounts
-        if mount.target != mirror_target and mount.target in _CLARIFICATION_AGENT_AUTH_MOUNT_TARGETS
+        if mount.target != mirror_target
+        and mount.target not in _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
     )
 
 
