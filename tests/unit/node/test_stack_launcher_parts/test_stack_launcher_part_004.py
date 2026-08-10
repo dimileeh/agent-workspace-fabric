@@ -551,6 +551,45 @@ def test_clarification_inputs_retain_direct_credentials_for_config_only_claude_m
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "credentials_payload",
+    (
+        "",
+        "{",
+        '{"claudeAiOauth": {}}',
+    ),
+)
+def test_clarification_inputs_retain_direct_credentials_for_unusable_claude_store(
+    tmp_path: Path,
+    credentials_payload: str,
+) -> None:
+    """An unusable Claude OAuth store does not displace direct credentials."""
+    claude_store = tmp_path / "claude"
+    claude_store.mkdir()
+    (claude_store / ".credentials.json").write_text(credentials_payload, encoding="utf-8")
+    environment = (
+        ("ANTHROPIC_API_KEY", "anthropic-token"),
+        ("ANTHROPIC_AUTH_TOKEN", "anthropic-auth-token"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-token"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(
+            AuthMount(
+                source=str(claude_store),
+                target="/home/agent/.claude",
+                mode="rw",
+            ),
+        ),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == environment
+
+
+@pytest.mark.unit
 def test_gemini_clarification_selects_only_its_active_credential_source() -> None:
     """Gemini re-asks do not stage inactive Google or CLI-file credentials."""
     api_key = AuthMount(

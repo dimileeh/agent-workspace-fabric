@@ -403,10 +403,30 @@ def _clarification_has_codex_id_token(value: str) -> bool:
 def _clarification_has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
     """Return whether a staged Claude home supplies its OAuth credential store."""
 
-    return any(
-        mount.target == "/home/agent/.claude"
-        and (Path(mount.source) / ".credentials.json").is_file()
-        for mount in source_mounts
+    for mount in source_mounts:
+        if mount.target != "/home/agent/.claude":
+            continue
+        try:
+            credentials = json.loads(
+                (Path(mount.source) / ".credentials.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if _clarification_has_claude_code_auth_credential(credentials):
+            return True
+    return False
+
+
+def _clarification_has_claude_code_auth_credential(credentials: object) -> bool:
+    """Return whether a Claude credential payload contains an OAuth access token."""
+
+    if not isinstance(credentials, dict):
+        return False
+    oauth = credentials.get("claudeAiOauth")
+    return (
+        isinstance(oauth, dict)
+        and isinstance(access_token := oauth.get("accessToken"), str)
+        and bool(access_token.strip())
     )
 
 
