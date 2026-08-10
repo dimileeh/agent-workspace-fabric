@@ -323,6 +323,52 @@ def test_clarification_inputs_retain_vertex_adc_directory() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback() -> None:
+    """Vertex clarification does not stage inactive ADC beside explicit credentials."""
+    gcloud_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gcloud",
+        target="/home/agent/.config/gcloud",
+        mode="ro",
+    )
+    google_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
+        target="/run/awf/secrets/gcp/credentials.json",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", google_credentials.target),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(gcloud_auth, google_credentials),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (gcloud_auth, google_credentials),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert clarification_mounts == (
+        AuthMount(
+            source=google_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials() -> None:
     """Claude file auth wins over direct credentials for clarification."""
     claude_auth = AuthMount(
