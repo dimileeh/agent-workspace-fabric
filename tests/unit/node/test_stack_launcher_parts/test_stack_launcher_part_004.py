@@ -1405,6 +1405,57 @@ def test_claude_bedrock_clarification_resolves_defaulted_web_identity_token_plac
 
 
 @pytest.mark.unit
+def test_claude_bedrock_clarification_honors_defaulted_web_identity_token_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bedrock clarification stages the web identity token override."""
+    fallback_token = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/default-aws-web-identity-token",
+        target="/run/awf/secrets/default-token",
+        mode="ro",
+    )
+    override_token = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/override-aws-web-identity-token",
+        target="/run/awf/secrets/override-token",
+        mode="ro",
+    )
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", override_token.target)
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        (
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            f"${{AWS_WEB_IDENTITY_TOKEN_FILE:-{fallback_token.target}}}",
+        ),
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+    auth_mounts = (fallback_token, override_token)
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=auth_mounts,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        auth_mounts,
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=override_token.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_claude_bedrock_clarification_resolves_bare_web_identity_token_placeholder() -> None:
     """Bedrock clarification stages an unambiguous dynamic token mount."""
     web_identity_token = AuthMount(

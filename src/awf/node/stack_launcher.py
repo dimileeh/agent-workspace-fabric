@@ -559,8 +559,8 @@ def _clarification_resolve_aws_web_identity_token_file_placeholder(
         if len(dynamic_targets) != 1:
             return agent_environment
         token_file = dynamic_targets[0]
-    elif match := _AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE.fullmatch(token_file or ""):
-        token_file = match.group("target")
+    elif _AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE.fullmatch(token_file or ""):
+        token_file = compose_expand_value(token_file or "", environ=os.environ)
     else:
         return agent_environment
     return tuple(
