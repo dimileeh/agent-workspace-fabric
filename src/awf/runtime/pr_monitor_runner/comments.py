@@ -1020,7 +1020,7 @@ async def _enforce_needs_human_reason(
                 ProviderRecoveryRetryError,
             ),
         ):
-            raise
+            needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
     else:
         sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
         reask_needs_human_reason = (
