@@ -99,6 +99,13 @@ _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES = frozenset(
         "CODEX_AUTH_TOKEN",
     }
 )
+_CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
+)
 _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -249,6 +256,14 @@ def _clarification_agent_environment(
         # static environment credentials, while non-secret endpoint settings
         # remain available to the clarification re-ask.
         clarification_environment_names -= _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES
+    if agent_runtime is AgentRuntime.claude_code and any(
+        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.claude_code]
+        for mount in source_mounts
+    ):
+        # Match Claude readiness: an isolated file-auth mount is preferred to
+        # static environment credentials, while non-secret endpoint settings
+        # remain available to the clarification re-ask.
+        clarification_environment_names -= _CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES
 
     return tuple(
         (name, staged_targets.get(value, value))

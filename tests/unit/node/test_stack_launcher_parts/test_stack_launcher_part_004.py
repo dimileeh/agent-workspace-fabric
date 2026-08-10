@@ -264,8 +264,8 @@ def test_clarification_inputs_retain_vertex_adc_directory() -> None:
 
 
 @pytest.mark.unit
-def test_clarification_inputs_retain_direct_claude_credentials() -> None:
-    """Direct Anthropic clarification retains its credentials and auth mount."""
+def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials() -> None:
+    """Claude file auth wins over direct credentials for clarification."""
     claude_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/claude",
         target="/home/agent/.claude",
@@ -300,7 +300,12 @@ def test_clarification_inputs_retain_direct_claude_credentials() -> None:
         agent_runtime=AgentRuntime.claude_code,
     )
 
-    assert clarification_environment == environment[:-1]
+    assert clarification_environment == (
+        ("ANTHROPIC_BASE_URL", "https://anthropic.example.test"),
+        ("ANTHROPIC_SMALL_FAST_MODEL", "claude-fast"),
+        ("CLAUDE_CODE_USE_BEDROCK", "0"),
+        ("CLAUDE_CODE_USE_VERTEX", "0"),
+    )
     assert clarification_mounts == (
         AuthMount(source=claude_auth.source, target=claude_auth.target, mode="ro"),
     )
