@@ -13,6 +13,8 @@ from awf.adapters.runtime_executor import AgentRuntimeExecResult
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.node.git_manager import linked_worktree_git_dir, mirror_path_for_worktree
 
+_ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
+
 
 def _isolated_reask_git_metadata_volume_binds(
     worktree_path: Path,
@@ -63,7 +65,7 @@ def _isolated_reask_git_metadata_volume_binds(
         (common_path / "config").unlink(missing_ok=True)
         shutil.copyfile(linked_git_dir / "HEAD", snapshot_path / "HEAD")
         (snapshot_path / "commondir").write_text(
-            f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common\n", encoding="utf-8"
+            f"{_ISOLATED_REASK_COMMON_GIT_DIR}\n", encoding="utf-8"
         )
         (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
         source_index = linked_git_dir / "index"
@@ -75,7 +77,7 @@ def _isolated_reask_git_metadata_volume_binds(
         return None, ()
     return temporary_metadata, (
         (snapshot_path, str(linked_git_dir)),
-        (common_path, f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common"),
+        (common_path, _ISOLATED_REASK_COMMON_GIT_DIR),
     )
 
 

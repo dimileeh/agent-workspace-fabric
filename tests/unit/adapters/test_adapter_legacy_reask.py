@@ -285,7 +285,8 @@ class TestIsolatedReaskAdapter:
         )
         assert not any(value.endswith(f":{mirror_path / 'objects'}:ro") for value in args)
         assert not any(value.endswith(f":{mirror_path / 'refs'}:ro") for value in args)
-        assert any(
+        assert any(value.endswith(":/awf-clarification-git-common:ro") for value in args)
+        assert not any(
             value.endswith(f":{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common:ro")
             for value in args
         )
@@ -320,6 +321,9 @@ class TestIsolatedReaskAdapter:
                 "index",
             }
             assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/reask\n"
+            assert (snapshot_path / "commondir").read_text(
+                encoding="utf-8"
+            ) == "/awf-clarification-git-common\n"
             assert (snapshot_path / "gitdir").read_text(encoding="utf-8") == "/workspace/.git\n"
             common_path = Path(temporary_metadata.name) / "common-git"
             assert (common_path / "config").exists() is False
@@ -343,7 +347,7 @@ class TestIsolatedReaskAdapter:
             assert binds[1:] == (
                 (
                     common_path,
-                    f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common",
+                    "/awf-clarification-git-common",
                 ),
             )
         finally:
