@@ -187,8 +187,10 @@ async def test_ccusage_argv_per_provider(
 @pytest.mark.unit
 async def test_isolated_run_imports_ccusage_samples_before_container_removal(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A clarification re-ask reads its disposable copied auth state, not ``agent``."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
     collector = CcusageCollector(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
@@ -231,8 +233,11 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
 
 
 @pytest.mark.unit
-async def test_isolated_run_records_missing_capture_as_unavailable(tmp_path: Path) -> None:
+async def test_isolated_run_records_missing_capture_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A timed-out re-ask cannot report stale usage when its final capture is absent."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
     collector = CcusageCollector(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
@@ -301,10 +306,12 @@ async def test_isolated_run_records_capture_setup_failure_as_unavailable(
 )
 async def test_isolated_run_preserves_ccusage_failure_reason(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     returncode: int,
     stderr: str,
     expected_reason: str,
 ) -> None:
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
     collector = CcusageCollector(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
