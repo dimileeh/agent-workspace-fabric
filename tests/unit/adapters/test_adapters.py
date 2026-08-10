@@ -631,6 +631,58 @@ class TestCodexAdapter:
         assert "run" in runner.calls[5].args
 
     @pytest.mark.unit
+    async def test_isolated_reask_surfaces_legacy_model_service_recovery_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Report a failed rollback recovery instead of the original update failure."""
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "ollama-sidecar": {
+                            "image": "ollama/ollama:latest",
+                            "networks": ["awf_net"],
+                        },
+                        "agent": {
+                            "image": "awf-agent-runtime:latest",
+                            "environment": {
+                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                            },
+                            "networks": ["awf_net"],
+                        },
+                    },
+                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result()
+        runner.queue_result()
+        runner.queue_result(returncode=1, stderr="could not restore model sidecar")
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+        assert exc.value.result.returncode == 1
+        assert exc.value.result.stderr == "could not restore model sidecar"
+        assert exc.value.details == {"services": ("ollama-sidecar",)}
+        assert len(runner.calls) == 4
+        assert "run" not in runner.calls[-1].args
+
+    @pytest.mark.unit
     async def test_isolated_reask_does_not_start_model_sidecar_when_legacy_restore_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
