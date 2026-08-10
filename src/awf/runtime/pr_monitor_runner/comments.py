@@ -950,6 +950,7 @@ async def _enforce_needs_human_reason(
                         break
         raise cancellation
 
+    needs_human_reason_code = _NEEDS_HUMAN_REASON_MISSING
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
@@ -967,9 +968,6 @@ async def _enforce_needs_human_reason(
         )
     except (
         ComposeExecCleanupError,
-        ProviderRecoveryAuthError,
-        ProviderRecoveryFallbackError,
-        ProviderRecoveryRetryError,
         _MonitorAgentServiceRecoveryFailedError,
         _MonitorAgentServiceRecoverySupersededError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -1014,6 +1012,18 @@ async def _enforce_needs_human_reason(
                 cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             ) from exc
+        if isinstance(
+            exc,
+            (
+                ProviderRecoveryAuthError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryRetryError,
+            ),
+        ):
+            # Provider recovery is actionable for a repair invocation, but a
+            # reason-only re-ask is advisory: the initial blocking verdict
+            # remains valid when its clarification cannot be obtained.
+            needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
     else:
         sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
         reask_needs_human_reason = (
@@ -1051,6 +1061,7 @@ async def _enforce_needs_human_reason(
         operation_id=operation_id,
         operation_type=operation_type,
         monitor_log=monitor_log,
+        reason_code=needs_human_reason_code,
     )
     return result
 
