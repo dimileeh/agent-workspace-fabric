@@ -263,13 +263,25 @@ async def test_isolated_run_records_missing_capture_as_unavailable(
 
 
 @pytest.mark.unit
-async def test_isolated_run_records_capture_setup_failure_as_unavailable(
+async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _fail_capture_setup(_work_dir: Path) -> Path:
         raise PermissionError("capture ownership denied")
 
     monkeypatch.setattr(usage_collection, "_make_isolated_capture_dir", _fail_capture_setup)
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_capture_setup_failure",
+            provider="codex",
+            ccusage_source="codex",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=42,
+        ),
+        work_dir=tmp_path,
+    )
     collector = CcusageCollector(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
@@ -291,8 +303,9 @@ async def test_isolated_run_records_capture_setup_failure_as_unavailable(
     snapshot = read_latest_usage_snapshot("ws_capture_setup_failure", work_dir=tmp_path)
     assert snapshot is not None
     assert snapshot.phase == "final"
-    assert snapshot.status == "unavailable"
+    assert snapshot.status == "available"
     assert snapshot.reason == "ccusage_command_failed"
+    assert snapshot.total_tokens == 42
 
 
 @pytest.mark.unit

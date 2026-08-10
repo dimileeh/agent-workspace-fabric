@@ -182,6 +182,7 @@ class CcusageCollector(UsageSampler):
 
         source = provider_ccusage_source(provider)
         capture_unavailable_reason: str | None = None
+        prior_snapshot: UsageSnapshot | None = None
         try:
             prior_snapshot = await asyncio.to_thread(
                 read_latest_usage_snapshot,
@@ -201,7 +202,6 @@ class CcusageCollector(UsageSampler):
                 workspace_id=workspace_id,
                 exc_info=True,
             )
-            prior_snapshot = None
             capture_dir = None
             capture_unavailable_reason = REASON_COMMAND_FAILED
         return _IsolatedCcusageSampleContext(
