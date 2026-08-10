@@ -231,7 +231,10 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f"{helper_target} --output {output_target}",
+                        "command": (
+                            f"printf '%s' {helper_target}-backup && "
+                            f"{helper_target} --output {output_target} | jq -c ."
+                        ),
                         "output_file": output_target,
                     }
                 },
@@ -286,7 +289,10 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
         "executable"
     ]
     assert executable == {
-        "command": f"{staged_helper} --output {staged_output}",
+        "command": (
+            f"printf '%s' {helper_target}-backup && "
+            f"{staged_helper} --output {staged_output} | jq -c ."
+        ),
         "output_file": str(staged_output),
     }
 
@@ -309,7 +315,10 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f"{helper_target} --output {output_target}",
+                        "command": (
+                            f"printf '%s' {helper_target}-backup && "
+                            f"{helper_target} --output {output_target} | jq -c ."
+                        ),
                         "output_file": output_target,
                     }
                 },
@@ -346,7 +355,10 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
         "executable"
     ]
     assert executable == {
-        "command": f"{staged_helper} --output {staged_output}",
+        "command": (
+            f"printf '%s' {helper_target}-backup && "
+            f"{staged_helper} --output {staged_output} | jq -c ."
+        ),
         "output_file": str(staged_output),
     }
 
