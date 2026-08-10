@@ -321,37 +321,13 @@ def external_account_credential_source_paths(
 ) -> tuple[str, ...]:
     """Return declared paths needed by a selected external-account ADC."""
 
-    google_credentials = dict(agent_environment).get("GOOGLE_APPLICATION_CREDENTIALS")
-    if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
-        return ()
-    adc_mount = next(
-        (
-            mount
-            for mount in auth_mounts
-            if mount.target != mirror_target
-            and (
-                mount.target == google_credentials
-                or path_is_below(google_credentials, mount.target)
-            )
-        ),
-        None,
+    credential_source = _external_account_credential_source(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
     )
-    if adc_mount is None:
-        return ()
-    adc_source = mounted_file_source(adc_mount, google_credentials)
-    if adc_source is None:
-        return ()
-    try:
-        adc_configuration = json.loads(adc_source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ()
-    if (
-        not isinstance(adc_configuration, dict)
-        or adc_configuration.get("type") != "external_account"
-    ):
-        return ()
-    credential_source = adc_configuration.get("credential_source")
-    if not isinstance(credential_source, dict):
+    if credential_source is None:
         return ()
 
     paths: list[str] = []
@@ -373,6 +349,68 @@ def external_account_credential_source_paths(
     if isinstance(output_file, str) and output_file.startswith("/"):
         paths.append(posixpath.normpath(output_file))
     return tuple(dict.fromkeys(paths))
+
+
+def is_aws_external_account_credential_source(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_environment_names: frozenset[str],
+    mirror_target: str,
+) -> bool:
+    """Return whether the selected external-account ADC obtains credentials from AWS."""
+
+    credential_source = _external_account_credential_source(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
+    )
+    return credential_source is not None and credential_source.get("environment_id") == "aws1"
+
+
+def _external_account_credential_source(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_environment_names: frozenset[str],
+    mirror_target: str,
+) -> dict[str, object] | None:
+    """Return the credential source from the selected external-account ADC."""
+
+    google_credentials = dict(agent_environment).get("GOOGLE_APPLICATION_CREDENTIALS")
+    if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
+        return None
+    adc_mount = next(
+        (
+            mount
+            for mount in auth_mounts
+            if mount.target != mirror_target
+            and (
+                mount.target == google_credentials
+                or path_is_below(google_credentials, mount.target)
+            )
+        ),
+        None,
+    )
+    if adc_mount is None:
+        return None
+    adc_source = mounted_file_source(adc_mount, google_credentials)
+    if adc_source is None:
+        return None
+    try:
+        adc_configuration = json.loads(adc_source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(adc_configuration, dict)
+        or adc_configuration.get("type") != "external_account"
+    ):
+        return None
+    credential_source = adc_configuration.get("credential_source")
+    if not isinstance(credential_source, dict):
+        return None
+    return credential_source
 
 
 def external_account_subject_token_mounts(

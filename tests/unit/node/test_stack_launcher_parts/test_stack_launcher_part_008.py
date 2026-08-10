@@ -623,6 +623,69 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("environment_id", "expected_aws_environment"),
+    (
+        (
+            "aws1",
+            (
+                ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+                ("AWS_SECRET_ACCESS_KEY", "static-secret"),
+                ("AWS_SESSION_TOKEN", "static-session-token"),
+                ("AWS_REGION", "us-east-1"),
+                ("AWS_DEFAULT_REGION", "us-west-2"),
+            ),
+        ),
+        ("azure1", ()),
+    ),
+)
+def test_clarification_retains_aws_inputs_only_for_gemini_aws_external_account_adc(
+    tmp_path: Path,
+    environment_id: str,
+    expected_aws_environment: tuple[tuple[str, str], ...],
+) -> None:
+    """Only Gemini AWS external-account ADC retains injected AWS credentials."""
+    adc_config = tmp_path / "external-account-adc.json"
+    adc_target = "/run/awf/secrets/google/external-account-adc.json"
+    adc_config.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"environment_id": environment_id},
+            }
+        ),
+        encoding="utf-8",
+    )
+    adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
+    environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+        ("AWS_SECRET_ACCESS_KEY", "static-secret"),
+        ("AWS_SESSION_TOKEN", "static-session-token"),
+        ("AWS_REGION", "us-east-1"),
+        ("AWS_DEFAULT_REGION", "us-west-2"),
+        ("AWS_PROFILE", "must-not-leak"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(adc_mount,),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    )
+
+    assert (
+        clarification_environment
+        == (
+            ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
+        )
+        + expected_aws_environment
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("agent_runtime", "environment"),
     (
         (

@@ -67,6 +67,9 @@ from awf.node.stack_launcher_auth_helpers import (
     has_codex_file_auth as _clarification_has_codex_file_auth,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    is_aws_external_account_credential_source as _clarification_is_aws_external_account_credential_source,
+)
+from awf.node.stack_launcher_auth_helpers import (
     path_is_below as _clarification_path_is_below,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -270,6 +273,15 @@ _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES = frozenset(
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES = frozenset(
     {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
 )
+_CLARIFICATION_GEMINI_AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    }
+)
 _CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
     {
         "ANTHROPIC_VERTEX_PROJECT_ID",
@@ -326,6 +338,16 @@ def _clarification_agent_environment(
         if source.target != staged.target
     )
     clarification_environment_names = provider_environment_names
+    if (
+        agent_runtime is AgentRuntime.gemini
+        and _clarification_is_aws_external_account_credential_source(
+            auth_mounts,
+            agent_environment=agent_environment,
+            provider_environment_names=provider_environment_names,
+            mirror_target=mirror_target,
+        )
+    ):
+        clarification_environment_names |= _CLARIFICATION_GEMINI_AWS_EXTERNAL_ACCOUNT_ENV_NAMES
     if (
         prefer_file_auth
         and agent_runtime is AgentRuntime.codex
