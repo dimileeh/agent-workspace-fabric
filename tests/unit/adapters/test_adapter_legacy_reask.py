@@ -428,6 +428,44 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_copy_split_index_backing_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A split index snapshot remains usable by Git in the clarification worktree."""
+        _mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        _git(["update-index", "--split-index"], worktree_path)
+        shared_index_path = (
+            worktree_path / _git(["rev-parse", "--shared-index-path"], worktree_path).stdout.strip()
+        ).resolve()
+        assert shared_index_path.is_file()
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is not None
+        try:
+            snapshot_path = Path(temporary_metadata.name) / "linked-git"
+            snapshot_shared_index_path = snapshot_path / shared_index_path.name
+            assert snapshot_shared_index_path.read_bytes() == shared_index_path.read_bytes()
+
+            common_path = Path(temporary_metadata.name) / "common-git"
+            (snapshot_path / "commondir").write_text(f"{common_path}\n", encoding="utf-8")
+            inspection_worktree = tmp_path / "inspection-worktree"
+            inspection_worktree.mkdir()
+            (inspection_worktree / ".git").write_text(
+                f"gitdir: {snapshot_path}\n", encoding="utf-8"
+            )
+            status = subprocess.run(
+                ["git", "-C", str(inspection_worktree), "status", "--porcelain"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert status.returncode == 0, status.stderr
+        finally:
+            temporary_metadata.cleanup()
+
     def test_isolated_reask_git_metadata_binds_skip_snapshot_when_clone_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
