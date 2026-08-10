@@ -503,6 +503,88 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_persists_completed_cleanup_failure_before_repeat_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed cleanup error is durable even when a repeat cancel wins the await race."""
+    persisted_errors: list[str] = []
+    state = MonitorState()
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        raise asyncio.CancelledError
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "e" * 40
+
+    async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> str:
+        return "could not inspect primary worktree"
+
+    async def _persist_reask_cleanup_failure_after_cancellation(
+        _runner: object,
+        **kwargs: object,
+    ) -> None:
+        persisted_errors.append(str(kwargs["cleanup_error"]))
+
+    original_shield = comments.asyncio.shield
+    shield_calls = 0
+
+    async def _cancel_after_completed_cleanup(task: object) -> object:
+        nonlocal shield_calls
+        shield_calls += 1
+        result = await original_shield(task)
+        if shield_calls == 1:
+            raise asyncio.CancelledError
+        return result
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_persist_reask_cleanup_failure_after_cancellation",
+        _persist_reask_cleanup_failure_after_cancellation,
+    )
+    monkeypatch.setattr(comments.asyncio, "shield", _cancel_after_completed_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=state,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert persisted_errors == ["could not inspect primary worktree"]
+    assert shield_calls == 2
+    assert state.threads_addressed_ids == {"thread_1": "needs_human"}
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("workspace_exists", (True, False))
 @pytest.mark.parametrize("item_kind", ("thread", "review"))
 @pytest.mark.parametrize(

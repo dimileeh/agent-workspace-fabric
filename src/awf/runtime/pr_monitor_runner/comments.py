@@ -804,65 +804,66 @@ async def _enforce_needs_human_reason(
         """Complete re-ask cleanup before propagating any worker cancellation."""
         cleanup_task = asyncio.create_task(_run_reask_cleanup(event_name=event_name))
         cancellation: asyncio.CancelledError | None = None
+        cleanup_result: tuple[str | None, bool] | None = None
         while True:
             try:
                 cleanup_result = await asyncio.shield(cleanup_task)
             except asyncio.CancelledError as exc:
                 cancellation = exc
                 if cleanup_task.done():
-                    cleanup_task.result()
-                    raise
+                    cleanup_result = cleanup_task.result()
+                    break
             else:
-                if cancellation is not None:
-                    cleanup_error, _isolated_cleanup_failed = cleanup_result
-                    if cleanup_error is not None:
-                        if state is not None:
-                            state.mark_addressed(item_id, "needs_human")
-                            if (
-                                item_body_hash is not None
-                                and (
-                                    body_state_key := _review_item_body_state_key(
-                                        item_id, item_kind
-                                    )
-                                )
-                                is not None
-                            ):
-                                state.mark_addressed(body_state_key, item_body_hash)
-                            reason_key = _needs_human_reason_state_key(item_id)
-                            if needs_human_reason is not None:
-                                state.mark_addressed(reason_key, needs_human_reason)
-                            else:
-                                state.threads_addressed_ids.pop(reason_key, None)
-                        persistence_task = asyncio.create_task(
-                            _persist_reask_cleanup_failure_after_cancellation(
-                                runner,
-                                workspace_id=workspace_id,
-                                pr_number=pr_number,
-                                item_id=item_id,
-                                item_kind=item_kind,
-                                item_author=item_author,
-                                item_path=item_path,
-                                item_line=item_line,
-                                needs_human_reason=needs_human_reason,
-                                item_body_hash=item_body_hash,
-                                cleanup_error=cleanup_error,
-                                base_branch=base_branch,
-                                remote_branch=remote_branch,
-                                operation_id=operation_id,
-                                operation_type=operation_type,
-                                monitor_log=monitor_log,
-                            )
-                        )
-                        while True:
-                            try:
-                                await asyncio.shield(persistence_task)
-                                break
-                            except asyncio.CancelledError:
-                                if persistence_task.done():
-                                    persistence_task.result()
-                                    break
-                    raise cancellation
-                return cleanup_result
+                break
+
+        assert cleanup_result is not None
+        if cancellation is None:
+            return cleanup_result
+
+        cleanup_error, _isolated_cleanup_failed = cleanup_result
+        if cleanup_error is not None:
+            if state is not None:
+                state.mark_addressed(item_id, "needs_human")
+                if (
+                    item_body_hash is not None
+                    and (body_state_key := _review_item_body_state_key(item_id, item_kind))
+                    is not None
+                ):
+                    state.mark_addressed(body_state_key, item_body_hash)
+                reason_key = _needs_human_reason_state_key(item_id)
+                if needs_human_reason is not None:
+                    state.mark_addressed(reason_key, needs_human_reason)
+                else:
+                    state.threads_addressed_ids.pop(reason_key, None)
+            persistence_task = asyncio.create_task(
+                _persist_reask_cleanup_failure_after_cancellation(
+                    runner,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    item_id=item_id,
+                    item_kind=item_kind,
+                    item_author=item_author,
+                    item_path=item_path,
+                    item_line=item_line,
+                    needs_human_reason=needs_human_reason,
+                    item_body_hash=item_body_hash,
+                    cleanup_error=cleanup_error,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                )
+            )
+            while True:
+                try:
+                    await asyncio.shield(persistence_task)
+                    break
+                except asyncio.CancelledError:
+                    if persistence_task.done():
+                        persistence_task.result()
+                        break
+        raise cancellation
 
     try:
         reask_result = await runner._invoke_cli_for_verdict_result(
