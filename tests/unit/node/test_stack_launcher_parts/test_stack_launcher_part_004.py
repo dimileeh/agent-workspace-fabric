@@ -1515,6 +1515,53 @@ def test_clarification_inputs_resolve_host_auth_claude_backend_toggle(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("toggle", "enabled_value"),
+    [
+        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+        ("GOOGLE_GENAI_USE_GCA", "yes"),
+    ],
+)
+def test_clarification_inputs_resolve_host_auth_gemini_google_cloud_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+    toggle: str,
+    enabled_value: str,
+) -> None:
+    """Host-auth Compose placeholders select Gemini Google Cloud ADC."""
+    gcloud_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gcloud",
+        target="/home/agent/.config/gcloud",
+        mode="ro",
+    )
+    gemini_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gemini",
+        target="/home/agent/.gemini",
+        mode="rw",
+    )
+    monkeypatch.setenv(toggle, enabled_value)
+    agent_environment = (
+        (toggle, f"${{{toggle}}}"),
+        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+    )
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            agent_environment,
+            auth_mounts=(gcloud_auth, gemini_auth),
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == agent_environment
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (gcloud_auth, gemini_auth),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
+
+
+@pytest.mark.unit
 def test_clarification_environment_computes_provider_names_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

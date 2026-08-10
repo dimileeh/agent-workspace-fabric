@@ -420,7 +420,8 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
     if environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN"):
         return "access_token"
     if any(
-        environment_values.get(name, "").lower() in {"1", "true", "yes"}
+        compose_expand_value(environment_values.get(name, ""), environ=os.environ).lower()
+        in {"1", "true", "yes"}
         for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
     ):
         return "google_cloud"
