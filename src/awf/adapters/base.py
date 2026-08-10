@@ -13,12 +13,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from awf.adapters.clarification_migration import (
+    _reap_persisted_clarification_model_migration,
+    _restore_compose_file,
+)
 from awf.adapters.failure_reasons import _failure_reason_for_result
 from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.registry_api import (
@@ -40,9 +43,9 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
     AgentRuntimeGitPreparation,
 )
+from awf.adapters.runtime_usage_sampling import start_isolated_usage_sampling
 from awf.adapters.usage import (
     IsolatedUsageSampleContext,
-    IsolatedUsageSampler,
     UsageSampleContext,
     UsageSampler,
 )
@@ -101,69 +104,6 @@ _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
-
-
-def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
-    """Atomically restore a Compose file after its sidecar update fails."""
-    temporary_path: Path | None = None
-    try:
-        file_mode = compose_file.stat().st_mode & 0o777
-        fd, raw_temporary_path = tempfile.mkstemp(
-            prefix=f".{compose_file.name}.", suffix=".tmp", dir=compose_file.parent
-        )
-        temporary_path = Path(raw_temporary_path)
-        with os.fdopen(fd, "wb") as temporary_file:
-            temporary_file.write(contents)
-        temporary_path.chmod(file_mode)
-        temporary_path.replace(compose_file)
-    finally:
-        if temporary_path is not None:
-            with contextlib.suppress(OSError):
-                temporary_path.unlink()
-
-
-async def _reap_persisted_clarification_model_migration(
-    runner: AsyncCommandRunner,
-    *,
-    compose_project: str,
-    compose_file: Path,
-    workspace_id: str | None,
-    clarification_model_services: tuple[str, ...],
-) -> CommandResult:
-    """Remove migrated sidecars and return the result of reaping their network."""
-    with contextlib.suppress(Exception):
-        await runner.run(
-            [
-                "docker",
-                "compose",
-                "-p",
-                compose_project,
-                "-f",
-                str(compose_file),
-                "rm",
-                "--stop",
-                "--force",
-                *clarification_model_services,
-            ]
-        )
-    network_name = (
-        f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net"
-    )
-    network_reap_result = await runner.run(
-        [
-            "docker",
-            "network",
-            "rm",
-            network_name,
-        ]
-    )
-    if not network_reap_result.ok and network_reap_result.stderr.rstrip().endswith(
-        f"network {network_name} not found"
-    ):
-        # Another teardown can win the network-removal race. Docker reports
-        # that idempotent state as an error, but the migration is reaped.
-        return CommandResult(returncode=0, stdout=network_reap_result.stdout, stderr="")
-    return network_reap_result
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -863,51 +803,13 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext | None:
-        """Start isolated usage capture without abandoning setup on cancellation."""
-        sampler = self._usage_sampler
-        if sampler is None or workspace_id is None or not isinstance(sampler, IsolatedUsageSampler):
-            return None
-        start_task = asyncio.create_task(
-            sampler.start_isolated(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                workspace_id=workspace_id,
-                provider=self.name,
-                cli_args=cli_args,
-            )
+        return await start_isolated_usage_sampling(
+            self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            cli_args=cli_args,
         )
-        try:
-            return await asyncio.shield(start_task)
-        except asyncio.CancelledError:
-            # ``start_isolated`` creates its capture directory in a worker
-            # thread. Keep the task alive through cancellation so a context
-            # returned after that worker finishes can remove the directory.
-            while not start_task.done():
-                with contextlib.suppress(BaseException):
-                    await asyncio.shield(start_task)
-            try:
-                sampler_ctx = start_task.result()
-            except (Exception, asyncio.CancelledError):
-                pass
-            else:
-                finalize_task = asyncio.create_task(
-                    self._finalize_usage_sampling(
-                        sampler_ctx, status="cancelled", workspace_id=workspace_id
-                    )
-                )
-                while not finalize_task.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(finalize_task)
-            raise
-        except Exception:
-            _log.warning(
-                "usage.collect.error",
-                agent=self.name.value,
-                workspace_id=workspace_id,
-                phase="start_isolated",
-                exc_info=True,
-            )
-            return None
 
     async def _finalize_usage_sampling(
         self,
