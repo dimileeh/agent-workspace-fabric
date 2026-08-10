@@ -591,7 +591,19 @@ class AgentAdapter(ABC):
                         while not recovery_task.done():
                             with contextlib.suppress(asyncio.CancelledError):
                                 await asyncio.shield(recovery_task)
-                        cancelled_recovery_result = recovery_task.result()
+                        try:
+                            cancelled_recovery_result = recovery_task.result()
+                        except Exception as exc:
+                            raise AgentRunError(
+                                agent=self.name,
+                                result=CommandResult(
+                                    returncode=1,
+                                    stdout="",
+                                    stderr=f"{type(exc).__name__}: {exc}",
+                                ),
+                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                                details={"services": clarification_model_services},
+                            ) from exc
                         if not cancelled_recovery_result.ok:
                             raise AgentRunError(
                                 agent=self.name,

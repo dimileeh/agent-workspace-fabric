@@ -859,7 +859,7 @@ class TestIsolatedReaskAdapter:
             monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_recovery_shield)
 
         if recovery_raises:
-            with pytest.raises(RuntimeError, match="could not restore model sidecar"):
+            with pytest.raises(AgentRunError) as exc:
                 await adapter.run(
                     compose_project="awf_ws_legacy",
                     compose_file=compose_file,
@@ -868,6 +868,11 @@ class TestIsolatedReaskAdapter:
                     workspace_id="ws_legacy",
                     isolated_worktree_host_path=tmp_path / "reask",
                 )
+
+            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+            assert exc.value.result.returncode == 1
+            assert exc.value.result.stderr == "RuntimeError: could not restore model sidecar"
+            assert exc.value.details == {"services": ("ollama-sidecar",)}
             assert shield_calls == 3
         else:
             with pytest.raises(AgentRunError) as exc:
