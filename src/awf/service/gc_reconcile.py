@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -47,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.companions import (
     is_isolated_reask_worktree_id,
+    isolated_reask_worktree_liveness_lock_path,
     parent_workspace_id_from_companion_worktree_id,
 )
 from awf.common.logging import get_logger
@@ -236,6 +239,16 @@ def scan_orphan_workspace_dirs(
             if entry.is_symlink() or not entry.is_dir():
                 continue
             scanned += 1
+            # The monitor takes this lock before ``git worktree add`` and holds
+            # it until its clarification container and Git cleanup have
+            # finished. It therefore closes the zero-grace race while an
+            # unlocked marker from a crashed monitor remains reapable.
+            if (
+                kind == "worktree"
+                and is_isolated_reask_worktree_id(entry.name)
+                and is_active_isolated_reask_worktree(entry)
+            ):
+                continue
             owner_id = (
                 parent_workspace_id_from_companion_worktree_id(entry.name)
                 if kind == "worktree" and not is_isolated_reask_worktree_id(entry.name)
@@ -272,6 +285,29 @@ def scan_orphan_workspace_dirs(
         dropped = len(candidates) - limit
         candidates = candidates[:limit]
     return tuple(candidates), scanned, dropped, young_orphan
+
+
+def is_active_isolated_reask_worktree(worktree_path: Path) -> bool:
+    """Return whether a monitor holds the re-ask's advisory liveness lock.
+
+    An absent marker is an old pre-lock checkout or an interrupted re-ask and
+    is intentionally reapable. Any error other than absence fails closed: GC
+    must not delete a checkout when it cannot determine whether it is live.
+    """
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree_path)
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(lock_fd)
+    return False
 
 
 def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +13,7 @@ ISOLATED_REASK_COMPANION_NAME_PREFIX = "isolated_reask_"
 ISOLATED_REASK_WORKTREE_SUFFIX = (
     f"{COMPANION_WORKTREE_MARKER}{ISOLATED_REASK_COMPANION_NAME_PREFIX}"
 )
+ISOLATED_REASK_LIVENESS_LOCK_DIR = ".awf-isolated-reask-locks"
 RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "docker"})
 _GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
@@ -74,6 +76,11 @@ def is_isolated_reask_worktree_id(worktree_id: str) -> bool:
         return len(reask_suffix) == 32 and UUID(hex=reask_suffix).hex == reask_suffix
     except ValueError:
         return False
+
+
+def isolated_reask_worktree_liveness_lock_path(worktree_path: Path) -> Path:
+    """Return the advisory-lock marker that protects one active re-ask checkout."""
+    return worktree_path.parent / ISOLATED_REASK_LIVENESS_LOCK_DIR / f"{worktree_path.name}.lock"
 
 
 def workspace_and_companion_ids(

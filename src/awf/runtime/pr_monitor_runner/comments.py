@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -13,7 +16,10 @@ from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
-from awf.common.companions import ISOLATED_REASK_WORKTREE_SUFFIX
+from awf.common.companions import (
+    ISOLATED_REASK_WORKTREE_SUFFIX,
+    isolated_reask_worktree_liveness_lock_path,
+)
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
@@ -88,6 +94,8 @@ class _IsolatedReaskWorktree:
 
     source_worktree: Path
     path: Path
+    liveness_lock_fd: int | None = None
+    liveness_lock_path: Path | None = None
 
 
 class _IsolatedReaskWorktreeCleanupFailedError(_MonitorPolicyBlockedError):
@@ -169,9 +177,18 @@ async def _create_isolated_reask_worktree(
     path = worktree_path.parent / (
         f"{worktree_path.name}{ISOLATED_REASK_WORKTREE_SUFFIX}{uuid4().hex}"
     )
+    try:
+        liveness_lock_fd, liveness_lock_path = _acquire_isolated_reask_liveness_lock(path)
+    except OSError as exc:
+        raise _MonitorPolicyBlockedError(
+            "Could not protect the isolated worktree before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
     reask_worktree = _IsolatedReaskWorktree(
         source_worktree=worktree_path,
         path=path,
+        liveness_lock_fd=liveness_lock_fd,
+        liveness_lock_path=liveness_lock_path,
     )
     try:
         create = await runner._deps.runner.run(
@@ -184,6 +201,9 @@ async def _create_isolated_reask_worktree(
                 restore_ref,
             )
         )
+    except (GitOperationError, OSError, RuntimeError):
+        _release_isolated_reask_liveness_lock(reask_worktree)
+        raise
     except asyncio.CancelledError:
         # Git may have registered the worktree before cancellation reaches the
         # command runner. Remove that checkout before preserving cancellation.
@@ -262,18 +282,46 @@ async def _remove_isolated_reask_worktree(
     if reask_worktree is None:
         return None
 
-    remove = await runner._deps.runner.run(
-        git_worktree_command(
-            reask_worktree.source_worktree,
-            "worktree",
-            "remove",
-            "--force",
-            str(reask_worktree.path),
+    try:
+        remove = await runner._deps.runner.run(
+            git_worktree_command(
+                reask_worktree.source_worktree,
+                "worktree",
+                "remove",
+                "--force",
+                str(reask_worktree.path),
+            )
         )
-    )
-    if remove.ok:
-        return None
-    return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+        if remove.ok:
+            return None
+        return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+    finally:
+        _release_isolated_reask_liveness_lock(reask_worktree)
+
+
+def _acquire_isolated_reask_liveness_lock(path: Path) -> tuple[int, Path]:
+    """Lock a re-ask before Git creates its checkout so GC never sees it bare."""
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+        raise
+    return lock_fd, lock_path
+
+
+def _release_isolated_reask_liveness_lock(reask_worktree: _IsolatedReaskWorktree) -> None:
+    """Release and remove the re-ask liveness marker after monitor use ends."""
+    if reask_worktree.liveness_lock_fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(reask_worktree.liveness_lock_fd)
+    if reask_worktree.liveness_lock_path is not None:
+        with contextlib.suppress(FileNotFoundError):
+            reask_worktree.liveness_lock_path.unlink()
 
 
 def _review_item_body_state_key(item_id: str, item_kind: str) -> str | None:

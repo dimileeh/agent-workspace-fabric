@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -11,7 +12,10 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from awf.common.companions import companion_worktree_id
+from awf.common.companions import (
+    companion_worktree_id,
+    isolated_reask_worktree_liveness_lock_path,
+)
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
@@ -26,6 +30,7 @@ from awf.service.gc_reconcile import (
     ORPHAN_DIR_REAP_PARTIAL,
     OrphanDirTarget,
     _reap_target,
+    is_active_isolated_reask_worktree,
     reconcile_orphaned_workspace_dirs,
     scan_orphan_workspace_dirs,
 )
@@ -404,6 +409,63 @@ def test_scan_reclaims_interrupted_reask_worktree_of_live_parent(tmp_path: Path)
     assert scanned == 2
     assert dropped == 0
     assert young_orphan == 0
+
+
+def test_scan_skips_live_reask_worktree_of_live_parent(tmp_path: Path) -> None:
+    """A lock-held clarification checkout is not an orphan while it runs."""
+    now = 13_600_000.0
+    reask = _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef",
+        age_seconds=10_000.0,
+        now=now,
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+            tmp_path,
+            frozenset({"ws_live"}),
+            now=now,
+            min_age_hours=0,
+            limit=10,
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert targets == ()
+    assert scanned == 1
+    assert dropped == 0
+    assert young_orphan == 0
+
+    targets, *_ = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        now=now,
+        min_age_hours=0,
+        limit=10,
+    )
+    assert [target.path for target in targets] == [reask]
+
+
+def test_reask_liveness_probe_fails_closed_when_marker_cannot_be_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC retains a re-ask when it cannot safely inspect its liveness marker."""
+    reask = tmp_path / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+
+    def _unreadable(_path: Path, _flags: int) -> int:
+        raise PermissionError("marker is unreadable")
+
+    monkeypatch.setattr("awf.service.gc_reconcile.os.open", _unreadable)
+
+    assert is_active_isolated_reask_worktree(reask)
 
 
 async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(

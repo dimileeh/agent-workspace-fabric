@@ -11,6 +11,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.companions import isolated_reask_worktree_liveness_lock_path
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.node.git_manager import GitOperationError
@@ -24,6 +25,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.service.gc_reconcile import is_active_isolated_reask_worktree
 from awf.service.orphan_resources import (
     WorkspaceIdView,
     build_orphan_resource_summary,
@@ -231,6 +233,10 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
     assert reask_worktree is not None
     assert reask_worktree.path.parent == worktree.parent
     assert reask_worktree.path.name.startswith("ws_reask_isolation__companion__isolated_reask_")
+    assert reask_worktree.liveness_lock_path == isolated_reask_worktree_liveness_lock_path(
+        reask_worktree.path
+    )
+    assert is_active_isolated_reask_worktree(reask_worktree.path)
     scan = scan_managed_worktrees(tmp_path)
     assert (str(reask_worktree.path), "ws_reask_isolation") in {
         (resource.path, resource.workspace_id) for resource in scan.resources
@@ -257,6 +263,7 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
     assert not reask_worktree.path.exists()
+    assert not reask_worktree.liveness_lock_path.exists()
 
 
 @pytest.mark.unit
@@ -294,6 +301,66 @@ async def test_isolated_reask_worktree_preserves_empty_primary_worktree_dir(
         )
 
     assert empty_output_dir.exists()
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thrown Git add error cannot leave a live-GC marker behind."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_add_raises")
+    lock_paths: list[Path] = []
+    acquire_lock = comments._acquire_isolated_reask_liveness_lock
+
+    class _GitAddRaisesRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "add" in args:
+                raise RuntimeError("worktree add failed")
+            return await super().run(args)
+
+    def _record_lock(path: Path) -> tuple[int, Path]:
+        lock_fd, lock_path = acquire_lock(path)
+        lock_paths.append(lock_path)
+        return lock_fd, lock_path
+
+    monkeypatch.setattr(comments, "_acquire_isolated_reask_liveness_lock", _record_lock)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_GitAddRaisesRunner()))
+
+    with pytest.raises(RuntimeError, match="worktree add failed"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert lock_paths
+    assert not lock_paths[0].exists()
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_blocks_when_liveness_lock_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clarification does not start without the lock that makes GC safe."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_lock_unavailable")
+
+    def _lock_unavailable(_fd: int, _operation: int) -> None:
+        raise OSError("advisory locks unavailable")
+
+    monkeypatch.setattr(comments.fcntl, "flock", _lock_unavailable)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not protect"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+    assert not list((worktree.parent / ".awf-isolated-reask-locks").iterdir())
 
 
 @pytest.mark.unit
