@@ -543,8 +543,20 @@ class AgentAdapter(ABC):
                             compose_file=compose_file,
                             contents=original_compose_file,
                         )
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        # Reaping removed the model sidecars. Without the
+                        # legacy Compose definition, cancellation would leave
+                        # no recoverable model endpoint for the monitor.
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=CommandResult(
+                                returncode=1,
+                                stdout="",
+                                stderr=f"{type(exc).__name__}: {exc}",
+                            ),
+                            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                            details={"services": clarification_model_services},
+                        ) from exc
                     else:
                         restored_legacy_compose = True
                     if restored_legacy_compose:

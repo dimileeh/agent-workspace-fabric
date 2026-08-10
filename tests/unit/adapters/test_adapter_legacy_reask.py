@@ -746,15 +746,30 @@ class TestIsolatedReaskAdapter:
 
         monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_cleanup_and_recovery_shield)
 
-        with pytest.raises(asyncio.CancelledError):
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
+        if restore_fails:
+            with pytest.raises(AgentRunError) as exc:
+                await adapter.run(
+                    compose_project="awf_ws_legacy",
+                    compose_file=compose_file,
+                    prompt=_PROMPT,
+                    model="ollama/kimi-k2.6:cloud",
+                    workspace_id="ws_legacy",
+                    isolated_worktree_host_path=tmp_path / "reask",
+                )
+
+            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+            assert exc.value.result.stderr == "OSError: disk full"
+            assert exc.value.details == {"services": ("ollama-sidecar",)}
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await adapter.run(
+                    compose_project="awf_ws_legacy",
+                    compose_file=compose_file,
+                    prompt=_PROMPT,
+                    model="ollama/kimi-k2.6:cloud",
+                    workspace_id="ws_legacy",
+                    isolated_worktree_host_path=tmp_path / "reask",
+                )
 
         assert shield_calls == expected_shield_calls
         assert len(runner.calls) == expected_calls
