@@ -225,18 +225,18 @@ def _mounted_file_source(
     return mounted_file_source(mount, target)
 
 
-def external_account_subject_token_file(
+def external_account_credential_source_paths(
     auth_mounts: Sequence[AuthMount],
     *,
     agent_environment: tuple[tuple[str, str], ...],
     provider_environment_names: frozenset[str],
     mirror_target: str,
-) -> str | None:
-    """Return the subject-token file named by a selected external-account ADC."""
+) -> tuple[str, ...]:
+    """Return declared paths needed by a selected external-account ADC."""
 
     google_credentials = dict(agent_environment).get("GOOGLE_APPLICATION_CREDENTIALS")
     if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
-        return None
+        return ()
     adc_mount = next(
         (
             mount
@@ -250,26 +250,42 @@ def external_account_subject_token_file(
         None,
     )
     if adc_mount is None:
-        return None
+        return ()
     adc_source = mounted_file_source(adc_mount, google_credentials)
     if adc_source is None:
-        return None
+        return ()
     try:
         adc_configuration = json.loads(adc_source.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return ()
     if (
         not isinstance(adc_configuration, dict)
         or adc_configuration.get("type") != "external_account"
     ):
-        return None
+        return ()
     credential_source = adc_configuration.get("credential_source")
     if not isinstance(credential_source, dict):
-        return None
+        return ()
+
+    paths: list[str] = []
     subject_token_file = credential_source.get("file")
-    if not isinstance(subject_token_file, str) or not subject_token_file.startswith("/"):
-        return None
-    return posixpath.normpath(subject_token_file)
+    if isinstance(subject_token_file, str) and subject_token_file.startswith("/"):
+        paths.append(posixpath.normpath(subject_token_file))
+    executable = credential_source.get("executable")
+    if not isinstance(executable, dict):
+        return tuple(dict.fromkeys(paths))
+    command = executable.get("command")
+    if isinstance(command, str):
+        with suppress(ValueError):
+            paths.extend(
+                posixpath.normpath(argument)
+                for argument in shlex.split(command)
+                if argument.startswith("/")
+            )
+    output_file = executable.get("output_file")
+    if isinstance(output_file, str) and output_file.startswith("/"):
+        paths.append(posixpath.normpath(output_file))
+    return tuple(dict.fromkeys(paths))
 
 
 def external_account_subject_token_mounts(
@@ -281,19 +297,22 @@ def external_account_subject_token_mounts(
 ) -> tuple[AuthMount, ...]:
     """Return declared mounts needed by a selected external-account ADC file."""
 
-    subject_token_file = external_account_subject_token_file(
+    credential_source_paths = external_account_credential_source_paths(
         auth_mounts,
         agent_environment=agent_environment,
         provider_environment_names=provider_environment_names,
         mirror_target=mirror_target,
     )
-    if subject_token_file is None:
+    if not credential_source_paths:
         return ()
     return tuple(
         mount
         for mount in auth_mounts
         if mount.target != mirror_target
-        and (mount.target == subject_token_file or path_is_below(subject_token_file, mount.target))
+        and any(
+            mount.target == path or path_is_below(path, mount.target)
+            for path in credential_source_paths
+        )
     )
 
 
@@ -305,7 +324,7 @@ def external_account_subject_token_file_rewrites(
     agent_runtime: AgentRuntime,
     agent_model: str | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """Map a selected external-account subject-token file to its staged copy."""
+    """Map selected external-account credential-source paths to staged copies."""
 
     # Import lazily because the stack launcher uses these helpers while it is
     # importing; by invocation time its shared selection helpers are defined.
@@ -331,13 +350,13 @@ def external_account_subject_token_file_rewrites(
         agent_runtime=agent_runtime,
         agent_model=agent_model,
     )
-    subject_token_file = external_account_subject_token_file(
+    credential_source_paths = external_account_credential_source_paths(
         auth_mounts,
         agent_environment=agent_environment,
         mirror_target=mirror_target,
         provider_environment_names=provider_environment_names,
     )
-    if subject_token_file is None:
+    if not credential_source_paths:
         return ()
     provider_auth_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
@@ -348,16 +367,15 @@ def external_account_subject_token_file_rewrites(
         provider_environment_names=provider_environment_names,
     )
     staged_mounts = staged_provider_auth_mounts(provider_auth_mounts)
-    staged_subject_token_file = staged_auth_value(
-        subject_token_file,
-        tuple(
-            (source.target, staged.target)
-            for source, staged in zip(provider_auth_mounts, staged_mounts, strict=True)
-        ),
+    staged_targets = tuple(
+        (source.target, staged.target)
+        for source, staged in zip(provider_auth_mounts, staged_mounts, strict=True)
     )
-    if staged_subject_token_file == subject_token_file:
-        return ()
-    return ((subject_token_file, staged_subject_token_file),)
+    return tuple(
+        (path, staged_path)
+        for path in credential_source_paths
+        if (staged_path := staged_auth_value(path, staged_targets)) != path
+    )
 
 
 def aws_profile_path_rewrites(
@@ -458,6 +476,7 @@ def legacy_clarification_entrypoint(
                 "import json",
                 "import os",
                 "import posixpath",
+                "import shlex",
                 "from pathlib import Path",
                 "",
                 'credentials_path = Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])',
@@ -470,12 +489,31 @@ def legacy_clarification_entrypoint(
                 'if isinstance(configuration, dict) and configuration.get("type") == "external_account":',
                 '    credential_source = configuration.get("credential_source")',
                 "    if isinstance(credential_source, dict):",
+                "        def rewrite_path(path):",
+                "            return rewrites.get(posixpath.normpath(path), path)",
+                "",
                 '        subject_token_file = credential_source.get("file")',
                 "        if isinstance(subject_token_file, str):",
-                "            normalized_subject_token_file = posixpath.normpath(subject_token_file)",
-                "            if normalized_subject_token_file in rewrites:",
-                '                credential_source["file"] = rewrites[normalized_subject_token_file]',
-                '            credentials_path.write_text(json.dumps(configuration), encoding="utf-8")',
+                '            credential_source["file"] = rewrite_path(subject_token_file)',
+                '        executable = credential_source.get("executable")',
+                "        if isinstance(executable, dict):",
+                '            command = executable.get("command")',
+                "            if isinstance(command, str):",
+                "                try:",
+                "                    command_parts = shlex.split(command)",
+                "                except ValueError:",
+                "                    command_parts = []",
+                "                if command_parts:",
+                '                    executable["command"] = shlex.join(',
+                "                        [",
+                '                            rewrite_path(part) if part.startswith("/") else part',
+                "                            for part in command_parts",
+                "                        ]",
+                "                    )",
+                '            output_file = executable.get("output_file")',
+                "            if isinstance(output_file, str):",
+                '                executable["output_file"] = rewrite_path(output_file)',
+                '        credentials_path.write_text(json.dumps(configuration), encoding="utf-8")',
                 "PY",
             )
         )

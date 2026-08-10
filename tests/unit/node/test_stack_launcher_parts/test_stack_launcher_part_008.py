@@ -622,6 +622,105 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_runtime", "environment"),
+    (
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+            ),
+        ),
+        (
+            AgentRuntime.gemini,
+            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
+        ),
+    ),
+)
+def test_clarification_stages_external_account_executable_source_mounts(
+    tmp_path: Path,
+    agent_runtime: AgentRuntime,
+    environment: tuple[tuple[str, str], ...],
+) -> None:
+    """Executable external-account ADC sources retain their helper and output."""
+    helper = tmp_path / "external-account-helper"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    output = tmp_path / "external-account-output.json"
+    output.write_text("{}", encoding="utf-8")
+    adc_config = tmp_path / "external-account-adc.json"
+    helper_target = "/run/awf/secrets/google/external-account-helper"
+    output_target = "/run/awf/secrets/google/external-account-output.json"
+    adc_target = "/run/awf/secrets/google/external-account-adc.json"
+    adc_config.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {
+                    "executable": {
+                        "command": f"{helper_target} --output {output_target}",
+                        "output_file": output_target,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
+    helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
+    output_mount = AuthMount(source=str(output), target=output_target, mode="ro")
+    agent_environment = (
+        *environment,
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+        ("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "1"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        agent_environment,
+        auth_mounts=(adc_mount, helper_mount, output_mount),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (adc_mount, helper_mount, output_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    )
+
+    assert dict(clarification_environment)["GOOGLE_APPLICATION_CREDENTIALS"] == (
+        "/home/agent/.awf/clarification-auth/0"
+    )
+    assert dict(clarification_environment)["GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"] == "1"
+    assert clarification_mounts == (
+        AuthMount(
+            source=str(adc_config),
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(helper),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(output),
+            target="/home/agent/.awf/clarification-auth/2",
+            mode="ro",
+        ),
+    )
+    assert external_account_subject_token_file_rewrites(
+        (adc_mount, helper_mount, output_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    ) == (
+        (helper_target, "/home/agent/.awf/clarification-auth/1"),
+        (output_target, "/home/agent/.awf/clarification-auth/2"),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_stages_transitive_bedrock_profile_auth_mounts(tmp_path: Path) -> None:
     """Bedrock profile helpers and web-identity tokens follow the staged profile."""
     aws_home = tmp_path / "aws"

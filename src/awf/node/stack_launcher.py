@@ -189,6 +189,7 @@ _CLARIFICATION_GEMINI_ENV_NAMES: dict[str, frozenset[str]] = {
             "GOOGLE_CLOUD_PROJECT",
             "GOOGLE_CLOUD_LOCATION",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
         }
     ),
     "access_token": frozenset(
@@ -269,6 +270,7 @@ _CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
         "ANTHROPIC_VERTEX_PROJECT_ID",
         "CLOUD_ML_REGION",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
     }
 )
 _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = {
