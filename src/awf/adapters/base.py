@@ -1381,6 +1381,14 @@ class AgentAdapter(ABC):
                     workspace_id=workspace_id,
                 )
                 raise
+            except Exception:
+                if isinstance(invocation, TrackedIsolatedComposeRun):
+                    await cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
+                raise
         finally:
             if sinks is not None:
                 await sinks.close()

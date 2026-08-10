@@ -161,6 +161,27 @@ class _RecordingLogStore:
         return self.sinks
 
 
+class _FailingStdoutSinks(_RecordingSinks):
+    """Log sinks that fail while processing streamed stdout."""
+
+    async def write_stdout(self, data: str) -> None:
+        """Raise the callback failure that interrupts the streaming command."""
+        del data
+        raise RuntimeError("log sink failure")
+
+
+class _FailingStdoutLogStore:
+    """Log store whose stdout sink interrupts a streaming run."""
+
+    def __init__(self) -> None:
+        """Initialize the failing stdout sink."""
+        self.sinks = _FailingStdoutSinks()
+
+    async def open_command_streams(self, **_kwargs: Any) -> _FailingStdoutSinks:
+        """Return the sink that raises during streamed stdout processing."""
+        return self.sinks
+
+
 class _RunOnlyRunner:
     """Runner that exercises the sync-only adapter execution path."""
 
@@ -1158,6 +1179,51 @@ services:
         assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
         assert "run" in runner.calls[0].args
         assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_removes_one_off_container_when_stream_callback_raises(
+        self,
+    ) -> None:
+        """A stream callback failure must not strand the isolated container."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="streamed output")
+        runner.queue_result(returncode=0, stdout="removed")
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=_FailingStdoutLogStore(),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_isolated_stream_callback_failure",
+                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+            )
+
+        assert "run" in runner.calls[0].args
+        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
+
+    @pytest.mark.unit
+    async def test_stream_callback_exception_does_not_clean_up_persistent_agent(self) -> None:
+        """Persistent agent cleanup remains limited to cancellation and timeout paths."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="streamed output")
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=_FailingStdoutLogStore(),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_persistent_stream_callback_failure",
+            )
+
+        assert len(runner.calls) == 1
 
     @pytest.mark.unit
     async def test_cleanup_failure_surfaces_distinct_error(self) -> None:
