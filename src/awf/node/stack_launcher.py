@@ -8,6 +8,7 @@ import posixpath
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Protocol
 
 from awf.adapters.opencode import opencode_provider_for_model
@@ -285,10 +286,7 @@ def _clarification_agent_environment(
     if (
         prefer_file_auth
         and agent_runtime is AgentRuntime.codex
-        and any(
-            mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
-            for mount in source_mounts
-        )
+        and _clarification_has_codex_file_auth(source_mounts)
     ):
         # Match Codex readiness: an isolated file-auth mount is preferred to
         # static environment credentials, while non-secret endpoint settings
@@ -317,6 +315,16 @@ def _clarification_agent_environment(
         for name, value in agent_environment
         if name in clarification_environment_names
         and not _is_clarification_git_auth_environment(name)
+    )
+
+
+def _clarification_has_codex_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
+    """Return whether a staged Codex home supplies the file-auth credential."""
+
+    return any(
+        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
+        and (Path(mount.source) / "auth.json").is_file()
+        for mount in source_mounts
     )
 
 

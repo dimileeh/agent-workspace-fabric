@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from awf.db.enums import AgentRuntime
@@ -10,11 +12,14 @@ from awf.node.compose_manager import AuthMount
 
 
 @pytest.mark.unit
-def test_clarification_inputs_retain_only_selected_adapter_credentials() -> None:
+def test_clarification_inputs_retain_only_selected_adapter_credentials(tmp_path: Path) -> None:
     """Codex clarification cannot read credentials for other coding adapters."""
     mirror = "/host/awf/git/mirrors/repo.git"
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
     codex_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/codex",
+        source=str(codex_home),
         target="/home/agent/.codex",
         mode="rw",
     )
@@ -116,10 +121,13 @@ def test_clarification_inputs_retain_only_selected_adapter_credentials() -> None
 
 
 @pytest.mark.unit
-def test_codex_clarification_prefers_file_auth_to_environment_credentials() -> None:
+def test_codex_clarification_prefers_file_auth_to_environment_credentials(tmp_path: Path) -> None:
     """Codex file auth wins over environment credentials for clarification."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
     codex_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/codex",
+        source=str(codex_home),
         target="/home/agent/.codex",
         mode="rw",
     )
@@ -145,6 +153,35 @@ def test_codex_clarification_prefers_file_auth_to_environment_credentials() -> N
     assert clarification_environment == (("OPENAI_BASE_URL", "https://openai.example.test/v1"),)
     assert clarification_mounts == (
         AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
+def test_codex_clarification_retains_environment_credentials_without_auth_json(
+    tmp_path: Path,
+) -> None:
+    """A config-only staged Codex home cannot replace an environment credential."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text("model = 'gpt-5'\n", encoding="utf-8")
+    codex_auth = AuthMount(
+        source=str(codex_home),
+        target="/home/agent/.codex",
+        mode="rw",
+    )
+    environment = (
+        ("OPENAI_API_KEY", "api-key"),
+        ("OPENAI_BASE_URL", "https://openai.example.test/v1"),
+    )
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(codex_auth,),
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=AgentRuntime.codex,
+        )
+        == environment
     )
 
 
