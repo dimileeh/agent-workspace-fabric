@@ -193,10 +193,10 @@ async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
 
 
 @pytest.mark.unit
-async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies(
+async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependencies(
     tmp_path: Path,
 ) -> None:
-    """The clarification checkout contains tracked source, not ignored dependency trees."""
+    """The clarification checkout is a sibling with tracked source only."""
     worktree = _init_real_worktree(tmp_path, "ws_reask_isolation")
     (worktree / ".gitignore").write_text("*.env\n.venv/\n", encoding="utf-8")
     _git(worktree, "add", ".gitignore")
@@ -221,7 +221,9 @@ async def test_isolated_reask_worktree_excludes_preexisting_ignored_dependencies
     )
 
     assert reask_worktree is not None
-    assert reask_worktree.path.parent == worktree
+    assert reask_worktree.path.parent == worktree.parent
+    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert _git(worktree, "status", "--porcelain", "--untracked-files=all").stdout == ""
     assert (reask_worktree.path / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
     assert not (reask_worktree.path / ".venv").exists()
     assert not (reask_worktree.path / ".agent-scratch").exists()
@@ -318,7 +320,7 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -386,7 +388,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert audit_events == []
-    assert list(worktree.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -466,7 +468,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert audit_events == []
-    assert list(worktree.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -492,7 +494,7 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -536,7 +538,7 @@ async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancella
         await asyncio.wait_for(task, timeout=5.0)
 
     assert cleanup_finished.is_set()
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -593,7 +595,7 @@ async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
     reask_worktree = comments._IsolatedReaskWorktree(
         source_worktree=Path("/worktree"),
-        path=Path("/worktree/.awf-needs-human-reask-test"),
+        path=Path("/.awf-needs-human-reask-test"),
     )
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) == (
@@ -607,7 +609,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
     tmp_path: Path,
     reask_raises: bool,
 ) -> None:
-    """A stranded nested checkout must stop later review-repair items."""
+    """A stranded isolated checkout must stop later review-repair items."""
     workspace_id = "ws_reask_remove_failure"
     worktree = _init_real_worktree(tmp_path, workspace_id)
 
@@ -672,7 +674,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
         )
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
-    assert list(worktree.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -754,7 +756,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
         )
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
-    assert list(worktree.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -1239,10 +1241,10 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     )
 
     assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
-    assert reask_worktree_paths[0].parent == worktree
+    assert reask_worktree_paths[0].parent == worktree.parent
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
     assert dependency.exists()
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -1306,7 +1308,7 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
     assert primary_output.read_text(encoding="utf-8") == "created independently\n"
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit
@@ -1370,7 +1372,7 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
-    assert not list(worktree.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
 
 
 @pytest.mark.unit

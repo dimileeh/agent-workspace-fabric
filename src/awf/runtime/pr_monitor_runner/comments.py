@@ -161,7 +161,9 @@ async def _create_isolated_reask_worktree(
         return None
 
     await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
-    path = worktree_path / f"{_ISOLATED_REASK_WORKTREE_PREFIX}{uuid4().hex}"
+    # Keep an interrupted checkout outside the primary worktree: otherwise a
+    # later repair could stage the nested repository as a gitlink.
+    path = worktree_path.parent / f"{_ISOLATED_REASK_WORKTREE_PREFIX}{uuid4().hex}"
     reask_worktree = _IsolatedReaskWorktree(
         source_worktree=worktree_path,
         path=path,
@@ -202,7 +204,7 @@ async def _create_isolated_reask_worktree(
     if not create.ok:
         # Git can register and populate the checkout before reporting an error
         # (for example, when a post-checkout hook fails). Do not leave that
-        # nested repository behind while treating clarification as unavailable.
+        # sibling repository behind while treating clarification as unavailable.
         cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
             runner,
             reask_worktree=reask_worktree,
@@ -233,8 +235,8 @@ async def _cleanup_isolated_reask_worktree_after_creation_failure(
     try:
         cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
     except (GitOperationError, OSError, RuntimeError) as exc:
-        # The failed creation may already have placed a nested repository in
-        # the primary worktree. Treat an unconfirmed removal just like a
+        # The failed creation may already have placed a sibling repository.
+        # Treat an unconfirmed removal just like a
         # nonzero removal result so callers apply the terminal cleanup policy.
         cleanup_error = str(exc) or "`git worktree remove` failed during cleanup"
     if cleanup_error is not None:
@@ -653,9 +655,8 @@ async def _enforce_needs_human_reason(
             else:
                 reask_restore_ref = await runner._rev_parse_head(worktree_path)
         except _IsolatedReaskWorktreeCleanupFailedError:
-            # A failed cleanup can leave a nested repository in the primary
-            # checkout. It must stop the fix cycle rather than be downgraded to
-            # an unavailable advisory clarification.
+            # A failed cleanup must stop the fix cycle rather than be
+            # downgraded to an unavailable advisory clarification.
             raise
         except (GitOperationError, OSError, RuntimeError, _MonitorPolicyBlockedError) as exc:
             # Clarification is advisory and read-only. A worktree/setup failure
