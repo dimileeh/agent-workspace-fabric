@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -19,11 +19,10 @@ def _isolated_reask_git_metadata_volume_binds(
     """Build credential-free Git discovery binds for a linked re-ask worktree.
 
     A linked worktree's ``.git`` file points at metadata beneath its shared
-    bare mirror. Mounting that whole mirror also exposes its ``config``, which
-    can retain HTTPS remote URL userinfo. Git needs only selected linked control
-    files plus the existing common ``objects`` and ``refs`` directories to
-    recognise the worktree, so mount those directories without exposing the
-    mirror configuration.
+    bare mirror. The clarification container instead receives a detached bare
+    clone of its current HEAD, preventing it from reading other worktrees'
+    refs or objects. Git needs only selected linked control files and the
+    snapshot's common Git directory to recognise the worktree.
     """
     mirror_path = mirror_path_for_worktree(worktree_path)
     linked_git_dir = linked_worktree_git_dir(worktree_path)
@@ -44,22 +43,38 @@ def _isolated_reask_git_metadata_volume_binds(
         temporary_path = Path(temporary_metadata.name)
         snapshot_path = temporary_path / "linked-git"
         snapshot_path.mkdir()
+        common_path = temporary_path / "common-git"
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--bare",
+                "--no-local",
+                "--no-tags",
+                "--single-branch",
+                str(worktree_path),
+                str(common_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        (common_path / "config").unlink(missing_ok=True)
         shutil.copyfile(linked_git_dir / "HEAD", snapshot_path / "HEAD")
         (snapshot_path / "commondir").write_text(
-            f"{os.path.relpath(mirror_path, linked_git_dir)}\n", encoding="utf-8"
+            f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common\n", encoding="utf-8"
         )
         (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
         source_index = linked_git_dir / "index"
         if source_index.is_file() and not source_index.is_symlink():
             shutil.copyfile(source_index, snapshot_path / "index")
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         if temporary_metadata is not None:
             temporary_metadata.cleanup()
         return None, ()
     return temporary_metadata, (
         (snapshot_path, str(linked_git_dir)),
-        (mirror_path / "objects", str(mirror_path / "objects")),
-        (mirror_path / "refs", str(mirror_path / "refs")),
+        (common_path, f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common"),
     )
 
 

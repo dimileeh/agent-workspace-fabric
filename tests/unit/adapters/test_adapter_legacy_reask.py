@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -11,16 +12,77 @@ import pytest
 import yaml
 
 from awf.adapters import base as adapter_base
+from awf.adapters import base_isolated_reask
 from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a Git setup or inspection command for an isolated re-ask fixture."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _linked_reask_worktree(tmp_path: Path) -> tuple[Path, Path, str, str]:
+    """Create a re-ask worktree and an unrelated branch in its shared mirror."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(["init", "-q", "-b", "main"], origin)
+    _git(["config", "user.name", "AWF Test"], origin)
+    _git(["config", "user.email", "awf@test.local"], origin)
+    (origin / "README.md").write_text("reask head\n", encoding="utf-8")
+    _git(["add", "README.md"], origin)
+    _git(["commit", "-q", "-m", "reask head"], origin)
+    head_oid = _git(["rev-parse", "HEAD"], origin).stdout.strip()
+    _git(["checkout", "-q", "-b", "unrelated"], origin)
+    (origin / "unrelated.txt").write_text("must stay private\n", encoding="utf-8")
+    _git(["add", "unrelated.txt"], origin)
+    _git(["commit", "-q", "-m", "unrelated"], origin)
+    unrelated_oid = _git(["rev-parse", "HEAD"], origin).stdout.strip()
+    _git(["checkout", "-q", "main"], origin)
+
+    mirror_path = tmp_path / "awf-work" / "mirrors" / "owner-repo.git"
+    mirror_path.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", str(origin), str(mirror_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    worktree_path = tmp_path / "awf-work" / "worktrees" / "reask"
+    worktree_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(mirror_path),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "reask",
+            str(worktree_path),
+            "main",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return mirror_path, worktree_path, head_oid, unrelated_oid
 
 
 def _write_legacy_opencode_ollama_compose(tmp_path: Path) -> Path:
@@ -106,19 +168,13 @@ class TestIsolatedReaskAdapter:
     async def test_isolated_reask_mounts_credential_free_git_metadata_read_only(
         self, tmp_path: Path
     ) -> None:
-        """Non-Codex re-asks see linked Git metadata without mirror config."""
+        """Non-Codex re-asks see only self-contained Git metadata snapshots."""
         runner = FakeCommandRunner()
         adapter = OpenCodeAdapter(runner=runner)
-        mirror_path = tmp_path / "mirrors" / "owner-repo.git"
-        worktree_path = tmp_path / "reask"
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
-        linked_git_dir.mkdir(parents=True)
-        worktree_path.mkdir()
-        (worktree_path / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-        (linked_git_dir / "HEAD").write_text("ref: refs/heads/reask\n", encoding="utf-8")
-        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
         (mirror_path / "config").write_text(
-            '[remote \\"origin\\"]\n\turl = https://token@github.example/repo.git\n',
+            '[remote "origin"]\n\turl = https://token@github.example/repo.git\n',
             encoding="utf-8",
         )
 
@@ -135,25 +191,22 @@ class TestIsolatedReaskAdapter:
             value.endswith(f":{linked_git_dir}:ro") and not value.startswith(f"{linked_git_dir}:")
             for value in args
         )
-        assert any(value.endswith(f":{mirror_path / 'objects'}:ro") for value in args)
-        assert any(value.endswith(f":{mirror_path / 'refs'}:ro") for value in args)
+        assert not any(value.endswith(f":{mirror_path / 'objects'}:ro") for value in args)
+        assert not any(value.endswith(f":{mirror_path / 'refs'}:ro") for value in args)
+        assert any(
+            value.endswith(f":{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common:ro")
+            for value in args
+        )
 
     def test_isolated_reask_git_metadata_binds_exclude_linked_git_config(
         self, tmp_path: Path
     ) -> None:
-        """The host-visible metadata snapshot omits worktree-specific Git config."""
+        """The snapshot contains only the re-ask HEAD and no mirror config."""
+        mirror_path, worktree_path, head_oid, unrelated_oid = _linked_reask_worktree(tmp_path)
         work_root = tmp_path / "awf-work"
-        mirror_path = work_root / "mirrors" / "owner-repo.git"
-        worktree_path = work_root / "worktrees" / "reask"
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
-        linked_git_dir.mkdir(parents=True)
-        worktree_path.mkdir(parents=True)
-        (worktree_path / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-        (linked_git_dir / "HEAD").write_text("ref: refs/heads/reask\n", encoding="utf-8")
-        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-        (linked_git_dir / "gitdir").write_text(f"{worktree_path / '.git'}\n", encoding="utf-8")
         (linked_git_dir / "config.worktree").write_text(
-            '[remote \\"origin\\"]\n\turl = https://token@github.example/repo.git\n',
+            '[remote "origin"]\n\turl = https://token@github.example/repo.git\n',
             encoding="utf-8",
         )
 
@@ -172,16 +225,55 @@ class TestIsolatedReaskAdapter:
                 "HEAD",
                 "commondir",
                 "gitdir",
+                "index",
             }
             assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/reask\n"
             assert (snapshot_path / "gitdir").read_text(encoding="utf-8") == "/workspace/.git\n"
+            common_path = Path(temporary_metadata.name) / "common-git"
+            assert (common_path / "config").exists() is False
+            assert (
+                _git(
+                    ["--git-dir", str(common_path), "cat-file", "-e", head_oid], tmp_path
+                ).returncode
+                == 0
+            )
+            assert (
+                subprocess.run(
+                    ["git", "--git-dir", str(common_path), "cat-file", "-e", unrelated_oid],
+                    cwd=tmp_path,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                ).returncode
+                == 1
+            )
             assert binds[0] == (snapshot_path, str(linked_git_dir))
             assert binds[1:] == (
-                (mirror_path / "objects", str(mirror_path / "objects")),
-                (mirror_path / "refs", str(mirror_path / "refs")),
+                (
+                    common_path,
+                    f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common",
+                ),
             )
         finally:
             temporary_metadata.cleanup()
+
+    def test_isolated_reask_git_metadata_binds_skip_snapshot_when_clone_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A failed local snapshot never falls back to shared mirror binds."""
+        _mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+
+        def _clone_failure(*_args: Any, **_kwargs: Any) -> None:
+            raise subprocess.CalledProcessError(1, ["git", "clone"])
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _clone_failure)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
 
     @pytest.mark.unit
     async def test_isolated_reask_upgrade_keeps_selected_opencode_provider_credentials(
