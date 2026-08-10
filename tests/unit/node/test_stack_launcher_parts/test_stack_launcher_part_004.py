@@ -369,6 +369,22 @@ def test_clarification_inputs_prefer_static_bedrock_credentials_to_profile_and_w
         ),
         (
             {
+                "AWS_PROFILE": "awf-bedrock",
+                "AWS_CONFIG_FILE": "/run/awf/secrets/aws-config",
+                "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/awf-bedrock",
+                "AWS_WEB_IDENTITY_TOKEN_FILE": "/run/awf/secrets/aws-web-identity-token",
+            },
+            frozenset(
+                {
+                    "AWS_REGION",
+                    "AWS_DEFAULT_REGION",
+                    "AWS_ROLE_ARN",
+                    "AWS_WEB_IDENTITY_TOKEN_FILE",
+                }
+            ),
+        ),
+        (
+            {
                 "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/awf-bedrock",
                 "AWS_WEB_IDENTITY_TOKEN_FILE": "/run/awf/secrets/aws-web-identity-token",
             },

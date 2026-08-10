@@ -346,16 +346,16 @@ def _clarification_claude_code_bedrock_environment_names(
         environment_values.get(name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
     ):
         credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES
-    elif any(
-        environment_values.get(name)
-        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
-    ):
-        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
     elif all(
         environment_values.get(name)
         for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
     ):
         credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+    elif any(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
     else:
         credential_names = frozenset()
     return _CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES | credential_names
