@@ -466,6 +466,41 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_keep_snapshot_when_shared_index_lookup_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Optional split-index discovery cannot discard a completed snapshot."""
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        real_run = base_isolated_reask.subprocess.run
+
+        def _shared_index_lookup_failure(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command == [
+                "git",
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "--shared-index-path",
+            ]:
+                raise subprocess.CalledProcessError(1, command)
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _shared_index_lookup_failure)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is not None
+        try:
+            snapshot_path = Path(temporary_metadata.name) / "linked-git"
+            assert (snapshot_path / "index").is_file()
+            assert binds == (
+                (snapshot_path, str(mirror_path / "worktrees" / worktree_path.name)),
+                (Path(temporary_metadata.name) / "common-git", "/awf-clarification-git-common"),
+            )
+        finally:
+            temporary_metadata.cleanup()
+
     def test_isolated_reask_git_metadata_binds_skip_snapshot_when_clone_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

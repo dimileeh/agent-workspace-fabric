@@ -86,20 +86,25 @@ def _isolated_reask_git_metadata_volume_binds(
         source_index = linked_git_dir / "index"
         if source_index.is_file() and not source_index.is_symlink():
             shutil.copyfile(source_index, snapshot_path / "index")
-            shared_index_output = subprocess.run(
-                ["git", "-C", str(worktree_path), "rev-parse", "--shared-index-path"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            ).stdout.strip()
-            shared_index_path = Path(shared_index_output)
-            if not shared_index_path.is_absolute():
-                shared_index_path = worktree_path / shared_index_path
-            shared_index_path = shared_index_path.resolve()
-            if shared_index_path.is_file() and not shared_index_path.is_symlink():
-                shared_index_path.relative_to(linked_git_dir)
-                shutil.copyfile(shared_index_path, snapshot_path / shared_index_path.name)
+            try:
+                shared_index_output = subprocess.run(
+                    ["git", "-C", str(worktree_path), "rev-parse", "--shared-index-path"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ).stdout.strip()
+                shared_index_path = Path(shared_index_output)
+                if not shared_index_path.is_absolute():
+                    shared_index_path = worktree_path / shared_index_path
+                shared_index_path = shared_index_path.resolve()
+                if shared_index_path.is_file() and not shared_index_path.is_symlink():
+                    shared_index_path.relative_to(linked_git_dir)
+                    shutil.copyfile(shared_index_path, snapshot_path / shared_index_path.name)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                # The split-index backing file is optional; retain the regular
+                # index snapshot if it cannot be discovered or copied.
+                pass
     except (OSError, subprocess.SubprocessError):
         if temporary_metadata is not None:
             temporary_metadata.cleanup()
