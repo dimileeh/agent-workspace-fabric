@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _collect_defer_items,
     _notification_key,
     _notify_human_blocker_items,
+    _notify_human_reason,
 )
 from awf.runtime.pr_monitor_runner.notify_human_details import (
     _needs_human_reason_state_key,
@@ -93,11 +94,13 @@ def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> 
     }
     body_changed = {**item, "body": "Updated blocker detail."}
     reason_changed = {**item, "agent_verdict_reason": "Updated triage reason."}
+    merge_blocking_changed = {**item, "is_merge_blocking": True}
 
     digest = _notification_items_digest((item,))
 
     assert _notification_items_digest((body_changed,)) != digest
     assert _notification_items_digest((reason_changed,)) != digest
+    assert _notification_items_digest((merge_blocking_changed,)) != digest
 
 
 @pytest.mark.unit
@@ -105,7 +108,7 @@ def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> 
 def test_notify_human_blocker_items_promotes_overlapping_blocking_review(
     triage_verdict: str,
 ) -> None:
-    """Verify notify human blocker items promotes overlapping blocking review."""
+    """Verify merge-blocking reviews retain their agent triage details."""
     review = ReviewComment(
         comment_id="R-deferred",
         body_excerpt="Please revise the error handling.",
@@ -113,13 +116,23 @@ def test_notify_human_blocker_items_promotes_overlapping_blocking_review(
         blocks_merge=True,
     )
     status = _status(reviews=(review,), blocking_reviews=(review,))
-    state = MonitorState(threads_addressed_ids={"R-deferred": triage_verdict})
+    triage_reason = "A maintainer must choose the release policy."
+    state = MonitorState(
+        threads_addressed_ids={
+            "R-deferred": triage_verdict,
+            _needs_human_reason_state_key("R-deferred"): triage_reason,
+        }
+    )
 
     bot_items, human_items = _notify_human_blocker_items(status, state)
 
     assert bot_items == []
     assert [item["id"] for item in human_items] == ["R-deferred"]
-    assert human_items[0]["verdict"] == "changes_requested"
+    assert human_items[0]["verdict"] == triage_verdict
+    assert human_items[0]["agent_verdict_reason"] == triage_reason
+    assert human_items[0]["is_merge_blocking"] is True
+    if triage_verdict == "needs_human":
+        assert _notify_human_reason(status, state) == triage_reason
 
 
 @pytest.mark.unit
@@ -162,11 +175,11 @@ def test_notify_human_blocker_items_excludes_advisory_bot_review_defer() -> None
 
 
 @pytest.mark.unit
-async def test_human_notification_includes_effective_blocking_reviews_in_details_and_digest(
+async def test_human_notification_preserves_triage_reason_for_effective_blocking_review(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify human notification includes effective blocking reviews in details and digest."""
+    """Verify notification renders a blocking review's triage and reason."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -196,7 +209,13 @@ async def test_human_notification_includes_effective_blocking_reviews_in_details
         reviews=(triaged_review,),
         blocking_reviews=(triaged_review, empty_review),
     )
-    state = MonitorState(threads_addressed_ids={"R-triaged": "defer"})
+    triage_reason = "A maintainer must choose the release policy."
+    state = MonitorState(
+        threads_addressed_ids={
+            "R-triaged": "needs_human",
+            _needs_human_reason_state_key("R-triaged"): triage_reason,
+        }
+    )
 
     await runner._post_human_notification_once(
         repo=RepoRef(owner="example", name="repo"),
@@ -209,17 +228,22 @@ async def test_human_notification_includes_effective_blocking_reviews_in_details
     items = bot_items + human_items
     items_digest = _notification_items_digest(items)
     assert [item["id"] for item in human_items] == ["R-triaged", "R-empty"]
-    assert all(item["verdict"] == "changes_requested" for item in human_items)
+    assert human_items[0]["verdict"] == "needs_human"
+    assert human_items[0]["agent_verdict_reason"] == triage_reason
+    assert all(item["is_merge_blocking"] is True for item in human_items)
+    assert human_items[1]["verdict"] == "changes_requested"
     assert len(gh.posts) == 1
     assert "https://github.example/reviews/R-triaged" in str(gh.posts[0]["body"])
     assert "https://github.example/reviews/R-empty" in str(gh.posts[0]["body"])
     assert "Merge-blocking changes-requested reviews (2):" in str(gh.posts[0]["body"])
+    assert "[needs_human]" in str(gh.posts[0]["body"])
+    assert triage_reason in str(gh.posts[0]["body"])
     assert "Human feedback deferred by agent (0):" in str(gh.posts[0]["body"])
     assert (
         state.threads_addressed_ids[
             _notification_key(
                 head_sha=status.head_sha,
-                blocker_reason="a merge-blocking changes-requested review remains unresolved",
+                blocker_reason=triage_reason,
                 items_digest=items_digest,
             )
         ]

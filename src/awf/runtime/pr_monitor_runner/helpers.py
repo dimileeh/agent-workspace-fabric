@@ -689,7 +689,8 @@ def _notify_human_blocker_items(
     their triage verdict and can have an empty body, so they may not appear in
     ``unresolved_review_comments`` at all. Include them in the rendered
     notification and its digest. When a triaged review is also an effective
-    blocker, retain its single item but render the blocking verdict.
+    blocker, retain its single item, agent verdict, and reason while marking
+    its independent merge-blocking state for rendering.
 
     Advisory bot review-level deferrals do not block merge and belong only in
     the terminal defer artifact, not a human-attention notification. A bot
@@ -699,7 +700,7 @@ def _notify_human_blocker_items(
     items_by_id = {str(item["id"]): item for item in bot_items + human_items}
     for review in status.blocking_reviews:
         if existing_item := items_by_id.get(review.comment_id):
-            existing_item["verdict"] = "changes_requested"
+            existing_item["is_merge_blocking"] = True
             continue
         is_bot = _is_bot_author(review.author)
         bucket = bot_items if is_bot else human_items
@@ -714,11 +715,18 @@ def _notify_human_blocker_items(
             "body": review.body_excerpt,
             "verdict": "changes_requested",
             "agent_verdict_reason": None,
+            "is_merge_blocking": True,
         }
         bucket.append(item)
         items_by_id[review.comment_id] = item
     bot_items = [
-        item for item in bot_items if item["kind"] != "review" or item.get("verdict") != "defer"
+        item
+        for item in bot_items
+        if (
+            item["kind"] != "review"
+            or item.get("verdict") != "defer"
+            or item.get("is_merge_blocking") is True
+        )
     ]
     return bot_items, human_items
 
@@ -730,10 +738,10 @@ def _notify_human_reason(
     blocker_items: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None,
 ) -> str | None:
     """Summarize the highest-priority unresolved human blocker."""
-    if status.blocking_reviews:
-        return "a merge-blocking changes-requested review remains unresolved"
     if reason := _first_needs_human_reason(status, state):
         return reason
+    if status.blocking_reviews:
+        return "a merge-blocking changes-requested review remains unresolved"
     bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
     if any(item.get("verdict") == "needs_human" for item in human_items):
         return "human review feedback needs human input and remains unresolved"

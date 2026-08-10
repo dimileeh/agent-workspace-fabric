@@ -103,6 +103,7 @@ def _notification_items_digest(items: Sequence[Mapping[str, object]]) -> str:
                     "body",
                     "verdict",
                     "agent_verdict_reason",
+                    "is_merge_blocking",
                 )
             },
             sort_keys=True,

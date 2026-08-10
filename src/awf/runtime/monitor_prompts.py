@@ -498,9 +498,13 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     human_items: list[Mapping[str, object]] = []
     blocking_review_items: list[Mapping[str, object]] = []
     for item in blocker_items:
-        if _item_text(item, "verdict") == "changes_requested":
+        if (
+            item.get("is_merge_blocking") is True
+            or _item_text(item, "verdict") == "changes_requested"
+        ):
             # Effective changes-requested reviews block merge independently of
-            # agent triage. Do not present them as a deferral or escalation.
+            # agent triage. Preserve any triage verdict and reason, but group
+            # the item with merge blockers.
             blocking_review_items.append(item)
             continue
         is_bot = item.get("is_bot")
