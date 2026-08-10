@@ -1235,7 +1235,7 @@ async def test_finalize_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-async def test_finalize_completes_final_sample_under_cancellation(tmp_path: Path) -> None:
+async def test_finalize_reraises_cancellation_after_final_sample(tmp_path: Path) -> None:
     # Baseline is read fresh at run start (passthrough, totalTokens=10); the final
     # sample (totalTokens=50) blocks in run_streaming so we can cancel mid-finalize.
     runner = _BlockingRunner(
@@ -1257,18 +1257,20 @@ async def test_finalize_completes_final_sample_under_cancellation(tmp_path: Path
     assert len(runner.calls) == 1  # fresh baseline captured at run start
 
     await _wait_for(lambda: len(clock.sleeps) == 1)  # live loop parked on sleep
-    finalize_task = asyncio.ensure_future(ctx.finalize(status="cancelled"))
+    finalize_task = asyncio.ensure_future(ctx.finalize(status="success"))
     await _wait_for(lambda: len(runner.calls) == 2)  # final sample blocked in run_streaming
 
     finalize_task.cancel()  # cancel the agent run mid-finalize
     for _ in range(5):
         await asyncio.sleep(0)
     runner.release.set()  # let the shielded final sample complete
-    await finalize_task
+    with pytest.raises(asyncio.CancelledError):
+        await finalize_task
 
     snap = read_latest_usage_snapshot("ws_cancel", work_dir=tmp_path)
     assert snap is not None
     assert snap.phase == "final"
+    assert snap.run_status == "success"
     assert snap.total_tokens == 40  # 50 - 10 baseline
 
 

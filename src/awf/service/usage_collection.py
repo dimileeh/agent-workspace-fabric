@@ -260,10 +260,17 @@ class _CcusageSampleContext(UsageSampleContext):
         self._finalized = True
         final_task = asyncio.create_task(self._finalize_inner(status))
         # Shield the final sample so it still completes if the agent run is being
-        # cancelled (the await below may be cancelled repeatedly).
+        # cancelled (the await below may be cancelled repeatedly). Preserve a
+        # consumed cancellation and re-raise it after the final sample lands so
+        # callers still stop their shutdown flow.
+        cancelled_error: asyncio.CancelledError | None = None
         while not final_task.done():
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await asyncio.shield(final_task)
+            except asyncio.CancelledError as exc:
+                cancelled_error = exc
+        if cancelled_error is not None:
+            raise cancelled_error
 
     async def _finalize_inner(self, status: str) -> None:
         await self._cancel_loop()
