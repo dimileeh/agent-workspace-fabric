@@ -520,10 +520,8 @@ def _clarification_resolve_google_credentials_placeholder(
         if len(dynamic_targets) != 1:
             return agent_environment
         google_credentials = dynamic_targets[0]
-    elif match := _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE.fullmatch(
-        google_credentials or ""
-    ):
-        google_credentials = match.group("target")
+    elif _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE.fullmatch(google_credentials or ""):
+        google_credentials = compose_expand_value(google_credentials or "", environ=os.environ)
     else:
         return agent_environment
     return tuple(

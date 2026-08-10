@@ -1280,6 +1280,10 @@ def test_claude_vertex_clarification_resolves_google_credentials_compose_placeho
 @pytest.mark.unit
 @pytest.mark.parametrize("operator", (":-", "-"))
 @pytest.mark.parametrize(
+    "worker_credentials_target",
+    (None, "/run/awf/secrets/worker-gcp.json"),
+)
+@pytest.mark.parametrize(
     ("agent_runtime", "environment"),
     (
         (
@@ -1302,8 +1306,16 @@ def test_google_vertex_clarification_resolves_defaulted_google_credentials_compo
     agent_runtime: AgentRuntime,
     environment: tuple[tuple[str, str], ...],
     operator: str,
+    worker_credentials_target: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vertex clarification stages a profile-declared defaulted ADC credential."""
+    """Vertex clarification stages the credential selected by a defaulted ADC expression."""
+    fallback_target = "/run/awf/secrets/gcp.json"
+    google_credentials_target = worker_credentials_target or fallback_target
+    if worker_credentials_target is None:
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    else:
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", worker_credentials_target)
     gcloud_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/gcloud",
         target="/home/agent/.config/gcloud",
@@ -1311,13 +1323,13 @@ def test_google_vertex_clarification_resolves_defaulted_google_credentials_compo
     )
     google_credentials = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
-        target="/run/awf/secrets/gcp.json",
+        target=google_credentials_target,
         mode="ro",
     )
     environment += (
         (
             "GOOGLE_APPLICATION_CREDENTIALS",
-            f"${{GOOGLE_APPLICATION_CREDENTIALS{operator}{google_credentials.target}}}",
+            f"${{GOOGLE_APPLICATION_CREDENTIALS{operator}{fallback_target}}}",
         ),
     )
     auth_mounts = (gcloud_auth, google_credentials)
