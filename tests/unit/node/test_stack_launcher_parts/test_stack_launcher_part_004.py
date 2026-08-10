@@ -636,6 +636,28 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
         agent_runtime=AgentRuntime.gemini,
     ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
 
+    vertex_explicit_adc_environment = vertex_adc_environment + (
+        (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "/home/agent/.config/gcloud/application_default_credentials.json",
+        ),
+    )
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            vertex_explicit_adc_environment,
+            auth_mounts=mounts,
+            mirror_target=mirror_target,
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == vertex_explicit_adc_environment
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=vertex_explicit_adc_environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.gemini,
+    ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
+
     assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
         mounts,
         agent_environment=(),

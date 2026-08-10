@@ -79,7 +79,7 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.ssh",
 )
 _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
-_HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET = (
+_GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
 _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
@@ -472,8 +472,11 @@ def _clarification_model_provider_auth_mount_targets(
         environment_values = dict(agent_environment)
         gemini_auth_source = _clarification_gemini_auth_source(environment_values)
         runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[gemini_auth_source]
-        if gemini_auth_source == "google_cloud" and environment_values.get(
-            _GOOGLE_APPLICATION_CREDENTIALS
+        google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+        if (
+            gemini_auth_source == "google_cloud"
+            and google_credentials
+            and google_credentials != _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
         ):
             # An explicit service-account file takes precedence over ADC.
             runtime_auth_mount_targets = frozenset()
@@ -1271,7 +1274,7 @@ def _hosted_google_application_credentials_target(
         f"${_GOOGLE_APPLICATION_CREDENTIALS}",
     ):
         # Hosted render-only cannot resolve executor-local ADC paths from Core.
-        return _HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET
+        return _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
     if "$" in raw:
         return None
     target = raw
