@@ -87,29 +87,7 @@ def _collect_defer_items(
 
 
 def _notification_items_digest(items: Sequence[Mapping[str, object]]) -> str:
-    """Return an order-independent digest of public blocking-item content."""
-    item_details = sorted(
-        json.dumps(
-            {
-                field: item.get(field)
-                for field in (
-                    "kind",
-                    "id",
-                    "author",
-                    "is_bot",
-                    "path",
-                    "line",
-                    "url",
-                    "body",
-                    "verdict",
-                    "agent_verdict_reason",
-                    "is_merge_blocking",
-                )
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for item in items
-    )
-    payload = json.dumps(item_details, separators=(",", ":"))
+    """Return a stable, order-independent notification identity for item IDs."""
+    item_ids = sorted(str(item.get("id", "")) for item in items)
+    payload = json.dumps(item_ids, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

@@ -78,8 +78,8 @@ class _RecordingGh:
 
 
 @pytest.mark.unit
-def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> None:
-    """Verify notification items digest includes rendered body and agent reason."""
+def test_notification_items_digest_ignores_rendered_body_and_agent_reason() -> None:
+    """Verify notification items digest only tracks blocker membership."""
     item = {
         "kind": "thread",
         "id": "T-rendered",
@@ -98,9 +98,9 @@ def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> 
 
     digest = _notification_items_digest((item,))
 
-    assert _notification_items_digest((body_changed,)) != digest
-    assert _notification_items_digest((reason_changed,)) != digest
-    assert _notification_items_digest((merge_blocking_changed,)) != digest
+    assert _notification_items_digest((body_changed,)) == digest
+    assert _notification_items_digest((reason_changed,)) == digest
+    assert _notification_items_digest((merge_blocking_changed,)) == digest
 
 
 @pytest.mark.unit
@@ -330,11 +330,11 @@ async def test_human_notification_dedup_includes_order_independent_item_ids(
 
 
 @pytest.mark.unit
-async def test_human_notification_dedup_posts_when_same_id_blocker_content_changes(
+async def test_human_notification_dedup_ignores_same_id_blocker_content_changes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify human notification dedup posts when same id blocker content changes."""
+    """Verify human notification dedup ignores mutable same-item details."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -390,11 +390,9 @@ async def test_human_notification_dedup_posts_when_same_id_blocker_content_chang
 
     second_bot_items, second_human_items = _collect_defer_items(second_status, state)
     second_digest = _notification_items_digest(second_bot_items + second_human_items)
-    assert first_digest != second_digest
-    assert len(gh.posts) == 2
+    assert first_digest == second_digest
+    assert len(gh.posts) == 1
     assert "Initial blocker detail." in str(gh.posts[0]["body"])
-    assert "Updated blocker detail." in str(gh.posts[1]["body"])
-    assert "Updated triage reason." in str(gh.posts[1]["body"])
 
 
 @pytest.mark.unit
