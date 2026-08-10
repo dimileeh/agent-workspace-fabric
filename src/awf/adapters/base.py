@@ -134,7 +134,8 @@ def _isolated_reask_git_metadata_volume_binds(
         # Docker resolves bind sources on the host, so place the snapshot beside
         # the host-visible mirror/worktree directories rather than in worker /tmp.
         temporary_metadata = tempfile.TemporaryDirectory[str](
-            prefix=".awf-clarification-git-", dir=mirror_path.parent.parent
+            prefix=f".awf-clarification-git-{worktree_path.name}--",
+            dir=mirror_path.parent.parent,
         )
         temporary_path = Path(temporary_metadata.name)
         snapshot_path = temporary_path / "linked-git"

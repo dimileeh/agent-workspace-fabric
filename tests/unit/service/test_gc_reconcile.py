@@ -593,6 +593,75 @@ async def test_reconcile_retains_locked_pre_checkout_reask_liveness_marker(
     assert lock_path.exists()
 
 
+@pytest.mark.usefixtures("engine")
+async def test_reconcile_reaps_stale_clarification_git_metadata_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A crashed clarification re-ask cannot strand its Git metadata snapshot."""
+    now = 13_750_000.0
+    stale_snapshot = _make_dir(
+        tmp_path / "git" / ".awf-clarification-git-stale",
+        age_seconds=7_200.0,
+        now=now,
+    )
+    recent_snapshot = _make_dir(
+        tmp_path / "git" / ".awf-clarification-git-recent",
+        age_seconds=60.0,
+        now=now,
+    )
+
+    result = await reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=now,
+        min_age_hours=1,
+        execute=True,
+    )
+
+    assert result.status == "ok"
+    assert not stale_snapshot.exists()
+    assert recent_snapshot.exists()
+
+
+@pytest.mark.usefixtures("engine")
+async def test_reconcile_retains_live_clarification_git_metadata_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A live re-ask keeps its snapshot even with no configured age grace."""
+    now = 13_800_000.0
+    reask = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    snapshot = _make_dir(
+        tmp_path / "git" / f".awf-clarification-git-{reask.name}--live",
+        age_seconds=7_200.0,
+        now=now,
+    )
+
+    try:
+        result = await reconcile_orphaned_workspace_dirs(
+            session_factory,
+            work_dir=tmp_path,
+            now=now,
+            min_age_hours=0,
+            execute=True,
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert result.status == "ok"
+    assert snapshot.exists()
+
+
 def test_pre_checkout_reaper_rechecks_liveness_before_unlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

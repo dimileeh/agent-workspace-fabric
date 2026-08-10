@@ -39,6 +39,7 @@ import contextlib
 import errno
 import fcntl
 import os
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -85,6 +86,8 @@ ORPHAN_DIR_REAP_DRY_RUN = "ORPHAN_DIR_REAP_DRY_RUN"
 ORPHAN_DIR_REAP_CAP_HIT = "ORPHAN_DIR_REAP_CAP_HIT"
 
 DEFAULT_ORPHAN_RECONCILE_LIMIT = 50
+
+_CLARIFICATION_GIT_SNAPSHOT_PREFIX = ".awf-clarification-git-"
 
 # (kind, relative path parts under work_dir). The kind doubles as the
 # ``_is_safe_gc_path`` root key, so it must stay one of the safe-root kinds.
@@ -352,6 +355,51 @@ def _reap_stale_pre_checkout_isolated_reask_liveness_locks(work_dir: Path) -> No
         _remove_isolated_reask_liveness_lock(worktree_path)
 
 
+def _reap_stale_clarification_git_metadata_snapshots(
+    work_dir: Path, *, now: float, min_age_hours: float
+) -> None:
+    """Delete old re-ask Git snapshots after their temporary cleanup was interrupted.
+
+    New snapshots carry their re-ask worktree id in the directory prefix. An
+    active liveness lock protects those snapshots even if an operator has set a
+    zero age grace. Older snapshots from before that naming convention have no
+    liveness association, so they remain until the normal orphan grace passes.
+    """
+    snapshot_root = work_dir / "git"
+    grace_seconds = max(0.0, min_age_hours) * 3600.0
+    try:
+        snapshots = tuple(snapshot_root.iterdir())
+    except OSError:
+        return
+    for snapshot in snapshots:
+        if (
+            not snapshot.name.startswith(_CLARIFICATION_GIT_SNAPSHOT_PREFIX)
+            or snapshot.is_symlink()
+            or not snapshot.is_dir()
+        ):
+            continue
+        reask_worktree_id, separator, _ = snapshot.name.removeprefix(
+            _CLARIFICATION_GIT_SNAPSHOT_PREFIX
+        ).partition("--")
+        if separator and is_isolated_reask_worktree_id(reask_worktree_id):
+            reask_worktree = work_dir / "git" / "worktrees" / reask_worktree_id
+            if is_active_isolated_reask_worktree(reask_worktree):
+                continue
+        try:
+            age_seconds = now - snapshot.stat().st_mtime
+        except OSError:
+            continue
+        if age_seconds < grace_seconds:
+            continue
+        try:
+            shutil.rmtree(snapshot)
+        except OSError:
+            _log.warning(
+                "gc.orphan_dir_reconcile.clarification_git_snapshot_reap_failed",
+                path=str(snapshot),
+            )
+
+
 def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
     """Build a volume-removing compose-teardown closure over a ``ComposeManager``.
 
@@ -401,6 +449,12 @@ async def reconcile_orphaned_workspace_dirs(
         await asyncio.to_thread(
             _reap_stale_pre_checkout_isolated_reask_liveness_locks,
             normalized_work_dir,
+        )
+        await asyncio.to_thread(
+            _reap_stale_clarification_git_metadata_snapshots,
+            normalized_work_dir,
+            now=resolved_now,
+            min_age_hours=min_age_hours,
         )
     # The known-id set is an intentional point-in-time snapshot: it is loaded once
     # here, the scan then runs off-loop, and each target is deleted sequentially,

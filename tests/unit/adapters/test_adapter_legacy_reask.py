@@ -164,6 +164,9 @@ class TestIsolatedReaskAdapter:
         assert temporary_metadata is not None
         try:
             assert Path(temporary_metadata.name).parent == work_root
+            assert Path(temporary_metadata.name).name.startswith(
+                f".awf-clarification-git-{worktree_path.name}--"
+            )
             snapshot_path = Path(temporary_metadata.name) / "linked-git"
             assert {path.name for path in snapshot_path.iterdir()} == {
                 "HEAD",
