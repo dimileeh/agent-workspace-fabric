@@ -1197,6 +1197,25 @@ def test_gemini_clarification_expands_optional_api_keys_before_auth_selection(
 
 
 @pytest.mark.unit
+def test_gemini_clarification_expands_auth_mechanism_before_vertex_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy host-auth API-key selection takes precedence over Vertex."""
+    monkeypatch.setenv("GEMINI_API_KEY_AUTH_MECHANISM", "api-key")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+
+    assert (
+        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
+            {
+                "GEMINI_API_KEY_AUTH_MECHANISM": "${GEMINI_API_KEY_AUTH_MECHANISM}",
+                "GOOGLE_GENAI_USE_VERTEXAI": "${GOOGLE_GENAI_USE_VERTEXAI}",
+            }
+        )
+        == "api_key"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("toggle", "enabled_value"),
     (("GOOGLE_GENAI_USE_VERTEXAI", "true"), ("GOOGLE_GENAI_USE_GCA", "yes")),

@@ -433,7 +433,9 @@ def _clarification_claude_code_bedrock_environment_names(
 def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str:
     """Return the single Gemini credential source selected for clarification."""
 
-    mechanism = environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", "").lower()
+    mechanism = compose_expand_value(
+        environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", ""), environ=os.environ
+    ).lower()
     if mechanism in {"api", "api-key", "api_key"}:
         return "api_key"
     if compose_expand_value(
