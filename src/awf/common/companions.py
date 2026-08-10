@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 COMPANION_POLICY_KEY = "companions"
 COMPANION_WORKTREE_MARKER = "__companion__"
+ISOLATED_REASK_WORKTREE_SUFFIX = f"{COMPANION_WORKTREE_MARKER}isolated_reask_"
 RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "docker"})
 _GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
@@ -55,6 +57,20 @@ def parent_workspace_id_from_companion_worktree_id(worktree_id: str) -> str | No
     if not parent.startswith("ws_") or not companion:
         return None
     return parent
+
+
+def is_isolated_reask_worktree_id(worktree_id: str) -> bool:
+    """Return whether an id belongs to AWF's temporary re-ask checkout."""
+    parent = parent_workspace_id_from_companion_worktree_id(worktree_id)
+    if parent is None:
+        return False
+    reask_suffix = worktree_id.removeprefix(parent + ISOLATED_REASK_WORKTREE_SUFFIX)
+    if reask_suffix == worktree_id:
+        return False
+    try:
+        return len(reask_suffix) == 32 and UUID(hex=reask_suffix).hex == reask_suffix
+    except ValueError:
+        return False
 
 
 def workspace_and_companion_ids(

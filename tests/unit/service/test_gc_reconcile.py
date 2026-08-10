@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -24,9 +25,11 @@ from awf.service.gc_reconcile import (
     ORPHAN_DIR_REAP_OK,
     ORPHAN_DIR_REAP_PARTIAL,
     OrphanDirTarget,
+    _reap_target,
     reconcile_orphaned_workspace_dirs,
     scan_orphan_workspace_dirs,
 )
+from awf.service.gc_worktrees import WorkspaceGCWorktreeRemoveResult
 
 pytestmark = pytest.mark.unit
 
@@ -364,6 +367,157 @@ def test_scan_counts_young_orphans_separately_from_live_dirs(tmp_path: Path) -> 
     assert scanned == 3
     assert dropped == 0
     assert young_orphan == 1
+
+
+def test_scan_reclaims_interrupted_reask_worktree_of_live_parent(tmp_path: Path) -> None:
+    """A stale re-ask checkout is not a policy-declared live companion."""
+    now = 13_500_000.0
+    _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef",
+        age_seconds=10_000.0,
+        now=now,
+    )
+    _make_dir(
+        tmp_path / "git" / "worktrees" / "ws_live__companion__declared_service",
+        age_seconds=10_000.0,
+        now=now,
+    )
+
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        now=now,
+        min_age_hours=1,
+        limit=10,
+    )
+
+    assert [target.path.name for target in targets] == [
+        "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    ]
+    assert (
+        targets[0].workspace_id
+        == "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    assert scanned == 2
+    assert dropped == 0
+    assert young_orphan == 0
+
+
+async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
+    tmp_path: Path,
+) -> None:
+    """Re-ask reconciliation clears its checkout and linked mirror registration."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget(
+        kind="worktree",
+        workspace_id=path.name,
+        path=path,
+        age_seconds=10_000.0,
+    )
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="succeeded",
+        reason_code="WORKTREE_REMOVE_SUCCEEDED",
+    )
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ) as remove_worktree:
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "deleted"
+    assert outcome.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    assert outcome.deleted is True
+    remove_worktree.assert_awaited_once_with(
+        workspace_id=path.name,
+        path=path,
+        work_dir=tmp_path,
+    )
+
+
+async def test_reap_treats_already_removed_reask_worktree_as_idempotent(
+    tmp_path: Path,
+) -> None:
+    """An already-pruned re-ask registration is a successful no-op."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="skipped",
+        reason_code="PATH_ALREADY_REMOVED",
+    )
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "already_removed"
+    assert outcome.reason_code == "PATH_ALREADY_REMOVED"
+
+
+async def test_reap_stops_when_reask_git_cleanup_fails(tmp_path: Path) -> None:
+    """A registered re-ask is retained if its Git cleanup cannot be confirmed."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="failed",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+        error="mirror is locked",
+    )
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "failed"
+    assert outcome.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+    assert outcome.error == "mirror is locked"
+
+
+async def test_reap_deletes_non_git_reask_checkout_after_metadata_skip(tmp_path: Path) -> None:
+    """A failed add without Git registration falls back to safe directory cleanup."""
+    path = _make_dir(
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    target = OrphanDirTarget("worktree", path.name, path, age_seconds=10_000.0)
+    removal = WorkspaceGCWorktreeRemoveResult(
+        status="skipped",
+        reason_code="WORKTREE_NOT_GIT_MANAGED",
+    )
+
+    with patch(
+        "awf.service.gc_worktrees.remove_orphan_worktree",
+        new=AsyncMock(return_value=removal),
+    ):
+        outcome = await _reap_target(target, work_dir=tmp_path)
+
+    assert outcome.status == "deleted"
+    assert outcome.reason_code == PATH_DELETED
+    assert not path.exists()
 
 
 def test_scan_ignores_non_ws_and_non_directory_entries(tmp_path: Path) -> None:

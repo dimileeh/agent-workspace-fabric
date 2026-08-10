@@ -45,7 +45,10 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.companions import parent_workspace_id_from_companion_worktree_id
+from awf.common.companions import (
+    is_isolated_reask_worktree_id,
+    parent_workspace_id_from_companion_worktree_id,
+)
 from awf.common.logging import get_logger
 from awf.db.models import Workspace
 from awf.db.session import session_scope
@@ -201,9 +204,10 @@ def scan_orphan_workspace_dirs(
 
     Pure: lists ``ws_*`` directory entries under each per-workspace root, maps a
     companion-worktree dir name back to its parent id (so a companion of a *live*
-    parent is not mis-classified as orphaned), and keeps only entries whose
-    (parent) id is row-less **and** whose mtime is older than the grace window.
-    Candidates are sorted oldest-first (deterministic), then capped to ``limit``.
+    parent is not mis-classified as orphaned), except for temporary isolated
+    re-ask checkouts. Those use a UUID-qualified internal suffix and are treated
+    as independently row-less after the grace window. Candidates are sorted
+    oldest-first (deterministic), then capped to ``limit``.
 
     ``scanned_count`` counts *every* ``ws_*`` dir entry, so on its own it cannot
     distinguish dirs backed by a live row (healthy) from row-less dirs still
@@ -234,7 +238,7 @@ def scan_orphan_workspace_dirs(
             scanned += 1
             owner_id = (
                 parent_workspace_id_from_companion_worktree_id(entry.name)
-                if kind == "worktree"
+                if kind == "worktree" and not is_isolated_reask_worktree_id(entry.name)
                 else None
             ) or entry.name
             if owner_id in known_workspace_ids:
@@ -476,7 +480,39 @@ def build_and_delete_gc_path(
 
 
 async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirReapOutcome:
-    """Delete one orphan dir via WS-B1's ``_delete_gc_path`` (off the event loop)."""
+    """Delete one orphan dir, preserving Git cleanup for isolated re-asks."""
+    if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+        # The re-ask may have completed ``git worktree add`` before its worker
+        # or host exited. Reuse the Git-aware orphan remover so it clears both
+        # the sibling checkout and the mirror's linked-worktree registration.
+        from awf.service.gc_worktrees import remove_orphan_worktree
+
+        removal = await remove_orphan_worktree(
+            workspace_id=target.path.name,
+            path=target.path,
+            work_dir=work_dir,
+        )
+        if removal.status == "succeeded":
+            return OrphanDirReapOutcome(
+                target=target,
+                status="deleted",
+                reason_code=removal.reason_code,
+                deleted=True,
+            )
+        if removal.reason_code == PATH_ALREADY_REMOVED:
+            return OrphanDirReapOutcome(
+                target=target,
+                status="already_removed",
+                reason_code=PATH_ALREADY_REMOVED,
+            )
+        if not (removal.status == "skipped" and removal.reason_code == "WORKTREE_NOT_GIT_MANAGED"):
+            return OrphanDirReapOutcome(
+                target=target,
+                status="failed",
+                reason_code=removal.reason_code,
+                error=removal.error,
+            )
+
     deleted, error, reason_code = await asyncio.to_thread(
         build_and_delete_gc_path, target.kind, target.path, work_dir=work_dir
     )

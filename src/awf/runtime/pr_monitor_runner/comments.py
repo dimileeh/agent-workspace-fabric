@@ -13,6 +13,7 @@ from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
+from awf.common.companions import ISOLATED_REASK_WORKTREE_SUFFIX
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
@@ -75,10 +76,9 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
-# Name interrupted re-ask checkouts as managed siblings of their source
-# workspace so orphan reconcilers retain visibility without treating them as
-# row-less workspaces.
-_ISOLATED_REASK_WORKTREE_SUFFIX = "__companion__isolated_reask_"
+# Name interrupted re-ask checkouts as managed siblings of their source. Their
+# UUID-qualified suffix lets the orphan reconciler distinguish them from
+# policy-declared companions if creation is interrupted before cleanup.
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 
 
@@ -167,7 +167,7 @@ async def _create_isolated_reask_worktree(
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
     path = worktree_path.parent / (
-        f"{worktree_path.name}{_ISOLATED_REASK_WORKTREE_SUFFIX}{uuid4().hex}"
+        f"{worktree_path.name}{ISOLATED_REASK_WORKTREE_SUFFIX}{uuid4().hex}"
     )
     reask_worktree = _IsolatedReaskWorktree(
         source_worktree=worktree_path,
