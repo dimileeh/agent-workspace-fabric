@@ -595,8 +595,14 @@ class AgentAdapter(ABC):
                         while not recovery_task.done():
                             with contextlib.suppress(asyncio.CancelledError):
                                 await asyncio.shield(recovery_task)
-                        with contextlib.suppress(Exception, asyncio.CancelledError):
-                            recovery_task.result()
+                        cancelled_recovery_result = recovery_task.result()
+                        if not cancelled_recovery_result.ok:
+                            raise AgentRunError(
+                                agent=self.name,
+                                result=cancelled_recovery_result,
+                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                                details={"services": clarification_model_services},
+                            ) from None
                     raise
                 except Exception:
                     # Runner failures also mean the model sidecars may not

@@ -994,6 +994,75 @@ class TestCodexAdapter:
             assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("recovery_raises", [False, True], ids=["nonzero", "raises"])
+    async def test_isolated_reask_surfaces_failed_legacy_recovery_after_cancellation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_raises: bool
+    ) -> None:
+        """Do not discard recovery failure after cancelled model recreation."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        original_compose_file = compose_file.read_bytes()
+
+        class _CancellingThenFailingRecoveryRunner(FakeCommandRunner):
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 1:
+                    raise asyncio.CancelledError
+                if len(self.calls) == 4:
+                    if recovery_raises:
+                        raise RuntimeError("could not restore model sidecar")
+                    return CommandResult(
+                        returncode=1,
+                        stdout="",
+                        stderr="could not restore model sidecar",
+                    )
+                return result
+
+        runner = _CancellingThenFailingRecoveryRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+        if recovery_raises:
+            original_shield = asyncio.shield
+            shield_calls = 0
+
+            async def cancel_recovery_shield(task: asyncio.Future[Any]) -> Any:
+                nonlocal shield_calls
+                shield_calls += 1
+                if shield_calls == 3:
+                    await asyncio.sleep(0)
+                    raise asyncio.CancelledError
+                return await original_shield(task)
+
+            monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_recovery_shield)
+
+        if recovery_raises:
+            with pytest.raises(RuntimeError, match="could not restore model sidecar"):
+                await adapter.run(
+                    compose_project="awf_ws_legacy",
+                    compose_file=compose_file,
+                    prompt=_PROMPT,
+                    model="ollama/kimi-k2.6:cloud",
+                    workspace_id="ws_legacy",
+                    isolated_worktree_host_path=tmp_path / "reask",
+                )
+            assert shield_calls == 3
+        else:
+            with pytest.raises(AgentRunError) as exc:
+                await adapter.run(
+                    compose_project="awf_ws_legacy",
+                    compose_file=compose_file,
+                    prompt=_PROMPT,
+                    model="ollama/kimi-k2.6:cloud",
+                    workspace_id="ws_legacy",
+                    isolated_worktree_host_path=tmp_path / "reask",
+                )
+
+            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+            assert exc.value.result.stderr == "could not restore model sidecar"
+            assert exc.value.details == {"services": ("ollama-sidecar",)}
+
+        assert len(runner.calls) == 4
+        assert compose_file.read_bytes() == original_compose_file
+
+    @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_raises(
         self, tmp_path: Path
     ) -> None:
