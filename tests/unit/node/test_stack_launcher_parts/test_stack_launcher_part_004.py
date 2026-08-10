@@ -164,6 +164,65 @@ def test_codex_clarification_prefers_file_auth_to_environment_credentials() -> N
 
 
 @pytest.mark.unit
+def test_grok_clarification_prefers_api_key_to_cached_token_auth() -> None:
+    """Grok clarification excludes inactive cached-token auth when an API key is set."""
+    grok_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/grok",
+        target="/home/agent/.grok",
+        mode="rw",
+    )
+    xai_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/xai-key",
+        target="/run/awf/secrets/xai-key",
+        mode="ro",
+    )
+    environment = (("XAI_API_KEY", xai_credentials.target),)
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(grok_auth, xai_credentials),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.grok,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (grok_auth, xai_credentials),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.grok,
+    )
+
+    assert clarification_environment == (("XAI_API_KEY", "/home/agent/.awf/clarification-auth/0"),)
+    assert clarification_mounts == (
+        AuthMount(
+            source=xai_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_grok_clarification_uses_cached_token_auth_without_an_api_key() -> None:
+    """Grok clarification retains cached-token auth when no API key is available."""
+    grok_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/grok",
+        target="/home/agent/.grok",
+        mode="rw",
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (grok_auth,),
+        agent_environment=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.grok,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=grok_auth.source, target=grok_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_selected_claude_backend_credentials() -> None:
     """Bedrock and Vertex clarification excludes inactive direct Claude auth."""
     claude_auth = AuthMount(

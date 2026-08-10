@@ -438,6 +438,12 @@ def _clarification_model_provider_auth_mount_targets(
         runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[
             _clarification_gemini_auth_source(dict(agent_environment))
         ]
+    if agent_runtime is AgentRuntime.grok and any(
+        name == "XAI_API_KEY" and value for name, value in agent_environment
+    ):
+        # Grok's headless launcher selects an API key before cached-token auth,
+        # so do not expose an inactive token store to clarification.
+        runtime_auth_mount_targets = frozenset()
     if agent_runtime is AgentRuntime.opencode:
         provider = opencode_provider_for_model(agent_model)
         if provider == "ollama":
