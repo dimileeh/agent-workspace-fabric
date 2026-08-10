@@ -514,14 +514,33 @@ def _clarification_resolve_google_credentials_placeholder(
         f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
         f"${_GOOGLE_APPLICATION_CREDENTIALS}",
     ):
-        dynamic_targets = tuple(
-            mount.target
-            for mount in auth_mounts
-            if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
+        worker_google_credentials = compose_expand_value(google_credentials, environ=os.environ)
+        matching_target = next(
+            (
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.source == worker_google_credentials
+                and mount.target == worker_google_credentials
+                and mount.target.startswith("/")
+            ),
+            None,
         )
-        if len(dynamic_targets) != 1:
+        if matching_target is not None:
+            google_credentials = matching_target
+        elif worker_google_credentials:
             return agent_environment
-        google_credentials = dynamic_targets[0]
+        else:
+            dynamic_targets = tuple(
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.source == mount.target
+                and mount.target.startswith("/")
+            )
+            if len(dynamic_targets) != 1:
+                return agent_environment
+            google_credentials = dynamic_targets[0]
     elif _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE.fullmatch(google_credentials or ""):
         google_credentials = compose_expand_value(google_credentials or "", environ=os.environ)
     else:

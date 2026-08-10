@@ -1240,8 +1240,11 @@ def test_gemini_clarification_expands_optional_access_token_before_auth_selectio
 
 
 @pytest.mark.unit
-def test_gemini_clarification_resolves_google_credentials_compose_placeholder() -> None:
+def test_gemini_clarification_resolves_google_credentials_compose_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     gcloud_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/gcloud",
         target="/home/agent/.config/gcloud",
@@ -1283,8 +1286,11 @@ def test_gemini_clarification_resolves_google_credentials_compose_placeholder() 
 
 
 @pytest.mark.unit
-def test_claude_vertex_clarification_resolves_google_credentials_compose_placeholder() -> None:
+def test_claude_vertex_clarification_resolves_google_credentials_compose_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     gcloud_auth = AuthMount(
         source="/host/awf/auth/ws_launcher/gcloud",
         target="/home/agent/.config/gcloud",
@@ -1316,6 +1322,70 @@ def test_claude_vertex_clarification_resolves_google_credentials_compose_placeho
         agent_environment=environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
         agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=google_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_runtime", "environment"),
+    (
+        (
+            AgentRuntime.gemini,
+            (
+                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+            ),
+        ),
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-project"),
+            ),
+        ),
+    ),
+)
+def test_google_vertex_clarification_resolves_bare_google_credentials_placeholder_with_other_pass_through_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_runtime: AgentRuntime,
+    environment: tuple[tuple[str, str], ...],
+) -> None:
+    """The worker's ADC placeholder selects its mount among pass-through mounts."""
+    credentials_target = "/run/awf/secrets/worker-gcp.json"
+    google_credentials = AuthMount(
+        source=credentials_target,
+        target=credentials_target,
+        mode="ro",
+    )
+    unrelated_pass_through = AuthMount(
+        source="/run/awf/secrets/unrelated",
+        target="/run/awf/secrets/unrelated",
+        mode="ro",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
+    environment += (("GOOGLE_APPLICATION_CREDENTIALS", "${GOOGLE_APPLICATION_CREDENTIALS}"),)
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(google_credentials, unrelated_pass_through),
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=agent_runtime,
+        )
+        == environment[:-1]
+        + (("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),)
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (google_credentials, unrelated_pass_through),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
     ) == (
         AuthMount(
             source=google_credentials.source,
