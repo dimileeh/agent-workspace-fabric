@@ -18,7 +18,10 @@ from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 
 
 class _LocalCommandRunner:
+    """Test double used by the surrounding scenario."""
+
     async def run(self, args: list[str]) -> CommandResult:
+        """Run this test double and record the invocation."""
         proc = subprocess.run(args, capture_output=True, text=True)
         return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
@@ -31,15 +34,19 @@ async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
     audit_events: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         raise RuntimeError("re-ask failed")
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return "d" * 40
 
     async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> str:
+        """Assert the primary worktree stays unchanged in this test."""
         return "could not inspect primary worktree"
 
     runner = SimpleNamespace(
@@ -89,9 +96,11 @@ async def test_needs_human_reason_reask_propagates_unexpected_setup_error(tmp_pa
     (worktree / ".git").write_text("gitdir: unavailable\n", encoding="utf-8")
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         raise ValueError("unexpected rev-parse defect")
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         pytest.fail("unexpected setup errors must not be recorded as unavailable")
 
     runner = SimpleNamespace(
@@ -137,14 +146,17 @@ async def test_needs_human_reason_reask_requires_a_restore_ref(tmp_path: Path) -
     state = MonitorState()
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         nonlocal invoked
         invoked = True
         return VerdictResult(verdict="needs_human", reason="select a region")
 
     async def _rev_parse_head(_worktree_path: Path) -> None:
-        return None
+        """Return the synthetic primary-worktree revision."""
+        return
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     runner = SimpleNamespace(
@@ -191,12 +203,15 @@ async def test_non_mutating_verdict_invocation_skips_commit_after_agent_error(
     committed = False
 
     async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        """Exercise the _provider_recovery_suppresses_cli test helper."""
         return False
 
     async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        """Exercise the _run_monitor_agent_with_service_recovery test helper."""
         raise RuntimeError("failed after edit")
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Exercise the _commit_dirty_worktree test helper."""
         nonlocal committed
         committed = True
         return True
@@ -238,9 +253,11 @@ async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery
     handled_agent_error = False
 
     async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        """Exercise the _provider_recovery_suppresses_cli test helper."""
         return False
 
     async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        """Exercise the _run_monitor_agent_with_service_recovery test helper."""
         raise AgentRunError(
             agent=AgentRuntime.codex,
             result=CommandResult(
@@ -253,6 +270,7 @@ async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery
         )
 
     async def _handle_provider_agent_run_error(*_args: object, **_kwargs: object) -> str:
+        """Exercise the _handle_provider_agent_run_error test helper."""
         nonlocal handled_agent_error
         handled_agent_error = True
         return "deterministic"

@@ -56,6 +56,7 @@ class TestIsolatedReaskAdapter:
 
     @pytest.mark.unit
     async def test_uses_requested_compose_exec_workdir(self) -> None:
+        """Verify uses requested compose exec workdir."""
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner)
 
@@ -270,6 +271,7 @@ class TestIsolatedReaskAdapter:
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
         def fail_marker(*, compose_file: Path) -> None:
+            """Exercise the fail_marker test helper."""
             del compose_file
             raise ValueError("disk full")
 
@@ -312,6 +314,7 @@ class TestIsolatedReaskAdapter:
         upgrade_finished = Event()
 
         def blocking_upgrade(**kwargs: object) -> tuple[str, ...]:
+            """Exercise the blocking_upgrade test helper."""
             upgraded_compose_file = kwargs["compose_file"]
             assert isinstance(upgraded_compose_file, Path)
             upgrade_started.set()
@@ -508,7 +511,10 @@ class TestIsolatedReaskAdapter:
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
         class _FailingNetworkReapRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 3:
                     raise RuntimeError("network reap unavailable")
@@ -632,7 +638,10 @@ class TestIsolatedReaskAdapter:
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
         class _FailingLegacyRecoveryRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 4:
                     raise FileNotFoundError("docker not found")
@@ -693,6 +702,7 @@ class TestIsolatedReaskAdapter:
         adapter = OpenCodeAdapter(runner=runner)
 
         def fail_restore(*, compose_file: Path, contents: bytes) -> None:
+            """Exercise the fail_restore test helper."""
             del compose_file, contents
             raise OSError("disk full")
 
@@ -753,7 +763,10 @@ class TestIsolatedReaskAdapter:
         original_compose_file = compose_file.read_bytes()
 
         class _CancellingSidecarUpdateRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 1:
                     raise asyncio.CancelledError
@@ -764,6 +777,7 @@ class TestIsolatedReaskAdapter:
         if restore_fails:
 
             def fail_restore(*, compose_file: Path, contents: bytes) -> None:
+                """Exercise the fail_restore test helper."""
                 del compose_file, contents
                 raise OSError("disk full")
 
@@ -772,6 +786,7 @@ class TestIsolatedReaskAdapter:
         shield_calls = 0
 
         async def cancel_cleanup_and_recovery_shield(task: asyncio.Future[Any]) -> Any:
+            """Exercise the cancel_cleanup_and_recovery_shield test helper."""
             nonlocal shield_calls
             shield_calls += 1
             # The first shield protects the legacy upgrade worker. Interrupt
@@ -865,7 +880,10 @@ class TestIsolatedReaskAdapter:
         original_compose_file = compose_file.read_bytes()
 
         class _CancellingThenFailingRecoveryRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 1:
                     raise asyncio.CancelledError
@@ -886,6 +904,7 @@ class TestIsolatedReaskAdapter:
             shield_calls = 0
 
             async def cancel_recovery_shield(task: asyncio.Future[Any]) -> Any:
+                """Exercise the cancel_recovery_shield test helper."""
                 nonlocal shield_calls
                 shield_calls += 1
                 if shield_calls == 3:
@@ -937,7 +956,10 @@ class TestIsolatedReaskAdapter:
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
         class _CancellingSidecarUpdateRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 1:
                     raise asyncio.CancelledError
@@ -981,7 +1003,10 @@ class TestIsolatedReaskAdapter:
         original_compose_file = compose_file.read_bytes()
 
         class _CancellingSidecarUpdateRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 result = await super().run(args, **kwargs)
                 if len(self.calls) == 1:
                     raise asyncio.CancelledError
@@ -1043,7 +1068,10 @@ class TestIsolatedReaskAdapter:
         original_compose_file = compose_file.read_bytes()
 
         class _FailingSidecarUpdateRunner(FakeCommandRunner):
+            """Test double used by the surrounding scenario."""
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                """Run this test double and record the invocation."""
                 await super().run(args, **kwargs)
                 raise FileNotFoundError("docker not found")
 

@@ -896,6 +896,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_reason_neutralizes_untrusted_mentions(self) -> None:
+        """Verify blocker reason neutralizes untrusted mentions."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -907,6 +908,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_reason_truncates_long_agent_reason(self) -> None:
+        """Verify blocker reason truncates long agent reason."""
         long_reason = "z" * 200
         body = ready_to_merge_comment(
             pr_number=1,
@@ -919,6 +921,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
+        """Verify blocker items render location verdict excerpt and honest missing reason."""
         long_body = "x" * 200
         body = ready_to_merge_comment(
             pr_number=1,
@@ -961,6 +964,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_item_truncates_long_agent_verdict_reason(self) -> None:
+        """Verify blocker item truncates long agent verdict reason."""
         long_reason = "y" * 200
         body = ready_to_merge_comment(
             pr_number=1,
@@ -986,6 +990,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_render_path_without_line_anchor(self) -> None:
+        """Verify blocker items render path without line anchor."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1009,6 +1014,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_cap_combined_groups_at_eight(self) -> None:
+        """Verify blocker items cap combined groups at eight."""
         blocker_items = tuple(
             {
                 "kind": "thread",
@@ -1037,6 +1043,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_use_group_labels_and_deterministic_location_ordering(self) -> None:
+        """Verify blocker items use group labels and deterministic location ordering."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1097,6 +1104,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_render_human_needs_human_as_an_escalation(self) -> None:
+        """Verify blocker items render human needs human as an escalation."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1133,6 +1141,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_render_effective_changes_reviews_separately_from_deferrals(self) -> None:
+        """Verify blocker items render effective changes reviews separately from deferrals."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1170,6 +1179,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_prioritize_changes_requested_reviews_within_cap(self) -> None:
+        """Verify blocker items prioritize changes requested reviews within cap."""
         deferred_items = tuple(
             {
                 "kind": "thread",
@@ -1209,6 +1219,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
+        """Verify blocker items honor collected thread classification."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1234,6 +1245,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_item_section_redacts_agent_reason_secrets(self) -> None:
+        """Verify blocker item section redacts agent reason secrets."""
         secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCD"
         body = ready_to_merge_comment(
             pr_number=1,
@@ -1260,6 +1272,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_item_excerpt_redacts_url_credentials_before_truncating(self) -> None:
+        """Verify blocker item excerpt redacts url credentials before truncating."""
         password = "credential-that-crosses-the-boundary"
         body = ready_to_merge_comment(
             pr_number=1,
@@ -1286,6 +1299,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_escape_untrusted_markdown_and_link_destinations(self) -> None:
+        """Verify blocker items escape untrusted markdown and link destinations."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1332,6 +1346,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_blocker_items_neutralize_mentions_in_untrusted_excerpt_and_reason(self) -> None:
+        """Verify blocker items neutralize mentions in untrusted excerpt and reason."""
         body = ready_to_merge_comment(
             pr_number=1,
             head_sha="a" * 40,
@@ -1360,6 +1375,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_empty_blocker_items_preserve_existing_comment_byte_for_byte(self) -> None:
+        """Verify empty blocker items preserve existing comment byte for byte."""
         expected = (
             "⚠️ PR #1 needs human attention at commit `aaaaaaaaaa`.\n\n"
             "AWF did not auto-merge because review feedback needs human input.\n\n"
@@ -1379,6 +1395,7 @@ class TestReadyToMergeComment:
 
     @pytest.mark.unit
     def test_incident_replay_renders_all_reasonless_needs_human_items(self) -> None:
+        """Verify incident replay renders all reasonless needs human items."""
         blocker_items = tuple(
             {
                 "kind": "thread",

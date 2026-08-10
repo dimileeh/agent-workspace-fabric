@@ -47,6 +47,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
     config.write_text("MODE=original\n", encoding="utf-8")
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
@@ -55,6 +56,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
         raise asyncio.CancelledError
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -107,7 +109,10 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
     cleanup_finished = asyncio.Event()
 
     class _BlockingWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
@@ -117,9 +122,11 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         raise asyncio.CancelledError
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -178,18 +185,23 @@ async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_
     )
 
     class _FailedWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
         raise terminal_error
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -244,7 +256,10 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
     cleanup_finished = asyncio.Event()
 
     class _BlockingWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
@@ -254,6 +269,7 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
@@ -264,10 +280,12 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
         raise RuntimeError("ordinary re-ask failure")
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
-        return None
+        """Record pr monitor audit event for this test."""
+        return
 
     runner = SimpleNamespace(
         _deps=SimpleNamespace(runner=_BlockingWorktreeRemoveRunner()),
@@ -329,7 +347,10 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
     state = MonitorState()
 
     class _BlockingFailedWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
@@ -337,6 +358,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
@@ -346,6 +368,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         _runner: object,
         **kwargs: object,
     ) -> None:
+        """Record the simulated re-ask cleanup persistence outcome."""
         assert kwargs["workspace_id"] == "ws_reask_post_invocation_cancel_cleanup_failure"
         assert kwargs["item_id"] == "thread_1"
         assert kwargs["needs_human_reason"] == "select a deployment region"
@@ -358,6 +381,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         persisted_states.append(dict(state.threads_addressed_ids))
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -429,7 +453,10 @@ async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_canc
     state = MonitorState()
 
     class _CancelAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
             result = await super().run(args)
@@ -441,10 +468,12 @@ async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_canc
         _runner: object,
         **kwargs: object,
     ) -> None:
+        """Record the simulated re-ask cleanup persistence outcome."""
         persisted_errors.append(str(kwargs["cleanup_error"]))
         assert kwargs["needs_human_reason"] is None
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -508,7 +537,10 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
     state = MonitorState()
 
     class _BlockingFailedWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
@@ -516,12 +548,14 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         raise asyncio.CancelledError
 
     async def _persist_reask_cleanup_failure_after_cancellation(
         _runner: object,
         **kwargs: object,
     ) -> None:
+        """Record the simulated re-ask cleanup persistence outcome."""
         assert kwargs["workspace_id"] == "ws_reask_cancel_cleanup_failure_without_reason"
         assert kwargs["item_id"] == "thread_1"
         persisted_reasons.append(kwargs["needs_human_reason"])
@@ -530,6 +564,7 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
         )
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -589,24 +624,29 @@ async def test_needs_human_reason_reask_persists_completed_cleanup_failure_befor
     state = MonitorState()
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         raise asyncio.CancelledError
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return "e" * 40
 
     async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> str:
+        """Assert the primary worktree stays unchanged in this test."""
         return "could not inspect primary worktree"
 
     async def _persist_reask_cleanup_failure_after_cancellation(
         _runner: object,
         **kwargs: object,
     ) -> None:
+        """Record the simulated re-ask cleanup persistence outcome."""
         persisted_errors.append(str(kwargs["cleanup_error"]))
 
     original_shield = comments.asyncio.shield
     shield_calls = 0
 
     async def _cancel_after_completed_cleanup(task: object) -> object:
+        """Simulate after completed cleanup for this test."""
         nonlocal shield_calls
         shield_calls += 1
         result = await original_shield(task)
@@ -692,28 +732,38 @@ async def test_persist_reask_cleanup_failure_after_cancellation_preserves_feedba
     audit_events: list[dict[str, object]] = []
 
     class _SessionContext:
+        """Test double used by the surrounding scenario."""
+
         async def __aenter__(self) -> SimpleNamespace:
+            """Enter the test session context."""
             return session
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Exit the test session context."""
+            return
 
     async def _commit() -> None:
+        """Exercise the _commit test helper."""
         session.committed = True
 
     session.commit = _commit
 
     class _WorkspaceRepository:
+        """Test double used by the surrounding scenario."""
+
         def __init__(self, _session: object) -> None:
+            """Initialize this test double."""
             pass
 
         async def get_for_update(self, workspace_id: str) -> SimpleNamespace | None:
+            """Exercise the get_for_update test helper."""
             assert workspace_id == "ws_1"
             return workspace if workspace_exists else None
 
     monkeypatch.setattr(comments, "WorkspaceRepository", _WorkspaceRepository)
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(dict(kwargs))
 
     runner = SimpleNamespace(

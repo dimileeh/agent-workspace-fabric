@@ -39,6 +39,7 @@ from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSle
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Provide an isolated database session factory."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -49,6 +50,7 @@ def _status(
     reviews: tuple[ReviewComment, ...] = (),
     blocking_reviews: tuple[ReviewComment, ...] = (),
 ) -> PRStatus:
+    """Build a mergeable pull-request status fixture."""
     return PRStatus(
         number=46,
         head_sha="abc1234567890def",
@@ -63,15 +65,20 @@ def _status(
 
 
 class _RecordingGh:
+    """Test double used by the surrounding scenario."""
+
     def __init__(self) -> None:
+        """Initialize this test double."""
         self.posts: list[dict[str, object]] = []
 
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        """Exercise the post_comment test helper."""
         self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
 
 
 @pytest.mark.unit
 def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> None:
+    """Verify notification items digest includes rendered body and agent reason."""
     item = {
         "kind": "thread",
         "id": "T-rendered",
@@ -98,6 +105,7 @@ def test_notification_items_digest_includes_rendered_body_and_agent_reason() -> 
 def test_notify_human_blocker_items_promotes_overlapping_blocking_review(
     triage_verdict: str,
 ) -> None:
+    """Verify notify human blocker items promotes overlapping blocking review."""
     review = ReviewComment(
         comment_id="R-deferred",
         body_excerpt="Please revise the error handling.",
@@ -116,6 +124,7 @@ def test_notify_human_blocker_items_promotes_overlapping_blocking_review(
 
 @pytest.mark.unit
 def test_notify_human_blocker_items_classifies_bot_blocking_review() -> None:
+    """Verify notify human blocker items classifies bot blocking review."""
     review = ReviewComment(
         comment_id="R-bot",
         body_excerpt="",
@@ -134,6 +143,7 @@ def test_notify_human_blocker_items_classifies_bot_blocking_review() -> None:
 
 @pytest.mark.unit
 def test_notify_human_blocker_items_excludes_advisory_bot_review_defer() -> None:
+    """Verify notify human blocker items excludes advisory bot review defer."""
     review = ReviewComment(
         comment_id="R-advisory",
         body_excerpt="Consider documenting this follow-up.",
@@ -156,6 +166,7 @@ async def test_human_notification_includes_effective_blocking_reviews_in_details
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify human notification includes effective blocking reviews in details and digest."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -221,6 +232,7 @@ async def test_human_notification_dedup_includes_order_independent_item_ids(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify human notification dedup includes order independent item ids."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -298,6 +310,7 @@ async def test_human_notification_dedup_posts_when_same_id_blocker_content_chang
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify human notification dedup posts when same id blocker content changes."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -362,6 +375,7 @@ async def test_human_notification_dedup_posts_when_same_id_blocker_content_chang
 
 @pytest.mark.unit
 def test_deferred_item_collection_keeps_existing_forge_urls() -> None:
+    """Verify deferred item collection keeps existing forge urls."""
     thread = ReviewThread(
         thread_id="T-url",
         path="src/thread.py",
@@ -402,6 +416,7 @@ async def test_human_notification_uses_the_same_items_and_digest_for_every_reaso
     blocker_reason: str,
     derived_reason: str | None,
 ) -> None:
+    """Verify human notification uses the same items and digest for every reason fallback."""
     gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
@@ -456,6 +471,7 @@ async def test_human_notification_uses_the_same_items_and_digest_for_every_reaso
     original_key = _notification_key
 
     def _capture_key(**kwargs: object) -> str:
+        """Exercise the _capture_key test helper."""
         digests.append(
             kwargs.get("items_digest") if isinstance(kwargs.get("items_digest"), str) else None
         )
@@ -479,32 +495,42 @@ async def test_human_notification_uses_the_same_items_and_digest_for_every_reaso
 
 
 class _NotifyHumanLoopRunner:
+    """Test double used by the surrounding scenario."""
+
     def __init__(self) -> None:
+        """Initialize this test double."""
         self._config = SimpleNamespace(auto_merge=True, poll_interval_seconds=0.0)
         self._deps = SimpleNamespace(sleep=self._sleep)
         self.attention_reasons: list[str] = []
 
     async def _sleep(self, _seconds: float) -> None:
-        return None
+        """Exercise the _sleep test helper."""
+        return
 
     async def _begin_monitor_operation(self, **_kwargs: object) -> object:
+        """Exercise the _begin_monitor_operation test helper."""
         return object()
 
     async def _set_workspace_attention(self, _workspace_id: str, *, reason: str) -> None:
+        """Exercise the _set_workspace_attention test helper."""
         self.attention_reasons.append(reason)
 
     async def _post_human_notification_once(self, **_kwargs: object) -> None:
-        return None
+        """Exercise the _post_human_notification_once test helper."""
+        return
 
     async def _clear_forge_transient_retry_state_on_success(self, **_kwargs: object) -> None:
-        return None
+        """Exercise the _clear_forge_transient_retry_state_on_success test helper."""
+        return
 
     async def _finish_monitor_operation(self, _operation: object, **_kwargs: object) -> None:
-        return None
+        """Exercise the _finish_monitor_operation test helper."""
+        return
 
 
 @pytest.mark.unit
 async def test_notify_human_workspace_attention_remains_a_compact_sentence() -> None:
+    """Verify notify human workspace attention remains a compact sentence."""
     runner = _NotifyHumanLoopRunner()
     status = _status(
         threads=(

@@ -61,6 +61,7 @@ class _LocalCommandRunner:
     """Run the PR monitor's git commands against a temporary real worktree."""
 
     async def run(self, args: list[str]) -> CommandResult:
+        """Run this test double and record the invocation."""
         proc = subprocess.run(args, capture_output=True, text=True)
         return CommandResult(
             returncode=proc.returncode,
@@ -75,9 +76,12 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
     calls: list[dict[str, object]] = []
 
     class _Adapter:
+        """Test double used by the surrounding scenario."""
+
         is_hosted = False
 
         async def run(self, **kwargs: object) -> AgentRunResult:
+            """Run this test double and record the invocation."""
             calls.append(dict(kwargs))
             return AgentRunResult(
                 returncode=0, stdout="AWF-VERDICT: NEEDS_HUMAN: reason", stderr=""
@@ -117,9 +121,12 @@ async def test_isolated_reask_agent_error_does_not_restart_persistent_service(
     calls = 0
 
     class _Adapter:
+        """Test double used by the surrounding scenario."""
+
         is_hosted = False
 
         async def run(self, **_kwargs: object) -> AgentRunResult:
+            """Run this test double and record the invocation."""
             nonlocal calls
             calls += 1
             raise AgentRunError(
@@ -131,6 +138,7 @@ async def test_isolated_reask_agent_error_does_not_restart_persistent_service(
     runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
 
     async def _unexpected_recovery(_runner: object, **_kwargs: object) -> None:
+        """Fail if recovery is invoked."""
         raise AssertionError("isolated clarification must not enter service recovery")
 
     monkeypatch.setattr(
@@ -162,9 +170,12 @@ async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
     calls = 0
 
     class _Adapter:
+        """Test double used by the surrounding scenario."""
+
         is_hosted = False
 
         async def run(self, **_kwargs: object) -> AgentRunResult:
+            """Run this test double and record the invocation."""
             nonlocal calls
             calls += 1
             raise ComposeExecCleanupError(
@@ -177,6 +188,7 @@ async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
     runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
 
     async def _unexpected_recovery(_runner: object, **_kwargs: object) -> None:
+        """Fail if recovery is invoked."""
         raise AssertionError("isolated clarification must not enter service recovery")
 
     monkeypatch.setattr(
@@ -226,6 +238,7 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
     ownership_repairs: list[dict[str, object]] = []
 
     async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        """Record the synthetic agent-worktree ownership repair."""
         ownership_repairs.append(dict(kwargs))
         return True
 
@@ -293,6 +306,7 @@ async def test_isolated_reask_worktree_is_removed_when_ownership_repair_fails(
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Record the synthetic agent-worktree ownership repair."""
         return False
 
     monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
@@ -318,12 +332,14 @@ async def test_isolated_reask_worktree_blocks_when_ownership_failure_cleanup_fai
     cleanup = comments._cleanup_isolated_reask_worktree_after_creation_failure
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Record the synthetic agent-worktree ownership repair."""
         return False
 
     async def _cleanup_isolated_reask_worktree_after_creation_failure(
         cleanup_runner: object,
         **kwargs: object,
     ) -> str:
+        """Exercise the _cleanup_isolated_reask_worktree_after_creation_failure test helper."""
         assert await cleanup(cleanup_runner, **kwargs) is None
         return "simulated cleanup failure"
 
@@ -392,12 +408,16 @@ async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raise
     acquire_lock = comments._acquire_isolated_reask_liveness_lock
 
     class _GitAddRaisesRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "add" in args:
                 raise RuntimeError("worktree add failed")
             return await super().run(args)
 
     def _record_lock(path: Path) -> tuple[int, Path]:
+        """Record lock for this test."""
         lock_fd, lock_path = acquire_lock(path)
         lock_paths.append(lock_path)
         return lock_fd, lock_path
@@ -425,6 +445,7 @@ async def test_isolated_reask_worktree_blocks_when_liveness_lock_is_unavailable(
     worktree = _init_real_worktree(tmp_path, "ws_reask_lock_unavailable")
 
     def _lock_unavailable(_fd: int, _operation: int) -> None:
+        """Exercise the _lock_unavailable test helper."""
         raise OSError("advisory locks unavailable")
 
     monkeypatch.setattr(comments.fcntl, "flock", _lock_unavailable)
@@ -471,7 +492,10 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
     worktree = _init_real_worktree(tmp_path, "ws_reask_create_nonzero_after_checkout")
 
     class _NonzeroAfterWorktreeAddRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             result = await super().run(args)
             if "worktree" in args and "add" in args:
                 return CommandResult(
@@ -503,7 +527,10 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
     audit_events: list[dict[str, object]] = []
 
     class _NonzeroAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
             result = await super().run(args)
@@ -516,9 +543,11 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
             return result
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     runner = SimpleNamespace(
@@ -586,7 +615,10 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
     audit_events: list[dict[str, object]] = []
 
     class _NonzeroAfterWorktreeAddWithExceptionalCleanupRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
             result = await super().run(args)
@@ -599,9 +631,11 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
             return result
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     runner = SimpleNamespace(
@@ -649,7 +683,10 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
     worktree = _init_real_worktree(tmp_path, "ws_reask_create_cancelled")
 
     class _CancelAfterWorktreeAddRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             result = await super().run(args)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
@@ -679,11 +716,13 @@ async def test_isolated_reask_worktree_removes_checkout_when_ownership_repair_is
     acquire_lock = comments._acquire_isolated_reask_liveness_lock
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Record the synthetic agent-worktree ownership repair."""
         repair_started.set()
         await asyncio.Event().wait()
         return True
 
     def _record_lock(path: Path) -> tuple[int, Path]:
+        """Record lock for this test."""
         lock_fd, lock_path = acquire_lock(path)
         lock_fds.append(lock_fd)
         return lock_fd, lock_path
@@ -721,7 +760,10 @@ async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancella
     cleanup_finished = asyncio.Event()
 
     class _CancelAfterWorktreeAddWithBlockingCleanupRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
@@ -764,7 +806,10 @@ async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_
     warnings: list[tuple[str, dict[str, object]]] = []
 
     class _CancelAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
             result = await super().run(args)
@@ -773,7 +818,10 @@ async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_
             return result
 
     class _RecordingLogger:
+        """Test double used by the surrounding scenario."""
+
         def warning(self, event_name: str, **kwargs: object) -> None:
+            """Capture a warning emitted by the test subject."""
             warnings.append((event_name, kwargs))
 
     runner = SimpleNamespace(
@@ -827,7 +875,10 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
     worktree = _init_real_worktree(tmp_path, workspace_id)
 
     class _FailingWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(
                     returncode=1,
@@ -837,6 +888,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         if reask_raises:
             raise RuntimeError("re-ask failed")
         return VerdictResult(
@@ -845,10 +897,12 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
         )
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
-        return None
+        """Record pr monitor audit event for this test."""
+        return
 
     runner = SimpleNamespace(
         _deps=SimpleNamespace(runner=_FailingWorktreeRemoveRunner()),
@@ -916,12 +970,16 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
     worktree = _init_real_worktree(tmp_path, workspace_id)
 
     class _ExceptionalWorktreeRemoveRunner(_LocalCommandRunner):
+        """Test double used by the surrounding scenario."""
+
         async def run(self, args: list[str]) -> CommandResult:
+            """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
             return await super().run(args)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         if reask_raises:
             raise RuntimeError("re-ask failed")
         return VerdictResult(
@@ -930,9 +988,11 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
         )
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         pytest.fail("a stranded isolated checkout must block the fix cycle")
 
     runner = SimpleNamespace(
@@ -997,15 +1057,19 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
     cleanup_calls: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         raise error
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         pytest.fail("terminal re-ask error must not be replaced with a missing reason")
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return "a" * 40
 
     async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> str | None:
+        """Assert the primary worktree stays unchanged in this test."""
         cleanup_calls.append(kwargs)
         if cleanup_fails:
             return "could not inspect primary worktree"
@@ -1068,6 +1132,7 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
     audit_events: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         nonlocal invoked
         invoked = True
         return VerdictResult(
@@ -1076,9 +1141,11 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
         )
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> None:
+        """Assert the primary worktree stays unchanged in this test."""
         nonlocal cleanup_called
         cleanup_called = True
 
@@ -1135,14 +1202,17 @@ async def test_needs_human_reason_reask_skips_when_primary_worktree_loses_git_co
     (tmp_path / workspace_id).mkdir()
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         nonlocal invoked
         invoked = True
         return VerdictResult(verdict="needs_human", reason="must not be used")
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         pytest.fail("missing Git metadata must skip the clarification re-ask")
 
     runner = SimpleNamespace(
@@ -1192,14 +1262,17 @@ async def test_needs_human_reason_reask_skips_when_production_worktree_is_missin
     workspace_id = "ws_reask_missing_worktree"
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         nonlocal invoked
         invoked = True
         return VerdictResult(verdict="needs_human", reason="must not be used")
 
     async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record pr monitor audit event for this test."""
         audit_events.append(kwargs)
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         pytest.fail("a missing production worktree must skip the clarification re-ask")
 
     runner = SimpleNamespace(
@@ -1249,9 +1322,11 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     cleanup_calls: list[dict[str, object]] = []
 
     async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        """Exercise the _provider_recovery_suppresses_cli test helper."""
         return False
 
     async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        """Exercise the _run_monitor_agent_with_service_recovery test helper."""
         return AgentRunResult(
             returncode=0,
             stdout="AWF-VERDICT: NEEDS_HUMAN: select the deployment region",
@@ -1259,16 +1334,20 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
         )
 
     async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        """Exercise the _commit_dirty_worktree test helper."""
         committed_messages.append(str(kwargs["message"]))
         return True
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
-        return None
+        """Record pr monitor audit event for this test."""
+        return
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return "b" * 40
 
     async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> None:
+        """Assert the primary worktree stays unchanged in this test."""
         cleanup_calls.append(kwargs)
 
     runner = SimpleNamespace(
@@ -1282,6 +1361,7 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     (tmp_path / "ws_1").mkdir()
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         return await comments._invoke_cli_for_verdict_result(runner, **kwargs)
 
     runner._invoke_cli_for_verdict_result = _invoke_cli_for_verdict_result
@@ -1335,15 +1415,18 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
     cleanup_calls: list[dict[str, object]] = []
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         return VerdictResult(
             verdict="needs_human",
             reason="select the deployment region",
         )
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return "b" * 40
 
     async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> None:
+        """Assert the primary worktree stays unchanged in this test."""
         cleanup_calls.append(kwargs)
 
     runner = SimpleNamespace(
@@ -1408,6 +1491,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     reask_worktree_paths: list[Path] = []
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         reask_worktree_paths.append(reask)
@@ -1420,6 +1504,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
         )
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -1470,6 +1555,7 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
     primary_output = worktree / "operator-output.txt"
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
         (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
@@ -1480,9 +1566,11 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
         )
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
-        return None
+        """Record pr monitor audit event for this test."""
+        return
 
     async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(

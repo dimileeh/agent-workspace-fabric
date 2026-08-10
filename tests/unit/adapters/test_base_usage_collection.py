@@ -55,25 +55,33 @@ class _RecordingSampler:
 
 
 class _IsolatedRecordingContext(_RecordingContext):
+    """Test double used by the surrounding scenario."""
+
     def __init__(self, events: list[str], *, capture_error: Exception | None = None) -> None:
+        """Initialize this test double."""
         super().__init__(events)
         self._capture_error = capture_error
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
+        """Exercise the capture_final_before_cleanup test helper."""
         self._events.append(f"capture:{container_name}")
         if self._capture_error is not None:
             raise self._capture_error
 
     @property
     def cli_args(self) -> list[str]:
+        """Return the configured command-line arguments."""
         return ["wrapped-agent-cli"]
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
+        """Return the configured isolated-capture volume bindings."""
         return ((Path("/tmp/awf-usage-capture"), "/tmp/awf-ccusage"),)
 
 
 class _IsolatedRecordingSampler(_RecordingSampler):
+    """Test double used by the surrounding scenario."""
+
     def __init__(
         self,
         events: list[str],
@@ -81,11 +89,13 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         start_error: Exception | None = None,
         capture_error: Exception | None = None,
     ) -> None:
+        """Initialize this test double."""
         super().__init__(events)
         self._isolated_start_error = start_error
         self._capture_error = capture_error
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
+        """Exercise the start_isolated test helper."""
         self._events.append("start_isolated")
         self.start_kwargs = kwargs
         if self._isolated_start_error is not None:
@@ -97,16 +107,19 @@ class _DelayedIsolatedRecordingSampler(_RecordingSampler):
     """Simulate an isolated capture worker that keeps running after cancellation."""
 
     def __init__(self, events: list[str], *, start_error: Exception | None = None) -> None:
+        """Initialize this test double."""
         super().__init__(events)
         self._isolated_start_error = start_error
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
+        """Exercise the start_isolated test helper."""
         self._events.append("start_isolated")
         self.start_kwargs = kwargs
 
         async def _complete_capture_setup() -> _IsolatedRecordingContext:
+            """Exercise the _complete_capture_setup test helper."""
             self.started.set()
             await self.release.wait()
             if self._isolated_start_error is not None:
@@ -162,6 +175,7 @@ async def test_sampler_started_before_agent_and_finalized_on_success() -> None:
 
 @pytest.mark.unit
 async def test_isolated_sampler_captures_usage_inside_clarification_container() -> None:
+    """Verify isolated sampler captures usage inside clarification container."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
@@ -202,6 +216,7 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
 async def test_isolated_run_does_not_fall_back_to_persistent_usage_sampling(
     sampler: Any, expected_events: list[str]
 ) -> None:
+    """Verify isolated run does not fall back to persistent usage sampling."""
     events: list[str] = []
     runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
     adapter = CodexAdapter(runner=runner, usage_sampler=sampler(events))
@@ -222,12 +237,14 @@ async def test_isolated_run_does_not_fall_back_to_persistent_usage_sampling(
 async def test_isolated_sampler_finalized_when_invocation_construction_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify isolated sampler finalized when invocation construction fails."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
     adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
 
     def _fail_invocation_construction(**_kwargs: Any) -> None:
+        """Simulate invocation construction for this test."""
         raise ValueError("invalid isolated invocation")
 
     monkeypatch.setattr(
@@ -248,6 +265,7 @@ async def test_isolated_sampler_finalized_when_invocation_construction_fails(
 
 @pytest.mark.unit
 async def test_isolated_sampler_finalized_when_startup_is_cancelled() -> None:
+    """Verify isolated sampler finalized when startup is cancelled."""
     events: list[str] = []
     sampler = _DelayedIsolatedRecordingSampler(events)
     runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
@@ -277,6 +295,7 @@ async def test_isolated_sampler_finalized_when_startup_is_cancelled() -> None:
 
 @pytest.mark.unit
 async def test_isolated_sampler_startup_failure_does_not_mask_cancellation() -> None:
+    """Verify isolated sampler startup failure does not mask cancellation."""
     events: list[str] = []
     sampler = _DelayedIsolatedRecordingSampler(
         events, start_error=RuntimeError("isolated sampler down")
@@ -348,6 +367,7 @@ async def test_sampler_finalized_timeout_on_agent_timeout() -> None:
 
 @pytest.mark.unit
 async def test_isolated_timeout_captures_usage_before_forced_container_removal() -> None:
+    """Verify isolated timeout captures usage before forced container removal."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(
@@ -375,6 +395,7 @@ async def test_isolated_timeout_captures_usage_before_forced_container_removal()
 
 @pytest.mark.unit
 async def test_isolated_cancellation_captures_usage_before_forced_container_removal() -> None:
+    """Verify isolated cancellation captures usage before forced container removal."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(
@@ -398,6 +419,7 @@ async def test_isolated_cancellation_captures_usage_before_forced_container_remo
 
 @pytest.mark.unit
 async def test_isolated_capture_failure_does_not_mask_timeout_or_container_removal() -> None:
+    """Verify isolated capture failure does not mask timeout or container removal."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events, capture_error=RuntimeError("capture failed"))
     runner = _EventRunner(
@@ -427,6 +449,7 @@ async def test_isolated_capture_failure_does_not_mask_timeout_or_container_remov
 async def test_isolated_timeout_cancellation_during_capture_still_removes_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify isolated timeout cancellation during capture still removes container."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(
@@ -439,6 +462,7 @@ async def test_isolated_timeout_cancellation_during_capture_still_removes_contai
     capture_started = asyncio.Event()
 
     async def _block_capture(_self: _IsolatedRecordingContext, *, container_name: str) -> None:
+        """Block capture for this test."""
         events.append(f"capture:{container_name}")
         capture_started.set()
         await asyncio.Event().wait()
@@ -470,6 +494,7 @@ async def test_isolated_timeout_cancellation_during_capture_still_removes_contai
 async def test_isolated_error_cancellation_during_capture_still_removes_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify isolated error cancellation during capture still removes container."""
     events: list[str] = []
     sampler = _IsolatedRecordingSampler(events)
     runner = _EventRunner(events, result=CommandResult(returncode=1, stdout="", stderr="boom"))
@@ -477,10 +502,12 @@ async def test_isolated_error_cancellation_during_capture_still_removes_containe
     capture_started = asyncio.Event()
 
     async def _fail_agent(*_args: Any, **_kwargs: Any) -> CommandResult:
+        """Simulate agent for this test."""
         events.append("agent")
         raise RuntimeError("agent execution failed")
 
     async def _block_capture(_self: _IsolatedRecordingContext, *, container_name: str) -> None:
+        """Block capture for this test."""
         events.append(f"capture:{container_name}")
         capture_started.set()
         await asyncio.Event().wait()
