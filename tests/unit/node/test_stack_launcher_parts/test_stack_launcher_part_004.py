@@ -633,6 +633,37 @@ def test_opencode_clarification_stages_config_auth_without_provider_environment(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_environment", "agent_model"),
+    [
+        (("OPENAI_BASE_URL", "http://openai-sidecar:4000/v1"), "openai/gpt-5"),
+        (("ANTHROPIC_BASE_URL", "http://anthropic-sidecar:4001"), "anthropic/claude-sonnet"),
+    ],
+)
+def test_opencode_clarification_stages_config_auth_with_only_a_provider_base_url(
+    agent_environment: tuple[str, str], agent_model: str
+) -> None:
+    """A provider endpoint alone does not replace OpenCode file authentication."""
+    opencode_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/opencode",
+        target="/home/agent/.config/opencode",
+        mode="rw",
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (opencode_auth,),
+        agent_environment=(agent_environment,),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model=agent_model,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=opencode_auth.source, target=opencode_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_opencode_ollama_clarification_omits_shared_opencode_store() -> None:
     """Ollama re-asks retain Ollama auth without mounting multi-provider config."""
     opencode_auth = AuthMount(

@@ -184,6 +184,13 @@ _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES: dict[str, frozenset[str]] = {
     "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
     "xai": frozenset({"XAI_API_KEY"}),
 }
+_CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES: dict[str, frozenset[str]] = {
+    "openai": frozenset({"OPENAI_API_KEY"}),
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}),
+    "gemini": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "xai": frozenset({"XAI_API_KEY"}),
+}
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES = frozenset(
     {
         "AWS_ACCESS_KEY_ID",
@@ -449,7 +456,8 @@ def _clarification_model_provider_auth_mount_targets(
         if provider == "ollama":
             runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
         elif not any(
-            name in _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(provider, frozenset()) and value
+            name in _CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES.get(provider, frozenset())
+            and value
             for name, value in agent_environment
         ):
             # Provider readiness permits OpenCode's file auth when no matching
