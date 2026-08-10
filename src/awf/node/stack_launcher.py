@@ -528,8 +528,6 @@ def _clarification_resolve_google_credentials_placeholder(
         )
         if matching_target is not None:
             google_credentials = matching_target
-        elif worker_google_credentials:
-            return agent_environment
         else:
             dynamic_targets = tuple(
                 mount.target
