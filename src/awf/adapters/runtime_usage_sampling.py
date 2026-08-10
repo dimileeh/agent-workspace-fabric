@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from awf.adapters.usage import IsolatedUsageSampleContext, IsolatedUsageSampler
 from awf.common.logging import get_logger
@@ -15,6 +16,18 @@ if TYPE_CHECKING:
 
 
 _log = get_logger(__name__)
+
+
+async def complete_isolated_usage_capture_after_cancellation(
+    capture: Coroutine[Any, Any, None],
+) -> None:
+    """Finish a final isolated usage capture despite repeated cancellation."""
+    capture_task = asyncio.create_task(capture)
+    while not capture_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(capture_task)
+    with contextlib.suppress(asyncio.CancelledError):
+        capture_task.result()
 
 
 async def start_isolated_usage_sampling(

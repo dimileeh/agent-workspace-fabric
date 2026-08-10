@@ -49,7 +49,10 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecutor,
     AgentRuntimeGitPreparation,
 )
-from awf.adapters.runtime_usage_sampling import start_isolated_usage_sampling
+from awf.adapters.runtime_usage_sampling import (
+    complete_isolated_usage_capture_after_cancellation,
+    start_isolated_usage_sampling,
+)
 from awf.adapters.usage import (
     IsolatedUsageSampleContext,
     UsageSampleContext,
@@ -1363,10 +1366,12 @@ class AgentAdapter(ABC):
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
             except asyncio.CancelledError:
-                await self._capture_isolated_usage_before_cleanup_after_cancellation(
-                    isolated_sampler_ctx,
-                    invocation,
-                    workspace_id=workspace_id,
+                await complete_isolated_usage_capture_after_cancellation(
+                    self._capture_isolated_usage_before_cleanup(
+                        isolated_sampler_ctx,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
                 )
                 await cleanup_compose_exec_invocation_after_cancellation(
                     self._runner,
@@ -1490,24 +1495,3 @@ class AgentAdapter(ABC):
                 phase="capture_before_isolated_cleanup",
                 exc_info=True,
             )
-
-    async def _capture_isolated_usage_before_cleanup_after_cancellation(
-        self,
-        sampler_ctx: IsolatedUsageSampleContext | None,
-        invocation: Any,
-        *,
-        workspace_id: str | None,
-    ) -> None:
-        """Finish the best-effort capture despite repeated cancellation."""
-        capture_task = asyncio.create_task(
-            self._capture_isolated_usage_before_cleanup(
-                sampler_ctx,
-                invocation,
-                workspace_id=workspace_id,
-            )
-        )
-        while not capture_task.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(capture_task)
-        with contextlib.suppress(asyncio.CancelledError):
-            capture_task.result()
