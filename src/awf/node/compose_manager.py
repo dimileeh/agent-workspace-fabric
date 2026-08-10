@@ -64,6 +64,20 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
 _CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
 
 
+def _is_managed_persisted_clarification_service(service: object) -> bool:
+    """Return whether a persisted service has AWF's clarification signature."""
+    if not isinstance(service, Mapping):
+        return False
+    networks = service.get("networks")
+    return (
+        service.get("profiles") == ["awf-clarification"]
+        and isinstance(networks, list)
+        and "clarification_egress_net" in networks
+        and service.get("command") == ["sh", "-c", "sleep infinity"]
+        and service.get("restart") == "no"
+    )
+
+
 def _clarification_model_service_names(
     clarification_environment: Iterable[tuple[str, str]], *, service_names: Iterable[str]
 ) -> tuple[str, ...]:
@@ -186,7 +200,12 @@ def upgrade_persisted_clarification_service(
     if not isinstance(services, dict):
         raise ValueError("persisted Compose file must contain a services mapping")
     if "clarification" in services:
-        return None
+        if _is_managed_persisted_clarification_service(services["clarification"]):
+            return None
+        raise ValueError(
+            "persisted Compose file clarification service conflicts with the managed "
+            "clarification service"
+        )
     agent = services.get("agent")
     if not isinstance(agent, dict):
         raise ValueError("persisted Compose file must contain an agent service")

@@ -149,6 +149,80 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "legacy_service",
+    [
+        pytest.param(
+            {
+                "image": "example/legacy-clarification:latest",
+                "environment": {"LEGACY_SERVICE_DATA": "preserve-me"},
+                "networks": ["awf_net"],
+            },
+            id="profile-service",
+        ),
+        pytest.param("not-a-service", id="invalid-service"),
+    ],
+)
+def test_upgrade_persisted_clarification_service_rejects_legacy_service_name_collision(
+    tmp_path: Path,
+    legacy_service: object,
+) -> None:
+    """A legacy profile service cannot be mistaken for AWF's managed agent."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": legacy_service,
+        },
+        "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicts with the managed clarification service"):
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_recognizes_managed_service_signature(
+    tmp_path: Path,
+) -> None:
+    """A previously rendered managed clarification service remains a no-op."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": {
+                "image": "awf-agent-runtime:latest",
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        is None
+    )
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
 def test_upgrade_persisted_clarification_service_keeps_opencode_model_credentials(
     tmp_path: Path,
 ) -> None:
