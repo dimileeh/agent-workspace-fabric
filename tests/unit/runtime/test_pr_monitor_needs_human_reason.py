@@ -202,6 +202,7 @@ async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
 @pytest.mark.unit
 async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependencies(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The clarification checkout is a sibling with tracked source only."""
     worktree_root = tmp_path / "git" / "worktrees"
@@ -222,6 +223,13 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
             adapter=SimpleNamespace(runtime_scratch_paths=(".agent-scratch/",)),
         )
     )
+    ownership_repairs: list[dict[str, object]] = []
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        ownership_repairs.append(dict(kwargs))
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
 
     reask_worktree = await comments._create_isolated_reask_worktree(
         runner,
@@ -259,10 +267,81 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
     assert not (reask_worktree.path / ".agent-scratch").exists()
     assert dependency.exists()
     assert scratch.exists()
+    assert ownership_repairs == [
+        {
+            "logger": comments._log,
+            "workspace_id": "ws_reask_isolation",
+            "worktree_path": reask_worktree.path,
+            "reason": "needs_human_reason_reask_pre_launch",
+            "event_name": "monitor.agent_runtime_ownership_repair_failed",
+            "linked_worktree_id": reask_worktree.path.name,
+        }
+    ]
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
     assert not reask_worktree.path.exists()
     assert not reask_worktree.liveness_lock_path.exists()
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_is_removed_when_ownership_repair_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout that cannot be prepared for the agent is not mounted or retained."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_ownership_failure")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not repair isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_blocks_when_ownership_failure_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed ownership repair does not hide a failed isolated-checkout cleanup."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_ownership_cleanup_failure")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+    cleanup = comments._cleanup_isolated_reask_worktree_after_creation_failure
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return False
+
+    async def _cleanup_isolated_reask_worktree_after_creation_failure(
+        cleanup_runner: object,
+        **kwargs: object,
+    ) -> str:
+        assert await cleanup(cleanup_runner, **kwargs) is None
+        return "simulated cleanup failure"
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "_cleanup_isolated_reask_worktree_after_creation_failure",
+        _cleanup_isolated_reask_worktree_after_creation_failure,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="simulated cleanup failure"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit

@@ -124,9 +124,19 @@ def _validated_layout_mirror_for_worktree(
     return mirror_path, linked_git_dir
 
 
-def _repair_agent_runtime_ownership_in_thread(worktree_path: Path, workspace_id: str) -> None:
+def _repair_agent_runtime_ownership_in_thread(
+    worktree_path: Path,
+    workspace_id: str,
+    linked_worktree_id: str | None,
+) -> None:
+    if linked_worktree_id is not None and linked_worktree_id != worktree_path.name:
+        raise ValueError(
+            "refusing ownership repair: temporary linked-worktree identifier does not "
+            f"match worktree path {worktree_path}"
+        )
     layout_mirror, validated_linked_git_dir = _validated_layout_mirror_for_worktree(
-        worktree_path, workspace_id
+        worktree_path,
+        linked_worktree_id or workspace_id,
     )
     repair_agent_writable_worktree(
         layout_mirror,
@@ -159,8 +169,13 @@ async def repair_agent_runtime_ownership(
     reason: str,
     event_name: str,
     reason_code: str = AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    linked_worktree_id: str | None = None,
 ) -> bool:
-    """Attempt to repair runtime ownership for an agent worktree."""
+    """Attempt to repair runtime ownership for an agent worktree.
+
+    ``linked_worktree_id`` is the Git metadata name for a temporary linked
+    worktree whose name differs from the owning workspace identifier.
+    """
     if os.geteuid() != 0:
         return True
     try:
@@ -168,6 +183,7 @@ async def repair_agent_runtime_ownership(
             _repair_agent_runtime_ownership_in_thread,
             worktree_path,
             workspace_id,
+            linked_worktree_id,
         )
     except Exception:
         logger.exception(

@@ -128,6 +128,86 @@ async def test_repair_agent_runtime_ownership_uses_mirror_from_worktree(tmp_path
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_accepts_temporary_linked_worktree_id(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace" / "worktrees"
+    worktree_path = worktrees_root / f"{workspace_id}__companion__isolated_reask_test"
+    mirror_root = worktrees_root.parent / "mirrors"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir = mirror_root / "repo.git" / "worktrees" / worktree_path.name
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    captured: list[tuple[Path | None, Path, Path | None]] = []
+
+    def _repair_agent_writable_worktree(
+        layout_mirror: Path | None, path: Path, linked_git_dir: Path | None = None
+    ) -> None:
+        captured.append((layout_mirror, path, linked_git_dir))
+
+    logger = _RecordingLogger()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    try:
+        ok = await ownership.repair_agent_runtime_ownership(
+            logger=logger,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="pytest",
+            event_name="monitor.event",
+            linked_worktree_id=worktree_path.name,
+        )
+    finally:
+        monkeypatched.undo()
+
+    assert ok
+    assert logger.exception_calls == []
+    assert captured == [(mirror_root / "repo.git", worktree_path, linked_git_dir)]
+
+
+@pytest.mark.unit
+async def test_repair_agent_runtime_ownership_rejects_mismatched_temporary_worktree_id(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws"
+    worktree_path = tmp_path / "workspace" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    logger = _RecordingLogger()
+
+    ok = await ownership.repair_agent_runtime_ownership(
+        logger=logger,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pytest",
+        event_name="monitor.event",
+        linked_worktree_id="another-worktree",
+    )
+
+    assert ok is False
+    assert logger.exception_calls == [
+        (
+            "monitor.event",
+            {
+                "workspace_id": workspace_id,
+                "worktree_path": str(worktree_path),
+                "reason": "pytest",
+                "reason_code": "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_passes_validated_git_metadata(
     tmp_path: Path,
 ) -> None:

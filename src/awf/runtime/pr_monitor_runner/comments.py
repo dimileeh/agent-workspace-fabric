@@ -261,6 +261,31 @@ async def _create_isolated_reask_worktree(
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=worktree_path.name,
+        worktree_path=path,
+        reason="needs_human_reason_reask_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        linked_worktree_id=path.name,
+    ):
+        cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
+            runner,
+            reask_worktree=reask_worktree,
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_ownership_repair_failure"
+            ),
+        )
+        if cleanup_error is not None:
+            raise _IsolatedReaskWorktreeCleanupFailedError(
+                cleanup_error,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
+        raise _MonitorPolicyBlockedError(
+            "Could not repair isolated worktree ownership before the NEEDS_HUMAN reason re-ask."
+        )
+
     return reask_worktree
 
 
