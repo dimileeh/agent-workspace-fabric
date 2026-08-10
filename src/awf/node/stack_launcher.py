@@ -91,6 +91,14 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
+        "CODEX_API_KEY",
+        "CODEX_AUTH_TOKEN",
+    }
+)
 _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -137,17 +145,14 @@ _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS: dict[str, frozenset[str]] = {
 _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.codex: frozenset(
         {
-            "OPENAI_API_KEY",
-            "OPENAI_API_TOKEN",
-            "CODEX_API_KEY",
-            "CODEX_AUTH_TOKEN",
             "OPENAI_BASE_URL",
             "OPENAI_ORG_ID",
             "OPENAI_ORGANIZATION",
             "OPENAI_PROJECT",
             "OPENAI_PROJECT_ID",
         }
-    ),
+    )
+    | _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES,
     AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
     AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
     AgentRuntime.gemini: frozenset(),
@@ -235,11 +240,21 @@ def _clarification_agent_environment(
         for source, staged in zip(source_mounts, staged_mounts, strict=True)
         if source.target != staged.target
     }
+    clarification_environment_names = provider_environment_names
+    if agent_runtime is AgentRuntime.codex and any(
+        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
+        for mount in source_mounts
+    ):
+        # Match Codex readiness: an isolated file-auth mount is preferred to
+        # static environment credentials, while non-secret endpoint settings
+        # remain available to the clarification re-ask.
+        clarification_environment_names -= _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES
 
     return tuple(
         (name, staged_targets.get(value, value))
         for name, value in agent_environment
-        if name in provider_environment_names and not _is_clarification_git_auth_environment(name)
+        if name in clarification_environment_names
+        and not _is_clarification_git_auth_environment(name)
     )
 
 

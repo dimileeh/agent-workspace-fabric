@@ -126,8 +126,41 @@ def test_clarification_inputs_retain_only_selected_adapter_credentials() -> None
         agent_runtime=AgentRuntime.codex,
     )
 
-    assert environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert environment == ()
     assert mounts == (AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),)
+
+
+@pytest.mark.unit
+def test_codex_clarification_prefers_file_auth_to_environment_credentials() -> None:
+    """Codex file auth wins over environment credentials for clarification."""
+    codex_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/codex",
+        target="/home/agent/.codex",
+        mode="rw",
+    )
+    environment = (
+        ("OPENAI_API_KEY", "api-key"),
+        ("CODEX_AUTH_TOKEN", "auth-token"),
+        ("OPENAI_BASE_URL", "https://openai.example.test/v1"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(codex_auth,),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.codex,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (codex_auth,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.codex,
+    )
+
+    assert clarification_environment == (("OPENAI_BASE_URL", "https://openai.example.test/v1"),)
+    assert clarification_mounts == (
+        AuthMount(source=codex_auth.source, target=codex_auth.target, mode="ro"),
+    )
 
 
 @pytest.mark.unit
