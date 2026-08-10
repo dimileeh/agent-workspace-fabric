@@ -940,6 +940,39 @@ class TestReadyToMergeComment:
         assert "Action: grant workflow scope, then retry the push." in body
 
     @pytest.mark.unit
+    def test_preserves_full_workflow_push_reason_with_blocker_items(self) -> None:
+        """Verify review details do not truncate a preserved push diagnostic."""
+        workflow_failure = (
+            "remote: **workflow update rejected**\n"
+            f"{('push diagnostic detail ' * 10).strip()}\n"
+            "Action: grant workflow scope, then retry the push."
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason=workflow_failure,
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "Review feedback that was fixed locally.",
+                    "verdict": "fixed",
+                    "agent_verdict_reason": "The requested change is complete.",
+                },
+            ),
+            preserve_full_blocker_reason=True,
+        )
+
+        assert r"remote: \*\*workflow update rejected\*\*" in body
+        assert ("push diagnostic detail " * 10).strip() in body
+        assert "Action: grant workflow scope, then retry the push." in body
+
+    @pytest.mark.unit
     def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
         """Verify blocker items render location verdict excerpt and honest missing reason."""
         long_body = "x" * 200

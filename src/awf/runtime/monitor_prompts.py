@@ -467,7 +467,7 @@ def ready_to_merge_comment(
     """
     if blocker_reason:
         reason = redact_secrets(blocker_reason)
-        if blocker_items or not preserve_full_blocker_reason:
+        if not preserve_full_blocker_reason:
             reason = _truncate_blocker_reason(reason)
         safe_blocker_reason = _redact_and_escape_markdown_inline(reason)
         body = (
