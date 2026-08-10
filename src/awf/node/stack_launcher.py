@@ -774,10 +774,25 @@ def _clarification_model_provider_auth_mount_targets(
             environment_values.get("AWS_CONFIG_FILE", ""), environ=os.environ
         )
         normalized_aws_config_file = posixpath.normpath(aws_config_file)
+        aws_config_file_uses_default_directory = (
+            not aws_config_file or normalized_aws_config_file.startswith("/home/agent/.aws/")
+        )
+        aws_config_file_escapes_default_directory = (
+            aws_config_file.startswith("/home/agent/.aws/")
+            and not aws_config_file_uses_default_directory
+        )
         aws_shared_credentials_file = compose_expand_value(
             environment_values.get("AWS_SHARED_CREDENTIALS_FILE", ""), environ=os.environ
         )
         normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
+        aws_shared_credentials_file_uses_default_directory = (
+            not aws_shared_credentials_file
+            or normalized_aws_shared_credentials_file.startswith("/home/agent/.aws/")
+        )
+        aws_shared_credentials_file_escapes_default_directory = (
+            aws_shared_credentials_file.startswith("/home/agent/.aws/")
+            and not aws_shared_credentials_file_uses_default_directory
+        )
         bedrock_credential_names = _clarification_claude_code_bedrock_environment_names(
             environment_values
         )
@@ -786,7 +801,9 @@ def _clarification_model_provider_auth_mount_targets(
                 environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
             )
             # The AWS SDK uses the default profile from ~/.aws when no
-            # higher-precedence Bedrock credential source is configured.
+            # higher-precedence Bedrock credential source is configured. A
+            # clean explicit override for one profile file still requires its
+            # complementary default file.
             and not (
                 bedrock_credential_names
                 & (
@@ -796,10 +813,13 @@ def _clarification_model_provider_auth_mount_targets(
                 )
             )
             and (
-                not aws_shared_credentials_file
-                or normalized_aws_shared_credentials_file.startswith("/home/agent/.aws/")
+                aws_shared_credentials_file_uses_default_directory
+                or aws_config_file_uses_default_directory
             )
-            and (not aws_config_file or normalized_aws_config_file.startswith("/home/agent/.aws/"))
+            and not (
+                aws_config_file_escapes_default_directory
+                or aws_shared_credentials_file_escapes_default_directory
+            )
         ):
             runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
     if agent_runtime is AgentRuntime.gemini:
