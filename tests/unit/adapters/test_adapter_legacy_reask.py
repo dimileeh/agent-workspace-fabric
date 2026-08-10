@@ -503,6 +503,39 @@ class TestIsolatedReaskAdapter:
         }
 
     @pytest.mark.unit
+    async def test_isolated_reask_restores_legacy_compose_when_network_reap_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """An already-reaped model network is a successful rollback cleanup."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        original_compose_file = compose_file.read_bytes()
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result()
+        runner.queue_result(
+            returncode=1,
+            stderr=(
+                "Error response from daemon: network "
+                "awf-ws_legacy-clarification-model-net not found"
+            ),
+        )
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
+        assert len(runner.calls) == 4
+        assert compose_file.read_bytes() == original_compose_file
+
+    @pytest.mark.unit
     async def test_isolated_reask_surfaces_legacy_model_service_recovery_failure(
         self, tmp_path: Path
     ) -> None:
@@ -881,6 +914,46 @@ class TestIsolatedReaskAdapter:
             "name": "awf-ws_legacy-clarification-model-net",
             "internal": True,
         }
+
+    @pytest.mark.unit
+    async def test_isolated_reask_restores_legacy_compose_when_cancelled_network_reap_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation succeeds when another cleanup already removed the network."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        original_compose_file = compose_file.read_bytes()
+
+        class _CancellingSidecarUpdateRunner(FakeCommandRunner):
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 1:
+                    raise asyncio.CancelledError
+                return result
+
+        runner = _CancellingSidecarUpdateRunner()
+        runner.queue_result()
+        runner.queue_result()
+        runner.queue_result(
+            returncode=1,
+            stderr=(
+                "Error response from daemon: network "
+                "awf-ws_legacy-clarification-model-net not found"
+            ),
+        )
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert len(runner.calls) == 4
+        assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_raises(

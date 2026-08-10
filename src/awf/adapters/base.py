@@ -144,14 +144,24 @@ async def _reap_persisted_clarification_model_migration(
                 *clarification_model_services,
             ]
         )
-    return await runner.run(
+    network_name = (
+        f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net"
+    )
+    network_reap_result = await runner.run(
         [
             "docker",
             "network",
             "rm",
-            f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net",
+            network_name,
         ]
     )
+    if not network_reap_result.ok and network_reap_result.stderr.rstrip().endswith(
+        f"network {network_name} not found"
+    ):
+        # Another teardown can win the network-removal race. Docker reports
+        # that idempotent state as an error, but the migration is reaped.
+        return CommandResult(returncode=0, stdout=network_reap_result.stdout, stderr="")
+    return network_reap_result
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
