@@ -1415,16 +1415,15 @@ def test_google_vertex_clarification_resolves_bare_google_credentials_placeholde
         ),
     ),
 )
-def test_google_vertex_clarification_resolves_bare_google_credentials_placeholder_with_stale_worker_path(
+def test_google_vertex_clarification_does_not_select_lone_pass_through_mount_for_stale_worker_path(
     monkeypatch: pytest.MonkeyPatch,
     agent_runtime: AgentRuntime,
     environment: tuple[tuple[str, str], ...],
 ) -> None:
-    """The sole pass-through ADC mount wins over a stale worker environment value."""
-    credentials_target = "/run/awf/secrets/worker-gcp.json"
-    google_credentials = AuthMount(
-        source=credentials_target,
-        target=credentials_target,
+    """An unmatched worker ADC path must not select an unrelated lone mount."""
+    unrelated_pass_through = AuthMount(
+        source="/run/awf/secrets/unrelated",
+        target="/run/awf/secrets/unrelated",
         mode="ro",
     )
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/stale-worker-gcp.json")
@@ -1433,24 +1432,20 @@ def test_google_vertex_clarification_resolves_bare_google_credentials_placeholde
     assert (
         stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
             environment,
-            auth_mounts=(google_credentials,),
+            auth_mounts=(unrelated_pass_through,),
             mirror_target="/host/awf/git/mirrors/repo.git",
             agent_runtime=agent_runtime,
         )
-        == environment[:-1]
-        + (("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),)
+        == environment
     )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        (google_credentials,),
-        agent_environment=environment,
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=agent_runtime,
-    ) == (
-        AuthMount(
-            source=google_credentials.source,
-            target="/home/agent/.awf/clarification-auth/0",
-            mode="ro",
-        ),
+    assert (
+        stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+            (unrelated_pass_through,),
+            agent_environment=environment,
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=agent_runtime,
+        )
+        == ()
     )
 
 
