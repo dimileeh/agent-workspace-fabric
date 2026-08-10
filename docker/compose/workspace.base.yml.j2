@@ -144,7 +144,7 @@ services:
               return rewrites.get(posixpath.normpath(path), path)
 
             executable_path_pattern = re.compile(
-              r"(?<![^\s'\"|&;()<>])(/[^\s'\"|&;()<>]+)(?![^\s'\"|&;()<>])"
+              r"(?<![^\s'\"|&;()<>=])(/[^\s'\"|&;()<>]+)(?![^\s'\"|&;()<>])"
             )
 
             subject_token_file = credential_source.get("file")

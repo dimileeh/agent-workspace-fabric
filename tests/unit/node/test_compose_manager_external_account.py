@@ -234,7 +234,7 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
                     "executable": {
                         "command": (
                             f"printf '%s' {helper_target}-backup && "
-                            f"{non_normalized_helper_target} --output {output_target} | jq -c ."
+                            f"{non_normalized_helper_target} --output={output_target} | jq -c ."
                         ),
                         "output_file": output_target,
                     }
@@ -292,7 +292,7 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
     assert executable == {
         "command": (
             f"printf '%s' {helper_target}-backup && "
-            f"{staged_helper} --output {staged_output} | jq -c ."
+            f"{staged_helper} --output={staged_output} | jq -c ."
         ),
         "output_file": str(staged_output),
     }
@@ -319,7 +319,7 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
                     "executable": {
                         "command": (
                             f"printf '%s' {helper_target}-backup && "
-                            f"{non_normalized_helper_target} --output {output_target} | jq -c ."
+                            f"{non_normalized_helper_target} --output={output_target} | jq -c ."
                         ),
                         "output_file": output_target,
                     }
@@ -359,7 +359,7 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
     assert executable == {
         "command": (
             f"printf '%s' {helper_target}-backup && "
-            f"{staged_helper} --output {staged_output} | jq -c ."
+            f"{staged_helper} --output={staged_output} | jq -c ."
         ),
         "output_file": str(staged_output),
     }

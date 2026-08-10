@@ -771,15 +771,15 @@ def test_clarification_stages_external_account_executable_source_mounts(
     agent_runtime: AgentRuntime,
     environment: tuple[tuple[str, str], ...],
 ) -> None:
-    """Executable external-account ADC sources retain their helper and output."""
+    """Executable external-account ADC sources retain helper and option-valued token."""
     helper = tmp_path / "external-account-helper"
     helper.write_text("#!/bin/sh\n", encoding="utf-8")
-    output = tmp_path / "external-account-output.json"
-    output.write_text("{}", encoding="utf-8")
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
     adc_config = tmp_path / "external-account-adc.json"
     helper_target = "/run/awf/secrets/google/external-account-helper"
     non_normalized_helper_target = "/run/awf/secrets/google/./external-account-helper"
-    output_target = "/run/awf/secrets/google/external-account-output.json"
+    subject_token_target = "/run/awf/secrets/google/subject-token"
     adc_target = "/run/awf/secrets/google/external-account-adc.json"
     adc_config.write_text(
         json.dumps(
@@ -787,8 +787,9 @@ def test_clarification_stages_external_account_executable_source_mounts(
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f"{non_normalized_helper_target} --output {output_target}",
-                        "output_file": output_target,
+                        "command": (
+                            f"{non_normalized_helper_target} --subject-token={subject_token_target}"
+                        ),
                     }
                 },
             }
@@ -797,7 +798,9 @@ def test_clarification_stages_external_account_executable_source_mounts(
     )
     adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
     helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
-    output_mount = AuthMount(source=str(output), target=output_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(subject_token), target=subject_token_target, mode="ro"
+    )
     agent_environment = (
         *environment,
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
@@ -806,12 +809,12 @@ def test_clarification_stages_external_account_executable_source_mounts(
 
     clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         agent_environment,
-        auth_mounts=(adc_mount, helper_mount, output_mount),
+        auth_mounts=(adc_mount, helper_mount, subject_token_mount),
         mirror_target="/host/awf/git/mirrors/repo.git",
         agent_runtime=agent_runtime,
     )
     clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        (adc_mount, helper_mount, output_mount),
+        (adc_mount, helper_mount, subject_token_mount),
         agent_environment=agent_environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
         agent_runtime=agent_runtime,
@@ -833,19 +836,19 @@ def test_clarification_stages_external_account_executable_source_mounts(
             mode="ro",
         ),
         AuthMount(
-            source=str(output),
+            source=str(subject_token),
             target="/home/agent/.awf/clarification-auth/2",
             mode="ro",
         ),
     )
     assert external_account_subject_token_file_rewrites(
-        (adc_mount, helper_mount, output_mount),
+        (adc_mount, helper_mount, subject_token_mount),
         agent_environment=agent_environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
         agent_runtime=agent_runtime,
     ) == (
         (helper_target, "/home/agent/.awf/clarification-auth/1"),
-        (output_target, "/home/agent/.awf/clarification-auth/2"),
+        (subject_token_target, "/home/agent/.awf/clarification-auth/2"),
     )
 
 

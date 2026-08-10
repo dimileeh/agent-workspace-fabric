@@ -349,11 +349,13 @@ def external_account_credential_source_paths(
     command = executable.get("command")
     if isinstance(command, str):
         with suppress(ValueError):
-            paths.extend(
-                posixpath.normpath(argument)
-                for argument in shlex.split(command)
-                if argument.startswith("/")
-            )
+            for argument in shlex.split(command):
+                if argument.startswith("/"):
+                    paths.append(posixpath.normpath(argument))
+                    continue
+                _, separator, option_value = argument.partition("=")
+                if separator and option_value.startswith("/"):
+                    paths.append(posixpath.normpath(option_value))
     output_file = executable.get("output_file")
     if isinstance(output_file, str) and output_file.startswith("/"):
         paths.append(posixpath.normpath(output_file))
@@ -646,7 +648,7 @@ def legacy_clarification_entrypoint(
                 "            return rewrites.get(posixpath.normpath(path), path)",
                 "",
                 "        executable_path_pattern = re.compile(",
-                '            r"(?<![^\\s\'\\"|&;()<>])(/[^\\s\'\\"|&;()<>]+)(?![^\\s\'\\"|&;()<>])"',
+                '            r"(?<![^\\s\'\\"|&;()<>=])(/[^\\s\'\\"|&;()<>]+)(?![^\\s\'\\"|&;()<>])"',
                 "        )",
                 "",
                 '        subject_token_file = credential_source.get("file")',
