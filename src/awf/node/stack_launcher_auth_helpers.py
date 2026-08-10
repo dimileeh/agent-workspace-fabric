@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import configparser
 import json
 import posixpath
+import shlex
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -66,9 +68,10 @@ def provider_auth_mounts(
     *,
     provider_mount_targets: frozenset[str],
     external_account_subject_token_mounts: Sequence[AuthMount],
+    aws_profile_credential_mounts: Sequence[AuthMount],
     mirror_target: str,
 ) -> tuple[AuthMount, ...]:
-    """Return provider mounts and declared external-account token sources."""
+    """Return provider mounts and declared transitive credential sources."""
 
     return tuple(
         mount
@@ -76,12 +79,139 @@ def provider_auth_mounts(
         if mount.target != mirror_target
         and (
             mount in external_account_subject_token_mounts
+            or mount in aws_profile_credential_mounts
             or any(
                 mount.target == provider_target or path_is_below(provider_target, mount.target)
                 for provider_target in provider_mount_targets
             )
         )
     )
+
+
+def aws_profile_credential_paths(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_mount_targets: frozenset[str],
+    mirror_target: str,
+) -> tuple[str, ...]:
+    """Return declared paths referenced by the active AWS profile files."""
+
+    profile_name = dict(agent_environment).get("AWS_PROFILE") or "default"
+    references: list[str] = []
+    for profile_file in _aws_profile_file_targets(provider_mount_targets):
+        source = _mounted_file_source(
+            auth_mounts,
+            target=profile_file,
+            mirror_target=mirror_target,
+        )
+        if source is None:
+            continue
+        try:
+            configuration = configparser.RawConfigParser(interpolation=None)
+            with source.open(encoding="utf-8") as profile_source:
+                configuration.read_file(profile_source)
+        except (OSError, UnicodeDecodeError, configparser.Error):
+            continue
+        section = next(
+            (
+                candidate
+                for candidate in (f"profile {profile_name}", profile_name)
+                if configuration.has_section(candidate)
+            ),
+            None,
+        )
+        if section is None:
+            continue
+        credential_process = configuration.get(section, "credential_process", fallback=None)
+        if isinstance(credential_process, str):
+            try:
+                references.extend(
+                    value for value in shlex.split(credential_process) if value.startswith("/")
+                )
+            except ValueError:
+                continue
+        web_identity_token_file = configuration.get(
+            section, "web_identity_token_file", fallback=None
+        )
+        if isinstance(web_identity_token_file, str) and web_identity_token_file.startswith("/"):
+            references.append(web_identity_token_file)
+    return tuple(
+        reference
+        for index, reference in enumerate(references)
+        if reference not in references[:index]
+        and any(
+            mount.target != mirror_target
+            and (
+                mount.target == posixpath.normpath(reference)
+                or path_is_below(reference, mount.target)
+            )
+            for mount in auth_mounts
+        )
+    )
+
+
+def aws_profile_credential_mounts(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_mount_targets: frozenset[str],
+    mirror_target: str,
+) -> tuple[AuthMount, ...]:
+    """Return declared mounts named by the active AWS profile configuration."""
+
+    credential_paths = aws_profile_credential_paths(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=provider_mount_targets,
+        mirror_target=mirror_target,
+    )
+    return tuple(
+        mount
+        for mount in auth_mounts
+        if mount.target != mirror_target
+        and any(
+            mount.target == posixpath.normpath(path) or path_is_below(path, mount.target)
+            for path in credential_paths
+        )
+    )
+
+
+def _aws_profile_file_targets(provider_mount_targets: frozenset[str]) -> tuple[str, ...]:
+    """Return AWS configuration files selected from provider mount targets."""
+
+    profile_files: list[str] = []
+    for target in sorted(provider_mount_targets):
+        normalized_target = posixpath.normpath(target)
+        if not normalized_target.startswith("/"):
+            continue
+        if normalized_target == f"{_AGENT_HOME}/.aws":
+            profile_files.extend(
+                (f"{normalized_target}/config", f"{normalized_target}/credentials")
+            )
+        else:
+            profile_files.append(normalized_target)
+    return tuple(profile_files)
+
+
+def _mounted_file_source(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    target: str,
+    mirror_target: str,
+) -> Path | None:
+    """Return the source for a target from its most-specific declared mount."""
+
+    matching_mounts = tuple(
+        mount
+        for mount in auth_mounts
+        if mount.target != mirror_target
+        and (mount.target == target or path_is_below(target, mount.target))
+    )
+    if not matching_mounts:
+        return None
+    mount = max(matching_mounts, key=lambda candidate: len(posixpath.normpath(candidate.target)))
+    return mounted_file_source(mount, target)
 
 
 def external_account_subject_token_file(
@@ -219,12 +349,80 @@ def external_account_subject_token_file_rewrites(
     return ((subject_token_file, staged_subject_token_file),)
 
 
+def aws_profile_path_rewrites(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Map active AWS profile references to the corresponding staged copies."""
+
+    # Import lazily because the stack launcher uses these helpers while it is
+    # importing; by invocation time its shared selection helpers are defined.
+    from awf.node.stack_launcher import (
+        _clarification_aws_profile_mount_targets,
+        _clarification_model_provider_auth_mount_targets,
+        _clarification_model_provider_environment_names,
+        _clarification_provider_auth_mounts,
+        _clarification_resolve_aws_web_identity_token_file_placeholder,
+    )
+
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    credential_paths = aws_profile_credential_paths(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=_clarification_aws_profile_mount_targets(
+            agent_environment,
+            provider_mount_targets=provider_mount_targets,
+        ),
+        mirror_target=mirror_target,
+    )
+    if not credential_paths:
+        return ()
+    provider_auth_mounts = _clarification_provider_auth_mounts(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    staged_mounts = staged_provider_auth_mounts(provider_auth_mounts)
+    staged_targets = tuple(
+        (source.target, staged.target)
+        for source, staged in zip(provider_auth_mounts, staged_mounts, strict=True)
+    )
+    return tuple(
+        (path, staged_path)
+        for path in credential_paths
+        if (staged_path := staged_auth_value(path, staged_targets)) != path
+    )
+
+
 def legacy_clarification_entrypoint(
     mount_count: int,
     *,
     rewrite_external_account_subject_token_file: bool = False,
+    rewrite_aws_profile_paths: bool = False,
 ) -> list[str]:
-    """Copy staged auth and optionally rewrite an external-account ADC file."""
+    """Copy staged auth and rewrite credential-file paths when required."""
 
     lines: list[str] = []
     for index in range(mount_count):
@@ -267,6 +465,33 @@ def legacy_clarification_entrypoint(
                 "            if normalized_subject_token_file in rewrites:",
                 '                credential_source["file"] = rewrites[normalized_subject_token_file]',
                 '            credentials_path.write_text(json.dumps(configuration), encoding="utf-8")',
+                "PY",
+            )
+        )
+    if rewrite_aws_profile_paths:
+        lines.extend(
+            (
+                "python - <<'PY'",
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "rewrites = dict(json.loads(os.environ['AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES']))",
+                "profile_paths = (",
+                "    Path(os.environ.get('AWS_CONFIG_FILE', '/home/agent/.aws/config')),",
+                "    Path(os.environ.get('AWS_SHARED_CREDENTIALS_FILE', '/home/agent/.aws/credentials')),",
+                ")",
+                "for profile_path in profile_paths:",
+                "    try:",
+                "        original_configuration = profile_path.read_text(encoding='utf-8')",
+                "    except (OSError, UnicodeDecodeError):",
+                "        continue",
+                "    configuration = original_configuration",
+                "    for source, staged in sorted(rewrites.items(), key=lambda item: len(item[0]), reverse=True):",
+                "        configuration = configuration.replace(source, staged)",
+                "    if configuration != original_configuration:",
+                "        profile_path.chmod(profile_path.stat().st_mode | 0o200)",
+                "        profile_path.write_text(configuration, encoding='utf-8')",
                 "PY",
             )
         )

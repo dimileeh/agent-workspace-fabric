@@ -96,6 +96,8 @@ services:
       {% endfor %}
       {% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES: {{ clarification_external_account_subject_token_file_rewrites_json | tojson }}
       {% endif %}
+      {% if clarification_aws_profile_path_rewrites_json != "[]" %}AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES: {{ clarification_aws_profile_path_rewrites_json | tojson }}
+      {% endif %}
     {% endif %}{% if clarification_auth_mounts %}volumes:
       {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
       {% endfor %}
@@ -143,6 +145,28 @@ services:
               if normalized_subject_token_file in rewrites:
                 credential_source["file"] = rewrites[normalized_subject_token_file]
               credentials_path.write_text(json.dumps(configuration), encoding="utf-8")
+        PY
+        {% endif %}{% if clarification_aws_profile_path_rewrites_json != "[]" %}python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        rewrites = dict(json.loads(os.environ["AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES"]))
+        profile_paths = (
+          Path(os.environ.get("AWS_CONFIG_FILE", "/home/agent/.aws/config")),
+          Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.aws/credentials")),
+        )
+        for profile_path in profile_paths:
+          try:
+            original_configuration = profile_path.read_text(encoding="utf-8")
+          except (OSError, UnicodeDecodeError):
+            continue
+          configuration = original_configuration
+          for source, staged in sorted(rewrites.items(), key=lambda item: len(item[0]), reverse=True):
+            configuration = configuration.replace(source, staged)
+          if configuration != original_configuration:
+            profile_path.chmod(profile_path.stat().st_mode | 0o200)
+            profile_path.write_text(configuration, encoding="utf-8")
         PY
         {% endif %}exec "$@"
       - "--"

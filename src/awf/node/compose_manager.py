@@ -226,6 +226,9 @@ def upgrade_persisted_clarification_service(
         _clarification_auth_mounts,
     )
     from awf.node.stack_launcher_auth_helpers import (
+        aws_profile_path_rewrites as _aws_profile_path_rewrites,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
         external_account_subject_token_file_rewrites as _external_account_subject_token_file_rewrites,
     )
     from awf.node.stack_launcher_auth_helpers import (
@@ -271,11 +274,22 @@ def upgrade_persisted_clarification_service(
         agent_runtime=agent_runtime,
         agent_model=agent_model,
     )
+    aws_profile_rewrites = _aws_profile_path_rewrites(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
     clarification_environment = dict(provider_environment)
     if external_account_subject_token_file_rewrites:
         clarification_environment[
             "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"
         ] = json.dumps(external_account_subject_token_file_rewrites).replace("$", "$$")
+    if aws_profile_rewrites:
+        clarification_environment["AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES"] = json.dumps(
+            aws_profile_rewrites
+        ).replace("$", "$$")
     clarification_volumes: list[str] = []
     for index, mount in enumerate(selected_mounts):
         clarification_environment[f"AWF_CLARIFICATION_AUTH_TARGET_{index}"] = mount.target.replace(
@@ -314,6 +328,7 @@ def upgrade_persisted_clarification_service(
             rewrite_external_account_subject_token_file=bool(
                 external_account_subject_token_file_rewrites
             ),
+            rewrite_aws_profile_paths=bool(aws_profile_rewrites),
         )
     if "host.docker.internal:host-gateway" in agent.get("extra_hosts", []):
         clarification["extra_hosts"] = ["host.docker.internal:host-gateway"]
@@ -550,6 +565,7 @@ class WorkspaceComposeSpec:
     clarification_agent_environment: tuple[tuple[str, str], ...] = ()
     clarification_auth_mounts: tuple[AuthMount, ...] = ()
     clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
+    clarification_aws_profile_path_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -713,6 +729,9 @@ class ComposeManager:
             ],
             clarification_external_account_subject_token_file_rewrites_json=json.dumps(
                 spec.clarification_external_account_subject_token_file_rewrites
+            ).replace("$", "$$"),
+            clarification_aws_profile_path_rewrites_json=json.dumps(
+                spec.clarification_aws_profile_path_rewrites
             ).replace("$", "$$"),
             git_name=spec.git_name,
             git_email=spec.git_email,

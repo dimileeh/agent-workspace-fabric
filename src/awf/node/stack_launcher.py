@@ -47,6 +47,12 @@ from awf.node.secret_mounts import (
     SecretLeaseResolutionError,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_credential_mounts as _clarification_aws_profile_credential_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_path_rewrites as _clarification_aws_profile_path_rewrites,
+)
+from awf.node.stack_launcher_auth_helpers import (
     clarification_auth_target as _helper_clarification_auth_target,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -746,6 +752,10 @@ def _clarification_provider_auth_mounts(
         agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
+    aws_profile_mount_targets = _clarification_aws_profile_mount_targets(
+        agent_environment,
+        provider_mount_targets=provider_mount_targets,
+    )
     return _selected_provider_auth_mounts(
         auth_mounts,
         provider_mount_targets=provider_mount_targets,
@@ -755,7 +765,32 @@ def _clarification_provider_auth_mounts(
             mirror_target=mirror_target,
             provider_environment_names=provider_environment_names,
         ),
+        aws_profile_credential_mounts=_clarification_aws_profile_credential_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            provider_mount_targets=aws_profile_mount_targets,
+            mirror_target=mirror_target,
+        ),
         mirror_target=mirror_target,
+    )
+
+
+def _clarification_aws_profile_mount_targets(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    provider_mount_targets: frozenset[str],
+) -> frozenset[str]:
+    """Return selected AWS profile-file mount targets, if any."""
+
+    explicit_profile_files = {
+        _clarification_expanded_aws_profile_file_value(name, value)
+        for name, value in agent_environment
+        if name in _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
+    }
+    return frozenset(
+        target
+        for target in provider_mount_targets
+        if target == "/home/agent/.aws" or target in explicit_profile_files
     )
 
 
@@ -1157,6 +1192,13 @@ class ComposeStackLauncher:
                 agent_model=request.agent_model,
             )
         )
+        clarification_aws_profile_path_rewrites = _clarification_aws_profile_path_rewrites(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=str(layout.mirror_path),
+            agent_runtime=request.agent_runtime,
+            agent_model=request.agent_model,
+        )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -1179,6 +1221,7 @@ class ComposeStackLauncher:
             clarification_external_account_subject_token_file_rewrites=(
                 clarification_external_account_subject_token_file_rewrites
             ),
+            clarification_aws_profile_path_rewrites=clarification_aws_profile_path_rewrites,
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,
