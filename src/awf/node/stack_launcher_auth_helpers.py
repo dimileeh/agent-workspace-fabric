@@ -7,6 +7,7 @@ import json
 import posixpath
 import shlex
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -125,12 +126,10 @@ def aws_profile_credential_paths(
             continue
         credential_process = configuration.get(section, "credential_process", fallback=None)
         if isinstance(credential_process, str):
-            try:
+            with suppress(ValueError):
                 references.extend(
                     value for value in shlex.split(credential_process) if value.startswith("/")
                 )
-            except ValueError:
-                continue
         web_identity_token_file = configuration.get(
             section, "web_identity_token_file", fallback=None
         )

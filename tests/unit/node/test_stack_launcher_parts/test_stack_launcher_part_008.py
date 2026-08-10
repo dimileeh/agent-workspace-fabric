@@ -677,6 +677,51 @@ def test_clarification_stages_transitive_bedrock_profile_auth_mounts(tmp_path: P
 
 
 @pytest.mark.unit
+def test_clarification_stages_web_identity_when_credential_process_is_unparseable(
+    tmp_path: Path,
+) -> None:
+    """A bad credential process does not hide a valid web-identity token."""
+    aws_home = tmp_path / "aws"
+    aws_home.mkdir()
+    token = tmp_path / "web-identity-token"
+    token.write_text("token", encoding="utf-8")
+    token_target = "/run/awf/secrets/web-identity-token"
+    (aws_home / "config").write_text(
+        "[profile awf-bedrock]\n"
+        'credential_process = "unclosed\n'
+        f"web_identity_token_file = {token_target}\n",
+        encoding="utf-8",
+    )
+    aws_profile = AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro")
+    token_mount = AuthMount(source=str(token), target=token_target, mode="ro")
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+    )
+    mounts = (aws_profile, token_mount)
+
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro"),
+        AuthMount(
+            source=str(token),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+    )
+    assert aws_profile_path_rewrites(
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == ((token_target, "/home/agent/.awf/clarification-auth/1"),)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "adc_configuration",
     (
