@@ -24,7 +24,12 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
-from awf.service.orphan_resources import scan_managed_worktrees
+from awf.service.orphan_resources import (
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    empty_docker_scan,
+    scan_managed_worktrees,
+)
 
 
 def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -225,11 +230,24 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
 
     assert reask_worktree is not None
     assert reask_worktree.path.parent == worktree.parent
-    assert reask_worktree.path.name.startswith("ws_isolated_reask_")
-    assert reask_worktree.path in {
-        Path(resource.path) for resource in scan_managed_worktrees(tmp_path).resources
+    assert reask_worktree.path.name.startswith("ws_reask_isolation__companion__isolated_reask_")
+    scan = scan_managed_worktrees(tmp_path)
+    assert (str(reask_worktree.path), "ws_reask_isolation") in {
+        (resource.path, resource.workspace_id) for resource in scan.resources
     }
-    assert not list(worktree.glob("ws_isolated_reask_*"))
+    assert (
+        build_orphan_resource_summary(
+            docker_scan=empty_docker_scan(),
+            worktree_scan=scan,
+            workspace_view=WorkspaceIdView(
+                active_ids=frozenset({"ws_reask_isolation"}),
+                terminal_ids=frozenset(),
+                available=True,
+            ),
+        ).reason
+        == "NO_ORPHANS"
+    )
+    assert not list(worktree.glob("*__companion__isolated_reask_*"))
     assert _git(worktree, "status", "--porcelain", "--untracked-files=all").stdout == ""
     assert (reask_worktree.path / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
     assert not (reask_worktree.path / ".venv").exists()
@@ -327,7 +345,7 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -395,7 +413,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert audit_events == []
-    assert list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -475,7 +493,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert audit_events == []
-    assert list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -501,7 +519,7 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -545,7 +563,7 @@ async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancella
         await asyncio.wait_for(task, timeout=5.0)
 
     assert cleanup_finished.is_set()
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -681,7 +699,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
         )
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
-    assert list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -763,7 +781,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
         )
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
-    assert list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -1251,7 +1269,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     assert reask_worktree_paths[0].parent == worktree.parent
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
     assert dependency.exists()
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -1315,7 +1333,7 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
     assert primary_output.read_text(encoding="utf-8") == "created independently\n"
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -1379,7 +1397,7 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
-    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit

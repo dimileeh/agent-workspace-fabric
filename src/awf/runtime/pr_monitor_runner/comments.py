@@ -75,9 +75,10 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
-# Keep interrupted re-ask checkouts visible to the managed-worktree orphan
-# reconcilers, which discover workspace-owned siblings by their ``ws_`` prefix.
-_ISOLATED_REASK_WORKTREE_PREFIX = "ws_isolated_reask_"
+# Name interrupted re-ask checkouts as managed siblings of their source
+# workspace so orphan reconcilers retain visibility without treating them as
+# row-less workspaces.
+_ISOLATED_REASK_WORKTREE_SUFFIX = "__companion__isolated_reask_"
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 
 
@@ -165,7 +166,9 @@ async def _create_isolated_reask_worktree(
     await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
-    path = worktree_path.parent / f"{_ISOLATED_REASK_WORKTREE_PREFIX}{uuid4().hex}"
+    path = worktree_path.parent / (
+        f"{worktree_path.name}{_ISOLATED_REASK_WORKTREE_SUFFIX}{uuid4().hex}"
+    )
     reask_worktree = _IsolatedReaskWorktree(
         source_worktree=worktree_path,
         path=path,
