@@ -447,6 +447,48 @@ def test_clarification_inputs_retain_vertex_adc_directory() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_bedrock_profile_directory() -> None:
+    """Bedrock profile clarification retains its standard AWS credential directory."""
+    claude_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/claude",
+        target="/home/agent/.claude",
+        mode="rw",
+    )
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_REGION", "us-west-2"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(claude_auth, aws_profile_directory),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (claude_auth, aws_profile_directory),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == environment
+    assert clarification_mounts == (
+        AuthMount(
+            source=aws_profile_directory.source,
+            target=aws_profile_directory.target,
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback() -> None:
     """Vertex clarification does not stage inactive ADC beside explicit credentials."""
     gcloud_auth = AuthMount(

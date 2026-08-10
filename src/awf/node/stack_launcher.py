@@ -516,14 +516,26 @@ def _clarification_model_provider_auth_mount_targets(
         and _clarification_claude_code_environment_names(dict(agent_environment))
         != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
     ):
-        # Vertex uses the standard gcloud ADC file only when no explicit
-        # credential path is configured; do not expose inactive auth stores.
+        environment_values = dict(agent_environment)
+        # Stage only the active managed-backend auth stores. Vertex uses the
+        # standard gcloud ADC directory only when no explicit credential path
+        # is configured. Bedrock profile auth uses the standard AWS directory
+        # only when no explicit AWS credential or config path is configured.
         runtime_auth_mount_targets = (
             frozenset({"/home/agent/.config/gcloud"})
-            if dict(agent_environment).get("CLAUDE_CODE_USE_VERTEX") == "1"
-            and not dict(agent_environment).get(_GOOGLE_APPLICATION_CREDENTIALS)
+            if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
+            and not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
             else frozenset()
         )
+        if (
+            environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+            and environment_values.get("AWS_PROFILE")
+            and "AWS_PROFILE"
+            in _clarification_claude_code_bedrock_environment_names(environment_values)
+            and not environment_values.get("AWS_SHARED_CREDENTIALS_FILE")
+            and not environment_values.get("AWS_CONFIG_FILE")
+        ):
+            runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
     if agent_runtime is AgentRuntime.gemini:
         environment_values = dict(agent_environment)
         gemini_auth_source = _clarification_gemini_auth_source(environment_values)
