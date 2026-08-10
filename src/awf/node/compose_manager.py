@@ -45,6 +45,7 @@ from awf.node.compose_diagnostics import (
     _redacted_diagnostics,
 )
 from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
+from awf.service.environment import compose_expand_value
 
 _log = get_logger(__name__)
 
@@ -98,9 +99,10 @@ def _clarification_model_service_names(
     selected_names: set[str] = set()
     for endpoint_name in endpoint_names:
         endpoint = environment.get(endpoint_name, "")
-        if endpoint_name.endswith("OLLAMA_BASE_URL") or endpoint_name == "OLLAMA_HOST":
-            endpoint = endpoint if "://" in endpoint else f"//{endpoint}"
         try:
+            endpoint = compose_expand_value(endpoint, environ=os.environ)
+            if endpoint_name.endswith("OLLAMA_BASE_URL") or endpoint_name == "OLLAMA_HOST":
+                endpoint = endpoint if "://" in endpoint else f"//{endpoint}"
             hostname = urlsplit(endpoint).hostname
         except ValueError:
             continue
