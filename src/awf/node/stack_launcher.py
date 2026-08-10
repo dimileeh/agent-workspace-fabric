@@ -570,14 +570,30 @@ def _clarification_resolve_aws_web_identity_token_file_placeholder(
         f"${{{_AWS_WEB_IDENTITY_TOKEN_FILE}}}",
         f"${_AWS_WEB_IDENTITY_TOKEN_FILE}",
     ):
-        dynamic_targets = tuple(
-            mount.target
-            for mount in auth_mounts
-            if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
+        worker_token_file = compose_expand_value(token_file, environ=os.environ)
+        matching_target = next(
+            (
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.target == worker_token_file
+                and mount.target.startswith("/")
+            ),
+            None,
         )
-        if len(dynamic_targets) != 1:
-            return agent_environment
-        token_file = dynamic_targets[0]
+        if matching_target is not None:
+            token_file = matching_target
+        else:
+            dynamic_targets = tuple(
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.source == mount.target
+                and mount.target.startswith("/")
+            )
+            if len(dynamic_targets) != 1:
+                return agent_environment
+            token_file = dynamic_targets[0]
     elif _AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE.fullmatch(token_file or ""):
         token_file = compose_expand_value(token_file or "", environ=os.environ)
     else:
