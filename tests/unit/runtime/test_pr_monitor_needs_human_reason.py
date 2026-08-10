@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.service import gc_reconcile
 from awf.service.gc_reconcile import is_active_isolated_reask_worktree
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -434,6 +436,38 @@ async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raise
 
     assert lock_paths
     assert not lock_paths[0].exists()
+
+
+@pytest.mark.unit
+def test_reask_liveness_acquisition_rejects_marker_reaped_before_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC cannot leave a monitor holding an unlinked pre-checkout marker."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_reask_race__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    real_flock = fcntl.flock
+    reaped_before_monitor_lock = False
+
+    def _race_flock(lock_fd: int, operation: int) -> None:
+        nonlocal reaped_before_monitor_lock
+        if not reaped_before_monitor_lock and operation == (fcntl.LOCK_EX | fcntl.LOCK_NB):
+            reaped_before_monitor_lock = True
+            gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+        real_flock(lock_fd, operation)
+
+    monkeypatch.setattr(comments.fcntl, "flock", _race_flock)
+
+    with pytest.raises(FileNotFoundError):
+        comments._acquire_isolated_reask_liveness_lock(path)
+
+    assert reaped_before_monitor_lock
+    assert not lock_path.exists()
 
 
 @pytest.mark.unit

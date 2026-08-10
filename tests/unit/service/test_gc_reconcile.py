@@ -19,6 +19,7 @@ from awf.common.companions import (
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
+from awf.service import gc_reconcile
 from awf.service.gc_classify import (
     PATH_DELETE_PERMISSION_DENIED,
     PATH_DELETED,
@@ -589,6 +590,40 @@ async def test_reconcile_retains_locked_pre_checkout_reask_liveness_marker(
 
     assert result.status == "ok"
     assert result.reaped_count == 0
+    assert lock_path.exists()
+
+
+def test_pre_checkout_reaper_rechecks_liveness_before_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A monitor locking after the first probe keeps its marker."""
+    reask = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    monitor_lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    original_probe = gc_reconcile.is_active_isolated_reask_worktree
+
+    def _probe_then_start_monitor(worktree_path: Path) -> bool:
+        assert not original_probe(worktree_path)
+        fcntl.flock(monitor_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+
+    monkeypatch.setattr(
+        gc_reconcile,
+        "is_active_isolated_reask_worktree",
+        _probe_then_start_monitor,
+    )
+    try:
+        gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)
+    finally:
+        os.close(monitor_lock_fd)
+
     assert lock_path.exists()
 
 

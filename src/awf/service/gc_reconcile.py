@@ -632,10 +632,22 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
 
 
 def _remove_isolated_reask_liveness_lock(worktree_path: Path) -> None:
-    """Best-effort cleanup of a marker left by an interrupted re-ask."""
+    """Best-effort cleanup of an unlocked marker left by an interrupted re-ask."""
     lock_path = isolated_reask_worktree_liveness_lock_path(worktree_path)
-    with contextlib.suppress(OSError):
-        lock_path.unlink()
+    try:
+        lock_fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        return
+    try:
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+    finally:
+        os.close(lock_fd)
     with contextlib.suppress(OSError):
         lock_path.parent.rmdir()
 
