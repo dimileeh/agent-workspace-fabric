@@ -46,11 +46,12 @@ def test_upgrade_persisted_clarification_stages_external_account_subject_token(
     subject_token = tmp_path / "subject-token"
     adc_target = "/run/awf/secrets/google/external-account-adc.json"
     subject_token_target = "/run/awf/secrets/google/subject-token"
+    non_normalized_subject_token_target = "/run/awf/secrets/google/./subject-token"
     adc.write_text(
         json.dumps(
             {
                 "type": "external_account",
-                "credential_source": {"file": subject_token_target},
+                "credential_source": {"file": non_normalized_subject_token_target},
             }
         ),
         encoding="utf-8",
@@ -148,13 +149,14 @@ def test_clarification_rewrites_staged_external_account_subject_token(
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     original_subject_token = "/run/awf/secrets/google/subject-token"
+    non_normalized_subject_token = "/run/awf/secrets/google/./subject-token"
     staged_adc = tmp_path / "clarification-auth" / "adc.json"
     staged_subject_token = tmp_path / "clarification-auth" / "subject-token"
     (source_root / "0").write_text(
         json.dumps(
             {
                 "type": "external_account",
-                "credential_source": {"file": original_subject_token},
+                "credential_source": {"file": non_normalized_subject_token},
             }
         ),
         encoding="utf-8",
