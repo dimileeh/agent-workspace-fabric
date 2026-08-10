@@ -425,7 +425,10 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
         for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
     ):
         return "google_cloud"
-    if any(environment_values.get(name) for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")):
+    if any(
+        compose_expand_value(environment_values.get(name, ""), environ=os.environ)
+        for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    ):
         return "api_key"
     return "file"
 

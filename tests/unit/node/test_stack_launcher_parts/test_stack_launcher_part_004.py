@@ -992,6 +992,21 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
 
 
 @pytest.mark.unit
+def test_gemini_clarification_expands_optional_api_keys_before_auth_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset optional Compose key falls back to Gemini CLI-file auth."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert (
+        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
+            {"GEMINI_API_KEY": "${GEMINI_API_KEY:-}"}
+        )
+        == "file"
+    )
+
+
+@pytest.mark.unit
 def test_gemini_clarification_resolves_google_credentials_compose_placeholder() -> None:
     """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
     gcloud_auth = AuthMount(
