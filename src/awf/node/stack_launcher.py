@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import os
 import posixpath
 import re
@@ -318,11 +321,48 @@ def _clarification_agent_environment(
 def _clarification_has_codex_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
     """Return whether a staged Codex home supplies the file-auth credential."""
 
-    return any(
-        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
-        and (Path(mount.source) / "auth.json").is_file()
-        for mount in source_mounts
+    for mount in source_mounts:
+        if mount.target not in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]:
+            continue
+        try:
+            auth = json.loads((Path(mount.source) / "auth.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if _clarification_has_codex_auth_credential(auth):
+            return True
+    return False
+
+
+def _clarification_has_codex_auth_credential(auth: object) -> bool:
+    """Return whether an auth.json payload contains a Codex credential."""
+
+    if not isinstance(auth, dict):
+        return False
+    if isinstance(api_key := auth.get("OPENAI_API_KEY"), str) and api_key.strip():
+        return True
+    tokens = auth.get("tokens")
+    return (
+        isinstance(tokens, dict)
+        and all(
+            isinstance(value := tokens.get(name), str) and value.strip()
+            for name in ("id_token", "access_token", "refresh_token")
+        )
+        and _clarification_has_codex_id_token(tokens["id_token"])
     )
+
+
+def _clarification_has_codex_id_token(value: str) -> bool:
+    """Return whether a token has the JWT payload Codex requires in auth.json."""
+
+    parts = value.split(".")
+    if len(parts) != 3 or not all(parts):
+        return False
+    try:
+        encoded_payload = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = base64.b64decode(encoded_payload, altchars=b"-_", validate=True)
+        return isinstance(json.loads(payload), dict)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return False
 
 
 def _clarification_has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:

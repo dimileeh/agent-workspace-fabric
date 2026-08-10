@@ -17,7 +17,9 @@ def test_clarification_inputs_retain_only_selected_adapter_credentials(tmp_path:
     mirror = "/host/awf/git/mirrors/repo.git"
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
-    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "auth.json").write_text(
+        '{"auth_mode": "apikey", "OPENAI_API_KEY": "file-api-key"}', encoding="utf-8"
+    )
     codex_auth = AuthMount(
         source=str(codex_home),
         target="/home/agent/.codex",
@@ -121,11 +123,25 @@ def test_clarification_inputs_retain_only_selected_adapter_credentials(tmp_path:
 
 
 @pytest.mark.unit
-def test_codex_clarification_prefers_file_auth_to_environment_credentials(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "auth_json",
+    (
+        '{"auth_mode": "apikey", "OPENAI_API_KEY": "file-api-key"}',
+        (
+            '{"auth_mode": "chatgpt", "tokens": {'
+            '"id_token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJjb2RleCJ9.c2lnbmF0dXJl", '
+            '"access_token": "access-token", "refresh_token": "refresh-token"}}'
+        ),
+    ),
+)
+def test_codex_clarification_prefers_file_auth_to_environment_credentials(
+    tmp_path: Path,
+    auth_json: str,
+) -> None:
     """Codex file auth wins over environment credentials for clarification."""
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
-    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "auth.json").write_text(auth_json, encoding="utf-8")
     codex_auth = AuthMount(
         source=str(codex_home),
         target="/home/agent/.codex",
@@ -164,6 +180,55 @@ def test_codex_clarification_retains_environment_credentials_without_auth_json(
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
     (codex_home / "config.toml").write_text("model = 'gpt-5'\n", encoding="utf-8")
+    codex_auth = AuthMount(
+        source=str(codex_home),
+        target="/home/agent/.codex",
+        mode="rw",
+    )
+    environment = (
+        ("OPENAI_API_KEY", "api-key"),
+        ("OPENAI_BASE_URL", "https://openai.example.test/v1"),
+    )
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(codex_auth,),
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=AgentRuntime.codex,
+        )
+        == environment
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "auth_json",
+    (
+        "{}",
+        "{",
+        "[]",
+        '{"auth_mode": "chatgpt", "tokens": {}}',
+        (
+            '{"auth_mode": "chatgpt", "tokens": {'
+            '"id_token": "not-a-jwt", '
+            '"access_token": "access-token", "refresh_token": "refresh-token"}}'
+        ),
+        (
+            '{"auth_mode": "chatgpt", "tokens": {'
+            '"id_token": "header.%.signature", '
+            '"access_token": "access-token", "refresh_token": "refresh-token"}}'
+        ),
+    ),
+)
+def test_codex_clarification_retains_environment_credentials_without_usable_file_auth(
+    tmp_path: Path,
+    auth_json: str,
+) -> None:
+    """An invalid or credential-free Codex file cannot replace environment auth."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(auth_json, encoding="utf-8")
     codex_auth = AuthMount(
         source=str(codex_home),
         target="/home/agent/.codex",
