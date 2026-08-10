@@ -274,11 +274,11 @@ def _clarification_agent_environment(
         provider_environment_names=provider_environment_names,
     )
     staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
-    staged_targets = {
-        source.target: staged.target
+    staged_targets = tuple(
+        (source.target, staged.target)
         for source, staged in zip(source_mounts, staged_mounts, strict=True)
         if source.target != staged.target
-    }
+    )
     clarification_environment_names = provider_environment_names
     if (
         prefer_file_auth
@@ -306,7 +306,7 @@ def _clarification_agent_environment(
         clarification_environment_names -= _CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES
 
     return tuple(
-        (name, staged_targets.get(value, value))
+        (name, _clarification_staged_auth_value(value, staged_targets))
         for name, value in agent_environment
         if name in clarification_environment_names
         and not _is_clarification_git_auth_environment(name)
@@ -569,6 +569,40 @@ def _clarification_staged_provider_auth_mounts(
     )
 
 
+def _clarification_staged_auth_value(
+    value: str,
+    staged_targets: Sequence[tuple[str, str]],
+) -> str:
+    """Rewrite a staged mount target or a credential file below that target."""
+
+    for source_target, staged_target in staged_targets:
+        if value == source_target:
+            return staged_target
+    normalized_value = posixpath.normpath(value)
+    containing_targets = tuple(
+        (posixpath.normpath(source_target), staged_target)
+        for source_target, staged_target in staged_targets
+        if _clarification_path_is_below(normalized_value, source_target)
+    )
+    if not containing_targets:
+        return value
+    source_target, staged_target = max(containing_targets, key=lambda target: len(target[0]))
+    return posixpath.join(staged_target, posixpath.relpath(normalized_value, source_target))
+
+
+def _clarification_path_is_below(path: str, target: str) -> bool:
+    """Return whether an absolute normalized path is a child of a mount target."""
+
+    normalized_path = posixpath.normpath(path)
+    normalized_target = posixpath.normpath(target)
+    return (
+        normalized_path.startswith("/")
+        and normalized_target.startswith("/")
+        and normalized_path != normalized_target
+        and (normalized_target == "/" or normalized_path.startswith(f"{normalized_target}/"))
+    )
+
+
 def _clarification_provider_auth_mounts(
     auth_mounts: Sequence[AuthMount],
     *,
@@ -590,7 +624,12 @@ def _clarification_provider_auth_mounts(
     return tuple(
         mount
         for mount in auth_mounts
-        if mount.target != mirror_target and mount.target in provider_mount_targets
+        if mount.target != mirror_target
+        and any(
+            mount.target == provider_target
+            or _clarification_path_is_below(provider_target, mount.target)
+            for provider_target in provider_mount_targets
+        )
     )
 
 

@@ -774,6 +774,69 @@ def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("agent_runtime", "environment", "credential_name"),
+    (
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "/run/awf/secrets/gcp.json"),
+            ),
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ),
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_PROFILE", "awf-bedrock"),
+                ("AWS_CONFIG_FILE", "/run/awf/secrets/config"),
+            ),
+            "AWS_CONFIG_FILE",
+        ),
+    ),
+)
+def test_clarification_stages_credential_file_below_declared_directory_mount(
+    agent_runtime: AgentRuntime,
+    environment: tuple[tuple[str, str], ...],
+    credential_name: str,
+) -> None:
+    """An explicit credential file retains and rewrites its containing mount."""
+    credential_directory = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/provider",
+        target="/run/awf/secrets",
+        mode="ro",
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(credential_directory,),
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (credential_directory,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+    )
+
+    assert dict(clarification_environment)[credential_name] == (
+        "/home/agent/.awf/clarification-auth/0/"
+        + environment[-1][1].removeprefix(f"{credential_directory.target}/")
+    )
+    assert clarification_mounts == (
+        AuthMount(
+            source=credential_directory.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("agent_runtime", "environment"),
     (
         (
