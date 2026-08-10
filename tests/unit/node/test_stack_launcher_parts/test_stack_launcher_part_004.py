@@ -208,6 +208,30 @@ def test_grok_clarification_uses_cached_token_auth_without_an_api_key() -> None:
 
 
 @pytest.mark.unit
+def test_grok_clarification_uses_cached_token_auth_when_optional_api_key_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty Compose API-key placeholder does not suppress Grok file auth."""
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    grok_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/grok",
+        target="/home/agent/.grok",
+        mode="rw",
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (grok_auth,),
+        agent_environment=(("XAI_API_KEY", "${XAI_API_KEY:-}"),),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.grok,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=grok_auth.source, target=grok_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_selected_claude_backend_credentials() -> None:
     """Bedrock and Vertex clarification excludes inactive direct Claude auth."""
     claude_auth = AuthMount(

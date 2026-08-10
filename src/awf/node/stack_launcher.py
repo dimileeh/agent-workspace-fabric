@@ -709,7 +709,8 @@ def _clarification_model_provider_auth_mount_targets(
             # An explicit service-account file takes precedence over ADC.
             runtime_auth_mount_targets = frozenset()
     if agent_runtime is AgentRuntime.grok and any(
-        name == "XAI_API_KEY" and value for name, value in agent_environment
+        name == "XAI_API_KEY" and compose_expand_value(value, environ=os.environ)
+        for name, value in agent_environment
     ):
         # Grok's headless launcher selects an API key before cached-token auth,
         # so do not expose an inactive token store to clarification.
