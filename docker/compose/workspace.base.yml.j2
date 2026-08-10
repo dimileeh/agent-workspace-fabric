@@ -127,6 +127,7 @@ services:
         import json
         import os
         import posixpath
+        import shlex
         from pathlib import Path
 
         credentials_path = Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
@@ -139,12 +140,31 @@ services:
         if isinstance(configuration, dict) and configuration.get("type") == "external_account":
           credential_source = configuration.get("credential_source")
           if isinstance(credential_source, dict):
+            def rewrite_path(path):
+              return rewrites.get(posixpath.normpath(path), path)
+
             subject_token_file = credential_source.get("file")
             if isinstance(subject_token_file, str):
-              normalized_subject_token_file = posixpath.normpath(subject_token_file)
-              if normalized_subject_token_file in rewrites:
-                credential_source["file"] = rewrites[normalized_subject_token_file]
-              credentials_path.write_text(json.dumps(configuration), encoding="utf-8")
+              credential_source["file"] = rewrite_path(subject_token_file)
+            executable = credential_source.get("executable")
+            if isinstance(executable, dict):
+              command = executable.get("command")
+              if isinstance(command, str):
+                try:
+                  command_parts = shlex.split(command)
+                except ValueError:
+                  command_parts = []
+                if command_parts:
+                  executable["command"] = shlex.join(
+                    [
+                      rewrite_path(part) if part.startswith("/") else part
+                      for part in command_parts
+                    ]
+                  )
+              output_file = executable.get("output_file")
+              if isinstance(output_file, str):
+                executable["output_file"] = rewrite_path(output_file)
+            credentials_path.write_text(json.dumps(configuration), encoding="utf-8")
         PY
         {% endif %}{% if clarification_aws_profile_path_rewrites_json != "[]" %}python - <<'PY'
         import json

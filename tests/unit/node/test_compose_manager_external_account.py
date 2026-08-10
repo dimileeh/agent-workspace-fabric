@@ -214,6 +214,84 @@ def test_clarification_rewrites_staged_external_account_subject_token(
 
 
 @pytest.mark.unit
+def test_clarification_rewrites_staged_external_account_executable_paths(
+    manager: ComposeManager, tmp_path: Path
+) -> None:
+    """The rendered entrypoint rewrites copied executable ADC dependencies."""
+    source_root = tmp_path / "clarification-source"
+    source_root.mkdir()
+    helper_target = "/run/awf/secrets/google/external-account-helper"
+    output_target = "/run/awf/secrets/google/external-account-output.json"
+    staged_adc = tmp_path / "clarification-auth" / "adc.json"
+    staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
+    staged_output = tmp_path / "clarification-auth" / "external-account-output.json"
+    (source_root / "0").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {
+                    "executable": {
+                        "command": f"{helper_target} --output {output_target}",
+                        "output_file": output_target,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source_root / "1").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source_root / "2").write_text("{}", encoding="utf-8")
+    parsed = yaml.safe_load(
+        manager.render(
+            _spec(
+                tmp_path,
+                clarification_enabled=True,
+                clarification_agent_environment=(
+                    ("GOOGLE_APPLICATION_CREDENTIALS", str(staged_adc)),
+                ),
+                clarification_auth_mounts=(
+                    AuthMount(source="/host/adc.json", target=str(staged_adc)),
+                    AuthMount(source="/host/helper", target=str(staged_helper)),
+                    AuthMount(source="/host/output", target=str(staged_output)),
+                ),
+                clarification_external_account_subject_token_file_rewrites=(
+                    (helper_target, str(staged_helper)),
+                    (output_target, str(staged_output)),
+                ),
+            )
+        ).compose_file.read_text()
+    )
+    entrypoint = parsed["services"]["clarification"]["entrypoint"]
+    script = entrypoint[2].replace("/run/awf/clarification-auth", str(source_root))
+
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GOOGLE_APPLICATION_CREDENTIALS": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_1": str(staged_helper),
+            "AWF_CLARIFICATION_AUTH_TARGET_2": str(staged_output),
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+                [
+                    [helper_target, str(staged_helper)],
+                    [output_target, str(staged_output)],
+                ]
+            ),
+        },
+    )
+
+    executable = json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"][
+        "executable"
+    ]
+    assert executable == {
+        "command": f"{staged_helper} --output {staged_output}",
+        "output_file": str(staged_output),
+    }
+
+
+@pytest.mark.unit
 def test_legacy_clarification_entrypoint_rewrites_external_account_executable_paths(
     tmp_path: Path,
 ) -> None:
