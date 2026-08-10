@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,7 +73,7 @@ from awf.node.compose_manager import (
     mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )
-from awf.node.git_manager import mirror_path_for_worktree
+from awf.node.git_manager import linked_worktree_git_dir, mirror_path_for_worktree
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
@@ -105,6 +107,58 @@ _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
+
+
+def _isolated_reask_git_metadata_volume_binds(
+    worktree_path: Path,
+) -> tuple[tempfile.TemporaryDirectory[str] | None, tuple[tuple[Path, str], ...]]:
+    """Build credential-free Git discovery binds for a linked re-ask worktree.
+
+    A linked worktree's ``.git`` file points at metadata beneath its shared
+    bare mirror. Mounting that whole mirror also exposes its ``config``, which
+    can retain HTTPS remote URL userinfo. Git needs only selected linked control
+    files plus existing common ``objects`` and ``refs`` directories to recognise
+    the worktree; empty read-only directories are sufficient for clarification
+    Git discovery and expose neither the mirror configuration nor its object
+    history.
+    """
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
+    if mirror_path is None or linked_git_dir is None or not linked_git_dir.is_dir():
+        return None, ()
+    try:
+        linked_git_dir.relative_to(mirror_path)
+    except ValueError:
+        return None, ()
+    temporary_metadata: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        temporary_metadata = tempfile.TemporaryDirectory[str](
+            prefix=".awf-clarification-git-", dir=worktree_path.parent
+        )
+        temporary_path = Path(temporary_metadata.name)
+        snapshot_path = temporary_path / "linked-git"
+        snapshot_path.mkdir()
+        shutil.copyfile(linked_git_dir / "HEAD", snapshot_path / "HEAD")
+        (snapshot_path / "commondir").write_text(
+            f"{os.path.relpath(mirror_path, linked_git_dir)}\n", encoding="utf-8"
+        )
+        (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
+        source_index = linked_git_dir / "index"
+        if source_index.is_file() and not source_index.is_symlink():
+            shutil.copyfile(source_index, snapshot_path / "index")
+        objects_path = temporary_path / "objects"
+        refs_path = temporary_path / "refs"
+        objects_path.mkdir()
+        refs_path.mkdir()
+    except OSError:
+        if temporary_metadata is not None:
+            temporary_metadata.cleanup()
+        return None, ()
+    return temporary_metadata, (
+        (snapshot_path, str(linked_git_dir)),
+        (objects_path, str(mirror_path / "objects")),
+        (refs_path, str(mirror_path / "refs")),
+    )
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -702,6 +756,7 @@ class AgentAdapter(ABC):
         # enclosing try/finally still reaches finalization.
         sampler_ctx: UsageSampleContext | None = isolated_sampler_ctx
         final_status = "failed"
+        isolated_git_metadata: tempfile.TemporaryDirectory[str] | None = None
         try:
             invocation: TrackedComposeExec | TrackedIsolatedComposeRun
             if isolated_worktree_host_path is None:
@@ -717,10 +772,11 @@ class AgentAdapter(ABC):
                 )
             else:
                 # Linked worktrees store their Git control data in the shared
-                # bare mirror. Keep that metadata visible at its original
-                # absolute path so non-Codex clarification CLIs can discover
-                # the disposable checkout, without granting mirror writes.
-                mirror_path = mirror_path_for_worktree(isolated_worktree_host_path)
+                # bare mirror. Give non-Codex clarification CLIs only the
+                # credential-free subset needed to discover that checkout.
+                isolated_git_metadata, read_only_volume_binds = (
+                    _isolated_reask_git_metadata_volume_binds(isolated_worktree_host_path)
+                )
                 invocation = build_isolated_tracked_compose_run(
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -729,9 +785,7 @@ class AgentAdapter(ABC):
                     label=self.name.value,
                     worktree_host_path=isolated_worktree_host_path,
                     preserve_stdin=True,
-                    read_only_volume_binds=(
-                        () if mirror_path is None else ((mirror_path, str(mirror_path)),)
-                    ),
+                    read_only_volume_binds=read_only_volume_binds,
                     extra_volume_binds=(
                         () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
                     ),
@@ -774,6 +828,9 @@ class AgentAdapter(ABC):
             final_status = "cancelled"
             raise
         finally:
+            if isolated_git_metadata is not None:
+                with contextlib.suppress(OSError):
+                    isolated_git_metadata.cleanup()
             await self._finalize_usage_sampling(
                 sampler_ctx, status=final_status, workspace_id=workspace_id
             )

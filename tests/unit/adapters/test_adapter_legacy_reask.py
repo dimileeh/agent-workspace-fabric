@@ -103,32 +103,76 @@ class TestIsolatedReaskAdapter:
         assert "--skip-git-repo-check" in args[service_idx:]
 
     @pytest.mark.unit
-    async def test_isolated_reask_mounts_backing_git_metadata_read_only(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_isolated_reask_mounts_credential_free_git_metadata_read_only(
+        self, tmp_path: Path
     ) -> None:
-        """Non-Codex re-asks can discover the isolated worktree's Git metadata."""
+        """Non-Codex re-asks see linked Git metadata without mirror config."""
         runner = FakeCommandRunner()
         adapter = OpenCodeAdapter(runner=runner)
-        mirror_path = Path("/worktrees/mirrors/owner-repo.git")
-        monkeypatch.setattr(
-            adapter_base,
-            "mirror_path_for_worktree",
-            lambda _worktree_path: mirror_path,
+        mirror_path = tmp_path / "mirrors" / "owner-repo.git"
+        worktree_path = tmp_path / "reask"
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        linked_git_dir.mkdir(parents=True)
+        worktree_path.mkdir()
+        (worktree_path / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+        (linked_git_dir / "HEAD").write_text("ref: refs/heads/reask\n", encoding="utf-8")
+        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (mirror_path / "config").write_text(
+            '[remote \\"origin\\"]\n\turl = https://token@github.example/repo.git\n',
+            encoding="utf-8",
         )
 
         await adapter.run(
             compose_project=_COMPOSE_PROJECT,
             compose_file=_COMPOSE_FILE,
             prompt=_PROMPT,
-            isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+            isolated_worktree_host_path=worktree_path,
         )
 
         args = runner.calls[0].args
-        service_idx = args.index("clarification")
-        assert args[service_idx - 2 : service_idx] == [
-            "-v",
-            "/worktrees/mirrors/owner-repo.git:/worktrees/mirrors/owner-repo.git:ro",
-        ]
+        assert f"{mirror_path}:{mirror_path}:ro" not in args
+        assert any(
+            value.endswith(f":{linked_git_dir}:ro") and not value.startswith(f"{linked_git_dir}:")
+            for value in args
+        )
+        assert any(value.endswith(f":{mirror_path / 'objects'}:ro") for value in args)
+        assert any(value.endswith(f":{mirror_path / 'refs'}:ro") for value in args)
+
+    def test_isolated_reask_git_metadata_binds_exclude_linked_git_config(
+        self, tmp_path: Path
+    ) -> None:
+        """The linked metadata snapshot omits worktree-specific Git config."""
+        mirror_path = tmp_path / "mirrors" / "owner-repo.git"
+        worktree_path = tmp_path / "reask"
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        linked_git_dir.mkdir(parents=True)
+        worktree_path.mkdir()
+        (worktree_path / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+        (linked_git_dir / "HEAD").write_text("ref: refs/heads/reask\n", encoding="utf-8")
+        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (linked_git_dir / "gitdir").write_text(f"{worktree_path / '.git'}\n", encoding="utf-8")
+        (linked_git_dir / "config.worktree").write_text(
+            '[remote \\"origin\\"]\n\turl = https://token@github.example/repo.git\n',
+            encoding="utf-8",
+        )
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is not None
+        try:
+            snapshot_path = Path(temporary_metadata.name) / "linked-git"
+            assert {path.name for path in snapshot_path.iterdir()} == {
+                "HEAD",
+                "commondir",
+                "gitdir",
+            }
+            assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/reask\n"
+            assert (snapshot_path / "gitdir").read_text(encoding="utf-8") == "/workspace/.git\n"
+            assert binds[0] == (snapshot_path, str(linked_git_dir))
+        finally:
+            temporary_metadata.cleanup()
 
     @pytest.mark.unit
     async def test_isolated_reask_upgrade_keeps_selected_opencode_provider_credentials(
