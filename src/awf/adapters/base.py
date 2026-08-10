@@ -132,7 +132,7 @@ def _isolated_reask_git_metadata_volume_binds(
     temporary_metadata: tempfile.TemporaryDirectory[str] | None = None
     try:
         temporary_metadata = tempfile.TemporaryDirectory[str](
-            prefix=".awf-clarification-git-", dir=worktree_path.parent
+            prefix=".awf-clarification-git-", dir=worktree_path
         )
         temporary_path = Path(temporary_metadata.name)
         snapshot_path = temporary_path / "linked-git"
