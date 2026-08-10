@@ -364,6 +364,13 @@ def _acquire_isolated_reask_liveness_lock(path: Path) -> tuple[int, Path]:
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+        raise
+
+    try:
         # GC holds the same advisory lock through stale-marker removal.  Confirm
         # the pathname still identifies this descriptor after locking: if GC
         # reaped the just-created, not-yet-locked marker, this monitor must not
@@ -374,8 +381,6 @@ def _acquire_isolated_reask_liveness_lock(path: Path) -> tuple[int, Path]:
             raise OSError("isolated re-ask liveness marker was replaced")
     except OSError:
         os.close(lock_fd)
-        with contextlib.suppress(OSError):
-            lock_path.unlink()
         raise
     return lock_fd, lock_path
 

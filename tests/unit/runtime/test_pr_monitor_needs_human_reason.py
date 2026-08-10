@@ -471,6 +471,39 @@ def test_reask_liveness_acquisition_rejects_marker_reaped_before_flock(
 
 
 @pytest.mark.unit
+def test_reask_liveness_acquisition_preserves_replacement_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed monitor must not unlink a marker that replaced its own."""
+    path = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_reask_race__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    real_flock = fcntl.flock
+    replacement_created = False
+
+    def _replace_marker_after_lock(lock_fd: int, operation: int) -> None:
+        nonlocal replacement_created
+        real_flock(lock_fd, operation)
+        if not replacement_created and operation == (fcntl.LOCK_EX | fcntl.LOCK_NB):
+            replacement_created = True
+            lock_path.unlink()
+            lock_path.write_text("replacement", encoding="utf-8")
+
+    monkeypatch.setattr(comments.fcntl, "flock", _replace_marker_after_lock)
+
+    with pytest.raises(OSError, match="marker was replaced"):
+        comments._acquire_isolated_reask_liveness_lock(path)
+
+    assert replacement_created
+    assert lock_path.read_text(encoding="utf-8") == "replacement"
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_blocks_when_liveness_lock_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
