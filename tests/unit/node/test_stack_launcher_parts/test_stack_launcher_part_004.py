@@ -1088,6 +1088,30 @@ def test_gemini_clarification_expands_optional_api_keys_before_auth_selection(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("toggle", "enabled_value"),
+    (("GOOGLE_GENAI_USE_VERTEXAI", "true"), ("GOOGLE_GENAI_USE_GCA", "yes")),
+)
+def test_gemini_clarification_expands_optional_access_token_before_auth_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    toggle: str,
+    enabled_value: str,
+) -> None:
+    """An unset optional token does not override enabled Google Cloud auth."""
+    monkeypatch.delenv("GOOGLE_CLOUD_ACCESS_TOKEN", raising=False)
+
+    assert (
+        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
+            {
+                "GOOGLE_CLOUD_ACCESS_TOKEN": "${GOOGLE_CLOUD_ACCESS_TOKEN:-}",
+                toggle: enabled_value,
+            }
+        )
+        == "google_cloud"
+    )
+
+
+@pytest.mark.unit
 def test_gemini_clarification_resolves_google_credentials_compose_placeholder() -> None:
     """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
     gcloud_auth = AuthMount(

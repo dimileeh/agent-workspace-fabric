@@ -421,7 +421,9 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
     mechanism = environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", "").lower()
     if mechanism in {"api", "api-key", "api_key"}:
         return "api_key"
-    if environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN"):
+    if compose_expand_value(
+        environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN", ""), environ=os.environ
+    ):
         return "access_token"
     if any(
         compose_expand_value(environment_values.get(name, ""), environ=os.environ).lower()
