@@ -1349,16 +1349,18 @@ class AgentAdapter(ABC):
                 raise
             except Exception:
                 if isinstance(invocation, TrackedIsolatedComposeRun):
-                    await self._capture_isolated_usage_before_cleanup(
-                        isolated_sampler_ctx,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
-                    await cleanup_compose_exec_invocation(
-                        self._runner,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
+                    try:
+                        await self._capture_isolated_usage_before_cleanup(
+                            isolated_sampler_ctx,
+                            invocation,
+                            workspace_id=workspace_id,
+                        )
+                    finally:
+                        await cleanup_compose_exec_invocation(
+                            self._runner,
+                            invocation,
+                            workspace_id=workspace_id,
+                        )
                 raise
         finally:
             if sinks is not None:
