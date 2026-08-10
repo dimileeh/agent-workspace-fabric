@@ -150,6 +150,71 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_error(
+    tmp_path: Path,
+) -> None:
+    """A terminal re-ask error cannot hide an unremoved isolated checkout."""
+    workspace_id = "ws_reask_terminal_cleanup_failure"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    terminal_error = _MonitorPolicyBlockedError(
+        "terminal re-ask failure",
+        reason_code="TERMINAL_REASK_FAILURE",
+    )
+
+    class _FailedWorktreeRemoveRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            return await super().run(args)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        raise terminal_error
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_FailedWorktreeRemoveRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert "git worktree remove" in str(raised.value)
+    assert raised.value.__cause__ is terminal_error
+    assert list(worktree.glob(".awf-needs-human-reask-*"))
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("outcome", ("success", "terminal_error", "error"))
 async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancellation(
     outcome: str,
