@@ -367,13 +367,13 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
     mechanism = environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", "").lower()
     if mechanism in {"api", "api-key", "api_key"}:
         return "api_key"
+    if environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN"):
+        return "access_token"
     if any(
         environment_values.get(name, "").lower() in {"1", "true", "yes"}
         for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
     ):
         return "google_cloud"
-    if environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN"):
-        return "access_token"
     if any(environment_values.get(name) for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")):
         return "api_key"
     return "file"

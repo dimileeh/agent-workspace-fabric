@@ -640,16 +640,18 @@ def test_gemini_clarification_does_not_mount_file_auth_for_access_token() -> Non
         ("GOOGLE_CLOUD_ACCESS_TOKEN", "direct-google-token"),
         ("GOOGLE_CLOUD_PROJECT", "awf-project"),
         ("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        ("GOOGLE_GENAI_USE_GCA", "true"),
     )
 
-    assert (
-        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-            environment,
-            auth_mounts=(gcloud_auth, gemini_auth),
-            mirror_target="/host/awf/git/mirrors/repo.git",
-            agent_runtime=AgentRuntime.gemini,
-        )
-        == environment
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(gcloud_auth, gemini_auth),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == (
+        ("GOOGLE_CLOUD_ACCESS_TOKEN", "direct-google-token"),
+        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
     )
     assert (
         stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
