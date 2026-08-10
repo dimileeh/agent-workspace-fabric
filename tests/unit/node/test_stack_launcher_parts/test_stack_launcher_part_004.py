@@ -354,6 +354,21 @@ def test_clarification_inputs_prefer_static_bedrock_credentials_to_profile_and_w
         ),
         (
             {
+                "AWS_BEARER_TOKEN_BEDROCK": "${AWS_BEARER_TOKEN_BEDROCK:-}",
+                "AWS_PROFILE": "awf-bedrock",
+            },
+            frozenset(
+                {
+                    "AWS_REGION",
+                    "AWS_DEFAULT_REGION",
+                    "AWS_PROFILE",
+                    "AWS_SHARED_CREDENTIALS_FILE",
+                    "AWS_CONFIG_FILE",
+                }
+            ),
+        ),
+        (
+            {
                 "AWS_PROFILE": "awf-bedrock",
                 "AWS_CONFIG_FILE": "/run/awf/secrets/aws-config",
                 "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/awf-bedrock",
@@ -389,9 +404,12 @@ def test_clarification_inputs_prefer_static_bedrock_credentials_to_profile_and_w
     ],
 )
 def test_clarification_bedrock_environment_selects_one_usable_credential_source(
-    environment_values: dict[str, str], expected_names: frozenset[str]
+    monkeypatch: pytest.MonkeyPatch,
+    environment_values: dict[str, str],
+    expected_names: frozenset[str],
 ) -> None:
     """Bedrock clarification retains a single usable credential source."""
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
     assert (
         stack_launcher_mod._clarification_claude_code_bedrock_environment_names(  # noqa: SLF001
             environment_values

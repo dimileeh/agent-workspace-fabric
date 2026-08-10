@@ -390,6 +390,10 @@ def _clarification_claude_code_bedrock_environment_names(
 ) -> frozenset[str]:
     """Return Bedrock settings plus its first usable credential source."""
 
+    environment_values = {
+        name: compose_expand_value(value, environ=os.environ)
+        for name, value in environment_values.items()
+    }
     if environment_values.get("AWS_BEARER_TOKEN_BEDROCK"):
         credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES
     elif all(
