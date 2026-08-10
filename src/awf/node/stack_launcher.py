@@ -418,9 +418,12 @@ def _clarification_resolve_google_credentials_placeholder(
 ) -> tuple[tuple[str, str], ...]:
     """Replace a same-name ADC Compose token with its concrete auth-mount target."""
 
-    if agent_runtime is not AgentRuntime.gemini:
-        return agent_environment
     environment_values = dict(agent_environment)
+    if agent_runtime is not AgentRuntime.gemini and (
+        agent_runtime is not AgentRuntime.claude_code
+        or environment_values.get("CLAUDE_CODE_USE_VERTEX") != "1"
+    ):
+        return agent_environment
     if environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS) not in (
         f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
         f"${_GOOGLE_APPLICATION_CREDENTIALS}",

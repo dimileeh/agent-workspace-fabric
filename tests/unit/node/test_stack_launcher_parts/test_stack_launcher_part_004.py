@@ -716,6 +716,49 @@ def test_gemini_clarification_resolves_google_credentials_compose_placeholder() 
 
 
 @pytest.mark.unit
+def test_claude_vertex_clarification_resolves_google_credentials_compose_placeholder() -> None:
+    """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
+    gcloud_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gcloud",
+        target="/home/agent/.config/gcloud",
+        mode="ro",
+    )
+    google_credentials = AuthMount(
+        source="/host/awf/auth/ws_launcher/google-credentials.json",
+        target="/host/awf/auth/ws_launcher/google-credentials.json",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "${GOOGLE_APPLICATION_CREDENTIALS}"),
+    )
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(gcloud_auth, google_credentials),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (gcloud_auth, google_credentials),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=google_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_gemini_clarification_does_not_mount_file_auth_for_access_token() -> None:
     """A direct Google access token is the active Gemini credential source."""
     gcloud_auth = AuthMount(
