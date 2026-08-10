@@ -974,6 +974,9 @@ async def _enforce_needs_human_reason(
         _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
         _MonitorPolicyBlockedError,
+        ProviderRecoveryAuthError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryRetryError,
     ) as exc:
         # A terminal result stops the fix cycle. Only a stranded isolated
         # checkout takes precedence: recovery must not run another item against
@@ -1012,15 +1015,6 @@ async def _enforce_needs_human_reason(
                 cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             ) from exc
-        if isinstance(
-            exc,
-            (
-                ProviderRecoveryAuthError,
-                ProviderRecoveryFallbackError,
-                ProviderRecoveryRetryError,
-            ),
-        ):
-            needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
     else:
         sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
         reask_needs_human_reason = (
