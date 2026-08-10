@@ -191,20 +191,18 @@ _CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES: dict[str, frozenset[str]]
     "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
     "xai": frozenset({"XAI_API_KEY"}),
 }
-_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES = frozenset(
-    {
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-        "AWS_PROFILE",
-        "AWS_SHARED_CREDENTIALS_FILE",
-        "AWS_CONFIG_FILE",
-        "AWS_ROLE_ARN",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-    }
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES = frozenset(
+    {"AWS_REGION", "AWS_DEFAULT_REGION"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES = frozenset(
+    {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES = frozenset(
+    {"AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES = frozenset(
+    {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
 )
 _CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
     {
@@ -328,11 +326,39 @@ def _clarification_claude_code_environment_names(
     backend_names = set()
     if environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1":
         backend_names.add("CLAUDE_CODE_USE_BEDROCK")
-        backend_names.update(_CLARIFICATION_CLAUDE_CODE_BEDROCK_ENV_NAMES)
+        backend_names.update(
+            _clarification_claude_code_bedrock_environment_names(environment_values)
+        )
     if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1":
         backend_names.add("CLAUDE_CODE_USE_VERTEX")
         backend_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(backend_names) or _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+
+
+def _clarification_claude_code_bedrock_environment_names(
+    environment_values: dict[str, str],
+) -> frozenset[str]:
+    """Return Bedrock settings plus its first usable credential source."""
+
+    if environment_values.get("AWS_BEARER_TOKEN_BEDROCK"):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES
+    elif all(
+        environment_values.get(name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES
+    elif any(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
+    elif all(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+    else:
+        credential_names = frozenset()
+    return _CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES | credential_names
 
 
 def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str:

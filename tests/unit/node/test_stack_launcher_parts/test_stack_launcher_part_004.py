@@ -271,7 +271,6 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
 
     assert clarification_environment == (
         ("CLAUDE_CODE_USE_BEDROCK", "1"),
-        ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
         ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.awf/clarification-auth/0"),
         ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
@@ -288,6 +287,115 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
             target="/home/agent/.awf/clarification-auth/1",
             mode="ro",
         ),
+    )
+
+
+@pytest.mark.unit
+def test_clarification_inputs_prefer_static_bedrock_credentials_to_profile_and_web_identity() -> (
+    None
+):
+    """Bedrock clarification does not stage inactive AWS credential files."""
+    aws_shared_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-credentials",
+        target="/run/awf/secrets/aws-credentials",
+        mode="ro",
+    )
+    aws_config = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-config",
+        target="/run/awf/secrets/aws-config",
+        mode="ro",
+    )
+    aws_web_identity_token = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-web-identity-token",
+        target="/run/awf/secrets/aws-web-identity-token",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+        ("AWS_SECRET_ACCESS_KEY", "static-secret"),
+        ("AWS_SESSION_TOKEN", "static-session-token"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_DEFAULT_REGION", "us-east-1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_SHARED_CREDENTIALS_FILE", aws_shared_credentials.target),
+        ("AWS_CONFIG_FILE", aws_config.target),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", aws_web_identity_token.target),
+    )
+    mounts = (aws_shared_credentials, aws_config, aws_web_identity_token)
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+        ("AWS_SECRET_ACCESS_KEY", "static-secret"),
+        ("AWS_SESSION_TOKEN", "static-session-token"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_DEFAULT_REGION", "us-east-1"),
+    )
+    assert clarification_mounts == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("environment_values", "expected_names"),
+    [
+        (
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "bedrock-api-key",
+                "AWS_ACCESS_KEY_ID": "AKIA_PROFILE_IDENTIFIER",
+                "AWS_SECRET_ACCESS_KEY": "static-secret",
+            },
+            frozenset(
+                {
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    "AWS_REGION",
+                    "AWS_DEFAULT_REGION",
+                }
+            ),
+        ),
+        (
+            {
+                "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/awf-bedrock",
+                "AWS_WEB_IDENTITY_TOKEN_FILE": "/run/awf/secrets/aws-web-identity-token",
+            },
+            frozenset(
+                {
+                    "AWS_REGION",
+                    "AWS_DEFAULT_REGION",
+                    "AWS_ROLE_ARN",
+                    "AWS_WEB_IDENTITY_TOKEN_FILE",
+                }
+            ),
+        ),
+        (
+            {"AWS_REGION": "us-west-2"},
+            frozenset({"AWS_REGION", "AWS_DEFAULT_REGION"}),
+        ),
+    ],
+)
+def test_clarification_bedrock_environment_selects_one_usable_credential_source(
+    environment_values: dict[str, str], expected_names: frozenset[str]
+) -> None:
+    """Bedrock clarification retains a single usable credential source."""
+    assert (
+        stack_launcher_mod._clarification_claude_code_bedrock_environment_names(  # noqa: SLF001
+            environment_values
+        )
+        == expected_names
     )
 
 
