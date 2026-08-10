@@ -10,6 +10,11 @@ import pytest
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
+    _git,
+    _init_real_worktree,
+    _LocalCommandRunner,
+)
 
 
 @pytest.mark.unit
@@ -86,3 +91,67 @@ async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails
             "restore_ref": "c" * 40,
         }
     ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_preserves_primary_commit_made_during_reask(
+    tmp_path: Path,
+) -> None:
+    """A clean primary worktree with a new HEAD still fails closed without reset."""
+    workspace_id = "ws_reask_primary_commit"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        _git(worktree, "add", "tracked.py")
+        _git(worktree, "commit", "-qm", "independent primary change")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
+    assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))

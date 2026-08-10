@@ -9,7 +9,6 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
 
 from awf.adapters.opencode import opencode_provider_for_model
 from awf.common.git_auth import apply_bitbucket_agent_git_auth
@@ -20,6 +19,7 @@ from awf.node.companion_images import CompanionImageBuilder
 from awf.node.companion_services import (
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
+    _hosted_companion_service_from_materialized,
     companion_env_secret_stack_metadata,
     companion_service_from_materialized,
     validate_companion_service_graph,
@@ -67,7 +67,6 @@ _HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES = {
 }
 _HOSTED_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
-_HOSTED_COMPANION_SOURCE_SCHEMA = "hosted_companion_source.v1"
 _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.claude",
     "/home/agent/.claude.json",
@@ -1198,79 +1197,6 @@ def _stack_secret_metadata(
         metadata.update(dict(secret_lease_resolution.metadata))
     metadata.update(companion_secret_metadata)
     return metadata
-
-
-def _hosted_companion_service_from_materialized(
-    companion: MaterializedCompanionService,
-) -> CompanionService:
-    """Render companion env-secret placeholders without consulting local env."""
-    if companion.spec.environment_secrets:
-        placeholder_env = {
-            secret.value_from: hosted_env_secret_alias_placeholder(secret.value_from)
-            for secret in companion.spec.environment_secrets
-        }
-        service = companion_service_from_materialized(companion, host_env=placeholder_env)
-        source_placeholders = {
-            secret.target: f"${{{secret.value_from}}}"
-            for secret in companion.spec.environment_secrets
-        }
-        service = replace(
-            service,
-            environment=tuple(
-                (target, source_placeholders.get(target, value))
-                for target, value in service.environment
-            ),
-        )
-    else:
-        service = companion_service_from_materialized(companion)
-    return replace(
-        service,
-        source_metadata=_hosted_companion_source_metadata(companion),
-    )
-
-
-def _hosted_companion_source_metadata(companion: MaterializedCompanionService) -> dict[str, object]:
-    """Return portable, secret-free source metadata for a hosted companion."""
-    spec = companion.spec
-    metadata: dict[str, object] = {
-        "schema": _HOSTED_COMPANION_SOURCE_SCHEMA,
-        "name": spec.name,
-        "repo_url": _hosted_companion_repo_url(spec.repo_url),
-        "base_branch": spec.base_branch,
-        "commit_sha": companion.commit_sha,
-        "build_context": spec.build_context,
-        "dockerfile": spec.dockerfile,
-    }
-    if spec.env_file is not None:
-        metadata["env_file"] = spec.env_file
-    if spec.volumes:
-        metadata["volumes"] = tuple(
-            {"source": source, "target": target} for source, target in spec.volumes
-        )
-    return metadata
-
-
-def _hosted_companion_repo_url(repo_url: str) -> str:
-    """Strip URL credentials before persisting portable hosted companion source metadata."""
-    try:
-        parsed = urlsplit(repo_url)
-    except ValueError:
-        return repo_url
-    authority = parsed.netloc
-    if not parsed.scheme or "@" not in authority:
-        if parsed.query or parsed.fragment:
-            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
-        return repo_url
-    userinfo, _, authority = authority.rpartition("@")
-    if parsed.scheme.lower() in {"ssh", "git+ssh"}:
-        username, password_separator, _ = userinfo.partition(":")
-        if not password_separator:
-            if parsed.query or parsed.fragment:
-                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-            return repo_url
-        if username:
-            authority = f"{username}@{authority}"
-    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
 def _hosted_secret_lease_placeholder_resolution(

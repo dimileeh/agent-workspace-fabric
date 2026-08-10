@@ -7,9 +7,10 @@ import os
 import re
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from awf.common.companions import (
     companion_volume_source_is_repo_relative,
@@ -17,6 +18,7 @@ from awf.common.companions import (
 )
 from awf.node.compose_manager import CompanionService, ComposeService
 from awf.node.git_manager import WorktreeLayout
+from awf.profiles.compose_env import hosted_env_secret_alias_placeholder
 from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, DockerMode
 from awf.profiles.resolver import ProfileResolutionError
 
@@ -25,6 +27,7 @@ COMPANION_ENV_SECRET_SOURCE_MISSING = "COMPANION_ENV_SECRET_SOURCE_MISSING"
 COMPANION_ENV_SECRET_UNSUPPORTED = "COMPANION_ENV_SECRET_UNSUPPORTED"
 MIN_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS = 1
 MAX_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS = 1800
+_HOSTED_COMPANION_SOURCE_SCHEMA = "hosted_companion_source.v1"
 _ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,6 +126,79 @@ def companion_service_from_materialized(
         ),
         secret_metadata=secret_metadata,
     )
+
+
+def _hosted_companion_service_from_materialized(
+    companion: MaterializedCompanionService,
+) -> CompanionService:
+    """Render companion env-secret placeholders without consulting local env."""
+    if companion.spec.environment_secrets:
+        placeholder_env = {
+            secret.value_from: hosted_env_secret_alias_placeholder(secret.value_from)
+            for secret in companion.spec.environment_secrets
+        }
+        service = companion_service_from_materialized(companion, host_env=placeholder_env)
+        source_placeholders = {
+            secret.target: f"${{{secret.value_from}}}"
+            for secret in companion.spec.environment_secrets
+        }
+        service = replace(
+            service,
+            environment=tuple(
+                (target, source_placeholders.get(target, value))
+                for target, value in service.environment
+            ),
+        )
+    else:
+        service = companion_service_from_materialized(companion)
+    return replace(
+        service,
+        source_metadata=_hosted_companion_source_metadata(companion),
+    )
+
+
+def _hosted_companion_source_metadata(companion: MaterializedCompanionService) -> dict[str, object]:
+    """Return portable, secret-free source metadata for a hosted companion."""
+    spec = companion.spec
+    metadata: dict[str, object] = {
+        "schema": _HOSTED_COMPANION_SOURCE_SCHEMA,
+        "name": spec.name,
+        "repo_url": _hosted_companion_repo_url(spec.repo_url),
+        "base_branch": spec.base_branch,
+        "commit_sha": companion.commit_sha,
+        "build_context": spec.build_context,
+        "dockerfile": spec.dockerfile,
+    }
+    if spec.env_file is not None:
+        metadata["env_file"] = spec.env_file
+    if spec.volumes:
+        metadata["volumes"] = tuple(
+            {"source": source, "target": target} for source, target in spec.volumes
+        )
+    return metadata
+
+
+def _hosted_companion_repo_url(repo_url: str) -> str:
+    """Strip URL credentials before persisting portable hosted companion source metadata."""
+    try:
+        parsed = urlsplit(repo_url)
+    except ValueError:
+        return repo_url
+    authority = parsed.netloc
+    if not parsed.scheme or "@" not in authority:
+        if parsed.query or parsed.fragment:
+            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
+        return repo_url
+    userinfo, _, authority = authority.rpartition("@")
+    if parsed.scheme.lower() in {"ssh", "git+ssh"}:
+        username, password_separator, _ = userinfo.partition(":")
+        if not password_separator:
+            if parsed.query or parsed.fragment:
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+            return repo_url
+        if username:
+            authority = f"{username}@{authority}"
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
 
 
 def companion_env_secret_stack_metadata(
