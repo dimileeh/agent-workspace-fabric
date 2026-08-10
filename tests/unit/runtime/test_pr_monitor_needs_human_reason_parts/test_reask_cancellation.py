@@ -91,7 +91,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
 
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
     assert config.read_text(encoding="utf-8") == "MODE=original\n"
-    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -162,7 +162,7 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
         await asyncio.wait_for(task, timeout=5.0)
 
     assert cleanup_finished.is_set()
-    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -227,7 +227,7 @@ async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
     assert "git worktree remove" in str(raised.value)
     assert raised.value.__cause__ is terminal_error
-    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob("ws_isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -310,7 +310,7 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
         await asyncio.wait_for(task, timeout=5.0)
 
     assert cleanup_finished.is_set()
-    assert not list(worktree.parent.glob(".awf-needs-human-reask-*"))
+    assert not list(worktree.parent.glob("ws_isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -414,7 +414,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
             "__needs_human_reason__:thread_1": "select a deployment region",
         }
     ]
-    assert list(worktree.parent.glob(".awf-needs-human-reask-*"))
+    assert list(worktree.parent.glob("ws_isolated_reask_*"))
 
 
 @pytest.mark.unit

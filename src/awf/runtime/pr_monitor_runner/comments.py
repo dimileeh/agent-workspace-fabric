@@ -75,7 +75,9 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
-_ISOLATED_REASK_WORKTREE_PREFIX = ".awf-needs-human-reask-"
+# Keep interrupted re-ask checkouts visible to the managed-worktree orphan
+# reconcilers, which discover workspace-owned siblings by their ``ws_`` prefix.
+_ISOLATED_REASK_WORKTREE_PREFIX = "ws_isolated_reask_"
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 
 
