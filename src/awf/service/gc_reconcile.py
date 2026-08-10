@@ -35,6 +35,7 @@ multi-node sweep (mirroring the terminal-runtime release sweep) is future work.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import fcntl
 import os
@@ -544,6 +545,7 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
             work_dir=work_dir,
         )
         if removal.status == "succeeded":
+            _remove_isolated_reask_liveness_lock(target.path)
             return OrphanDirReapOutcome(
                 target=target,
                 status="deleted",
@@ -551,6 +553,7 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
                 deleted=True,
             )
         if removal.reason_code == PATH_ALREADY_REMOVED:
+            _remove_isolated_reask_liveness_lock(target.path)
             return OrphanDirReapOutcome(
                 target=target,
                 status="already_removed",
@@ -568,6 +571,8 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         build_and_delete_gc_path, target.kind, target.path, work_dir=work_dir
     )
     if deleted:
+        if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+            _remove_isolated_reask_liveness_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="deleted",
@@ -576,6 +581,8 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         )
     if reason_code is None or reason_code == PATH_ALREADY_REMOVED:
         # ``None`` is the genuine not-exists case; both are idempotent no-ops.
+        if target.kind == "worktree" and is_isolated_reask_worktree_id(target.path.name):
+            _remove_isolated_reask_liveness_lock(target.path)
         return OrphanDirReapOutcome(
             target=target,
             status="already_removed",
@@ -587,6 +594,15 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
         reason_code=reason_code,
         error=error,
     )
+
+
+def _remove_isolated_reask_liveness_lock(worktree_path: Path) -> None:
+    """Best-effort cleanup of a marker left by an interrupted re-ask."""
+    lock_path = isolated_reask_worktree_liveness_lock_path(worktree_path)
+    with contextlib.suppress(OSError):
+        lock_path.unlink()
+    with contextlib.suppress(OSError):
+        lock_path.parent.rmdir()
 
 
 async def _load_known_workspace_and_companion_worktree_ids(

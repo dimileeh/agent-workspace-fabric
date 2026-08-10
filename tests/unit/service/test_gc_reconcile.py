@@ -551,6 +551,9 @@ async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
         status="succeeded",
         reason_code="WORKTREE_REMOVE_SUCCEEDED",
     )
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
 
     with patch(
         "awf.service.gc_worktrees.remove_orphan_worktree",
@@ -561,6 +564,8 @@ async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
     assert outcome.status == "deleted"
     assert outcome.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
     assert outcome.deleted is True
+    assert not lock_path.exists()
+    assert not lock_path.parent.exists()
     remove_worktree.assert_awaited_once_with(
         workspace_id=path.name,
         path=path,
@@ -583,6 +588,9 @@ async def test_reap_treats_already_removed_reask_worktree_as_idempotent(
         status="skipped",
         reason_code="PATH_ALREADY_REMOVED",
     )
+    lock_path = isolated_reask_worktree_liveness_lock_path(path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
 
     with patch(
         "awf.service.gc_worktrees.remove_orphan_worktree",
@@ -592,6 +600,8 @@ async def test_reap_treats_already_removed_reask_worktree_as_idempotent(
 
     assert outcome.status == "already_removed"
     assert outcome.reason_code == "PATH_ALREADY_REMOVED"
+    assert not lock_path.exists()
+    assert not lock_path.parent.exists()
 
 
 async def test_reap_stops_when_reask_git_cleanup_fails(tmp_path: Path) -> None:
