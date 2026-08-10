@@ -520,22 +520,13 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     display_cap = 8
     # Preserve an actionable triage excerpt alongside a full set of
     # changes-requested reviews. Otherwise all eight slots can be consumed
-    # before the human sees why additional feedback needs attention. A review
-    # can independently block merge while still having an actionable triage
-    # verdict, so include those items in the reservation as well.
-    triaged_blocking_item_count = sum(
-        _item_text(item, "verdict") in {"defer", "needs_human"} for item in blocking_review_items
-    )
+    # before the human sees why additional feedback needs attention. Triaged
+    # merge blockers are sorted first below, while this reservation preserves
+    # separately rendered escalation feedback.
     triaged_item_reservation = min(
-        1,
-        len(bot_items)
-        + len(human_escalation_items)
-        + len(human_items)
-        + triaged_blocking_item_count,
+        1, len(bot_items) + len(human_escalation_items) + len(human_items)
     )
-    blocking_review_display_limit = display_cap - (
-        0 if triaged_blocking_item_count else triaged_item_reservation
-    )
+    blocking_review_display_limit = display_cap - triaged_item_reservation
     displayed = 0
     lines: list[str] = []
     for label, items, display_limit, prioritize_triage in (

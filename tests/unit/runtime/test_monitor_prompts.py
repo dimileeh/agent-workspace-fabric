@@ -1306,6 +1306,64 @@ class TestReadyToMergeComment:
         assert "(+1 more)" in body
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("separate_verdict", ("needs_human", "defer"))
+    def test_blocker_items_reserve_a_slot_for_separate_triage(
+        self,
+        separate_verdict: str,
+    ) -> None:
+        """Keep a separate triage visible beside a triaged blocking review."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        triaged_blocking_feedback = {
+            "kind": "review",
+            "id": "R-triaged-blocking",
+            "author": "triaged reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-triaged-blocking",
+            "body": "A human decision is required.",
+            "verdict": "needs_human",
+            "agent_verdict_reason": "Choose the intended merge policy.",
+            "is_merge_blocking": True,
+        }
+        separate_triage = {
+            "kind": "review",
+            "id": "R-separate-triage",
+            "author": "alice",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-separate-triage",
+            "body": "This requires separate attention.",
+            "verdict": separate_verdict,
+            "agent_verdict_reason": "Keep this escalation visible.",
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, triaged_blocking_feedback, separate_triage),
+        )
+
+        assert body.count("[changes_requested]") == 6
+        assert "A human decision is required." in body
+        assert "This requires separate attention." in body
+        assert "-> reason: Keep this escalation visible." in body
+        assert "(+2 more)" in body
+
+    @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
         """Verify blocker items honor collected thread classification."""
         body = ready_to_merge_comment(
