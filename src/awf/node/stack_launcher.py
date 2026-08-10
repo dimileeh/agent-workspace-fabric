@@ -83,6 +83,7 @@ _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
+_GCLOUD_AUTH_MOUNT_TARGET = "/home/agent/.config/gcloud"
 _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     {
         "/home/agent/.config/gh",
@@ -399,6 +400,12 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
     return "file"
 
 
+def _google_credentials_are_within_gcloud_auth_mount(google_credentials: str) -> bool:
+    """Return whether a normalized Google credential path is below gcloud auth."""
+
+    return posixpath.normpath(google_credentials).startswith(f"{_GCLOUD_AUTH_MOUNT_TARGET}/")
+
+
 def _clarification_auth_mounts(
     auth_mounts: Sequence[AuthMount],
     *,
@@ -524,9 +531,14 @@ def _clarification_model_provider_auth_mount_targets(
         # unless an explicit config or credentials file lies outside the
         # mounted directory.
         runtime_auth_mount_targets = (
-            frozenset({"/home/agent/.config/gcloud"})
+            frozenset({_GCLOUD_AUTH_MOUNT_TARGET})
             if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
-            and not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+            and (
+                not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+                or _google_credentials_are_within_gcloud_auth_mount(
+                    environment_values[_GOOGLE_APPLICATION_CREDENTIALS]
+                )
+            )
             else frozenset()
         )
         aws_config_file = environment_values.get("AWS_CONFIG_FILE", "")
@@ -554,6 +566,7 @@ def _clarification_model_provider_auth_mount_targets(
             gemini_auth_source == "google_cloud"
             and google_credentials
             and google_credentials != _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
+            and not _google_credentials_are_within_gcloud_auth_mount(google_credentials)
         ):
             # An explicit service-account file takes precedence over ADC.
             runtime_auth_mount_targets = frozenset()

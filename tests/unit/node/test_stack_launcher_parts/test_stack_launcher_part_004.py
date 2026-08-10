@@ -685,6 +685,63 @@ def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_runtime", "environment"),
+    (
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+                (
+                    "GOOGLE_APPLICATION_CREDENTIALS",
+                    "/home/agent/.config/gcloud/awf-service-account.json",
+                ),
+            ),
+        ),
+        (
+            AgentRuntime.gemini,
+            (
+                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+                (
+                    "GOOGLE_APPLICATION_CREDENTIALS",
+                    "/home/agent/.config/gcloud/awf-service-account.json",
+                ),
+            ),
+        ),
+    ),
+)
+def test_clarification_inputs_retain_gcloud_mount_for_contained_credentials(
+    agent_runtime: AgentRuntime,
+    environment: tuple[tuple[str, str], ...],
+) -> None:
+    """A credential below the gcloud mount retains its parent during clarification."""
+    gcloud_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gcloud",
+        target="/home/agent/.config/gcloud",
+        mode="ro",
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(gcloud_auth,),
+            mirror_target=mirror_target,
+            agent_runtime=agent_runtime,
+        )
+        == environment
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (gcloud_auth,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+    ) == (gcloud_auth,)
+
+
+@pytest.mark.unit
 def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials() -> None:
     """Claude file auth wins over direct credentials for clarification."""
     claude_auth = AuthMount(
