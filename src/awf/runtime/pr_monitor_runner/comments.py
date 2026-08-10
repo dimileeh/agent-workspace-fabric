@@ -271,9 +271,9 @@ async def _persist_reask_cleanup_failure_after_cancellation(
     *,
     workspace_id: str,
     item_id: str,
-    cleanup_reason: str,
+    needs_human_reason: str,
 ) -> None:
-    """Durably block later monitor work after cancelled re-ask cleanup fails."""
+    """Durably block later monitor work while preserving the agent's reason."""
     from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 
     async with runner._deps.session_factory() as session:
@@ -282,7 +282,7 @@ async def _persist_reask_cleanup_failure_after_cancellation(
             return
         addressed = dict(workspace.monitor_threads_addressed or {})
         addressed[item_id] = "needs_human"
-        addressed[_needs_human_reason_state_key(item_id)] = cleanup_reason
+        addressed[_needs_human_reason_state_key(item_id)] = needs_human_reason
         workspace.monitor_threads_addressed = addressed
         await session.commit()
 
@@ -671,7 +671,11 @@ async def _enforce_needs_human_reason(
             )
         return cleanup_error, isolated_cleanup_failed
 
-    async def _run_reask_cleanup_cancellation_safe(*, event_name: str) -> tuple[str | None, bool]:
+    async def _run_reask_cleanup_cancellation_safe(
+        *,
+        event_name: str,
+        needs_human_reason: str | None = None,
+    ) -> tuple[str | None, bool]:
         """Complete re-ask cleanup before propagating any worker cancellation."""
         cleanup_task = asyncio.create_task(_run_reask_cleanup(event_name=event_name))
         cancellation: asyncio.CancelledError | None = None
@@ -687,18 +691,18 @@ async def _enforce_needs_human_reason(
                 if cancellation is not None:
                     cleanup_error, _isolated_cleanup_failed = cleanup_result
                     if cleanup_error is not None:
-                        cleanup_reason = redact_audit_text(cleanup_error, limit=240)
+                        human_reason = needs_human_reason or _GENERIC_HUMAN_BLOCKER_REASON
                         if state is not None:
                             state.mark_addressed(item_id, "needs_human")
                             state.mark_addressed(
-                                _needs_human_reason_state_key(item_id), cleanup_reason
+                                _needs_human_reason_state_key(item_id), human_reason
                             )
                         persistence_task = asyncio.create_task(
                             _persist_reask_cleanup_failure_after_cancellation(
                                 runner,
                                 workspace_id=workspace_id,
                                 item_id=item_id,
-                                cleanup_reason=cleanup_reason,
+                                needs_human_reason=human_reason,
                             )
                         )
                         while True:
@@ -770,8 +774,13 @@ async def _enforce_needs_human_reason(
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             ) from exc
     else:
+        sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
+        reask_needs_human_reason = (
+            sanitized_reask_reason if reask_result.verdict == "needs_human" else None
+        )
         cleanup_error, _isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
-            event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success"
+            event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success",
+            needs_human_reason=reask_needs_human_reason,
         )
         if cleanup_error is not None:
             raise _MonitorPolicyBlockedError(
@@ -781,7 +790,7 @@ async def _enforce_needs_human_reason(
         if cleanup_error is None:
             reask_result = replace(
                 reask_result,
-                reason=_sanitize_verdict_reason(reask_result.reason),
+                reason=sanitized_reask_reason,
             )
             if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(
                 reask_result

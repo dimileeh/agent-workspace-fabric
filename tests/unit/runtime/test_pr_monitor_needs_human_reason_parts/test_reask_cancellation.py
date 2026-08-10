@@ -237,7 +237,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation must leave failed clarification cleanup as a human blocker."""
+    """Cancellation keeps the clarified human reason when cleanup also fails."""
     workspace_id = "ws_reask_post_invocation_cancel_cleanup_failure"
     worktree = _init_real_worktree(tmp_path, workspace_id)
     cleanup_started = asyncio.Event()
@@ -266,13 +266,11 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         *,
         workspace_id: str,
         item_id: str,
-        cleanup_reason: str,
+        needs_human_reason: str,
     ) -> None:
         assert workspace_id == "ws_reask_post_invocation_cancel_cleanup_failure"
         assert item_id == "thread_1"
-        assert cleanup_reason == (
-            "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
-        )
+        assert needs_human_reason == "select a deployment region"
         persistence_started.set()
         await release_persistence.wait()
         persisted_states.append(dict(state.threads_addressed_ids))
@@ -329,9 +327,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
     assert persisted_states == [
         {
             "thread_1": "needs_human",
-            "__needs_human_reason__:thread_1": (
-                "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
-            ),
+            "__needs_human_reason__:thread_1": "select a deployment region",
         }
     ]
     assert list(worktree.glob(".awf-needs-human-reask-*"))
@@ -339,11 +335,11 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
 
 @pytest.mark.unit
 @pytest.mark.parametrize("workspace_exists", (True, False))
-async def test_persist_reask_cleanup_failure_after_cancellation_merges_blocker(
+async def test_persist_reask_cleanup_failure_after_cancellation_merges_human_reason(
     monkeypatch: pytest.MonkeyPatch,
     workspace_exists: bool,
 ) -> None:
-    """Durable re-ask cleanup markers merge state and tolerate workspace removal."""
+    """Durable cleanup blockers preserve a human reason and tolerate workspace removal."""
     workspace = SimpleNamespace(monitor_threads_addressed={"other_thread": "fix_committed"})
     session = SimpleNamespace(committed=False)
 
@@ -376,14 +372,14 @@ async def test_persist_reask_cleanup_failure_after_cancellation_merges_blocker(
         runner,
         workspace_id="ws_1",
         item_id="thread_1",
-        cleanup_reason="could not remove clarification checkout",
+        needs_human_reason="a maintainer must choose the deployment region",
     )
 
     if workspace_exists:
         assert workspace.monitor_threads_addressed == {
             "other_thread": "fix_committed",
             "thread_1": "needs_human",
-            "__needs_human_reason__:thread_1": "could not remove clarification checkout",
+            "__needs_human_reason__:thread_1": "a maintainer must choose the deployment region",
         }
         assert session.committed is True
     else:
