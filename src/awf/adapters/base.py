@@ -19,7 +19,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from awf.adapters.failure_reasons import _failure_reason_for_result
 from awf.adapters.provider_failures import classify_provider_failure
+from awf.adapters.registry_api import (
+    _REGISTRY as _REGISTRY,
+)
+from awf.adapters.registry_api import (
+    get_adapter as get_adapter,
+)
+from awf.adapters.registry_api import (
+    register_adapter as register_adapter,
+)
 from awf.adapters.runtime_executor import (
     _HOSTED_TIMEOUT_REASONS,
     _HOSTED_TIMEOUT_RETURN_CODE,
@@ -35,7 +45,6 @@ from awf.adapters.usage import (
     UsageSampler,
 )
 from awf.common.commands import (
-    COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
     CommandResult,
@@ -1481,75 +1490,3 @@ class AgentAdapter(ABC):
             stdout=result.stdout,
             stderr=result.stderr,
         )
-
-
-# ── Registry ──────────────────────────────────────────────────────────────
-
-# Populated by awf.adapters.codex / .claude_code / .cursor / .gemini / .opencode / .grok on
-# import. Keyed by AgentRuntime enum so callers that receive a Workspace.agent
-# string just map through the enum.
-_REGISTRY: dict[AgentRuntime, type[AgentAdapter]] = {}
-
-
-def register_adapter(cls: type[AgentAdapter]) -> type[AgentAdapter]:
-    """Class decorator used by each adapter module to self-register."""
-    instance = cls.__new__(cls)  # bypass __init__ just to read .name
-    # We can't call name via instance without runner; require subclasses to
-    # override via a class-level _REGISTERED_NAME as well. Simpler: read
-    # ``cls.runtime`` which subclasses set as a class attribute.
-    runtime: AgentRuntime = getattr(cls, "runtime")  # noqa: B009 - structural check
-    _REGISTRY[runtime] = cls
-    del instance
-    return cls
-
-
-def get_adapter(
-    runtime: AgentRuntime,
-    *,
-    runner: AsyncCommandRunner,
-    default_model: str | None = None,
-    default_effort: str | None = None,
-    defaults: AgentDefaults | None = None,
-    log_store: LogStore | None = None,
-    agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
-    agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
-    usage_sampler: UsageSampler | None = None,
-    runtime_executor: AgentRuntimeExecutor | None = None,
-) -> AgentAdapter:
-    """Instantiate the adapter for the given runtime.
-
-    Raises ``KeyError`` if no adapter is registered — can happen only if a
-    subclass forgot to import. Tests verify the registry is populated.
-    """
-    cls = _REGISTRY[runtime]
-    if defaults is not None:
-        default_model = defaults.model
-        default_effort = defaults.effort
-    return cls(
-        runner=runner,
-        default_model=default_model,
-        default_effort=default_effort,
-        log_store=log_store,
-        agent_wall_timeout_seconds=agent_wall_timeout_seconds,
-        agent_idle_timeout_seconds=agent_idle_timeout_seconds,
-        usage_sampler=usage_sampler,
-        runtime_executor=runtime_executor,
-    )
-
-
-def _failure_reason_for_result(result: CommandResult) -> str:
-    """Normalize command timeout/provider failure reason codes for retries."""
-    if result.reason_code == COMMAND_TIMEOUT_REASON:
-        return "AGENT_TIMEOUT"
-    if result.reason_code == COMMAND_IDLE_TIMEOUT_REASON:
-        return "AGENT_IDLE_TIMEOUT"
-    provider_failure = classify_provider_failure(
-        reason_code=None,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        provider=None,
-        model=None,
-    )
-    if provider_failure is not None:
-        return provider_failure.reason_code
-    return "AGENT_CLI_FAILED"

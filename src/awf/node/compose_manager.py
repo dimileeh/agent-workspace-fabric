@@ -44,6 +44,7 @@ from awf.node.compose_diagnostics import (
     _container_is_unhealthy,
     _redacted_diagnostics,
 )
+from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
 
 _log = get_logger(__name__)
 
@@ -404,35 +405,6 @@ DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200
 
 SERVICE_STARTUP_DIAGNOSTICS_SCHEMA = "service_startup_diagnostics.v1"
 """Schema marker for the persisted ``SERVICE_STARTUP_FAILURE`` diagnostics payload."""
-
-
-class ComposeOperationError(Exception):
-    """Raised when a ``docker compose`` command exits non-zero.
-
-    Carries stdout/stderr plus a structured reason code so the provisioner can
-    convert it to a workspace failure without regex-parsing error messages.
-    """
-
-    def __init__(
-        self,
-        *,
-        operation: str,
-        returncode: int,
-        stdout: str,
-        stderr: str,
-        reason_code: str = "COMPOSE_COMMAND_FAILED",
-    ) -> None:
-        """Capture the failed compose operation and its diagnostic streams."""
-        self.operation = operation
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.reason_code = reason_code
-        super().__init__(
-            f"docker compose {operation} failed "
-            f"(exit={returncode}, reason={reason_code}): "
-            f"{stderr.strip() or stdout.strip() or '<no output>'}"
-        )
 
 
 @dataclass(frozen=True)

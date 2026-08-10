@@ -20,7 +20,6 @@ from awf.service import usage_collection
 from awf.service.usage_collection import (
     CcusageCollector,
     _make_isolated_capture_dir,
-    _RealClock,
 )
 from awf.service.usage_store import (
     NormalizedUsage,
@@ -1493,12 +1492,3 @@ async def test_timeout_cleanup_logs_non_cancel_errors(
     )
     await ctx._cleanup_timed_out_invocation(invocation)
     await ctx.finalize(status="failed")
-
-
-@pytest.mark.unit
-async def test_real_clock_defaults(tmp_path: Path) -> None:
-    # Constructing without a clock uses the real clock.
-    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path)
-    assert isinstance(collector._clock, _RealClock)
-    assert isinstance(collector._clock.now(), datetime)
-    await collector._clock.sleep(0)
