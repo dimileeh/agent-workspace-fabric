@@ -418,6 +418,83 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A creation cancellation records its stranded checkout before it escapes."""
+    workspace_id = "ws_reask_creation_cancel_cleanup_failure"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    persisted_errors: list[str] = []
+    state = MonitorState()
+
+    class _CancelAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            result = await super().run(args)
+            if "worktree" in args and "add" in args:
+                raise asyncio.CancelledError
+            return result
+
+    async def _persist_reask_cleanup_failure_after_cancellation(
+        _runner: object,
+        **kwargs: object,
+    ) -> None:
+        persisted_errors.append(str(kwargs["cleanup_error"]))
+        assert kwargs["needs_human_reason"] is None
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_CancelAfterWorktreeAddWithFailedCleanupRunner()),
+        _worktrees_root=tmp_path,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_persist_reask_cleanup_failure_after_cancellation",
+        _persist_reask_cleanup_failure_after_cancellation,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            item_body_hash="thread-body-hash",
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=state,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert persisted_errors == [
+        "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+    ]
+    assert state.threads_addressed_ids == {
+        "thread_1": "needs_human",
+        "__review_thread_body_hash__:thread_1": "thread-body-hash",
+    }
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -6,10 +6,10 @@ import asyncio
 import contextlib
 import fcntl
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from awf.adapters.base import AgentRunError
@@ -165,6 +165,7 @@ async def _create_isolated_reask_worktree(
     *,
     worktree_path: Path,
     restore_ref: str,
+    on_cleanup_failure_after_cancellation: Callable[[str], Coroutine[Any, Any, None]] | None = None,
 ) -> _IsolatedReaskWorktree | None:
     """Create a temporary tracked-only checkout for a local clarification re-ask."""
     if not (worktree_path / ".git").exists():
@@ -220,12 +221,24 @@ async def _create_isolated_reask_worktree(
         )
         while True:
             try:
-                await asyncio.shield(cleanup_task)
+                cleanup_error = await asyncio.shield(cleanup_task)
                 break
             except asyncio.CancelledError:
                 if cleanup_task.done():
-                    cleanup_task.result()
+                    cleanup_error = cleanup_task.result()
                     break
+        if cleanup_error is not None and on_cleanup_failure_after_cancellation is not None:
+            persistence_task = asyncio.create_task(
+                on_cleanup_failure_after_cancellation(cleanup_error)
+            )
+            while True:
+                try:
+                    await asyncio.shield(persistence_task)
+                    break
+                except asyncio.CancelledError:
+                    if persistence_task.done():
+                        persistence_task.result()
+                        break
         raise
     if not create.ok:
         # Git can register and populate the checkout before reporting an error
@@ -683,6 +696,43 @@ async def _enforce_needs_human_reason(
     worktree_path = worktrees_root / workspace_id if isinstance(worktrees_root, Path) else None
     reask_restore_ref: str | None = None
     reask_worktree: _IsolatedReaskWorktree | None = None
+
+    async def _persist_cleanup_failure_after_cancellation(
+        cleanup_error: str,
+        *,
+        needs_human_reason: str | None = None,
+    ) -> None:
+        if state is not None:
+            state.mark_addressed(item_id, "needs_human")
+            if (
+                item_body_hash is not None
+                and (body_state_key := _review_item_body_state_key(item_id, item_kind)) is not None
+            ):
+                state.mark_addressed(body_state_key, item_body_hash)
+            reason_key = _needs_human_reason_state_key(item_id)
+            if needs_human_reason is not None:
+                state.mark_addressed(reason_key, needs_human_reason)
+            else:
+                state.threads_addressed_ids.pop(reason_key, None)
+        await _persist_reask_cleanup_failure_after_cancellation(
+            runner,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            item_id=item_id,
+            item_kind=item_kind,
+            item_author=item_author,
+            item_path=item_path,
+            item_line=item_line,
+            needs_human_reason=needs_human_reason,
+            item_body_hash=item_body_hash,
+            cleanup_error=cleanup_error,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+        )
+
     if worktree_path is not None:
         # A real AWF worktree always has its Git control file. Unit-level
         # runners deliberately omit it, so retain their direct invocation seam
@@ -701,6 +751,7 @@ async def _enforce_needs_human_reason(
                     runner,
                     worktree_path=worktree_path,
                     restore_ref=reask_restore_ref,
+                    on_cleanup_failure_after_cancellation=_persist_cleanup_failure_after_cancellation,
                 )
             elif getattr(runner, "_deps", None) is not None:
                 if worktree_path.exists():
@@ -822,37 +873,10 @@ async def _enforce_needs_human_reason(
 
         cleanup_error, _isolated_cleanup_failed = cleanup_result
         if cleanup_error is not None:
-            if state is not None:
-                state.mark_addressed(item_id, "needs_human")
-                if (
-                    item_body_hash is not None
-                    and (body_state_key := _review_item_body_state_key(item_id, item_kind))
-                    is not None
-                ):
-                    state.mark_addressed(body_state_key, item_body_hash)
-                reason_key = _needs_human_reason_state_key(item_id)
-                if needs_human_reason is not None:
-                    state.mark_addressed(reason_key, needs_human_reason)
-                else:
-                    state.threads_addressed_ids.pop(reason_key, None)
             persistence_task = asyncio.create_task(
-                _persist_reask_cleanup_failure_after_cancellation(
-                    runner,
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    item_id=item_id,
-                    item_kind=item_kind,
-                    item_author=item_author,
-                    item_path=item_path,
-                    item_line=item_line,
+                _persist_cleanup_failure_after_cancellation(
+                    cleanup_error,
                     needs_human_reason=needs_human_reason,
-                    item_body_hash=item_body_hash,
-                    cleanup_error=cleanup_error,
-                    base_branch=base_branch,
-                    remote_branch=remote_branch,
-                    operation_id=operation_id,
-                    operation_type=operation_type,
-                    monitor_log=monitor_log,
                 )
             )
             while True:
