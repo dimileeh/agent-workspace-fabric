@@ -415,7 +415,7 @@ def _profile_for_workspace(
     first-write-wins semantics.
     """
     if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
             profile,
             planning_max_iterations_default,
@@ -450,7 +450,7 @@ def _realign_profile_from_resolved_profile_snapshot(
     if snapshot is None:
         return None
     ws.resolved_profile = snapshot
-    profile = WorkspaceProfile.model_validate(snapshot)
+    profile = WorkspaceProfile.model_validate_persisted(snapshot)
     return _profile_with_planning_iteration_default(
         profile,
         planning_max_iterations_default,
@@ -611,7 +611,7 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         coverage_count = 1 if _should_run_local_coverage(profile) else 0
         return (
             len(profile.phases.post_agent)
