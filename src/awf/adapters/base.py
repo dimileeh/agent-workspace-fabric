@@ -532,11 +532,50 @@ class AgentAdapter(ABC):
                             await asyncio.shield(cleanup_task)
                     with contextlib.suppress(asyncio.CancelledError):
                         cleanup_task.result()
-                    with contextlib.suppress(OSError):
+                    restored_legacy_compose = False
+                    try:
                         _restore_compose_file(
                             compose_file=compose_file,
                             contents=original_compose_file,
                         )
+                    except OSError:
+                        pass
+                    else:
+                        restored_legacy_compose = True
+                    if restored_legacy_compose:
+                        # Reaping deliberately removed the model sidecars. Run
+                        # the same recovery as the nonzero-result rollback
+                        # before cancellation escapes, so the restored legacy
+                        # definition still has a reachable model endpoint.
+                        recovery_task = asyncio.create_task(
+                            self._runner.run(
+                                [
+                                    "docker",
+                                    "compose",
+                                    "-p",
+                                    compose_project,
+                                    "-f",
+                                    str(compose_file),
+                                    "up",
+                                    "-d",
+                                    "--no-deps",
+                                    "--force-recreate",
+                                    "--wait",
+                                    "--wait-timeout",
+                                    str(readiness_timeout_seconds),
+                                    *clarification_model_services,
+                                ],
+                                timeout_seconds=compose_up_capture_timeout_seconds(
+                                    readiness_timeout_seconds,
+                                    wait=True,
+                                ),
+                            )
+                        )
+                        while not recovery_task.done():
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await asyncio.shield(recovery_task)
+                        with contextlib.suppress(Exception, asyncio.CancelledError):
+                            recovery_task.result()
                     raise
                 except Exception:
                     # Runner failures also mean the model sidecars may not

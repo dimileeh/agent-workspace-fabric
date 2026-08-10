@@ -627,10 +627,20 @@ class TestCodexAdapter:
         assert len(runner.calls) == 3
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("restore_fails", "expected_shield_calls", "expected_calls"),
+        [(False, 4, 4), (True, 2, 3)],
+        ids=["legacy-restore-succeeds", "legacy-restore-fails"],
+    )
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_fails: bool,
+        expected_shield_calls: int,
+        expected_calls: int,
     ) -> None:
-        """Cancellation cannot leave a legacy sidecar off the model network."""
+        """Cancellation restores a legacy sidecar only after its definition is restored."""
         compose_file = tmp_path / "compose.yml"
         compose_file.write_text(
             yaml.safe_dump(
@@ -665,17 +675,24 @@ class TestCodexAdapter:
 
         runner = _CancellingSidecarUpdateRunner()
         adapter = OpenCodeAdapter(runner=runner)
+        if restore_fails:
+
+            def fail_restore(*, compose_file: Path, contents: bytes) -> None:
+                del compose_file, contents
+                raise OSError("disk full")
+
+            monkeypatch.setattr(adapter_base, "_restore_compose_file", fail_restore)
         original_shield = asyncio.shield
         shield_calls = 0
 
-        async def cancel_cleanup_shield_once(task: asyncio.Future[Any]) -> Any:
+        async def cancel_cleanup_and_recovery_shield(task: asyncio.Future[Any]) -> Any:
             nonlocal shield_calls
             shield_calls += 1
-            if shield_calls == 1:
+            if shield_calls in {1, 3}:
                 raise asyncio.CancelledError
             return await original_shield(task)
 
-        monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_cleanup_shield_once)
+        monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_cleanup_and_recovery_shield)
 
         with pytest.raises(asyncio.CancelledError):
             await adapter.run(
@@ -687,8 +704,8 @@ class TestCodexAdapter:
                 isolated_worktree_host_path=tmp_path / "reask",
             )
 
-        assert shield_calls == 2
-        assert len(runner.calls) == 3
+        assert shield_calls == expected_shield_calls
+        assert len(runner.calls) == expected_calls
         assert runner.calls[1].args == [
             "docker",
             "compose",
@@ -707,7 +724,32 @@ class TestCodexAdapter:
             "rm",
             "awf-ws_legacy-clarification-model-net",
         ]
-        assert compose_file.read_bytes() == original_compose_file
+        if restore_fails:
+            assert runner.calls[-1].args == [
+                "docker",
+                "network",
+                "rm",
+                "awf-ws_legacy-clarification-model-net",
+            ]
+        else:
+            assert runner.calls[3].args == [
+                "docker",
+                "compose",
+                "-p",
+                "awf_ws_legacy",
+                "-f",
+                str(compose_file),
+                "up",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                "--wait",
+                "--wait-timeout",
+                "300",
+                "ollama-sidecar",
+            ]
+            assert runner.calls[3].timeout_seconds == 660.0
+            assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_raises(
