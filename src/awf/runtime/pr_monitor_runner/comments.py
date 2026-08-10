@@ -270,10 +270,21 @@ async def _persist_reask_cleanup_failure_after_cancellation(
     runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
+    pr_number: int,
     item_id: str,
-    needs_human_reason: str,
+    item_kind: str,
+    item_author: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    needs_human_reason: str | None,
+    cleanup_error: str,
+    base_branch: str,
+    remote_branch: str | None,
+    operation_id: str | None,
+    operation_type: str | None,
+    monitor_log: WorkspaceLogSink | None,
 ) -> None:
-    """Durably block later monitor work while preserving the agent's reason."""
+    """Persist a cleanup blocker without attributing it to the agent."""
     from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 
     async with runner._deps.session_factory() as session:
@@ -282,9 +293,36 @@ async def _persist_reask_cleanup_failure_after_cancellation(
             return
         addressed = dict(workspace.monitor_threads_addressed or {})
         addressed[item_id] = "needs_human"
-        addressed[_needs_human_reason_state_key(item_id)] = needs_human_reason
+        reason_key = _needs_human_reason_state_key(item_id)
+        if needs_human_reason is not None:
+            addressed[reason_key] = needs_human_reason
+        else:
+            addressed.pop(reason_key, None)
         workspace.monitor_threads_addressed = addressed
         await session.commit()
+
+    await runner._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action=f"address_{item_kind}",
+        outcome="failed",
+        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+        evidence={
+            "item_id": redact_audit_text(item_id, limit=200),
+            "item_kind": item_kind,
+            "item_author": redact_audit_text(item_author or "", limit=200),
+            "item_path": redact_audit_text(item_path or "", limit=400),
+            "item_line": item_line,
+            "reask_cleanup_error": redact_audit_text(cleanup_error, limit=240),
+        },
+    )
 
 
 async def _address_thread(
@@ -691,18 +729,30 @@ async def _enforce_needs_human_reason(
                 if cancellation is not None:
                     cleanup_error, _isolated_cleanup_failed = cleanup_result
                     if cleanup_error is not None:
-                        human_reason = needs_human_reason or _GENERIC_HUMAN_BLOCKER_REASON
                         if state is not None:
                             state.mark_addressed(item_id, "needs_human")
-                            state.mark_addressed(
-                                _needs_human_reason_state_key(item_id), human_reason
-                            )
+                            reason_key = _needs_human_reason_state_key(item_id)
+                            if needs_human_reason is not None:
+                                state.mark_addressed(reason_key, needs_human_reason)
+                            else:
+                                state.threads_addressed_ids.pop(reason_key, None)
                         persistence_task = asyncio.create_task(
                             _persist_reask_cleanup_failure_after_cancellation(
                                 runner,
                                 workspace_id=workspace_id,
+                                pr_number=pr_number,
                                 item_id=item_id,
-                                needs_human_reason=human_reason,
+                                item_kind=item_kind,
+                                item_author=item_author,
+                                item_path=item_path,
+                                item_line=item_line,
+                                needs_human_reason=needs_human_reason,
+                                cleanup_error=cleanup_error,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=operation_id,
+                                operation_type=operation_type,
+                                monitor_log=monitor_log,
                             )
                         )
                         while True:

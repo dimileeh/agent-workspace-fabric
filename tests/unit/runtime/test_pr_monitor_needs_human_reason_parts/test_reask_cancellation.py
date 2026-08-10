@@ -263,14 +263,14 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
 
     async def _persist_reask_cleanup_failure_after_cancellation(
         _runner: object,
-        *,
-        workspace_id: str,
-        item_id: str,
-        needs_human_reason: str,
+        **kwargs: object,
     ) -> None:
-        assert workspace_id == "ws_reask_post_invocation_cancel_cleanup_failure"
-        assert item_id == "thread_1"
-        assert needs_human_reason == "select a deployment region"
+        assert kwargs["workspace_id"] == "ws_reask_post_invocation_cancel_cleanup_failure"
+        assert kwargs["item_id"] == "thread_1"
+        assert kwargs["needs_human_reason"] == "select a deployment region"
+        assert kwargs["cleanup_error"] == (
+            "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+        )
         persistence_started.set()
         await release_persistence.wait()
         persisted_states.append(dict(state.threads_addressed_ids))
@@ -334,14 +334,117 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup failure cannot make up an agent NEEDS_HUMAN reason."""
+    workspace_id = "ws_reask_cancel_cleanup_failure_without_reason"
+    worktree = _init_real_worktree(tmp_path, workspace_id)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    persisted_reasons: list[str | None] = []
+    state = MonitorState()
+
+    class _BlockingFailedWorktreeRemoveRunner(_LocalCommandRunner):
+        async def run(self, args: list[str]) -> CommandResult:
+            if "worktree" in args and "remove" in args:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            return await super().run(args)
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        raise asyncio.CancelledError
+
+    async def _persist_reask_cleanup_failure_after_cancellation(
+        _runner: object,
+        **kwargs: object,
+    ) -> None:
+        assert kwargs["workspace_id"] == "ws_reask_cancel_cleanup_failure_without_reason"
+        assert kwargs["item_id"] == "thread_1"
+        persisted_reasons.append(kwargs["needs_human_reason"])
+        assert kwargs["cleanup_error"] == (
+            "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_BlockingFailedWorktreeRemoveRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_persist_reask_cleanup_failure_after_cancellation",
+        _persist_reask_cleanup_failure_after_cancellation,
+    )
+    task = asyncio.create_task(
+        comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=state,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=5.0)
+    task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert persisted_reasons == [None]
+    assert "__needs_human_reason__:thread_1" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("workspace_exists", (True, False))
-async def test_persist_reask_cleanup_failure_after_cancellation_merges_human_reason(
+@pytest.mark.parametrize(
+    ("needs_human_reason", "expected_reason"),
+    (
+        (
+            "a maintainer must choose the deployment region",
+            "a maintainer must choose the deployment region",
+        ),
+        (None, None),
+    ),
+)
+async def test_persist_reask_cleanup_failure_after_cancellation_preserves_only_agent_reason(
     monkeypatch: pytest.MonkeyPatch,
     workspace_exists: bool,
+    needs_human_reason: str | None,
+    expected_reason: str | None,
 ) -> None:
-    """Durable cleanup blockers preserve a human reason and tolerate workspace removal."""
-    workspace = SimpleNamespace(monitor_threads_addressed={"other_thread": "fix_committed"})
+    """Durable cleanup failures retain only an actual re-ask reason."""
+    workspace = SimpleNamespace(
+        monitor_threads_addressed={
+            "other_thread": "fix_committed",
+            "__needs_human_reason__:thread_1": "stale agent reason",
+        }
+    )
     session = SimpleNamespace(committed=False)
+    audit_events: list[dict[str, object]] = []
 
     class _SessionContext:
         async def __aenter__(self) -> SimpleNamespace:
@@ -364,24 +467,67 @@ async def test_persist_reask_cleanup_failure_after_cancellation_merges_human_rea
             return workspace if workspace_exists else None
 
     monkeypatch.setattr(comments, "WorkspaceRepository", _WorkspaceRepository)
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(dict(kwargs))
+
     runner = SimpleNamespace(
         _deps=SimpleNamespace(session_factory=lambda: _SessionContext()),
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
     )
 
     await comments._persist_reask_cleanup_failure_after_cancellation(
         runner,
         workspace_id="ws_1",
+        pr_number=42,
         item_id="thread_1",
-        needs_human_reason="a maintainer must choose the deployment region",
+        item_kind="thread",
+        item_author="reviewer",
+        item_path="src/monitor.py",
+        item_line=17,
+        needs_human_reason=needs_human_reason,
+        cleanup_error="worktree cleanup failed",
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id="operation_1",
+        operation_type="monitor",
+        monitor_log=None,
     )
 
     if workspace_exists:
+        expected_state = {"other_thread": "fix_committed", "thread_1": "needs_human"}
+        if expected_reason is not None:
+            expected_state["__needs_human_reason__:thread_1"] = expected_reason
+        assert workspace.monitor_threads_addressed == expected_state
+        assert session.committed is True
+        assert audit_events == [
+            {
+                "workspace_id": "ws_1",
+                "event_type": "workspace.audit.comment_resolution",
+                "action": "address_thread",
+                "outcome": "failed",
+                "reason_code": "VALIDATION_WORKTREE_CLEANUP_FAILED",
+                "pr_number": 42,
+                "status": None,
+                "base_branch": "main",
+                "remote_branch": "awf/ws_1",
+                "operation_id": "operation_1",
+                "operation_type": "monitor",
+                "monitor_log": None,
+                "evidence": {
+                    "item_id": "thread_1",
+                    "item_kind": "thread",
+                    "item_author": "reviewer",
+                    "item_path": "src/monitor.py",
+                    "item_line": 17,
+                    "reask_cleanup_error": "worktree cleanup failed",
+                },
+            }
+        ]
+    else:
         assert workspace.monitor_threads_addressed == {
             "other_thread": "fix_committed",
-            "thread_1": "needs_human",
-            "__needs_human_reason__:thread_1": "a maintainer must choose the deployment region",
+            "__needs_human_reason__:thread_1": "stale agent reason",
         }
-        assert session.committed is True
-    else:
-        assert workspace.monitor_threads_addressed == {"other_thread": "fix_committed"}
         assert session.committed is False
+        assert audit_events == []
