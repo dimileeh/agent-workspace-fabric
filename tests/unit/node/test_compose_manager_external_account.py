@@ -1,0 +1,209 @@
+"""External-account clarification auth staging tests."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+from awf.db.enums import AgentRuntime
+from awf.node.compose_manager import (
+    AuthMount,
+    ComposeManager,
+    WorkspaceComposeSpec,
+    upgrade_persisted_clarification_service,
+)
+
+_TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+@pytest.fixture
+def manager(tmp_path: Path) -> ComposeManager:
+    """Provide a compose manager rooted in the test temp directory."""
+    return ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+
+
+def _spec(tmp_path: Path, **overrides: object) -> WorkspaceComposeSpec:
+    base = {
+        "workspace_id": "ws_test123",
+        "worktree_host_path": tmp_path / "worktree",
+        "postgres_password": "deterministic-for-test",
+    }
+    base.update(overrides)
+    return WorkspaceComposeSpec(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_stages_external_account_subject_token(
+    tmp_path: Path,
+) -> None:
+    """Legacy clarification copies external-account ADC dependencies under its home."""
+    adc = tmp_path / "external-account-adc.json"
+    subject_token = tmp_path / "subject-token"
+    adc_target = "/run/awf/secrets/google/external-account-adc.json"
+    subject_token_target = "/run/awf/secrets/google/subject-token"
+    adc.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    subject_token.write_text("subject-token", encoding="utf-8")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "GOOGLE_GENAI_USE_VERTEXAI": "1",
+                            "GOOGLE_APPLICATION_CREDENTIALS": adc_target,
+                        },
+                        "volumes": [
+                            f"{adc}:{adc_target}:ro",
+                            f"{subject_token}:{subject_token_target}:ro",
+                        ],
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_external_account",
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == ()
+    )
+
+    clarification = yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"][
+        "clarification"
+    ]
+    assert clarification["environment"] == {
+        "GOOGLE_GENAI_USE_VERTEXAI": "1",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/home/agent/.awf/clarification-auth/0",
+        "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.awf/clarification-auth/0",
+        "AWF_CLARIFICATION_AUTH_TARGET_1": "/home/agent/.awf/clarification-auth/1",
+        "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+            [[subject_token_target, "/home/agent/.awf/clarification-auth/1"]]
+        ),
+    }
+    assert clarification["volumes"] == [
+        f"{adc}:/run/awf/clarification-auth/0:ro",
+        f"{subject_token}:/run/awf/clarification-auth/1:ro",
+    ]
+    assert "credential_source" in clarification["entrypoint"][2]
+    assert (
+        "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"
+        in (clarification["entrypoint"][2])
+    )
+    source_root = tmp_path / "clarification-source"
+    source_root.mkdir()
+    staged_adc = tmp_path / "clarification-auth" / "adc.json"
+    staged_subject_token = tmp_path / "clarification-auth" / "subject-token"
+    (source_root / "0").write_text(adc.read_text(encoding="utf-8"), encoding="utf-8")
+    (source_root / "1").write_text("subject-token", encoding="utf-8")
+    entrypoint = clarification["entrypoint"]
+    subprocess.run(
+        [
+            entrypoint[0],
+            entrypoint[1],
+            entrypoint[2].replace("/run/awf/clarification-auth", str(source_root)),
+            entrypoint[3],
+            "true",
+        ],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GOOGLE_APPLICATION_CREDENTIALS": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_1": str(staged_subject_token),
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+                [[subject_token_target, str(staged_subject_token)]]
+            ),
+        },
+    )
+    assert json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"]["file"] == str(
+        staged_subject_token
+    )
+
+
+@pytest.mark.unit
+def test_clarification_rewrites_staged_external_account_subject_token(
+    manager: ComposeManager, tmp_path: Path
+) -> None:
+    """The copied external-account ADC points at the copied subject token."""
+    source_root = tmp_path / "clarification-source"
+    source_root.mkdir()
+    original_subject_token = "/run/awf/secrets/google/subject-token"
+    staged_adc = tmp_path / "clarification-auth" / "adc.json"
+    staged_subject_token = tmp_path / "clarification-auth" / "subject-token"
+    (source_root / "0").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": original_subject_token},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source_root / "1").write_text("subject-token", encoding="utf-8")
+    parsed = yaml.safe_load(
+        manager.render(
+            _spec(
+                tmp_path,
+                clarification_enabled=True,
+                clarification_agent_environment=(
+                    ("GOOGLE_APPLICATION_CREDENTIALS", str(staged_adc)),
+                ),
+                clarification_auth_mounts=(
+                    AuthMount(source="/host/adc.json", target=str(staged_adc)),
+                    AuthMount(
+                        source="/host/subject-token",
+                        target=str(staged_subject_token),
+                    ),
+                ),
+                clarification_external_account_subject_token_file_rewrites=(
+                    (original_subject_token, str(staged_subject_token)),
+                ),
+            )
+        ).compose_file.read_text()
+    )
+    clarification = parsed["services"]["clarification"]
+
+    assert json.loads(
+        clarification["environment"][
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"
+        ]
+    ) == [[original_subject_token, str(staged_subject_token)]]
+    entrypoint = clarification["entrypoint"]
+    script = entrypoint[2].replace("/run/awf/clarification-auth", str(source_root))
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GOOGLE_APPLICATION_CREDENTIALS": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_1": str(staged_subject_token),
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+                [[original_subject_token, str(staged_subject_token)]]
+            ),
+        },
+    )
+
+    assert json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"]["file"] == str(
+        staged_subject_token
+    )

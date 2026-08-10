@@ -10,6 +10,7 @@ import pytest
 from awf.db.enums import AgentRuntime
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.compose_manager import AuthMount
+from awf.node.stack_launcher_auth_helpers import external_account_subject_token_file_rewrites
 
 
 @pytest.mark.unit
@@ -560,7 +561,7 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
     agent_runtime: AgentRuntime,
     environment: tuple[tuple[str, str], ...],
 ) -> None:
-    """External-account ADC keeps its declared subject-token path available."""
+    """External-account ADC stages its declared subject-token path with the ADC."""
     subject_token = tmp_path / "subject-token"
     subject_token.write_text("subject-token", encoding="utf-8")
     adc_config = tmp_path / "external-account-adc.json"
@@ -603,8 +604,18 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
             target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
-        AuthMount(source=str(subject_token), target=subject_token_target, mode="ro"),
+        AuthMount(
+            source=str(subject_token),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
     )
+    assert external_account_subject_token_file_rewrites(
+        (adc_mount, subject_token_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/1"),)
 
 
 @pytest.mark.unit

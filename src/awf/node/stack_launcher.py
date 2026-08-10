@@ -50,6 +50,9 @@ from awf.node.stack_launcher_auth_helpers import (
     clarification_auth_target as _helper_clarification_auth_target,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    external_account_subject_token_file_rewrites as _clarification_external_account_subject_token_file_rewrites,
+)
+from awf.node.stack_launcher_auth_helpers import (
     external_account_subject_token_mounts as _clarification_external_account_subject_token_mounts,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -311,18 +314,7 @@ def _clarification_agent_environment(
         agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
-    staged_mounts = _clarification_staged_provider_auth_mounts(
-        source_mounts,
-        preserved_targets=frozenset(
-            mount.target
-            for mount in _clarification_external_account_subject_token_mounts(
-                auth_mounts,
-                agent_environment=agent_environment,
-                mirror_target=mirror_target,
-                provider_environment_names=provider_environment_names,
-            )
-        ),
-    )
+    staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
     staged_targets = tuple(
         (source.target, staged.target)
         for source, staged in zip(source_mounts, staged_mounts, strict=True)
@@ -593,18 +585,7 @@ def _clarification_auth_mounts(
         agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
-    return _clarification_staged_provider_auth_mounts(
-        provider_auth_mounts,
-        preserved_targets=frozenset(
-            mount.target
-            for mount in _clarification_external_account_subject_token_mounts(
-                auth_mounts,
-                agent_environment=agent_environment,
-                mirror_target=mirror_target,
-                provider_environment_names=provider_environment_names,
-            )
-        ),
-    )
+    return _clarification_staged_provider_auth_mounts(provider_auth_mounts)
 
 
 def _clarification_resolve_google_credentials_placeholder(
@@ -1147,6 +1128,15 @@ class ComposeStackLauncher:
             agent_runtime=request.agent_runtime,
             agent_model=request.agent_model,
         )
+        clarification_external_account_subject_token_file_rewrites = (
+            _clarification_external_account_subject_token_file_rewrites(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=str(layout.mirror_path),
+                agent_runtime=request.agent_runtime,
+                agent_model=request.agent_model,
+            )
+        )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -1166,6 +1156,9 @@ class ComposeStackLauncher:
                 agent_model=request.agent_model,
             ),
             clarification_auth_mounts=clarification_auth_mounts,
+            clarification_external_account_subject_token_file_rewrites=(
+                clarification_external_account_subject_token_file_rewrites
+            ),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,

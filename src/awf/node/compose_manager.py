@@ -175,27 +175,6 @@ def _legacy_shared_git_mirror_target(auth_mounts: list[AuthMount]) -> str:
     )
 
 
-def _legacy_clarification_entrypoint(mount_count: int) -> list[str]:
-    """Copy read-only provider auth into the clarification runtime's home."""
-    lines: list[str] = []
-    for index in range(mount_count):
-        target = f"$AWF_CLARIFICATION_AUTH_TARGET_{index}"
-        source = f"/run/awf/clarification-auth/{index}"
-        lines.extend(
-            (
-                f'mkdir -p "$(dirname "{target}")"',
-                f"if [ -d {source} ]; then",
-                f'  mkdir -p "{target}"',
-                f'  cp -a {source}/. "{target}/"',
-                "else",
-                f'  cp -a {source} "{target}"',
-                "fi",
-            )
-        )
-    lines.append('exec "$@"')
-    return ["sh", "-ec", "\n".join(lines), "--"]
-
-
 def upgrade_persisted_clarification_service(
     *,
     compose_file: Path,
@@ -246,6 +225,12 @@ def upgrade_persisted_clarification_service(
         _clarification_agent_environment,
         _clarification_auth_mounts,
     )
+    from awf.node.stack_launcher_auth_helpers import (
+        external_account_subject_token_file_rewrites as _external_account_subject_token_file_rewrites,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
+        legacy_clarification_entrypoint,
+    )
 
     raw_environment = agent.get("environment", {})
     agent_environment = (
@@ -279,7 +264,18 @@ def upgrade_persisted_clarification_service(
         agent_model=agent_model,
         prefer_file_auth=False,
     )
+    external_account_subject_token_file_rewrites = _external_account_subject_token_file_rewrites(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
     clarification_environment = dict(provider_environment)
+    if external_account_subject_token_file_rewrites:
+        clarification_environment[
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"
+        ] = json.dumps(external_account_subject_token_file_rewrites).replace("$", "$$")
     clarification_volumes: list[str] = []
     for index, mount in enumerate(selected_mounts):
         clarification_environment[f"AWF_CLARIFICATION_AUTH_TARGET_{index}"] = mount.target.replace(
@@ -313,7 +309,12 @@ def upgrade_persisted_clarification_service(
         clarification["environment"] = clarification_environment
     if clarification_volumes:
         clarification["volumes"] = clarification_volumes
-        clarification["entrypoint"] = _legacy_clarification_entrypoint(len(selected_mounts))
+        clarification["entrypoint"] = legacy_clarification_entrypoint(
+            len(selected_mounts),
+            rewrite_external_account_subject_token_file=bool(
+                external_account_subject_token_file_rewrites
+            ),
+        )
     if "host.docker.internal:host-gateway" in agent.get("extra_hosts", []):
         clarification["extra_hosts"] = ["host.docker.internal:host-gateway"]
     if isinstance(agent.get("deploy"), Mapping):
@@ -548,6 +549,7 @@ class WorkspaceComposeSpec:
     clarification_enabled: bool = False
     clarification_agent_environment: tuple[tuple[str, str], ...] = ()
     clarification_auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -709,6 +711,9 @@ class ComposeManager:
                 {"source": m.source, "target": m.target, "mode": m.mode}
                 for m in spec.clarification_auth_mounts
             ],
+            clarification_external_account_subject_token_file_rewrites_json=json.dumps(
+                spec.clarification_external_account_subject_token_file_rewrites
+            ).replace("$", "$$"),
             git_name=spec.git_name,
             git_email=spec.git_email,
             agent_environment=agent_env,

@@ -94,6 +94,8 @@ services:
       {% endfor %}
       {% for m in clarification_auth_mounts %}AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}: {{ m.target | replace("$", "$$") | tojson }}
       {% endfor %}
+      {% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES: {{ clarification_external_account_subject_token_file_rewrites_json | tojson }}
+      {% endif %}
     {% endif %}{% if clarification_auth_mounts %}volumes:
       {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
       {% endfor %}
@@ -118,7 +120,28 @@ services:
         else
           cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
         fi
-        {% endfor %}exec "$@"
+        {% endfor %}{% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}chmod u+w "$GOOGLE_APPLICATION_CREDENTIALS"
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        credentials_path = Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+        rewrites = dict(
+            json.loads(
+                os.environ["AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"]
+            )
+        )
+        configuration = json.loads(credentials_path.read_text(encoding="utf-8"))
+        if isinstance(configuration, dict) and configuration.get("type") == "external_account":
+          credential_source = configuration.get("credential_source")
+          if isinstance(credential_source, dict):
+            subject_token_file = credential_source.get("file")
+            if subject_token_file in rewrites:
+              credential_source["file"] = rewrites[subject_token_file]
+              credentials_path.write_text(json.dumps(configuration), encoding="utf-8")
+        PY
+        {% endif %}exec "$@"
       - "--"
     {% endif %}
     command: ["sh", "-c", "sleep infinity"]
