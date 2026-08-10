@@ -514,6 +514,51 @@ def test_clarification_inputs_retain_default_bedrock_profile_directory_for_file_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("environment_name", "default_path"),
+    (
+        ("AWS_CONFIG_FILE", "/home/agent/.aws/config"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.aws/credentials"),
+    ),
+)
+@pytest.mark.parametrize("operator", (":-", "-"))
+def test_clarification_inputs_retain_bedrock_profile_directory_for_defaulted_file_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    default_path: str,
+    operator: str,
+) -> None:
+    """Defaulted Compose file paths select the standard AWS credential directory."""
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    monkeypatch.delenv(environment_name, raising=False)
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        (environment_name, f"${{{environment_name}{operator}{default_path}}}"),
+        ("AWS_REGION", "us-west-2"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (aws_profile_directory,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(
+            source=aws_profile_directory.source,
+            target=aws_profile_directory.target,
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_bedrock_profile_directory_for_its_config_file() -> None:
     """Bedrock profile config within its standard directory remains available."""
     aws_profile_directory = AuthMount(

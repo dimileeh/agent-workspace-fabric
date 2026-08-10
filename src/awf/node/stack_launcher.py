@@ -626,9 +626,13 @@ def _clarification_model_provider_auth_mount_targets(
             )
             else frozenset()
         )
-        aws_config_file = environment_values.get("AWS_CONFIG_FILE", "")
+        aws_config_file = compose_expand_value(
+            environment_values.get("AWS_CONFIG_FILE", ""), environ=os.environ
+        )
         normalized_aws_config_file = posixpath.normpath(aws_config_file)
-        aws_shared_credentials_file = environment_values.get("AWS_SHARED_CREDENTIALS_FILE", "")
+        aws_shared_credentials_file = compose_expand_value(
+            environment_values.get("AWS_SHARED_CREDENTIALS_FILE", ""), environ=os.environ
+        )
         normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
         if (
             _clarification_claude_code_backend_enabled(
