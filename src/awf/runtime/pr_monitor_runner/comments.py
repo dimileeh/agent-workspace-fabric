@@ -192,31 +192,14 @@ async def _create_isolated_reask_worktree(
         liveness_lock_fd=liveness_lock_fd,
         liveness_lock_path=liveness_lock_path,
     )
-    try:
-        create = await runner._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "worktree",
-                "add",
-                "--detach",
-                str(path),
-                restore_ref,
-            )
-        )
-    except (GitOperationError, OSError, RuntimeError):
-        _release_isolated_reask_liveness_lock(reask_worktree)
-        raise
-    except asyncio.CancelledError:
-        # Git may have registered the worktree before cancellation reaches the
-        # command runner. Remove that checkout before preserving cancellation.
+
+    async def _cleanup_after_cancellation(*, event_name: str) -> None:
+        """Remove a possibly-created checkout before preserving cancellation."""
         cleanup_task = asyncio.create_task(
             _cleanup_isolated_reask_worktree_after_creation_failure(
                 runner,
                 reask_worktree=reask_worktree,
-                event_name=(
-                    "monitor.needs_human_reason_reask_"
-                    "isolated_cleanup_failed_after_creation_cancellation"
-                ),
+                event_name=event_name,
             )
         )
         while True:
@@ -239,6 +222,30 @@ async def _create_isolated_reask_worktree(
                     if persistence_task.done():
                         persistence_task.result()
                         break
+
+    try:
+        create = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "worktree",
+                "add",
+                "--detach",
+                str(path),
+                restore_ref,
+            )
+        )
+    except (GitOperationError, OSError, RuntimeError):
+        _release_isolated_reask_liveness_lock(reask_worktree)
+        raise
+    except asyncio.CancelledError:
+        # Git may have registered the worktree before cancellation reaches the
+        # command runner. Remove that checkout before preserving cancellation.
+        await _cleanup_after_cancellation(
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_creation_cancellation"
+            )
+        )
         raise
     if not create.ok:
         # Git can register and populate the checkout before reporting an error
@@ -261,14 +268,26 @@ async def _create_isolated_reask_worktree(
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
-    if not await repair_agent_runtime_ownership(
-        logger=_log,
-        workspace_id=worktree_path.name,
-        worktree_path=path,
-        reason="needs_human_reason_reask_pre_launch",
-        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-        linked_worktree_id=path.name,
-    ):
+    try:
+        ownership_repaired = await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=worktree_path.name,
+            worktree_path=path,
+            reason="needs_human_reason_reask_pre_launch",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            linked_worktree_id=path.name,
+        )
+    except asyncio.CancelledError:
+        # Ownership repair runs asynchronously after Git creates the checkout,
+        # so it needs the same cancellation-safe cleanup as `git worktree add`.
+        await _cleanup_after_cancellation(
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_ownership_repair_cancellation"
+            )
+        )
+        raise
+    if not ownership_repaired:
         cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
             runner,
             reask_worktree=reask_worktree,

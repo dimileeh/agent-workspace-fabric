@@ -668,6 +668,49 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_removes_checkout_when_ownership_repair_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during ownership repair cannot strand the re-ask worktree."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_ownership_repair_cancelled")
+    repair_started = asyncio.Event()
+    lock_fds: list[int] = []
+    acquire_lock = comments._acquire_isolated_reask_liveness_lock
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        repair_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    def _record_lock(path: Path) -> tuple[int, Path]:
+        lock_fd, lock_path = acquire_lock(path)
+        lock_fds.append(lock_fd)
+        return lock_fd, lock_path
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(comments, "_acquire_isolated_reask_liveness_lock", _record_lock)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+    task = asyncio.create_task(
+        comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+    )
+    await asyncio.wait_for(repair_started.wait(), timeout=5.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+    assert lock_fds
+    with pytest.raises(OSError):
+        comments.os.fstat(lock_fds[0])
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancellation(
     tmp_path: Path,
 ) -> None:
