@@ -46,6 +46,24 @@ from awf.node.secret_mounts import (
     LocalSecretLeaseResolution,
     SecretLeaseResolutionError,
 )
+from awf.node.stack_launcher_auth_helpers import (
+    clarification_auth_target as _helper_clarification_auth_target,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    external_account_subject_token_mounts as _clarification_external_account_subject_token_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    path_is_below as _clarification_path_is_below,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    provider_auth_mounts as _selected_provider_auth_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    staged_auth_value as _clarification_staged_auth_value,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    staged_provider_auth_mounts as _clarification_staged_provider_auth_mounts,
+)
 from awf.node.stack_launcher_compose_helpers import (
     WorkspaceServiceExecutionError as WorkspaceServiceExecutionError,
 )
@@ -252,8 +270,6 @@ _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = 
     AgentRuntime.opencode: frozenset(),
     AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
 }
-_CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
-_AGENT_HOME = "/home/agent"
 
 
 def _clarification_agent_environment(
@@ -295,7 +311,18 @@ def _clarification_agent_environment(
         agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
-    staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
+    staged_mounts = _clarification_staged_provider_auth_mounts(
+        source_mounts,
+        preserved_targets=frozenset(
+            mount.target
+            for mount in _clarification_external_account_subject_token_mounts(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=mirror_target,
+                provider_environment_names=provider_environment_names,
+            )
+        ),
+    )
     staged_targets = tuple(
         (source.target, staged.target)
         for source, staged in zip(source_mounts, staged_mounts, strict=True)
@@ -530,7 +557,7 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
 def _google_credentials_are_within_gcloud_auth_mount(google_credentials: str) -> bool:
     """Return whether a normalized Google credential path is below gcloud auth."""
 
-    return posixpath.normpath(google_credentials).startswith(f"{_GCLOUD_AUTH_MOUNT_TARGET}/")
+    return _clarification_path_is_below(google_credentials, _GCLOUD_AUTH_MOUNT_TARGET)
 
 
 def _clarification_auth_mounts(
@@ -553,14 +580,30 @@ def _clarification_auth_mounts(
         auth_mounts=auth_mounts,
         agent_runtime=agent_runtime,
     )
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    provider_auth_mounts = _clarification_provider_auth_mounts(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
     return _clarification_staged_provider_auth_mounts(
-        _clarification_provider_auth_mounts(
-            auth_mounts,
-            agent_environment=agent_environment,
-            mirror_target=mirror_target,
-            agent_runtime=agent_runtime,
-            agent_model=agent_model,
-        )
+        provider_auth_mounts,
+        preserved_targets=frozenset(
+            mount.target
+            for mount in _clarification_external_account_subject_token_mounts(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=mirror_target,
+                provider_environment_names=provider_environment_names,
+            )
+        ),
     )
 
 
@@ -677,55 +720,6 @@ def _clarification_resolve_aws_web_identity_token_file_placeholder(
     )
 
 
-def _clarification_staged_provider_auth_mounts(
-    provider_auth_mounts: Sequence[AuthMount],
-) -> tuple[AuthMount, ...]:
-    """Stage selected provider mounts beneath the clarification agent home."""
-
-    return tuple(
-        replace(
-            mount,
-            mode="ro",
-            target=_clarification_auth_target(mount.target, index=index),
-        )
-        for index, mount in enumerate(provider_auth_mounts)
-    )
-
-
-def _clarification_staged_auth_value(
-    value: str,
-    staged_targets: Sequence[tuple[str, str]],
-) -> str:
-    """Rewrite a staged mount target or a credential file below that target."""
-
-    for source_target, staged_target in staged_targets:
-        if value == source_target:
-            return staged_target
-    normalized_value = posixpath.normpath(value)
-    containing_targets = tuple(
-        (posixpath.normpath(source_target), staged_target)
-        for source_target, staged_target in staged_targets
-        if _clarification_path_is_below(normalized_value, source_target)
-    )
-    if not containing_targets:
-        return value
-    source_target, staged_target = max(containing_targets, key=lambda target: len(target[0]))
-    return posixpath.join(staged_target, posixpath.relpath(normalized_value, source_target))
-
-
-def _clarification_path_is_below(path: str, target: str) -> bool:
-    """Return whether an absolute normalized path is a child of a mount target."""
-
-    normalized_path = posixpath.normpath(path)
-    normalized_target = posixpath.normpath(target)
-    return (
-        normalized_path.startswith("/")
-        and normalized_target.startswith("/")
-        and normalized_path != normalized_target
-        and (normalized_target == "/" or normalized_path.startswith(f"{normalized_target}/"))
-    )
-
-
 def _clarification_provider_auth_mounts(
     auth_mounts: Sequence[AuthMount],
     *,
@@ -737,22 +731,30 @@ def _clarification_provider_auth_mounts(
 ) -> tuple[AuthMount, ...]:
     """Return model-provider authentication mounts available to clarification."""
 
+    provider_environment_names = (
+        provider_environment_names
+        or _clarification_model_provider_environment_names(
+            agent_environment,
+            agent_runtime=agent_runtime,
+            agent_model=agent_model,
+        )
+    )
     provider_mount_targets = _clarification_model_provider_auth_mount_targets(
         agent_environment,
         agent_runtime=agent_runtime,
         agent_model=agent_model,
         provider_environment_names=provider_environment_names,
     )
-
-    return tuple(
-        mount
-        for mount in auth_mounts
-        if mount.target != mirror_target
-        and any(
-            mount.target == provider_target
-            or _clarification_path_is_below(provider_target, mount.target)
-            for provider_target in provider_mount_targets
-        )
+    return _selected_provider_auth_mounts(
+        auth_mounts,
+        provider_mount_targets=provider_mount_targets,
+        external_account_subject_token_mounts=_clarification_external_account_subject_token_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=mirror_target,
+            provider_environment_names=provider_environment_names,
+        ),
+        mirror_target=mirror_target,
     )
 
 
@@ -872,11 +874,9 @@ def _clarification_model_provider_auth_mount_targets(
 
 
 def _clarification_auth_target(target: str, *, index: int) -> str:
-    """Keep agent-home targets and stage all other paths under the agent home."""
+    """Keep agent-home targets and stage other paths under the agent home."""
 
-    if target == _AGENT_HOME or target.startswith(f"{_AGENT_HOME}/"):
-        return target
-    return f"{_CLARIFICATION_AUTH_STAGING_ROOT}/{index}"
+    return _helper_clarification_auth_target(target, index=index)
 
 
 @dataclass(frozen=True)

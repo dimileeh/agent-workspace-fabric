@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from awf.db.enums import AgentRuntime
@@ -529,6 +532,168 @@ def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback
     assert clarification_mounts == (
         AuthMount(
             source=google_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_runtime", "environment"),
+    (
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+            ),
+        ),
+        (
+            AgentRuntime.gemini,
+            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
+        ),
+    ),
+)
+def test_clarification_stages_external_account_adc_subject_token_mount(
+    tmp_path: Path,
+    agent_runtime: AgentRuntime,
+    environment: tuple[tuple[str, str], ...],
+) -> None:
+    """External-account ADC keeps its declared subject-token path available."""
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
+    adc_config = tmp_path / "external-account-adc.json"
+    subject_token_target = "/run/awf/secrets/google/subject-token"
+    adc_target = "/run/awf/secrets/google/external-account-adc.json"
+    adc_config.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(subject_token), target=subject_token_target, mode="ro"
+    )
+    agent_environment = (*environment, ("GOOGLE_APPLICATION_CREDENTIALS", adc_target))
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        agent_environment,
+        auth_mounts=(adc_mount, subject_token_mount),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (adc_mount, subject_token_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=agent_runtime,
+    )
+
+    assert dict(clarification_environment)["GOOGLE_APPLICATION_CREDENTIALS"] == (
+        "/home/agent/.awf/clarification-auth/0"
+    )
+    assert clarification_mounts == (
+        AuthMount(
+            source=str(adc_config),
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+        AuthMount(source=str(subject_token), target=subject_token_target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "adc_configuration",
+    (
+        "not-json",
+        {
+            "type": "service_account",
+            "credential_source": {"file": "/run/awf/secrets/google/subject-token"},
+        },
+        {
+            "type": "external_account",
+            "credential_source": {"file": "relative-subject-token"},
+        },
+        {
+            "type": "external_account",
+            "credential_source": {"file": "/run/awf/secrets/google/not-declared"},
+        },
+    ),
+)
+def test_clarification_does_not_expand_invalid_external_account_adc_mounts(
+    tmp_path: Path,
+    adc_configuration: str | dict[str, object],
+) -> None:
+    """Only valid external-account configs may select a second auth mount."""
+    adc_config = tmp_path / "adc.json"
+    adc_config.write_text(
+        adc_configuration if isinstance(adc_configuration, str) else json.dumps(adc_configuration),
+        encoding="utf-8",
+    )
+    adc_target = "/run/awf/secrets/google/adc.json"
+    adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(tmp_path / "subject-token"),
+        target="/run/awf/secrets/google/subject-token",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (adc_mount, subject_token_mount),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(
+            source=str(adc_config),
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_clarification_does_not_expand_unavailable_external_account_adc_mount() -> None:
+    """An unavailable ADC file cannot select another declared auth mount."""
+    adc_target = "/run/awf/secrets/google/adc.json"
+    adc_mount = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/missing-adc.json",
+        target=adc_target,
+        mode="ro",
+    )
+    subject_token_mount = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/subject-token",
+        target="/run/awf/secrets/google/subject-token",
+        mode="ro",
+    )
+    environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (adc_mount, subject_token_mount),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(
+            source=adc_mount.source,
             target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
