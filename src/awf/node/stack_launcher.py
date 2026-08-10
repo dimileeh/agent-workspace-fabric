@@ -469,9 +469,14 @@ def _clarification_model_provider_auth_mount_targets(
             else frozenset()
         )
     if agent_runtime is AgentRuntime.gemini:
-        runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[
-            _clarification_gemini_auth_source(dict(agent_environment))
-        ]
+        environment_values = dict(agent_environment)
+        gemini_auth_source = _clarification_gemini_auth_source(environment_values)
+        runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[gemini_auth_source]
+        if gemini_auth_source == "google_cloud" and environment_values.get(
+            _GOOGLE_APPLICATION_CREDENTIALS
+        ):
+            # An explicit service-account file takes precedence over ADC.
+            runtime_auth_mount_targets = frozenset()
     if agent_runtime is AgentRuntime.grok and any(
         name == "XAI_API_KEY" and value for name, value in agent_environment
     ):

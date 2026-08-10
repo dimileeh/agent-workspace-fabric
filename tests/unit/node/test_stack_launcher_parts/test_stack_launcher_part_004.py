@@ -609,7 +609,7 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
         ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
         ("GOOGLE_CLOUD_PROJECT", "awf-project"),
         ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/1"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
     )
     assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
         mounts,
@@ -617,13 +617,24 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
         mirror_target=mirror_target,
         agent_runtime=AgentRuntime.gemini,
     ) == (
-        AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),
         AuthMount(
             source=application_credentials.source,
-            target="/home/agent/.awf/clarification-auth/1",
+            target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
     )
+
+    vertex_adc_environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=vertex_adc_environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.gemini,
+    ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
 
     assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
         mounts,
