@@ -520,20 +520,21 @@ def _clarification_model_provider_auth_mount_targets(
         # Stage only the active managed-backend auth stores. Vertex uses the
         # standard gcloud ADC directory only when no explicit credential path
         # is configured. Bedrock profile auth uses the standard AWS directory
-        # only when no explicit AWS credential or config path is configured.
+        # unless an explicit config file lies outside the mounted directory.
         runtime_auth_mount_targets = (
             frozenset({"/home/agent/.config/gcloud"})
             if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
             and not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
             else frozenset()
         )
+        aws_config_file = environment_values.get("AWS_CONFIG_FILE", "")
         if (
             environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
             and environment_values.get("AWS_PROFILE")
             and "AWS_PROFILE"
             in _clarification_claude_code_bedrock_environment_names(environment_values)
             and not environment_values.get("AWS_SHARED_CREDENTIALS_FILE")
-            and not environment_values.get("AWS_CONFIG_FILE")
+            and (not aws_config_file or aws_config_file.startswith("/home/agent/.aws/"))
         ):
             runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
     if agent_runtime is AgentRuntime.gemini:
