@@ -619,8 +619,10 @@ async def _enforce_needs_human_reason(
                     worktree_path=worktree_path,
                     restore_ref=reask_restore_ref,
                 )
-            elif worktree_path.exists() and getattr(runner, "_deps", None) is not None:
-                raise RuntimeError("worktree has no Git control file")
+            elif getattr(runner, "_deps", None) is not None:
+                if worktree_path.exists():
+                    raise RuntimeError("worktree has no Git control file")
+                raise RuntimeError("worktree is missing")
             else:
                 reask_restore_ref = await runner._rev_parse_head(worktree_path)
         except _IsolatedReaskWorktreeCleanupFailedError:

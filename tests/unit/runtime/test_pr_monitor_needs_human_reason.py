@@ -968,6 +968,63 @@ async def test_needs_human_reason_reask_skips_when_primary_worktree_loses_git_co
 
 
 @pytest.mark.unit
+async def test_needs_human_reason_reask_skips_when_production_worktree_is_missing(
+    tmp_path: Path,
+) -> None:
+    """A missing production workspace never falls back to an unisolated run."""
+    invoked = False
+    audit_events: list[dict[str, object]] = []
+    workspace_id = "ws_reask_missing_worktree"
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        nonlocal invoked
+        invoked = True
+        return VerdictResult(verdict="needs_human", reason="must not be used")
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        pytest.fail("a missing production worktree must skip the clarification re-ask")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert invoked is False
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
