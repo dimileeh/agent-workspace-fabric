@@ -517,17 +517,32 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
         else:
             target = human_items
         target.append(item)
+    display_cap = 8
+    # Preserve an actionable triage excerpt alongside a full set of
+    # changes-requested reviews. Otherwise all eight slots can be consumed
+    # before the human sees why additional feedback needs attention.
+    triaged_item_reservation = min(
+        1, len(bot_items) + len(human_escalation_items) + len(human_items)
+    )
     displayed = 0
     lines: list[str] = []
-    for label, items in (
-        ("Merge-blocking changes-requested reviews", blocking_review_items),
-        ("Agent escalated - needs your decision", bot_items),
-        ("Human feedback escalated - needs your decision", human_escalation_items),
-        ("Human feedback deferred by agent", human_items),
+    for label, items, display_limit in (
+        (
+            "Merge-blocking changes-requested reviews",
+            blocking_review_items,
+            display_cap - triaged_item_reservation,
+        ),
+        ("Agent escalated - needs your decision", bot_items, display_cap),
+        (
+            "Human feedback escalated - needs your decision",
+            human_escalation_items,
+            display_cap,
+        ),
+        ("Human feedback deferred by agent", human_items, display_cap),
     ):
         lines.append(f"{label} ({len(items)}):")
         for item in sorted(items, key=_blocker_item_sort_key):
-            if displayed >= 8:
+            if displayed >= display_limit:
                 continue
             lines.append(_render_blocker_item(item))
             displayed += 1

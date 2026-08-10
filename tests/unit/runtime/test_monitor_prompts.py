@@ -1218,6 +1218,47 @@ class TestReadyToMergeComment:
         assert "(+1 more)" in body
 
     @pytest.mark.unit
+    def test_blocker_items_reserve_a_slot_for_triaged_feedback(self) -> None:
+        """Keep a triaged reason visible beside eight merge-blocking reviews."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        human_deferred_feedback = {
+            "kind": "review",
+            "id": "R-deferred",
+            "author": "alice",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-deferred",
+            "body": "Track this separately.",
+            "verdict": "defer",
+            "agent_verdict_reason": "Needs a tracked follow-up.",
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, human_deferred_feedback),
+        )
+
+        assert body.count("[changes_requested]") == 7
+        assert "Track this separately." in body
+        assert "-> reason: Needs a tracked follow-up." in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
         """Verify blocker items honor collected thread classification."""
         body = ready_to_merge_comment(
