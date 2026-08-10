@@ -1078,6 +1078,90 @@ def test_google_vertex_clarification_resolves_defaulted_google_credentials_compo
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operator", (":-", "-"))
+def test_claude_bedrock_clarification_resolves_defaulted_web_identity_token_placeholder(
+    operator: str,
+) -> None:
+    """Bedrock clarification stages a defaulted web identity token mount."""
+    web_identity_token = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-web-identity-token",
+        target="/run/awf/secrets/aws-token",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        (
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            f"${{AWS_WEB_IDENTITY_TOKEN_FILE{operator}{web_identity_token.target}}}",
+        ),
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(web_identity_token,),
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (web_identity_token,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=web_identity_token.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_claude_bedrock_clarification_resolves_bare_web_identity_token_placeholder() -> None:
+    """Bedrock clarification stages an unambiguous dynamic token mount."""
+    web_identity_token = AuthMount(
+        source="/run/awf/secrets/aws-token",
+        target="/run/awf/secrets/aws-token",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "${AWS_WEB_IDENTITY_TOKEN_FILE}"),
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(web_identity_token,),
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (web_identity_token,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=web_identity_token.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_gemini_clarification_does_not_mount_file_auth_for_access_token() -> None:
     """A direct Google access token is the active Gemini credential source."""
     gcloud_auth = AuthMount(

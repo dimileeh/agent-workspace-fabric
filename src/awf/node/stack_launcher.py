@@ -86,6 +86,10 @@ _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
 _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE = re.compile(
     r"^\$\{GOOGLE_APPLICATION_CREDENTIALS(?::-|-)(?P<target>/[^$}]+)\}$"
 )
+_AWS_WEB_IDENTITY_TOKEN_FILE = "AWS_WEB_IDENTITY_TOKEN_FILE"
+_AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE = re.compile(
+    r"^\$\{AWS_WEB_IDENTITY_TOKEN_FILE(?::-|-)(?P<target>/[^$}]+)\}$"
+)
 _GCLOUD_AUTH_MOUNT_TARGET = "/home/agent/.config/gcloud"
 _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     {
@@ -245,6 +249,11 @@ def _clarification_agent_environment(
     """
 
     agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
         agent_environment,
         auth_mounts=auth_mounts,
         agent_runtime=agent_runtime,
@@ -424,6 +433,11 @@ def _clarification_auth_mounts(
         auth_mounts=auth_mounts,
         agent_runtime=agent_runtime,
     )
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
     return _clarification_staged_provider_auth_mounts(
         _clarification_provider_auth_mounts(
             auth_mounts,
@@ -470,6 +484,43 @@ def _clarification_resolve_google_credentials_placeholder(
         return agent_environment
     return tuple(
         (name, google_credentials if name == _GOOGLE_APPLICATION_CREDENTIALS else value)
+        for name, value in agent_environment
+    )
+
+
+def _clarification_resolve_aws_web_identity_token_file_placeholder(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    agent_runtime: AgentRuntime,
+) -> tuple[tuple[str, str], ...]:
+    """Replace Bedrock web identity Compose values with their concrete targets."""
+
+    environment_values = dict(agent_environment)
+    if (
+        agent_runtime is not AgentRuntime.claude_code
+        or environment_values.get("CLAUDE_CODE_USE_BEDROCK") != "1"
+    ):
+        return agent_environment
+    token_file = environment_values.get(_AWS_WEB_IDENTITY_TOKEN_FILE)
+    if token_file in (
+        f"${{{_AWS_WEB_IDENTITY_TOKEN_FILE}}}",
+        f"${_AWS_WEB_IDENTITY_TOKEN_FILE}",
+    ):
+        dynamic_targets = tuple(
+            mount.target
+            for mount in auth_mounts
+            if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
+        )
+        if len(dynamic_targets) != 1:
+            return agent_environment
+        token_file = dynamic_targets[0]
+    elif match := _AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE.fullmatch(token_file or ""):
+        token_file = match.group("target")
+    else:
+        return agent_environment
+    return tuple(
+        (name, token_file if name == _AWS_WEB_IDENTITY_TOKEN_FILE else value)
         for name, value in agent_environment
     )
 
