@@ -141,12 +141,13 @@ class TestIsolatedReaskAdapter:
     def test_isolated_reask_git_metadata_binds_exclude_linked_git_config(
         self, tmp_path: Path
     ) -> None:
-        """The external linked metadata snapshot omits worktree-specific Git config."""
-        mirror_path = tmp_path / "mirrors" / "owner-repo.git"
-        worktree_path = tmp_path / "reask"
+        """The host-visible metadata snapshot omits worktree-specific Git config."""
+        work_root = tmp_path / "awf-work"
+        mirror_path = work_root / "mirrors" / "owner-repo.git"
+        worktree_path = work_root / "worktrees" / "reask"
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         linked_git_dir.mkdir(parents=True)
-        worktree_path.mkdir()
+        worktree_path.mkdir(parents=True)
         (worktree_path / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
         (linked_git_dir / "HEAD").write_text("ref: refs/heads/reask\n", encoding="utf-8")
         (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
@@ -162,7 +163,7 @@ class TestIsolatedReaskAdapter:
 
         assert temporary_metadata is not None
         try:
-            assert not Path(temporary_metadata.name).is_relative_to(worktree_path)
+            assert Path(temporary_metadata.name).parent == work_root
             snapshot_path = Path(temporary_metadata.name) / "linked-git"
             assert {path.name for path in snapshot_path.iterdir()} == {
                 "HEAD",
