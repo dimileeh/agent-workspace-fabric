@@ -608,7 +608,6 @@ def _clarification_model_provider_auth_mount_targets(
         normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
         if (
             environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
-            and environment_values.get("AWS_PROFILE")
             and "AWS_PROFILE"
             in _clarification_claude_code_bedrock_environment_names(environment_values)
             and (
