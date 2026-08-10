@@ -531,6 +531,67 @@ def test_reask_liveness_probe_fails_closed_when_marker_cannot_be_opened(
     assert is_active_isolated_reask_worktree(reask)
 
 
+@pytest.mark.usefixtures("engine")
+async def test_reconcile_removes_unlocked_pre_checkout_reask_liveness_marker(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A crashed monitor cannot strand a marker before Git creates its checkout."""
+    reask = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+
+    result = await reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=13_700_000.0,
+        execute=True,
+    )
+
+    assert result.status == "ok"
+    assert result.reaped_count == 0
+    assert not lock_path.exists()
+    assert not lock_path.parent.exists()
+
+
+@pytest.mark.usefixtures("engine")
+async def test_reconcile_retains_locked_pre_checkout_reask_liveness_marker(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """GC leaves the marker in place while a monitor is still creating its checkout."""
+    reask = (
+        tmp_path
+        / "git"
+        / "worktrees"
+        / "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    )
+    lock_path = isolated_reask_worktree_liveness_lock_path(reask)
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        result = await reconcile_orphaned_workspace_dirs(
+            session_factory,
+            work_dir=tmp_path,
+            now=13_700_000.0,
+            execute=True,
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert result.status == "ok"
+    assert result.reaped_count == 0
+    assert lock_path.exists()
+
+
 async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
     tmp_path: Path,
 ) -> None:

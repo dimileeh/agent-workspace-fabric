@@ -49,6 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.companions import (
+    ISOLATED_REASK_LIVENESS_LOCK_DIR,
     is_isolated_reask_worktree_id,
     isolated_reask_worktree_liveness_lock_path,
     parent_workspace_id_from_companion_worktree_id,
@@ -322,6 +323,35 @@ def is_active_isolated_reask_worktree(worktree_path: Path) -> bool:
     return False
 
 
+def _reap_stale_pre_checkout_isolated_reask_liveness_locks(work_dir: Path) -> None:
+    """Remove unlocked re-ask markers left before their checkout was created.
+
+    The monitor acquires each marker before ``git worktree add`` so the normal
+    worktree scan does not race a live creation. A process death in that narrow
+    interval leaves no checkout directory for the normal orphan sweep to target,
+    though the kernel has released the lock. Probe the marker's liveness before
+    unlinking it; a live monitor is always retained, even before Git creates its
+    checkout.
+    """
+    lock_dir = work_dir / "git" / "worktrees" / ISOLATED_REASK_LIVENESS_LOCK_DIR
+    try:
+        lock_paths = tuple(lock_dir.glob("*.lock"))
+    except OSError:
+        # A marker directory that cannot be enumerated cannot safely be reaped.
+        return
+    for lock_path in lock_paths:
+        worktree_path = lock_dir.parent / lock_path.name.removesuffix(".lock")
+        if (
+            not lock_path.is_file()
+            or lock_path.is_symlink()
+            or not is_isolated_reask_worktree_id(worktree_path.name)
+            or worktree_path.exists()
+            or is_active_isolated_reask_worktree(worktree_path)
+        ):
+            continue
+        _remove_isolated_reask_liveness_lock(worktree_path)
+
+
 def build_default_compose_teardown(manager: ComposeManager) -> OrphanComposeTeardown:
     """Build a volume-removing compose-teardown closure over a ``ComposeManager``.
 
@@ -367,6 +397,11 @@ async def reconcile_orphaned_workspace_dirs(
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
+    if execute:
+        await asyncio.to_thread(
+            _reap_stale_pre_checkout_isolated_reask_liveness_locks,
+            normalized_work_dir,
+        )
     # The known-id set is an intentional point-in-time snapshot: it is loaded once
     # here, the scan then runs off-loop, and each target is deleted sequentially,
     # so the snapshot can be minutes old on a busy node. Re-querying per target was
