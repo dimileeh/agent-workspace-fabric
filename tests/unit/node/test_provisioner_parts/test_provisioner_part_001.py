@@ -661,8 +661,19 @@ class TestSuccess:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("companion_name", "clarification_enabled"),
-        [("backend", True), ("clarification", False)],
+        ("companion_name", "clarification_enabled", "resolved_profile"),
+        [
+            ("backend", True, None),
+            ("clarification", False, None),
+            (
+                "backend",
+                False,
+                {
+                    "name": "legacy-clarification",
+                    "services": [{"name": "clarification", "image": "example:latest"}],
+                },
+            ),
+        ],
     )
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
@@ -670,6 +681,7 @@ class TestSuccess:
         tmp_path: Path,
         companion_name: str,
         clarification_enabled: bool,
+        resolved_profile: dict[str, object] | None,
     ) -> None:
         class _RecordingGit:
             work_dir = tmp_path / "awf-work"
@@ -732,6 +744,7 @@ class TestSuccess:
                 task_prompt="p",
                 agent="codex",
                 test_commands=[],
+                resolved_profile=resolved_profile,
                 task_policy={
                     "companions": [
                         {
@@ -783,6 +796,8 @@ class TestSuccess:
         assert defaulted_companion.spec.base_branch is None
         assert launcher.requests[0].companion_graph_prevalidated is True
         assert launcher.requests[0].clarification_enabled is clarification_enabled
+        if resolved_profile is not None:
+            assert launcher.requests[0].profile.services[0].name == "clarification"
 
     @pytest.mark.unit
     async def test_rejects_invalid_companion_graph_before_materializing_companions(

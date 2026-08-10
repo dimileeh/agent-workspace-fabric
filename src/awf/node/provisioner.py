@@ -326,7 +326,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 )
                 profile = profile_resolution.profile
             else:
-                profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+                profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
             resolved_profile_dict = (
                 profile_resolution.profile.model_dump(mode="json", by_alias=True)
                 if profile_resolution is not None
@@ -341,10 +341,12 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
-            clarification_enabled = True
+            clarification_enabled = all(
+                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
+            )
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
-                clarification_enabled = all(
+                clarification_enabled = clarification_enabled and all(
                     companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
                     for companion in companion_specs
                 )

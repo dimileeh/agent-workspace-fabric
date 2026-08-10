@@ -925,7 +925,7 @@ async def _monitor_agent_service_restart_timeout_seconds(
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None or not workspace.resolved_profile:
                 return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
-            profile = WorkspaceProfile.model_validate(workspace.resolved_profile)
+            profile = WorkspaceProfile.model_validate_persisted(workspace.resolved_profile)
             task_policy = (
                 workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
             )

@@ -23,6 +23,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -941,8 +942,18 @@ class WorkspaceProfile(BaseModel):
     ports: dict[str, str] = Field(default_factory=dict)
     app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
 
+    @classmethod
+    def model_validate_persisted(cls, value: object) -> WorkspaceProfile:
+        """Validate a stored snapshot while allowing grandfathered service names.
+
+        ``clarification`` became reserved after resolved profiles were already
+        persisted. Only database snapshot consumers use this entry point; new
+        profile requests continue to use the normal strict validation path.
+        """
+        return cls.model_validate(value, context={"allow_legacy_clarification_service": True})
+
     @model_validator(mode="after")
-    def _validate_service_names(self) -> WorkspaceProfile:
+    def _validate_service_names(self, info: ValidationInfo) -> WorkspaceProfile:
         """Reject ambiguous service names before they reach Compose rendering.
 
         Each service becomes a top-level key in the generated Compose file, so two
@@ -958,7 +969,11 @@ class WorkspaceProfile(BaseModel):
             if service.name in seen:
                 raise ValueError(f"duplicate service name: {service.name}")
             seen.add(service.name)
-        if MANAGED_CLARIFICATION_SERVICE_NAME in seen:
+        allows_legacy_clarification_service = (
+            isinstance(info.context, Mapping)
+            and info.context.get("allow_legacy_clarification_service") is True
+        )
+        if MANAGED_CLARIFICATION_SERVICE_NAME in seen and not allows_legacy_clarification_service:
             raise ValueError(
                 f"service name {MANAGED_CLARIFICATION_SERVICE_NAME!r} is reserved for the "
                 "managed clarification service"
