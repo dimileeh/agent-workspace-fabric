@@ -702,6 +702,7 @@ async def _enforce_needs_human_reason(
         *,
         needs_human_reason: str | None = None,
     ) -> None:
+        """Persist cancellation cleanup failure and retain needs-human state."""
         if state is not None:
             state.mark_addressed(item_id, "needs_human")
             if (

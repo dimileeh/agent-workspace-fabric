@@ -803,6 +803,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext | None:
+        """Start isolated usage sampling and return its cleanup context."""
         return await start_isolated_usage_sampling(
             self,
             compose_project=compose_project,
