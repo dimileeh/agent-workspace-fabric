@@ -211,6 +211,9 @@ _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES = frozenset(
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES = frozenset(
     {"AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
 )
+_CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES = frozenset(
+    {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+)
 _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES = frozenset(
     {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
 )
@@ -305,11 +308,24 @@ def _clarification_agent_environment(
         clarification_environment_names -= _CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES
 
     return tuple(
-        (name, _clarification_staged_auth_value(value, staged_targets))
+        (
+            name,
+            _clarification_staged_auth_value(
+                _clarification_expanded_aws_profile_file_value(name, value), staged_targets
+            ),
+        )
         for name, value in agent_environment
         if name in clarification_environment_names
         and not _is_clarification_git_auth_environment(name)
     )
+
+
+def _clarification_expanded_aws_profile_file_value(name: str, value: str) -> str:
+    """Resolve Compose expressions in Bedrock profile-file locations."""
+
+    if name in _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES:
+        return compose_expand_value(value, environ=os.environ)
+    return value
 
 
 def _is_clarification_git_auth_environment(name: str) -> bool:
@@ -730,7 +746,11 @@ def _clarification_model_provider_auth_mount_targets(
             runtime_auth_mount_targets = frozenset({"/home/agent/.config/opencode"})
     return (
         runtime_auth_mount_targets
-        | frozenset(value for name, value in agent_environment if name in names)
+        | frozenset(
+            _clarification_expanded_aws_profile_file_value(name, value)
+            for name, value in agent_environment
+            if name in names
+        )
     ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
 
 
