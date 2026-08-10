@@ -153,3 +153,6 @@ networks:
     name: {{ ("awf-" ~ workspace_id ~ "-clarification-model-net") | tojson }}
     internal: true
   {% endif %}
+
+{% if clarification_model_services %}x-awf-persisted-clarification-model-network-reconciled: true
+{% endif %}

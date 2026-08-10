@@ -20,6 +20,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
     ComposeService,
     WorkspaceComposeSpec,
+    mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )
 from awf.profiles.registry import docker_compose_profile
@@ -310,6 +311,15 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_model_servic
         "name": "awf-ws_legacy-clarification-model-net",
         "internal": True,
     }
+    assert upgraded["x-awf-persisted-clarification-model-network-reconciled"] is False
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    ) == ("ollama-sidecar",)
+    mark_persisted_clarification_model_network_reconciled(compose_file=compose_file)
+    mark_persisted_clarification_model_network_reconciled(compose_file=compose_file)
     assert (
         upgrade_persisted_clarification_service(
             compose_file=compose_file,
@@ -448,6 +458,7 @@ class TestRender:
             "name": "awf-ws_test123-clarification-model-net",
             "internal": True,
         }
+        assert parsed["x-awf-persisted-clarification-model-network-reconciled"] is True
 
     @pytest.mark.unit
     def test_clarification_reaches_selected_companion_model_service(

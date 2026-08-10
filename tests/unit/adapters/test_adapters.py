@@ -46,6 +46,34 @@ _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
 
 
+def _write_legacy_opencode_ollama_compose(tmp_path: Path) -> Path:
+    """Create a legacy stack whose clarification endpoint is an Ollama sidecar."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "ollama-sidecar": {
+                        "image": "ollama/ollama:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return compose_file
+
+
 def _assert_docker_exec_prefix(args: list[str]) -> None:
     """Common assertions for the docker compose exec prefix."""
     assert args[:2] == ["docker", "compose"]
@@ -483,6 +511,89 @@ class TestCodexAdapter:
             "--no-deps",
             "-T",
         ]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_reconciles_interrupted_legacy_model_migration_once(
+        self, tmp_path: Path
+    ) -> None:
+        """A retry completes a migration persisted before its sidecar recreation."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        assert adapter_base.upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.opencode,
+            agent_model="ollama/kimi-k2.6:cloud",
+        ) == ("ollama-sidecar",)
+
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert "up" in runner.calls[0].args
+        assert "ollama-sidecar" in runner.calls[0].args
+        assert (
+            yaml.safe_load(compose_file.read_text(encoding="utf-8"))[
+                "x-awf-persisted-clarification-model-network-reconciled"
+            ]
+            is True
+        )
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert len(runner.calls) == 3
+        assert "run" in runner.calls[-1].args
+
+    @pytest.mark.unit
+    async def test_isolated_reask_runs_after_persisted_migration_marker_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A marker-write failure leaves a safe retry path without blocking clarification."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        def fail_marker(*, compose_file: Path) -> None:
+            del compose_file
+            raise ValueError("disk full")
+
+        monkeypatch.setattr(
+            adapter_base,
+            "mark_persisted_clarification_model_network_reconciled",
+            fail_marker,
+        )
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert "up" in runner.calls[0].args
+        assert "run" in runner.calls[1].args
+        assert (
+            yaml.safe_load(compose_file.read_text(encoding="utf-8"))[
+                "x-awf-persisted-clarification-model-network-reconciled"
+            ]
+            is False
+        )
 
     @pytest.mark.unit
     async def test_isolated_reask_restores_legacy_compose_when_upgrade_is_cancelled(

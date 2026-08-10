@@ -62,6 +62,9 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown flag: --remove-orphans",
 )
 _CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
+    "x-awf-persisted-clarification-model-network-reconciled"
+)
 
 
 def _is_managed_persisted_clarification_service(service: object) -> bool:
@@ -122,6 +125,22 @@ def _attach_persisted_clarification_model_network(
         service["networks"] = [*service_networks, "clarification_model_net"]
         attached_names.append(name)
     return tuple(attached_names)
+
+
+def _pending_persisted_clarification_model_network_services(
+    document: Mapping[object, object], services: Mapping[object, object]
+) -> tuple[str, ...]:
+    """Return sidecars awaiting a persisted clarification network reconciliation."""
+    if document.get(_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED) is True:
+        return ()
+    return tuple(
+        str(name)
+        for name, service in services.items()
+        if name not in {"agent", "clarification"}
+        and isinstance(service, Mapping)
+        and isinstance(service.get("networks"), list)
+        and "clarification_model_net" in service["networks"]
+    )
 
 
 def _legacy_bind_mount(value: object) -> AuthMount | None:
@@ -187,8 +206,9 @@ def upgrade_persisted_clarification_service(
     rather than re-resolving a profile. This narrowly augments those generated
     files from the persisted agent inputs, preserving services while denying the
     clarification container the primary worktree and Git credentials. Returns
-    the model services whose network declaration changed, or ``None`` when
-    clarification was already present.
+    the model services whose network declaration changed or whose earlier
+    persisted migration remains incomplete; returns ``None`` when clarification
+    was already present and fully reconciled.
     """
     try:
         document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -201,7 +221,10 @@ def upgrade_persisted_clarification_service(
         raise ValueError("persisted Compose file must contain a services mapping")
     if "clarification" in services:
         if _is_managed_persisted_clarification_service(services["clarification"]):
-            return None
+            pending_model_services = _pending_persisted_clarification_model_network_services(
+                document, services
+            )
+            return pending_model_services or None
         raise ValueError(
             "persisted Compose file clarification service conflicts with the managed "
             "clarification service"
@@ -316,6 +339,9 @@ def upgrade_persisted_clarification_service(
                 "internal": True,
             },
         )
+    document[_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED] = not bool(
+        clarification_model_services
+    )
 
     temporary_path: Path | None = None
     try:
@@ -336,6 +362,40 @@ def upgrade_persisted_clarification_service(
                 temporary_path.unlink()
         raise ValueError(f"could not upgrade persisted Compose file {compose_file}") from exc
     return clarification_model_services
+
+
+def mark_persisted_clarification_model_network_reconciled(*, compose_file: Path) -> None:
+    """Durably record that Compose recreated a migrated model sidecar."""
+    try:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"could not read persisted Compose file {compose_file}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("persisted Compose file must contain a mapping")
+    if document.get(_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED) is True:
+        return
+
+    document[_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED] = True
+    temporary_path: Path | None = None
+    try:
+        file_mode = compose_file.stat().st_mode & 0o777
+        fd, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{compose_file.name}.",
+            suffix=".tmp",
+            dir=compose_file.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            yaml.safe_dump(document, temporary_file, sort_keys=False)
+        temporary_path.chmod(file_mode)
+        temporary_path.replace(compose_file)
+    except (OSError, yaml.YAMLError) as exc:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+        raise ValueError(
+            f"could not mark persisted Compose model network reconciled {compose_file}"
+        ) from exc
 
 
 DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200

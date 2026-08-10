@@ -54,6 +54,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import (
     compose_up_capture_timeout_seconds,
+    mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )
 from awf.profiles.compose import (
@@ -679,6 +680,20 @@ class AgentAdapter(ABC):
                         result=model_service_update,
                         reason_code="CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED",
                         details={"services": clarification_model_services},
+                    )
+                try:
+                    await asyncio.to_thread(
+                        mark_persisted_clarification_model_network_reconciled,
+                        compose_file=compose_file,
+                    )
+                except ValueError:
+                    # The live sidecar has already been reconciled. Leaving
+                    # the marker pending is safe: the next re-ask will repeat
+                    # this idempotent reconciliation rather than assume it.
+                    _log.warning(
+                        "agent.persisted_clarification_model_network_marker_failed",
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
                     )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
