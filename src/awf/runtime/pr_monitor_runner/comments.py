@@ -795,13 +795,19 @@ async def _enforce_needs_human_reason(
         _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
         _MonitorPolicyBlockedError,
-    ):
-        # The terminal result must reach the fix-cycle reason-code handlers.
-        # Still finish and log cleanup, but do not replace the original failure
-        # with an advisory clarification cleanup result.
-        await _run_reask_cleanup_cancellation_safe(
+    ) as exc:
+        # A terminal result stops the fix cycle. Only a stranded isolated
+        # checkout takes precedence: recovery must not run another item against
+        # that unknown state. A failed primary-worktree inspection remains
+        # advisory to the terminal error's reason-code handler.
+        cleanup_error, isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_terminal_error"
         )
+        if isolated_cleanup_failed and cleanup_error is not None:
+            raise _MonitorPolicyBlockedError(
+                cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            ) from exc
         raise
     except asyncio.CancelledError:
         # Cancellation still owns control flow, but record a cleanup failure so
