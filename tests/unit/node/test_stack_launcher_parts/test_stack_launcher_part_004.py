@@ -1524,6 +1524,31 @@ def test_opencode_clarification_stages_config_auth_with_only_a_provider_base_url
 
 
 @pytest.mark.unit
+def test_opencode_clarification_stages_config_auth_for_unset_optional_provider_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset optional Compose key does not replace OpenCode file auth."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    opencode_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/opencode",
+        target="/home/agent/.config/opencode",
+        mode="rw",
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (opencode_auth,),
+        agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY:-}"),),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="openai/gpt-5",
+    )
+
+    assert clarification_mounts == (
+        AuthMount(source=opencode_auth.source, target=opencode_auth.target, mode="ro"),
+    )
+
+
+@pytest.mark.unit
 def test_opencode_ollama_clarification_omits_shared_opencode_store() -> None:
     """Ollama re-asks retain Ollama auth without mounting multi-provider config."""
     opencode_auth = AuthMount(

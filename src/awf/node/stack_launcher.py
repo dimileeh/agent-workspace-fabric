@@ -718,7 +718,7 @@ def _clarification_model_provider_auth_mount_targets(
             runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
         elif not any(
             name in _CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES.get(provider, frozenset())
-            and value
+            and compose_expand_value(value, environ=os.environ)
             for name, value in agent_environment
         ):
             # Provider readiness permits OpenCode's file auth when no matching
