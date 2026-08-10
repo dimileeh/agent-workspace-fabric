@@ -1039,10 +1039,17 @@ def test_clarification_inputs_retain_gcloud_mount_for_contained_credentials(
 
 
 @pytest.mark.unit
-def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials() -> None:
+def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials(
+    tmp_path: Path,
+) -> None:
     """Claude file auth wins over direct credentials for clarification."""
+    claude_store = tmp_path / "claude"
+    claude_store.mkdir()
+    (claude_store / ".credentials.json").write_text(
+        '{"claudeAiOauth": {"accessToken": "oauth-access-token"}}\n'
+    )
     claude_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/claude",
+        source=str(claude_store),
         target="/home/agent/.claude",
         mode="rw",
     )
@@ -1084,6 +1091,43 @@ def test_clarification_inputs_prefer_claude_file_auth_to_direct_credentials() ->
     assert clarification_mounts == (
         AuthMount(source=claude_auth.source, target=claude_auth.target, mode="ro"),
     )
+
+
+@pytest.mark.unit
+def test_clarification_inputs_retain_direct_credentials_for_config_only_claude_mounts(
+    tmp_path: Path,
+) -> None:
+    """Claude configuration mounts do not displace usable direct credentials."""
+    claude_directory = tmp_path / "claude"
+    claude_directory.mkdir()
+    (claude_directory / "settings.json").write_text('{"theme": "dark"}\n')
+    claude_config = tmp_path / ".claude.json"
+    claude_config.write_text('{"projects": {}}\n')
+    environment = (
+        ("ANTHROPIC_API_KEY", "anthropic-token"),
+        ("ANTHROPIC_AUTH_TOKEN", "anthropic-auth-token"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-token"),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(
+            AuthMount(
+                source=str(claude_directory),
+                target="/home/agent/.claude",
+                mode="rw",
+            ),
+            AuthMount(
+                source=str(claude_config),
+                target="/home/agent/.claude.json",
+                mode="rw",
+            ),
+        ),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == environment
 
 
 @pytest.mark.unit

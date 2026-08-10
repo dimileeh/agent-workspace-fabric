@@ -295,10 +295,7 @@ def _clarification_agent_environment(
     if (
         prefer_file_auth
         and agent_runtime is AgentRuntime.claude_code
-        and any(
-            mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.claude_code]
-            for mount in source_mounts
-        )
+        and _clarification_has_claude_code_file_auth(source_mounts)
     ):
         # Match Claude readiness: an isolated file-auth mount is preferred to
         # static environment credentials, while non-secret endpoint settings
@@ -324,6 +321,16 @@ def _clarification_has_codex_file_auth(source_mounts: Sequence[AuthMount]) -> bo
     return any(
         mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
         and (Path(mount.source) / "auth.json").is_file()
+        for mount in source_mounts
+    )
+
+
+def _clarification_has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
+    """Return whether a staged Claude home supplies its OAuth credential store."""
+
+    return any(
+        mount.target == "/home/agent/.claude"
+        and (Path(mount.source) / ".credentials.json").is_file()
         for mount in source_mounts
     )
 
