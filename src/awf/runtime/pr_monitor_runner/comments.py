@@ -266,6 +266,27 @@ async def _remove_isolated_reask_worktree(
     return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
 
 
+async def _persist_reask_cleanup_failure_after_cancellation(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    item_id: str,
+    cleanup_reason: str,
+) -> None:
+    """Durably block later monitor work after cancelled re-ask cleanup fails."""
+    from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
+
+    async with runner._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+        if workspace is None:
+            return
+        addressed = dict(workspace.monitor_threads_addressed or {})
+        addressed[item_id] = "needs_human"
+        addressed[_needs_human_reason_state_key(item_id)] = cleanup_reason
+        workspace.monitor_threads_addressed = addressed
+        await session.commit()
+
+
 async def _address_thread(
     runner: PullRequestMonitorRunner,
     *,
@@ -506,6 +527,7 @@ async def _enforce_needs_human_reason(
         _needs_human_reason_missing,
         _sanitize_verdict_reason,
     )
+    from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 
     result = replace(result, reason=_sanitize_verdict_reason(result.reason))
     if not _needs_human_reason_missing(result):
@@ -663,6 +685,30 @@ async def _enforce_needs_human_reason(
                     raise
             else:
                 if cancellation is not None:
+                    cleanup_error, _isolated_cleanup_failed = cleanup_result
+                    if cleanup_error is not None:
+                        cleanup_reason = redact_audit_text(cleanup_error, limit=240)
+                        if state is not None:
+                            state.mark_addressed(item_id, "needs_human")
+                            state.mark_addressed(
+                                _needs_human_reason_state_key(item_id), cleanup_reason
+                            )
+                        persistence_task = asyncio.create_task(
+                            _persist_reask_cleanup_failure_after_cancellation(
+                                runner,
+                                workspace_id=workspace_id,
+                                item_id=item_id,
+                                cleanup_reason=cleanup_reason,
+                            )
+                        )
+                        while True:
+                            try:
+                                await asyncio.shield(persistence_task)
+                                break
+                            except asyncio.CancelledError:
+                                if persistence_task.done():
+                                    persistence_task.result()
+                                    break
                     raise cancellation
                 return cleanup_result
 
