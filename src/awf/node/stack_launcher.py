@@ -579,7 +579,6 @@ def _clarification_resolve_google_credentials_placeholder(
                 mount.target
                 for mount in auth_mounts
                 if mount.mode == "ro"
-                and mount.source == worker_google_credentials
                 and mount.target == worker_google_credentials
                 and mount.target.startswith("/")
             ),

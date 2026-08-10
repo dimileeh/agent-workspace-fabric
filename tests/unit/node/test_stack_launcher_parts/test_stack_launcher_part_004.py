@@ -926,15 +926,15 @@ def test_claude_vertex_clarification_resolves_google_credentials_compose_placeho
         ),
     ),
 )
-def test_google_vertex_clarification_resolves_bare_google_credentials_placeholder_with_other_pass_through_mount(
+def test_google_vertex_clarification_resolves_bare_google_credentials_placeholder_with_unrelated_pass_through_mount(
     monkeypatch: pytest.MonkeyPatch,
     agent_runtime: AgentRuntime,
     environment: tuple[tuple[str, str], ...],
 ) -> None:
-    """The worker's ADC placeholder selects its mount among pass-through mounts."""
+    """The worker's ADC placeholder ignores an unrelated pass-through mount."""
     credentials_target = "/run/awf/secrets/worker-gcp.json"
     google_credentials = AuthMount(
-        source=credentials_target,
+        source="/host/awf/secret-leases/ws_launcher/worker-gcp.json",
         target=credentials_target,
         mode="ro",
     )
