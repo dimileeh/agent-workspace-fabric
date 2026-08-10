@@ -540,6 +540,27 @@ def test_isolated_compose_run_uses_restricted_clarification_service() -> None:
     ]
 
 
+def test_isolated_compose_run_mounts_linked_git_metadata_read_only() -> None:
+    """A re-ask exposes its backing linked-worktree metadata without write access."""
+    mirror_path = Path("/worktrees/mirrors/owner-repo.git")
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["gemini", "-p", "explain"],
+        source="review-reask",
+        label="gemini",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        read_only_volume_binds=((mirror_path, str(mirror_path)),),
+    )
+
+    run_idx = invocation.args.index("run")
+    service_idx = invocation.args.index("clarification", run_idx)
+    assert invocation.args[service_idx - 2 : service_idx] == [
+        "-v",
+        "/worktrees/mirrors/owner-repo.git:/worktrees/mirrors/owner-repo.git:ro",
+    ]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("returncode", "stderr"),

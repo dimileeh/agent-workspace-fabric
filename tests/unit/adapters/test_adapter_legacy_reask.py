@@ -103,6 +103,34 @@ class TestIsolatedReaskAdapter:
         assert "--skip-git-repo-check" in args[service_idx:]
 
     @pytest.mark.unit
+    async def test_isolated_reask_mounts_backing_git_metadata_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-Codex re-asks can discover the isolated worktree's Git metadata."""
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+        mirror_path = Path("/worktrees/mirrors/owner-repo.git")
+        monkeypatch.setattr(
+            adapter_base,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+        )
+
+        args = runner.calls[0].args
+        service_idx = args.index("clarification")
+        assert args[service_idx - 2 : service_idx] == [
+            "-v",
+            "/worktrees/mirrors/owner-repo.git:/worktrees/mirrors/owner-repo.git:ro",
+        ]
+
+    @pytest.mark.unit
     async def test_isolated_reask_upgrade_keeps_selected_opencode_provider_credentials(
         self, tmp_path: Path
     ) -> None:

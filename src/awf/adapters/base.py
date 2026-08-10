@@ -71,6 +71,7 @@ from awf.node.compose_manager import (
     mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )
+from awf.node.git_manager import mirror_path_for_worktree
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
@@ -715,6 +716,11 @@ class AgentAdapter(ABC):
                     env_passthrough=env_passthrough,
                 )
             else:
+                # Linked worktrees store their Git control data in the shared
+                # bare mirror. Keep that metadata visible at its original
+                # absolute path so non-Codex clarification CLIs can discover
+                # the disposable checkout, without granting mirror writes.
+                mirror_path = mirror_path_for_worktree(isolated_worktree_host_path)
                 invocation = build_isolated_tracked_compose_run(
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -723,6 +729,9 @@ class AgentAdapter(ABC):
                     label=self.name.value,
                     worktree_host_path=isolated_worktree_host_path,
                     preserve_stdin=True,
+                    read_only_volume_binds=(
+                        () if mirror_path is None else ((mirror_path, str(mirror_path)),)
+                    ),
                     extra_volume_binds=(
                         () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
                     ),
