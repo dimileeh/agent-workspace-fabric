@@ -100,6 +100,7 @@ def aws_profile_credential_paths(
 
     profile_name = dict(agent_environment).get("AWS_PROFILE") or "default"
     references: list[str] = []
+    configurations: list[configparser.RawConfigParser] = []
     for profile_file in _aws_profile_file_targets(provider_mount_targets):
         source = _mounted_file_source(
             auth_mounts,
@@ -114,27 +115,38 @@ def aws_profile_credential_paths(
                 configuration.read_file(profile_source)
         except (OSError, UnicodeDecodeError, configparser.Error):
             continue
-        section = next(
-            (
-                candidate
-                for candidate in (f"profile {profile_name}", profile_name)
-                if configuration.has_section(candidate)
-            ),
-            None,
-        )
-        if section is None:
-            continue
-        credential_process = configuration.get(section, "credential_process", fallback=None)
-        if isinstance(credential_process, str):
-            with suppress(ValueError):
-                references.extend(
-                    value for value in shlex.split(credential_process) if value.startswith("/")
-                )
-        web_identity_token_file = configuration.get(
-            section, "web_identity_token_file", fallback=None
-        )
-        if isinstance(web_identity_token_file, str) and web_identity_token_file.startswith("/"):
-            references.append(web_identity_token_file)
+        configurations.append(configuration)
+
+    pending_profile_names = {profile_name}
+    processed_profile_names: set[str] = set()
+    while pending_profile_names:
+        current_profile_name = pending_profile_names.pop()
+        processed_profile_names.add(current_profile_name)
+        for configuration in configurations:
+            section = next(
+                (
+                    candidate
+                    for candidate in (f"profile {current_profile_name}", current_profile_name)
+                    if configuration.has_section(candidate)
+                ),
+                None,
+            )
+            if section is None:
+                continue
+            credential_process = configuration.get(section, "credential_process", fallback=None)
+            if isinstance(credential_process, str):
+                with suppress(ValueError):
+                    references.extend(
+                        value for value in shlex.split(credential_process) if value.startswith("/")
+                    )
+            web_identity_token_file = configuration.get(
+                section, "web_identity_token_file", fallback=None
+            )
+            if isinstance(web_identity_token_file, str) and web_identity_token_file.startswith("/"):
+                references.append(web_identity_token_file)
+            source_profile = configuration.get(section, "source_profile", fallback=None)
+            if source_profile:
+                pending_profile_names.update({source_profile} - processed_profile_names)
     return tuple(
         reference
         for index, reference in enumerate(references)
