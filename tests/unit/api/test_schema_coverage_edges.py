@@ -456,6 +456,7 @@ def test_workspace_companion_rejects_isolated_reask_name_prefix(name: str) -> No
     ("companions", "message"),
     [
         ([{"name": "agent", "repo_url": "git@example.com:api.git"}], "reserved"),
+        ([{"name": "clarification", "repo_url": "git@example.com:api.git"}], "reserved"),
         (
             [
                 {"name": "api", "repo_url": "git@example.com:api.git"},

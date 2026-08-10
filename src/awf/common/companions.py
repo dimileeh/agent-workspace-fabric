@@ -14,7 +14,7 @@ ISOLATED_REASK_WORKTREE_SUFFIX = (
     f"{COMPANION_WORKTREE_MARKER}{ISOLATED_REASK_COMPANION_NAME_PREFIX}"
 )
 ISOLATED_REASK_LIVENESS_LOCK_DIR = ".awf-isolated-reask-locks"
-RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "docker"})
+RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "clarification", "docker"})
 _GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 
