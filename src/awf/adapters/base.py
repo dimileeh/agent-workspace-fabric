@@ -814,6 +814,7 @@ class AgentAdapter(ABC):
                 workspace_id=workspace_id,
                 log_source=log_source,
                 compose_project=compose_project,
+                isolated_sampler_ctx=isolated_sampler_ctx,
             )
             final_status = "success"
             return result
@@ -1399,6 +1400,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         log_source: str,
         compose_project: str,
+        isolated_sampler_ctx: IsolatedUsageSampleContext | None,
     ) -> AgentRunResult:
         # Stream the prompt on stdin and close it explicitly. This avoids OS
         # argv length limits for large review comments while still preventing
@@ -1430,6 +1432,11 @@ class AgentAdapter(ABC):
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
             except asyncio.CancelledError:
+                await self._capture_isolated_usage_before_cleanup_after_cancellation(
+                    isolated_sampler_ctx,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
                 await cleanup_compose_exec_invocation_after_cancellation(
                     self._runner,
                     invocation,
@@ -1438,6 +1445,11 @@ class AgentAdapter(ABC):
                 raise
             except Exception:
                 if isinstance(invocation, TrackedIsolatedComposeRun):
+                    await self._capture_isolated_usage_before_cleanup(
+                        isolated_sampler_ctx,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
                     await cleanup_compose_exec_invocation(
                         self._runner,
                         invocation,
@@ -1465,6 +1477,11 @@ class AgentAdapter(ABC):
                 else _failure_reason_for_result(result)
             )
             if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
+                await self._capture_isolated_usage_before_cleanup(
+                    isolated_sampler_ctx,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
                 await cleanup_compose_exec_invocation(
                     self._runner,
                     invocation,
@@ -1515,3 +1532,47 @@ class AgentAdapter(ABC):
             stdout=result.stdout,
             stderr=result.stderr,
         )
+
+    async def _capture_isolated_usage_before_cleanup(
+        self,
+        sampler_ctx: IsolatedUsageSampleContext | None,
+        invocation: Any,
+        *,
+        workspace_id: str | None,
+    ) -> None:
+        """Best-effort final capture before force-removing an isolated container."""
+        if sampler_ctx is None or not isinstance(invocation, TrackedIsolatedComposeRun):
+            return
+        try:
+            await sampler_ctx.capture_final_before_cleanup(container_name=invocation.container_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                phase="capture_before_isolated_cleanup",
+                exc_info=True,
+            )
+
+    async def _capture_isolated_usage_before_cleanup_after_cancellation(
+        self,
+        sampler_ctx: IsolatedUsageSampleContext | None,
+        invocation: Any,
+        *,
+        workspace_id: str | None,
+    ) -> None:
+        """Finish the best-effort capture despite repeated cancellation."""
+        capture_task = asyncio.create_task(
+            self._capture_isolated_usage_before_cleanup(
+                sampler_ctx,
+                invocation,
+                workspace_id=workspace_id,
+            )
+        )
+        while not capture_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(capture_task)
+        with contextlib.suppress(asyncio.CancelledError):
+            capture_task.result()

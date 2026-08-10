@@ -55,6 +55,15 @@ class _RecordingSampler:
 
 
 class _IsolatedRecordingContext(_RecordingContext):
+    def __init__(self, events: list[str], *, capture_error: Exception | None = None) -> None:
+        super().__init__(events)
+        self._capture_error = capture_error
+
+    async def capture_final_before_cleanup(self, *, container_name: str) -> None:
+        self._events.append(f"capture:{container_name}")
+        if self._capture_error is not None:
+            raise self._capture_error
+
     @property
     def cli_args(self) -> list[str]:
         return ["wrapped-agent-cli"]
@@ -65,16 +74,23 @@ class _IsolatedRecordingContext(_RecordingContext):
 
 
 class _IsolatedRecordingSampler(_RecordingSampler):
-    def __init__(self, events: list[str], *, start_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        start_error: Exception | None = None,
+        capture_error: Exception | None = None,
+    ) -> None:
         super().__init__(events)
         self._isolated_start_error = start_error
+        self._capture_error = capture_error
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
         self._events.append("start_isolated")
         self.start_kwargs = kwargs
         if self._isolated_start_error is not None:
             raise self._isolated_start_error
-        return _IsolatedRecordingContext(self._events)
+        return _IsolatedRecordingContext(self._events, capture_error=self._capture_error)
 
 
 class _DelayedIsolatedRecordingSampler(_RecordingSampler):
@@ -327,6 +343,83 @@ async def test_sampler_finalized_timeout_on_agent_timeout() -> None:
         )
 
     assert excinfo.value.reason_code == "AGENT_TIMEOUT"
+    assert events[-1] == "finalize:timeout"
+
+
+@pytest.mark.unit
+async def test_isolated_timeout_captures_usage_before_forced_container_removal() -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(
+        events,
+        result=CommandResult(
+            returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON
+        ),
+    )
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_timeout_capture",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_timeout_capture/reask"),
+        )
+
+    assert excinfo.value.reason_code == "AGENT_TIMEOUT"
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
+    assert events[-1] == "finalize:timeout"
+
+
+@pytest.mark.unit
+async def test_isolated_cancellation_captures_usage_before_forced_container_removal() -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(
+        events, result=CommandResult(returncode=0, stdout="", stderr=""), cancel=True
+    )
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_cancel_capture",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_cancel_capture/reask"),
+        )
+
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
+    assert events[-1] == "finalize:cancelled"
+
+
+@pytest.mark.unit
+async def test_isolated_capture_failure_does_not_mask_timeout_or_container_removal() -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events, capture_error=RuntimeError("capture failed"))
+    runner = _EventRunner(
+        events,
+        result=CommandResult(
+            returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON
+        ),
+    )
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_capture_failure",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_capture_failure/reask"),
+        )
+
+    assert excinfo.value.reason_code == "AGENT_TIMEOUT"
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
     assert events[-1] == "finalize:timeout"
 
 

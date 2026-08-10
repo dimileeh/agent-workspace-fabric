@@ -700,6 +700,27 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             return ()
         return ((self._capture_dir, _ISOLATED_CCUSAGE_CAPTURE_DIR),)
 
+    async def capture_final_before_cleanup(self, *, container_name: str) -> None:
+        """Write a final sample before a timed-out re-ask is force-removed."""
+        if self._capture_dir is None or self._source is None:
+            return
+        await self._collector._runner.run_streaming(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                _isolated_ccusage_capture_script(
+                    source=str(self._source),
+                    timeout_seconds=self._collector._command_timeout_seconds,
+                    sample_name="final",
+                ),
+            ],
+            wall_timeout_seconds=self._collector._command_timeout_seconds,
+            idle_timeout_seconds=self._collector._command_timeout_seconds,
+        )
+
     async def _finalize_inner(self, status: str) -> None:
         """Collect the final reading and always remove the capture directory."""
         try:
@@ -761,6 +782,20 @@ capture_ccusage baseline
 agent_status=$?
 capture_ccusage final
 exit \"$agent_status\"
+""".strip()
+
+
+def _isolated_ccusage_capture_script(
+    *, source: str, timeout_seconds: float, sample_name: str
+) -> str:
+    """Return a command that writes one ccusage reading into the mounted directory."""
+    quoted_source = shlex.quote(source)
+    return f"""
+timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
+  > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.stdout\" \\
+  2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.stderr\"
+ccusage_status=$?
+printf '%s\\n' \"$ccusage_status\" > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.status\"
 """.strip()
 
 

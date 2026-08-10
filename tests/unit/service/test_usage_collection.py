@@ -190,8 +190,9 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
 ) -> None:
     """A clarification re-ask reads its disposable copied auth state, not ``agent``."""
     monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+    runner = FakeCommandRunner()
     collector = CcusageCollector(
-        runner=FakeCommandRunner(),
+        runner=runner,
         work_dir=tmp_path,
         clock=FakeClock(),
         command_timeout_seconds=3.5,
@@ -229,6 +230,60 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
     assert snapshot.total_tokens == 3
     assert not capture_dir.exists()
     await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout can import a final reading before the one-off container is removed."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+
+    class _FinalCaptureRunner:
+        def __init__(self, capture_dir: Path) -> None:
+            self.capture_dir = capture_dir
+            self.calls: list[list[str]] = []
+
+        async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.calls.append(list(args))
+            (self.capture_dir / "final.status").write_text("0\n", encoding="utf-8")
+            (self.capture_dir / "final.stdout").write_text(
+                json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+            )
+            (self.capture_dir / "final.stderr").write_text("", encoding="utf-8")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    bootstrap_runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=bootstrap_runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_forced_cleanup",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    capture_dir = ctx.volume_binds[0][0]
+    (capture_dir / "baseline.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "baseline.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 5}}), encoding="utf-8"
+    )
+    (capture_dir / "baseline.stderr").write_text("", encoding="utf-8")
+
+    capture_runner = _FinalCaptureRunner(capture_dir)
+    collector._runner = capture_runner  # type: ignore[assignment]  # noqa: SLF001
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
+
+    assert capture_runner.calls[0][:3] == ["docker", "exec", "awf-reask-test"]
+    assert "ccusage codex daily --json --offline" in capture_runner.calls[0][-1]
+    await ctx.finalize(status="timeout")
+
+    snapshot = read_latest_usage_snapshot("ws_isolated_forced_cleanup", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.phase == "final"
+    assert snapshot.run_status == "timeout"
+    assert snapshot.status == "available"
+    assert snapshot.total_tokens == 3
 
 
 @pytest.mark.unit
@@ -281,11 +336,8 @@ async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
         ),
         work_dir=tmp_path,
     )
-    collector = CcusageCollector(
-        runner=FakeCommandRunner(),
-        work_dir=tmp_path,
-        clock=FakeClock(),
-    )
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
 
     ctx = await collector.start_isolated(
         compose_project="proj",
@@ -297,6 +349,8 @@ async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
 
     assert ctx.cli_args == ["codex", "exec", "-"]
     assert ctx.volume_binds == ()
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-capture-setup-failure")
+    assert runner.calls == []
     await ctx.finalize(status="success")
 
     snapshot = read_latest_usage_snapshot("ws_capture_setup_failure", work_dir=tmp_path)

@@ -45,6 +45,9 @@ class UsageSampler(Protocol):
 class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
     """Usage capture configuration for a disposable clarification container."""
 
+    async def capture_final_before_cleanup(self, *, container_name: str) -> None:
+        """Capture usage while the disposable container is still running."""
+
     @property
     def cli_args(self) -> list[str]:
         """Return the agent command wrapped with in-container usage collection."""
