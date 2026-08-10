@@ -715,8 +715,9 @@ class AgentAdapter(ABC):
                 # Linked worktrees store their Git control data in the shared
                 # bare mirror. Give non-Codex clarification CLIs only the
                 # credential-free subset needed to discover that checkout.
-                isolated_git_metadata, read_only_volume_binds = (
-                    _isolated_reask_git_metadata_volume_binds(isolated_worktree_host_path)
+                isolated_git_metadata, read_only_volume_binds = await asyncio.to_thread(
+                    _isolated_reask_git_metadata_volume_binds,
+                    isolated_worktree_host_path,
                 )
                 invocation = build_isolated_tracked_compose_run(
                     compose_project=compose_project,

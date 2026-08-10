@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
 from typing import Any
 
 import pytest
@@ -163,6 +163,39 @@ class TestIsolatedReaskAdapter:
         assert "-e" not in args[run_idx:service_idx]
         assert args[service_idx + 1 : service_idx + 3] == ["sh", "-lc"]
         assert "--skip-git-repo-check" in args[service_idx:]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_prepares_git_snapshot_off_event_loop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Git snapshot preparation cannot block concurrent adapter work."""
+        event_loop_thread = get_ident()
+        snapshot_thread: int | None = None
+
+        def record_snapshot_thread(
+            _worktree_path: Path,
+        ) -> tuple[None, tuple[tuple[Path, str], ...]]:
+            nonlocal snapshot_thread
+            snapshot_thread = get_ident()
+            return None, ()
+
+        monkeypatch.setattr(
+            adapter_base,
+            "_isolated_reask_git_metadata_volume_binds",
+            record_snapshot_thread,
+        )
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+        assert snapshot_thread is not None
+        assert snapshot_thread != event_loop_thread
 
     @pytest.mark.unit
     async def test_isolated_reask_mounts_credential_free_git_metadata_read_only(
