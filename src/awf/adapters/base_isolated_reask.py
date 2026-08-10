@@ -97,6 +97,7 @@ def _discard_isolated_reask_git_metadata_task_result(
 
 
 def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+    """Consume a cancelled hosted-execution task's eventual result."""
     try:
         task.result()
     except asyncio.CancelledError:
