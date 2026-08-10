@@ -171,6 +171,10 @@ class TestIsolatedReaskAdapter:
             assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/reask\n"
             assert (snapshot_path / "gitdir").read_text(encoding="utf-8") == "/workspace/.git\n"
             assert binds[0] == (snapshot_path, str(linked_git_dir))
+            assert binds[1:] == (
+                (mirror_path / "objects", str(mirror_path / "objects")),
+                (mirror_path / "refs", str(mirror_path / "refs")),
+            )
         finally:
             temporary_metadata.cleanup()
 

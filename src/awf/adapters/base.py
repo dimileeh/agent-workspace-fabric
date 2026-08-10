@@ -117,10 +117,9 @@ def _isolated_reask_git_metadata_volume_binds(
     A linked worktree's ``.git`` file points at metadata beneath its shared
     bare mirror. Mounting that whole mirror also exposes its ``config``, which
     can retain HTTPS remote URL userinfo. Git needs only selected linked control
-    files plus existing common ``objects`` and ``refs`` directories to recognise
-    the worktree; empty read-only directories are sufficient for clarification
-    Git discovery and expose neither the mirror configuration nor its object
-    history.
+    files plus the existing common ``objects`` and ``refs`` directories to
+    recognise the worktree, so mount those directories without exposing the
+    mirror configuration.
     """
     mirror_path = mirror_path_for_worktree(worktree_path)
     linked_git_dir = linked_worktree_git_dir(worktree_path)
@@ -146,18 +145,14 @@ def _isolated_reask_git_metadata_volume_binds(
         source_index = linked_git_dir / "index"
         if source_index.is_file() and not source_index.is_symlink():
             shutil.copyfile(source_index, snapshot_path / "index")
-        objects_path = temporary_path / "objects"
-        refs_path = temporary_path / "refs"
-        objects_path.mkdir()
-        refs_path.mkdir()
     except OSError:
         if temporary_metadata is not None:
             temporary_metadata.cleanup()
         return None, ()
     return temporary_metadata, (
         (snapshot_path, str(linked_git_dir)),
-        (objects_path, str(mirror_path / "objects")),
-        (refs_path, str(mirror_path / "refs")),
+        (mirror_path / "objects", str(mirror_path / "objects")),
+        (mirror_path / "refs", str(mirror_path / "refs")),
     )
 
 
