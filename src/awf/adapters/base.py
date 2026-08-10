@@ -650,7 +650,17 @@ class AgentAdapter(ABC):
                                 contents=original_compose_file,
                             )
                         except OSError:
-                            pass
+                            # Reaping has removed the legacy sidecars. If the
+                            # persisted Compose file cannot be restored, the
+                            # workspace is left with neither a usable legacy
+                            # definition nor a running model endpoint. Surface
+                            # that terminal lifecycle damage to the monitor.
+                            raise AgentRunError(
+                                agent=self.name,
+                                result=model_service_update,
+                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                                details={"services": clarification_model_services},
+                            ) from None
                         else:
                             restored_legacy_compose = True
                     if restored_legacy_compose:

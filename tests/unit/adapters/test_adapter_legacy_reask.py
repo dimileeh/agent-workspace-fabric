@@ -519,7 +519,7 @@ class TestIsolatedReaskAdapter:
         assert "run" not in runner.calls[-1].args
 
     @pytest.mark.unit
-    async def test_isolated_reask_does_not_start_model_sidecar_when_legacy_restore_fails(
+    async def test_isolated_reask_surfaces_terminal_failure_when_legacy_restore_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Do not recreate from the migrated definition if legacy restore fails."""
@@ -566,7 +566,8 @@ class TestIsolatedReaskAdapter:
                 isolated_worktree_host_path=tmp_path / "reask",
             )
 
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+        assert exc.value.details == {"services": ("ollama-sidecar",)}
         assert len(runner.calls) == 3
 
     @pytest.mark.unit
