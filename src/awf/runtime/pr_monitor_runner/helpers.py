@@ -728,6 +728,7 @@ def _notify_human_reason(
     *,
     blocker_items: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None,
 ) -> str | None:
+    """Summarize the highest-priority unresolved human blocker."""
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
     if reason := _first_needs_human_reason(status, state):
@@ -1064,6 +1065,7 @@ def _base_fetch_retry_wait_seconds(
 def _notification_key(
     *, head_sha: str, blocker_reason: str | None, items_digest: str | None = None
 ) -> str:
+    """Build a stable notification deduplication key."""
     reason = blocker_reason or "ready-to-merge"
     key = f"__awf_notify__:{head_sha}:{reason}"
     return f"{key}:{items_digest}" if items_digest else key

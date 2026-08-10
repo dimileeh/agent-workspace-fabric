@@ -66,4 +66,6 @@ class IsolatedUsageSampler(Protocol):
         workspace_id: str,
         provider: AgentRuntime,
         cli_args: list[str],
-    ) -> IsolatedUsageSampleContext: ...
+    ) -> IsolatedUsageSampleContext:
+        """Start usage collection for a disposable agent invocation."""
+        ...

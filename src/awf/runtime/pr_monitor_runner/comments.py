@@ -100,6 +100,7 @@ async def _prepare_reask_primary_worktree(
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
     async def _run_git(args: list[str]) -> CommandResult:
+        """Run a Git command against the primary worktree."""
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
 
     adapter = getattr(runner._deps, "adapter", None)
@@ -130,6 +131,7 @@ async def _check_reask_primary_worktree_clean(
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
     async def _run_git(args: list[str]) -> CommandResult:
+        """Run a Git command against the primary worktree."""
         return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
 
     check = await check_validation_worktree_clean(
@@ -687,6 +689,7 @@ async def _enforce_needs_human_reason(
             return result
 
     async def _cleanup_reask_worktree() -> tuple[str | None, bool]:
+        """Remove the isolated checkout, then verify the primary worktree."""
         # The re-ask only collects a reason. Remove its tracked-only checkout
         # first, then only inspect the primary worktree. The primary checkout
         # is never mounted into the clarification container, so any changes
@@ -724,6 +727,7 @@ async def _enforce_needs_human_reason(
         return primary_check_failure, False
 
     async def _run_reask_cleanup(*, event_name: str) -> tuple[str | None, bool]:
+        """Run re-ask cleanup and log any failure under the supplied event."""
         try:
             cleanup_error, isolated_cleanup_failed = await _cleanup_reask_worktree()
         except (GitOperationError, OSError, RuntimeError) as exc:

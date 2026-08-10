@@ -312,6 +312,7 @@ def _clarification_agent_environment(
 
 
 def _is_clarification_git_auth_environment(name: str) -> bool:
+    """Return whether an environment variable grants Git authentication."""
     normalized = name.upper()
     return normalized == "SSH_AUTH_SOCK" or normalized.startswith(
         _CLARIFICATION_GIT_AUTH_ENV_PREFIXES

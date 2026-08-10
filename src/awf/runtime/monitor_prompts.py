@@ -536,6 +536,7 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
 
 
 def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, str]:
+    """Order located blocker items before unlocated feedback deterministically."""
     path = _item_text(item, "path")
     line = item.get("line")
     line_number = line if isinstance(line, int) else 0
@@ -543,6 +544,7 @@ def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, 
 
 
 def _render_blocker_item(item: Mapping[str, object]) -> str:
+    """Render one sanitized blocker item as a Markdown list entry."""
     author = _redact_and_escape_markdown_inline(_item_text(item, "author") or "unknown author")
     path = _redact_and_escape_markdown_inline(_item_text(item, "path"))
     line = item.get("line")
@@ -568,6 +570,7 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
 
 
 def _item_text(item: Mapping[str, object], key: str) -> str:
+    """Return a string item field, treating other values as absent."""
     value = item.get(key)
     return value if isinstance(value, str) else ""
 

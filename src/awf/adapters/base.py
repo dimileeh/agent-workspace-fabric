@@ -862,6 +862,7 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext | None:
+        """Start isolated usage capture without abandoning setup on cancellation."""
         sampler = self._usage_sampler
         if sampler is None or workspace_id is None or not isinstance(sampler, IsolatedUsageSampler):
             return None

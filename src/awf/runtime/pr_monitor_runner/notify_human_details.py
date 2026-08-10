@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor import (
 
 
 def _needs_human_reason_state_key(item_id: str) -> str:
+    """Return the persisted state key for a blocker item's human reason."""
     return f"__needs_human_reason__:{item_id}"
 
 

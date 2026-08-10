@@ -659,6 +659,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         capture_dir: Path | None,
         capture_unavailable_reason: str | None,
     ) -> None:
+        """Initialize isolated capture state around the inherited usage context."""
         super().__init__(
             collector=collector,
             compose_project=compose_project,
@@ -700,6 +701,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         return ((self._capture_dir, _ISOLATED_CCUSAGE_CAPTURE_DIR),)
 
     async def _finalize_inner(self, status: str) -> None:
+        """Collect the final reading and always remove the capture directory."""
         try:
             if self._source is None:
                 await self._safe_sample(phase="final", run_status=status)
@@ -713,6 +715,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
                 await asyncio.to_thread(shutil.rmtree, self._capture_dir, ignore_errors=True)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
+        """Read the currently selected ccusage sample from the isolated capture."""
         capture_dir = self._capture_dir
         if capture_dir is None:
             return None, self._capture_unavailable_reason or REASON_SOURCE_UNSUPPORTED, None
@@ -724,6 +727,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
 
 
 def _make_isolated_capture_dir(work_dir: Path) -> Path:
+    """Create a private host directory for isolated ccusage result files."""
     root = work_dir / "usage-captures"
     root.mkdir(parents=True, exist_ok=True)
     capture_dir = Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
@@ -740,6 +744,7 @@ def _make_isolated_capture_dir(work_dir: Path) -> Path:
 
 
 def _isolated_ccusage_wrapper_script(*, source: str, timeout_seconds: float) -> str:
+    """Return the shell wrapper that captures ccusage before and after the agent."""
     quoted_source = shlex.quote(source)
     return f"""
 set +e
@@ -764,6 +769,7 @@ def _read_isolated_ccusage_sample(
     *,
     sample: str,
 ) -> tuple[NormalizedUsage | None, str | None, str | None]:
+    """Parse one isolated ccusage sample and normalize its usage payload."""
     try:
         returncode = int((capture_dir / f"{sample}.status").read_text(encoding="utf-8").strip())
         stdout = (capture_dir / f"{sample}.stdout").read_text(encoding="utf-8")
