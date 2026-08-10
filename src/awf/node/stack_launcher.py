@@ -233,6 +233,11 @@ def _clarification_agent_environment(
 ) -> tuple[tuple[str, str], ...]:
     """Keep only model-provider settings and rewrite staged file references."""
 
+    agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
     provider_environment_names = _clarification_model_provider_environment_names(
         agent_environment,
         agent_runtime=agent_runtime,
@@ -389,6 +394,11 @@ def _clarification_auth_mounts(
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
 
+    agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
     return _clarification_staged_provider_auth_mounts(
         _clarification_provider_auth_mounts(
             auth_mounts,
@@ -397,6 +407,35 @@ def _clarification_auth_mounts(
             agent_runtime=agent_runtime,
             agent_model=agent_model,
         )
+    )
+
+
+def _clarification_resolve_google_credentials_placeholder(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    agent_runtime: AgentRuntime,
+) -> tuple[tuple[str, str], ...]:
+    """Replace a same-name ADC Compose token with its concrete auth-mount target."""
+
+    if agent_runtime is not AgentRuntime.gemini:
+        return agent_environment
+    environment_values = dict(agent_environment)
+    if environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS) not in (
+        f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
+        f"${_GOOGLE_APPLICATION_CREDENTIALS}",
+    ):
+        return agent_environment
+    dynamic_targets = tuple(
+        mount.target
+        for mount in auth_mounts
+        if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
+    )
+    if len(dynamic_targets) != 1:
+        return agent_environment
+    return tuple(
+        (name, dynamic_targets[0] if name == _GOOGLE_APPLICATION_CREDENTIALS else value)
+        for name, value in agent_environment
     )
 
 
