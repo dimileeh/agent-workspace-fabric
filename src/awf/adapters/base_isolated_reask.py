@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import subprocess
 import tempfile
@@ -76,6 +77,23 @@ def _isolated_reask_git_metadata_volume_binds(
         (snapshot_path, str(linked_git_dir)),
         (common_path, f"{DEFAULT_AGENT_WORKDIR}/.awf-clarification-git-common"),
     )
+
+
+def _discard_isolated_reask_git_metadata_task_result(
+    task: asyncio.Task[
+        tuple[tempfile.TemporaryDirectory[str] | None, tuple[tuple[Path, str], ...]]
+    ],
+) -> None:
+    """Consume a cancelled re-ask snapshot task and remove its temporary metadata."""
+    try:
+        temporary_metadata, _volume_binds = task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+    if temporary_metadata is not None:
+        with contextlib.suppress(OSError):
+            temporary_metadata.cleanup()
 
 
 def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:

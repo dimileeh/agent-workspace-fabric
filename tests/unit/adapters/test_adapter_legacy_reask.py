@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import tempfile
 from pathlib import Path
 from threading import Event, get_ident
 from typing import Any
@@ -196,6 +197,64 @@ class TestIsolatedReaskAdapter:
 
         assert snapshot_thread is not None
         assert snapshot_thread != event_loop_thread
+
+    @pytest.mark.unit
+    async def test_isolated_reask_cancellation_cleans_git_snapshot_created_by_worker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A cancelled awaiter transfers worker-created snapshot cleanup ownership."""
+        snapshot_started = Event()
+        release_snapshot = Event()
+        completed_snapshots: list[tempfile.TemporaryDirectory[str]] = []
+
+        def create_snapshot_after_cancellation(
+            _worktree_path: Path,
+        ) -> tuple[tempfile.TemporaryDirectory[str], tuple[tuple[Path, str], ...]]:
+            snapshot_started.set()
+            assert release_snapshot.wait(timeout=1)
+            temporary_metadata = tempfile.TemporaryDirectory[str](dir=tmp_path)
+            # Keep the worker result alive: the adapter must explicitly clean
+            # it instead of depending on its garbage-collection finalizer.
+            completed_snapshots.append(temporary_metadata)
+            return temporary_metadata, ()
+
+        monkeypatch.setattr(
+            adapter_base,
+            "_isolated_reask_git_metadata_volume_binds",
+            create_snapshot_after_cancellation,
+        )
+        adapter = CodexAdapter(runner=FakeCommandRunner())
+        run_task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+        )
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(snapshot_started.wait), timeout=0.2)
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+        finally:
+            release_snapshot.set()
+
+        for _ in range(20):
+            if completed_snapshots:
+                break
+            await asyncio.sleep(0.01)
+        assert completed_snapshots
+        snapshot_path = Path(completed_snapshots[0].name)
+        for _ in range(20):
+            if not snapshot_path.exists():
+                break
+            await asyncio.sleep(0.01)
+        try:
+            assert not snapshot_path.exists()
+        finally:
+            completed_snapshots[0].cleanup()
 
     @pytest.mark.unit
     async def test_isolated_reask_mounts_credential_free_git_metadata_read_only(

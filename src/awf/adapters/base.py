@@ -21,6 +21,7 @@ from typing import Any
 
 from awf.adapters.base_isolated_reask import (
     _discard_hosted_execute_task_result,
+    _discard_isolated_reask_git_metadata_task_result,
     _isolated_reask_git_metadata_volume_binds,
 )
 from awf.adapters.clarification_migration import (
@@ -715,10 +716,28 @@ class AgentAdapter(ABC):
                 # Linked worktrees store their Git control data in the shared
                 # bare mirror. Give non-Codex clarification CLIs only the
                 # credential-free subset needed to discover that checkout.
-                isolated_git_metadata, read_only_volume_binds = await asyncio.to_thread(
-                    _isolated_reask_git_metadata_volume_binds,
-                    isolated_worktree_host_path,
+                git_metadata_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _isolated_reask_git_metadata_volume_binds,
+                        isolated_worktree_host_path,
+                    )
                 )
+                try:
+                    isolated_git_metadata, read_only_volume_binds = await asyncio.shield(
+                        git_metadata_task
+                    )
+                except asyncio.CancelledError:
+                    # ``to_thread`` leaves the snapshot worker running after
+                    # cancellation. Hand its result to a cleanup callback, as
+                    # the surrounding finally cannot own a result it never
+                    # received.
+                    if git_metadata_task.done():
+                        _discard_isolated_reask_git_metadata_task_result(git_metadata_task)
+                    else:
+                        git_metadata_task.add_done_callback(
+                            _discard_isolated_reask_git_metadata_task_result
+                        )
+                    raise
                 invocation = build_isolated_tracked_compose_run(
                     compose_project=compose_project,
                     compose_file=compose_file,
