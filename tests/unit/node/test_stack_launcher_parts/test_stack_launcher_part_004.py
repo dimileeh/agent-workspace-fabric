@@ -532,6 +532,65 @@ def test_clarification_inputs_retain_bedrock_profile_directory_for_its_config_fi
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_bedrock_profile_directory_for_shared_credentials_file() -> (
+    None
+):
+    """Bedrock profile credentials within its standard directory remain available."""
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.aws/credentials"),
+        ("AWS_REGION", "us-west-2"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (aws_profile_directory,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(
+            source=aws_profile_directory.source,
+            target=aws_profile_directory.target,
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_clarification_bedrock_profile_directory_excludes_external_shared_credentials_file() -> (
+    None
+):
+    """An external Bedrock credentials file does not select the standard directory."""
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/run/awf/secrets/aws-credentials"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (aws_profile_directory,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == ()
+
+
+@pytest.mark.unit
 def test_clarification_bedrock_profile_directory_excludes_external_config_file() -> None:
     """An external Bedrock config file does not select the standard directory."""
     aws_profile_directory = AuthMount(
