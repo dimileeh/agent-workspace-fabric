@@ -456,6 +456,7 @@ def ready_to_merge_comment(
     head_sha: str,
     blocker_reason: str | None = None,
     blocker_items: Sequence[Mapping[str, object]] = (),
+    preserve_full_blocker_reason: bool = False,
 ) -> str:
     """Body used when AWF stops for human action.
 
@@ -465,9 +466,10 @@ def ready_to_merge_comment(
     gates are green.
     """
     if blocker_reason:
-        safe_blocker_reason = _redact_and_escape_markdown_inline(
-            _truncate_blocker_reason(redact_secrets(blocker_reason))
-        )
+        reason = redact_secrets(blocker_reason)
+        if blocker_items or not preserve_full_blocker_reason:
+            reason = _truncate_blocker_reason(reason)
+        safe_blocker_reason = _redact_and_escape_markdown_inline(reason)
         body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
             f"AWF did not auto-merge because {safe_blocker_reason}.\n\n"

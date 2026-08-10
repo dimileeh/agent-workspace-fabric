@@ -1347,6 +1347,7 @@ async def _post_human_notification_once(
     status: PRStatus,
     state: MonitorState,
     blocker_reason: str | None = None,
+    preserve_full_blocker_reason: bool = False,
 ) -> None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
@@ -1400,6 +1401,7 @@ async def _post_human_notification_once(
             head_sha=status.head_sha,
             blocker_reason=reason,
             blocker_items=items,
+            preserve_full_blocker_reason=preserve_full_blocker_reason,
         ),
     )
     state.mark_addressed(key, "notified")
