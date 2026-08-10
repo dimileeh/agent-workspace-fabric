@@ -1019,6 +1019,7 @@ async def test_compose_stack_launcher_resolves_profile_services_in_thread(
             "profile_services": compose.specs[0].services,
             "companions": (),
             "docker_mode": profile.docker.mode,
+            "clarification_enabled": True,
         },
     )
     # No companions in this profile, so no per-companion build runs off-thread.
