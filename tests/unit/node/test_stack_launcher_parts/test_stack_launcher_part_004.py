@@ -722,6 +722,41 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
 
 
 @pytest.mark.unit
+def test_gemini_clarification_selects_explicit_adc_without_google_cloud_toggle() -> None:
+    """An explicit Gemini ADC file takes precedence over CLI-file auth."""
+    gemini_auth = AuthMount(
+        source="/host/awf/auth/ws_launcher/gemini",
+        target="/home/agent/.gemini",
+        mode="rw",
+    )
+    application_credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
+        target="/run/awf/secrets/gcp/credentials.json",
+        mode="ro",
+    )
+    environment = (("GOOGLE_APPLICATION_CREDENTIALS", application_credentials.target),)
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(gemini_auth, application_credentials),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == (("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),)
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (gemini_auth, application_credentials),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == (
+        AuthMount(
+            source=application_credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_gemini_clarification_expands_optional_api_keys_before_auth_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

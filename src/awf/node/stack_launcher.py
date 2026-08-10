@@ -491,6 +491,10 @@ def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str
         for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
     ):
         return "api_key"
+    if compose_expand_value(
+        environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS, ""), environ=os.environ
+    ):
+        return "google_cloud"
     return "file"
 
 
