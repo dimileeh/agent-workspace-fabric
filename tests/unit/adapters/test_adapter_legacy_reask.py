@@ -38,11 +38,16 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _linked_reask_worktree(tmp_path: Path) -> tuple[Path, Path, str, str]:
+def _linked_reask_worktree(
+    tmp_path: Path, *, object_format: str | None = None
+) -> tuple[Path, Path, str, str]:
     """Create a re-ask worktree and an unrelated branch in its shared mirror."""
     origin = tmp_path / "origin"
     origin.mkdir()
-    _git(["init", "-q", "-b", "main"], origin)
+    init_args = ["init", "-q", "-b", "main"]
+    if object_format is not None:
+        init_args.append(f"--object-format={object_format}")
+    _git(init_args, origin)
     _git(["config", "user.name", "AWF Test"], origin)
     _git(["config", "user.email", "awf@test.local"], origin)
     (origin / "README.md").write_text("reask head\n", encoding="utf-8")
@@ -294,7 +299,7 @@ class TestIsolatedReaskAdapter:
     def test_isolated_reask_git_metadata_binds_exclude_linked_git_config(
         self, tmp_path: Path
     ) -> None:
-        """The snapshot contains only the re-ask HEAD and no mirror config."""
+        """The snapshot excludes linked config and its clone remote."""
         mirror_path, worktree_path, head_oid, unrelated_oid = _linked_reask_worktree(tmp_path)
         work_root = tmp_path / "awf-work"
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
@@ -326,7 +331,25 @@ class TestIsolatedReaskAdapter:
             ) == "/awf-clarification-git-common\n"
             assert (snapshot_path / "gitdir").read_text(encoding="utf-8") == "/workspace/.git\n"
             common_path = Path(temporary_metadata.name) / "common-git"
-            assert (common_path / "config").exists() is False
+            config_path = common_path / "config"
+            assert config_path.exists()
+            assert (
+                subprocess.run(
+                    [
+                        "git",
+                        "config",
+                        "--file",
+                        str(config_path),
+                        "--get-regexp",
+                        r"^remote\\..*\\.url$",
+                    ],
+                    cwd=tmp_path,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                ).returncode
+                == 1
+            )
             assert (
                 _git(
                     ["--git-dir", str(common_path), "cat-file", "-e", head_oid], tmp_path
@@ -349,6 +372,58 @@ class TestIsolatedReaskAdapter:
                     common_path,
                     "/awf-clarification-git-common",
                 ),
+            )
+        finally:
+            temporary_metadata.cleanup()
+
+    def test_isolated_reask_git_metadata_binds_preserve_sha256_format(self, tmp_path: Path) -> None:
+        """A credential-free snapshot remains usable for SHA-256 repositories."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
+            tmp_path, object_format="sha256"
+        )
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is not None
+        try:
+            common_path = Path(temporary_metadata.name) / "common-git"
+            config_path = common_path / "config"
+            assert (
+                _git(["--git-dir", str(common_path), "rev-parse", "HEAD"], tmp_path).stdout.strip()
+                == head_oid
+            )
+            assert (
+                _git(
+                    ["config", "--file", str(config_path), "--get", "core.repositoryformatversion"],
+                    tmp_path,
+                ).stdout.strip()
+                == "1"
+            )
+            assert (
+                _git(
+                    ["config", "--file", str(config_path), "--get", "extensions.objectformat"],
+                    tmp_path,
+                ).stdout.strip()
+                == "sha256"
+            )
+            assert (
+                subprocess.run(
+                    [
+                        "git",
+                        "config",
+                        "--file",
+                        str(config_path),
+                        "--get-regexp",
+                        r"^remote\\..*\\.url$",
+                    ],
+                    cwd=tmp_path,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                ).returncode
+                == 1
             )
         finally:
             temporary_metadata.cleanup()

@@ -62,7 +62,22 @@ def _isolated_reask_git_metadata_volume_binds(
             capture_output=True,
             timeout=30,
         )
-        (common_path / "config").unlink(missing_ok=True)
+        # Retain clone-created core/extensions metadata (notably SHA-256 object
+        # format settings), but remove the remote section whose URL may contain
+        # credentials. A bare clone always creates this origin section.
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                str(common_path / "config"),
+                "--remove-section",
+                "remote.origin",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
         shutil.copyfile(linked_git_dir / "HEAD", snapshot_path / "HEAD")
         (snapshot_path / "commondir").write_text(
             f"{_ISOLATED_REASK_COMMON_GIT_DIR}\n", encoding="utf-8"
