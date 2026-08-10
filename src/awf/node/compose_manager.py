@@ -274,6 +274,7 @@ def upgrade_persisted_clarification_service(
         mirror_target=mirror_target,
         agent_runtime=agent_runtime,
         agent_model=agent_model,
+        prefer_file_auth=False,
     )
     clarification_environment = dict(provider_environment)
     clarification_volumes: list[str] = []

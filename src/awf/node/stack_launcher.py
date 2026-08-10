@@ -230,8 +230,14 @@ def _clarification_agent_environment(
     mirror_target: str,
     agent_runtime: AgentRuntime,
     agent_model: str | None = None,
+    prefer_file_auth: bool = True,
 ) -> tuple[tuple[str, str], ...]:
-    """Keep only model-provider settings and rewrite staged file references."""
+    """Keep model-provider settings and rewrite staged file references.
+
+    Persisted legacy stacks retain direct provider credentials as a fallback:
+    their existing file-auth mount cannot be re-resolved before clarification
+    starts. Freshly rendered stacks prefer the staged file-auth source.
+    """
 
     agent_environment = _clarification_resolve_google_credentials_placeholder(
         agent_environment,
@@ -258,17 +264,25 @@ def _clarification_agent_environment(
         if source.target != staged.target
     }
     clarification_environment_names = provider_environment_names
-    if agent_runtime is AgentRuntime.codex and any(
-        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
-        for mount in source_mounts
+    if (
+        prefer_file_auth
+        and agent_runtime is AgentRuntime.codex
+        and any(
+            mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]
+            for mount in source_mounts
+        )
     ):
         # Match Codex readiness: an isolated file-auth mount is preferred to
         # static environment credentials, while non-secret endpoint settings
         # remain available to the clarification re-ask.
         clarification_environment_names -= _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES
-    if agent_runtime is AgentRuntime.claude_code and any(
-        mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.claude_code]
-        for mount in source_mounts
+    if (
+        prefer_file_auth
+        and agent_runtime is AgentRuntime.claude_code
+        and any(
+            mount.target in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.claude_code]
+            for mount in source_mounts
+        )
     ):
         # Match Claude readiness: an isolated file-auth mount is preferred to
         # static environment credentials, while non-secret endpoint settings
