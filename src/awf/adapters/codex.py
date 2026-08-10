@@ -62,6 +62,7 @@ class CodexAdapter(AgentAdapter):
         return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CODEX_OPENAI_ENV_NAMES)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
+        """Build executable arguments for a Codex CLI invocation."""
         args = [
             "codex",
             "exec",

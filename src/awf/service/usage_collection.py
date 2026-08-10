@@ -255,6 +255,7 @@ class _CcusageSampleContext(UsageSampleContext):
         self._pending_write: asyncio.Task[Path] | None = None
 
     async def finalize(self, *, status: str) -> None:
+        """Persist the final usage sample and stop periodic collection."""
         if self._finalized:
             return
         self._finalized = True

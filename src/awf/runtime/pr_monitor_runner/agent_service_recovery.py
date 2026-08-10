@@ -94,6 +94,7 @@ async def _run_monitor_agent_with_service_recovery(
     git_preparation: AgentRuntimeGitPreparation | None = None,
     isolated_worktree_host_path: Path | None = None,
 ) -> AgentRunResult:
+    """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted

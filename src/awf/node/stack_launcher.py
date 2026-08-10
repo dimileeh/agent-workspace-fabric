@@ -1444,6 +1444,7 @@ def _hosted_dynamic_file_auth_mount_targets(
 def _hosted_google_application_credentials_target(
     agent_environment: tuple[tuple[str, str], ...],
 ) -> str | None:
+    """Return a safe absolute target for a hosted Google ADC mount."""
     raw = dict(agent_environment).get(_GOOGLE_APPLICATION_CREDENTIALS)
     if raw is None:
         return None

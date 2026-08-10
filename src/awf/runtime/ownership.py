@@ -129,6 +129,7 @@ def _repair_agent_runtime_ownership_in_thread(
     workspace_id: str,
     linked_worktree_id: str | None,
 ) -> None:
+    """Repair ownership using a linked-worktree identifier when one is supplied."""
     if linked_worktree_id is not None and linked_worktree_id != worktree_path.name:
         raise ValueError(
             "refusing ownership repair: temporary linked-worktree identifier does not "

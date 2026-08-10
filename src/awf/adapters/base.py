@@ -1305,6 +1305,7 @@ class AgentAdapter(ABC):
         compose_project: str,
         isolated_sampler_ctx: IsolatedUsageSampleContext | None,
     ) -> AgentRunResult:
+        """Run an agent CLI with streamed logs and optional isolated usage capture."""
         # Stream the prompt on stdin and close it explicitly. This avoids OS
         # argv length limits for large review comments while still preventing
         # CLIs from waiting forever for inherited interactive input.

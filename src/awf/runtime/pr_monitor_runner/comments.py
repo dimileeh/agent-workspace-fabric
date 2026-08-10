@@ -460,6 +460,7 @@ async def _address_thread(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
+    """Ask the monitor agent to resolve a review thread and return its verdict."""
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -557,6 +558,7 @@ async def _address_review_comment(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
+    """Resolve a review comment and return only its verdict."""
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
         repo=repo,
@@ -596,6 +598,7 @@ async def _address_review_comment_result(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult:
+    """Resolve a review comment while retaining its full verdict result."""
     from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
 
     prompt_owned_paths = (
@@ -1137,6 +1140,7 @@ async def _invoke_cli_for_verdict_result(
     commit_dirty_changes: bool = True,
     isolated_worktree_host_path: Path | None = None,
 ) -> VerdictResult:
+    """Run the monitor agent and parse its verdict without losing reason details."""
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
     result_stdout = ""

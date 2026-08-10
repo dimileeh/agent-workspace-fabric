@@ -373,6 +373,7 @@ def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResu
 
 
 def _sanitize_verdict_reason(reason: str | None) -> str | None:
+    """Redact and normalize a verdict reason, dropping unusable content."""
     if reason is None:
         return None
     cleaned = redact_secrets(reason).strip()
