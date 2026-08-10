@@ -1101,9 +1101,7 @@ class ComposeStackLauncher:
                 docker_mode=profile.docker.mode,
                 clarification_enabled=request.clarification_enabled,
             )
-        # Resolve the effective compose-up budget before pre-building companions so
-        # the cache pre-build shares the same subprocess cap the inline `docker
-        # compose up` build uses (see _build_companion_services).
+        # Give pre-builds and inline builds the same effective compose-up budget.
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=request.companions,
