@@ -221,6 +221,7 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     helper_target = "/run/awf/secrets/google/external-account-helper"
+    non_normalized_helper_target = "/run/awf/secrets/google/./external-account-helper"
     output_target = "/run/awf/secrets/google/external-account-output.json"
     staged_adc = tmp_path / "clarification-auth" / "adc.json"
     staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
@@ -233,7 +234,7 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
                     "executable": {
                         "command": (
                             f"printf '%s' {helper_target}-backup && "
-                            f"{helper_target} --output {output_target} | jq -c ."
+                            f"{non_normalized_helper_target} --output {output_target} | jq -c ."
                         ),
                         "output_file": output_target,
                     }
@@ -305,6 +306,7 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     helper_target = "/run/awf/secrets/google/external-account-helper"
+    non_normalized_helper_target = "/run/awf/secrets/google/./external-account-helper"
     output_target = "/run/awf/secrets/google/external-account-output.json"
     staged_adc = tmp_path / "clarification-auth" / "adc.json"
     staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
@@ -317,7 +319,7 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
                     "executable": {
                         "command": (
                             f"printf '%s' {helper_target}-backup && "
-                            f"{helper_target} --output {output_target} | jq -c ."
+                            f"{non_normalized_helper_target} --output {output_target} | jq -c ."
                         ),
                         "output_file": output_target,
                     }

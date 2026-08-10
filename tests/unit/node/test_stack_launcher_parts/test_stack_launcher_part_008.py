@@ -713,6 +713,7 @@ def test_clarification_stages_external_account_executable_source_mounts(
     output.write_text("{}", encoding="utf-8")
     adc_config = tmp_path / "external-account-adc.json"
     helper_target = "/run/awf/secrets/google/external-account-helper"
+    non_normalized_helper_target = "/run/awf/secrets/google/./external-account-helper"
     output_target = "/run/awf/secrets/google/external-account-output.json"
     adc_target = "/run/awf/secrets/google/external-account-adc.json"
     adc_config.write_text(
@@ -721,7 +722,7 @@ def test_clarification_stages_external_account_executable_source_mounts(
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f"{helper_target} --output {output_target}",
+                        "command": f"{non_normalized_helper_target} --output {output_target}",
                         "output_file": output_target,
                     }
                 },
