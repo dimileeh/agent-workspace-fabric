@@ -83,6 +83,9 @@ _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
+_GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE = re.compile(
+    r"^\$\{GOOGLE_APPLICATION_CREDENTIALS(?::-|-)(?P<target>/[^$}]+)\}$"
+)
 _GCLOUD_AUTH_MOUNT_TARGET = "/home/agent/.config/gcloud"
 _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     {
@@ -438,7 +441,7 @@ def _clarification_resolve_google_credentials_placeholder(
     auth_mounts: Sequence[AuthMount],
     agent_runtime: AgentRuntime,
 ) -> tuple[tuple[str, str], ...]:
-    """Replace a same-name ADC Compose token with its concrete auth-mount target."""
+    """Replace a self-referential ADC Compose value with its concrete target."""
 
     environment_values = dict(agent_environment)
     if agent_runtime is not AgentRuntime.gemini and (
@@ -446,20 +449,27 @@ def _clarification_resolve_google_credentials_placeholder(
         or environment_values.get("CLAUDE_CODE_USE_VERTEX") != "1"
     ):
         return agent_environment
-    if environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS) not in (
+    google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+    if google_credentials in (
         f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
         f"${_GOOGLE_APPLICATION_CREDENTIALS}",
     ):
-        return agent_environment
-    dynamic_targets = tuple(
-        mount.target
-        for mount in auth_mounts
-        if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
-    )
-    if len(dynamic_targets) != 1:
+        dynamic_targets = tuple(
+            mount.target
+            for mount in auth_mounts
+            if mount.mode == "ro" and mount.source == mount.target and mount.target.startswith("/")
+        )
+        if len(dynamic_targets) != 1:
+            return agent_environment
+        google_credentials = dynamic_targets[0]
+    elif match := _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE.fullmatch(
+        google_credentials or ""
+    ):
+        google_credentials = match.group("target")
+    else:
         return agent_environment
     return tuple(
-        (name, dynamic_targets[0] if name == _GOOGLE_APPLICATION_CREDENTIALS else value)
+        (name, google_credentials if name == _GOOGLE_APPLICATION_CREDENTIALS else value)
         for name, value in agent_environment
     )
 
