@@ -72,7 +72,11 @@ def _make_dir(path: Path, *, age_seconds: float | None = None, now: float | None
     return path
 
 
-async def _create_workspace(session_factory: async_sessionmaker[AsyncSession]) -> str:
+async def _create_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    task_policy: dict[str, object] | None = None,
+) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
             repo_url="git@github.com:example/repo.git",
@@ -81,6 +85,7 @@ async def _create_workspace(session_factory: async_sessionmaker[AsyncSession]) -
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         await session.commit()
         return workspace.id
@@ -168,6 +173,37 @@ async def test_leaves_live_provisioning_young_and_companion_dirs(
     assert live_compose.exists()
     assert companion_dir.exists()
     assert young.exists()
+
+
+@pytest.mark.usefixtures("engine")
+async def test_leaves_legacy_reserved_pattern_companion_of_live_parent(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A persisted pre-reservation companion is not a temporary re-ask."""
+    now = 2_100_000.0
+    legacy_name = "isolated_reask_0123456789abcdef0123456789abcdef"
+    live_id = await _create_workspace(
+        session_factory,
+        task_policy={"companions": [{"name": legacy_name, "repo_url": "git@example/legacy.git"}]},
+    )
+    legacy_companion_dir = _make_dir(
+        tmp_path / "git" / "worktrees" / companion_worktree_id(live_id, legacy_name),
+        age_seconds=10_000_000.0,
+        now=now,
+    )
+
+    result = await reconcile_orphaned_workspace_dirs(
+        session_factory,
+        work_dir=tmp_path,
+        now=now,
+        min_age_hours=0,
+        execute=True,
+    )
+
+    assert result.reaped_count == 0
+    assert result.orphan_count == 0
+    assert legacy_companion_dir.exists()
 
 
 @pytest.mark.usefixtures("engine")
@@ -406,6 +442,33 @@ def test_scan_reclaims_interrupted_reask_worktree_of_live_parent(tmp_path: Path)
         targets[0].workspace_id
         == "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
     )
+    assert scanned == 2
+    assert dropped == 0
+    assert young_orphan == 0
+
+
+def test_scan_only_protects_persisted_companion_identity_in_worktree_root(tmp_path: Path) -> None:
+    """A companion identity cannot protect unrelated per-workspace roots."""
+    now = 13_550_000.0
+    companion_id = "ws_live__companion__isolated_reask_0123456789abcdef0123456789abcdef"
+    worktree = _make_dir(
+        tmp_path / "git" / "worktrees" / companion_id,
+        age_seconds=10_000.0,
+        now=now,
+    )
+    stray_auth = _make_dir(tmp_path / "auth" / companion_id, age_seconds=10_000.0, now=now)
+
+    targets, scanned, dropped, young_orphan = scan_orphan_workspace_dirs(
+        tmp_path,
+        frozenset({"ws_live"}),
+        known_companion_worktree_ids=frozenset({companion_id}),
+        now=now,
+        min_age_hours=1,
+        limit=10,
+    )
+
+    assert [target.path for target in targets] == [stray_auth]
+    assert worktree.exists()
     assert scanned == 2
     assert dropped == 0
     assert young_orphan == 0

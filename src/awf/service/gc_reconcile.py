@@ -51,6 +51,7 @@ from awf.common.companions import (
     is_isolated_reask_worktree_id,
     isolated_reask_worktree_liveness_lock_path,
     parent_workspace_id_from_companion_worktree_id,
+    workspace_and_companion_ids,
 )
 from awf.common.logging import get_logger
 from awf.db.models import Workspace
@@ -199,6 +200,7 @@ def scan_orphan_workspace_dirs(
     work_dir: Path,
     known_workspace_ids: frozenset[str] | set[str],
     *,
+    known_companion_worktree_ids: frozenset[str] | set[str] = frozenset(),
     now: float,
     min_age_hours: float,
     limit: int,
@@ -208,9 +210,11 @@ def scan_orphan_workspace_dirs(
     Pure: lists ``ws_*`` directory entries under each per-workspace root, maps a
     companion-worktree dir name back to its parent id (so a companion of a *live*
     parent is not mis-classified as orphaned), except for temporary isolated
-    re-ask checkouts. Those use a UUID-qualified internal suffix and are treated
-    as independently row-less after the grace window. Candidates are sorted
-    oldest-first (deterministic), then capped to ``limit``.
+    re-ask checkouts. Persisted pre-reservation companion identities are exempt
+    from that temporary classification. Unrecorded temporary checkouts use a
+    UUID-qualified internal suffix and are treated as independently row-less
+    after the grace window. Candidates are sorted oldest-first (deterministic),
+    then capped to ``limit``.
 
     ``scanned_count`` counts *every* ``ws_*`` dir entry, so on its own it cannot
     distinguish dirs backed by a live row (healthy) from row-less dirs still
@@ -239,6 +243,13 @@ def scan_orphan_workspace_dirs(
             if entry.is_symlink() or not entry.is_dir():
                 continue
             scanned += 1
+            # Before the isolated re-ask prefix was reserved, a persisted
+            # companion could use a UUID-qualified name that now matches the
+            # temporary checkout pattern. Its durable task policy proves this
+            # is a live companion; protect that exact identity only in the
+            # worktree root before temporary-checkout classification below.
+            if kind == "worktree" and entry.name in known_companion_worktree_ids:
+                continue
             # The monitor takes this lock before ``git worktree add`` and holds
             # it until its clarification container and Git cleanup have
             # finished. It therefore closes the zero-grace race while an
@@ -364,12 +375,16 @@ async def reconcile_orphaned_workspace_dirs(
     # with an already-scanned orphan dir is vanishingly unlikely. Second, the
     # ``min_age_hours`` grace window covers the inverse race -- a dir created just
     # before its row commits is younger than the grace and is never a target.
-    known_ids = await _load_known_workspace_ids(session_factory)
+    (
+        known_ids,
+        known_companion_worktree_ids,
+    ) = await _load_known_workspace_and_companion_worktree_ids(session_factory)
 
     targets, scanned, dropped, young_orphan = await asyncio.to_thread(
         scan_orphan_workspace_dirs,
         normalized_work_dir,
         known_ids,
+        known_companion_worktree_ids=known_companion_worktree_ids,
         now=resolved_now,
         min_age_hours=min_age_hours,
         limit=limit,
@@ -574,13 +589,24 @@ async def _reap_target(target: OrphanDirTarget, *, work_dir: Path) -> OrphanDirR
     )
 
 
-async def _load_known_workspace_ids(
+async def _load_known_workspace_and_companion_worktree_ids(
     session_factory: async_sessionmaker[AsyncSession],
-) -> frozenset[str]:
-    """Load every workspace id across all statuses; any row protects its dirs."""
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Load all workspace IDs and legacy persisted companion worktree IDs."""
     async with session_scope(session_factory) as session:
-        rows = (await session.execute(select(Workspace.id))).all()
-    return frozenset(str(row[0]) for row in rows)
+        rows = (await session.execute(select(Workspace.id, Workspace.task_policy))).all()
+
+    workspace_ids: set[str] = set()
+    companion_worktree_ids: set[str] = set()
+    for workspace_id, task_policy in rows:
+        normalized_workspace_id = str(workspace_id)
+        workspace_ids.add(normalized_workspace_id)
+        for companion_worktree_id in workspace_and_companion_ids(
+            normalized_workspace_id, task_policy
+        )[1:]:
+            if is_isolated_reask_worktree_id(companion_worktree_id):
+                companion_worktree_ids.add(companion_worktree_id)
+    return frozenset(workspace_ids), frozenset(companion_worktree_ids)
 
 
 def _default_compose_manager(work_dir: Path) -> ComposeManager:
