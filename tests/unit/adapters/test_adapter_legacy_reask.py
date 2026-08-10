@@ -467,6 +467,42 @@ class TestIsolatedReaskAdapter:
         assert "run" in runner.calls[5].args
 
     @pytest.mark.unit
+    async def test_isolated_reask_keeps_migration_compose_when_network_reap_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed network reap retains its Compose declaration for later teardown."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result()
+        runner.queue_result(returncode=1, stderr="network still has active endpoints")
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == "network still has active endpoints"
+        assert exc.value.details == {"services": ("ollama-sidecar",)}
+        assert len(runner.calls) == 3
+        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        assert rendered["services"]["ollama-sidecar"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert rendered["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_legacy-clarification-model-net",
+            "internal": True,
+        }
+
+    @pytest.mark.unit
     async def test_isolated_reask_surfaces_legacy_model_service_recovery_failure(
         self, tmp_path: Path
     ) -> None:
@@ -802,6 +838,49 @@ class TestIsolatedReaskAdapter:
 
         assert len(runner.calls) == 4
         assert compose_file.read_bytes() == original_compose_file
+
+    @pytest.mark.unit
+    async def test_isolated_reask_keeps_migration_compose_when_cancelled_network_reap_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation cannot restore a file that would orphan a failed network reap."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        class _CancellingSidecarUpdateRunner(FakeCommandRunner):
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 1:
+                    raise asyncio.CancelledError
+                return result
+
+        runner = _CancellingSidecarUpdateRunner()
+        runner.queue_result()
+        runner.queue_result()
+        runner.queue_result(returncode=1, stderr="network still has active endpoints")
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == "network still has active endpoints"
+        assert len(runner.calls) == 3
+        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        assert rendered["services"]["ollama-sidecar"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert rendered["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_legacy-clarification-model-net",
+            "internal": True,
+        }
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_raises(

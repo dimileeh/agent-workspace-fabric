@@ -127,8 +127,8 @@ async def _reap_persisted_clarification_model_migration(
     compose_file: Path,
     workspace_id: str | None,
     clarification_model_services: tuple[str, ...],
-) -> None:
-    """Remove migrated model sidecars and their dedicated legacy network."""
+) -> CommandResult:
+    """Remove migrated sidecars and return the result of reaping their network."""
     with contextlib.suppress(Exception):
         await runner.run(
             [
@@ -144,16 +144,14 @@ async def _reap_persisted_clarification_model_migration(
                 *clarification_model_services,
             ]
         )
-    with contextlib.suppress(Exception):
-        await runner.run(
-            [
-                "docker",
-                "network",
-                "rm",
-                f"awf-{workspace_id or compose_project.removeprefix('awf_')}-"
-                "clarification-model-net",
-            ]
-        )
+    return await runner.run(
+        [
+            "docker",
+            "network",
+            "rm",
+            f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net",
+        ]
+    )
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -560,8 +558,14 @@ class AgentAdapter(ABC):
                     while not cleanup_task.done():
                         with contextlib.suppress(asyncio.CancelledError):
                             await asyncio.shield(cleanup_task)
-                    with contextlib.suppress(asyncio.CancelledError):
-                        cleanup_task.result()
+                    cleanup_result = cleanup_task.result()
+                    if not cleanup_result.ok:
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=cleanup_result,
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                            details={"services": clarification_model_services},
+                        ) from None
                     restored_legacy_compose = False
                     try:
                         _restore_compose_file(
@@ -633,36 +637,41 @@ class AgentAdapter(ABC):
                     # current Compose file. Stop and remove the migrated
                     # sidecars, then reap their now-unused network before
                     # restoring the legacy file that does not declare it.
-                    try:
-                        await _reap_persisted_clarification_model_migration(
-                            self._runner,
-                            compose_project=compose_project,
-                            compose_file=compose_file,
-                            workspace_id=workspace_id,
-                            clarification_model_services=clarification_model_services,
+                    cleanup_result = await _reap_persisted_clarification_model_migration(
+                        self._runner,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        workspace_id=workspace_id,
+                        clarification_model_services=clarification_model_services,
+                    )
+                    if not cleanup_result.ok:
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=cleanup_result,
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                            details={"services": clarification_model_services},
                         )
-                    finally:
-                        restored_legacy_compose = False
-                        try:
-                            await asyncio.to_thread(
-                                _restore_compose_file,
-                                compose_file=compose_file,
-                                contents=original_compose_file,
-                            )
-                        except OSError:
-                            # Reaping has removed the legacy sidecars. If the
-                            # persisted Compose file cannot be restored, the
-                            # workspace is left with neither a usable legacy
-                            # definition nor a running model endpoint. Surface
-                            # that terminal lifecycle damage to the monitor.
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=model_service_update,
-                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
-                                details={"services": clarification_model_services},
-                            ) from None
-                        else:
-                            restored_legacy_compose = True
+                    restored_legacy_compose = False
+                    try:
+                        await asyncio.to_thread(
+                            _restore_compose_file,
+                            compose_file=compose_file,
+                            contents=original_compose_file,
+                        )
+                    except OSError:
+                        # Reaping has removed the legacy sidecars. If the
+                        # persisted Compose file cannot be restored, the
+                        # workspace is left with neither a usable legacy
+                        # definition nor a running model endpoint. Surface
+                        # that terminal lifecycle damage to the monitor.
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=model_service_update,
+                            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                            details={"services": clarification_model_services},
+                        ) from None
+                    else:
+                        restored_legacy_compose = True
                     if restored_legacy_compose:
                         # The migrated containers were deliberately removed
                         # before their dedicated network. Start replacements
