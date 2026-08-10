@@ -237,6 +237,7 @@ class _CcusageSampleContext(UsageSampleContext):
         source: str | None,
         accumulated_usage_at_run_start: NormalizedUsage | None,
         prior_ccusage_source: str | None,
+        empty_baseline_is_zero: bool = False,
     ) -> None:
         self._collector = collector
         self._compose_project = compose_project
@@ -246,6 +247,7 @@ class _CcusageSampleContext(UsageSampleContext):
         self._source = source
         self._accumulated_usage_at_run_start = accumulated_usage_at_run_start
         self._prior_ccusage_source = prior_ccusage_source
+        self._empty_baseline_is_zero = empty_baseline_is_zero
         self._latest_accumulated_usage = accumulated_usage_at_run_start
         self._baseline: NormalizedUsage | None = None
         # Set when baseline capture failed (vs. a fresh, legitimately empty one).
@@ -358,6 +360,7 @@ class _CcusageSampleContext(UsageSampleContext):
             self._baseline = usage
         elif (
             reason == REASON_NO_RECORDS
+            and not self._empty_baseline_is_zero
             and self._accumulated_usage_at_run_start is not None
             and self._prior_ccusage_source == self._source
         ):
@@ -674,6 +677,10 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             source=source,
             accumulated_usage_at_run_start=accumulated_usage_at_run_start,
             prior_ccusage_source=prior_ccusage_source,
+            # The clarification container has a deliberately fresh auth/home
+            # state, so no records is its true zero baseline even when the
+            # workspace has a same-source usage snapshot from a repair run.
+            empty_baseline_is_zero=True,
         )
         self._agent_cli_args = list(cli_args)
         self._capture_dir = capture_dir

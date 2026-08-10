@@ -235,6 +235,57 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
 
 
 @pytest.mark.unit
+async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh clarification container adds its usage after a repair run."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_isolated_empty_baseline",
+            provider="codex",
+            ccusage_source="codex",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=500,
+            cost_estimate=1.20,
+            currency="USD",
+        ),
+        work_dir=tmp_path,
+    )
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_empty_baseline",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    capture_dir = ctx.volume_binds[0][0]
+    for sample, payload in (
+        ("baseline", {}),
+        ("final", {"totals": {"totalTokens": 50, "totalCost": 0.13}}),
+    ):
+        (capture_dir / f"{sample}.status").write_text("0\n", encoding="utf-8")
+        (capture_dir / f"{sample}.stdout").write_text(json.dumps(payload), encoding="utf-8")
+        (capture_dir / f"{sample}.stderr").write_text("", encoding="utf-8")
+
+    await ctx.finalize(status="success")
+
+    snapshot = read_latest_usage_snapshot("ws_isolated_empty_baseline", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.status == "available"
+    assert snapshot.reason is None
+    assert snapshot.total_tokens == 550
+    assert snapshot.cost_estimate == pytest.approx(1.33)
+    assert snapshot.run_delta is not None
+    assert snapshot.run_delta["total_tokens"] == 50
+    assert snapshot.run_delta["cost_estimate"] == pytest.approx(0.13)
+
+
+@pytest.mark.unit
 async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
