@@ -76,6 +76,7 @@ _log = get_logger(__name__)
 
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
 _ISOLATED_REASK_WORKTREE_PREFIX = ".awf-needs-human-reask-"
+_CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 
 
 @dataclass(frozen=True)
@@ -1045,6 +1046,12 @@ async def _invoke_cli_for_verdict_result(
             )
         result_stdout = result.stdout
     except AgentRunError as exc:
+        if exc.reason_code == _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED:
+            raise _MonitorAgentServiceRecoveryFailedError(
+                "clarification model service recovery failed",
+                reason_code=exc.reason_code,
+                details=exc.details,
+            ) from exc
         cli_failed = True
         result_stdout = exc.result.stdout
         agent_run_err = exc

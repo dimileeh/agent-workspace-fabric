@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.adapters.base import AgentRunResult
+from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -220,3 +221,56 @@ async def test_non_mutating_verdict_invocation_skips_commit_after_agent_error(
         )
 
     assert committed is False
+
+
+@pytest.mark.unit
+async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed legacy sidecar recovery must stop the clarification flow."""
+    handled_agent_error = False
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        raise AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="could not restore model sidecar",
+            ),
+            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+            details={"services": ("ollama-sidecar",)},
+        )
+
+    async def _handle_provider_agent_run_error(*_args: object, **_kwargs: object) -> str:
+        nonlocal handled_agent_error
+        handled_agent_error = True
+        return "deterministic"
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+    )
+    (tmp_path / "ws_legacy").mkdir()
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
+
+    with pytest.raises(comments._MonitorAgentServiceRecoveryFailedError) as raised:
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id="ws_legacy",
+            prompt="clarify the required decision",
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            commit_dirty_changes=False,
+            isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
+        )
+
+    assert raised.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+    assert raised.value.details == {"services": ("ollama-sidecar",)}
+    assert handled_agent_error is False

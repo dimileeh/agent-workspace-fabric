@@ -19,6 +19,7 @@ from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -761,6 +762,10 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
     "error",
     (
         _MonitorAgentRuntimeOwnershipRepairFailedError("ownership repair failed"),
+        _MonitorAgentServiceRecoveryFailedError(
+            "clarification model service recovery failed",
+            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+        ),
         _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING_UNRECOVERABLE"),
         _MonitorMirrorHooksPathRepairFailedError(),
         _MonitorPolicyBlockedError("policy blocked"),
