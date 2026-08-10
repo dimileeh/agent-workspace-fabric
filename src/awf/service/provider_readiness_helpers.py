@@ -880,7 +880,7 @@ def overlay_profile_ollama_base_url(
     if not isinstance(profile_snapshot, Mapping):
         return result
     try:
-        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+        profile = WorkspaceProfile.model_validate_persisted(dict(profile_snapshot))
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
@@ -1020,7 +1020,7 @@ def overlay_profile_provider_credentials(
     if not isinstance(profile_snapshot, Mapping):
         return result
     try:
-        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+        profile = WorkspaceProfile.model_validate_persisted(dict(profile_snapshot))
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
