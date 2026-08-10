@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import posixpath
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -528,13 +529,14 @@ def _clarification_model_provider_auth_mount_targets(
             else frozenset()
         )
         aws_config_file = environment_values.get("AWS_CONFIG_FILE", "")
+        normalized_aws_config_file = posixpath.normpath(aws_config_file)
         if (
             environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
             and environment_values.get("AWS_PROFILE")
             and "AWS_PROFILE"
             in _clarification_claude_code_bedrock_environment_names(environment_values)
             and not environment_values.get("AWS_SHARED_CREDENTIALS_FILE")
-            and (not aws_config_file or aws_config_file.startswith("/home/agent/.aws/"))
+            and (not aws_config_file or normalized_aws_config_file.startswith("/home/agent/.aws/"))
         ):
             runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
     if agent_runtime is AgentRuntime.gemini:

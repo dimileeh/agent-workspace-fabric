@@ -556,6 +556,30 @@ def test_clarification_bedrock_profile_directory_excludes_external_config_file()
 
 
 @pytest.mark.unit
+def test_clarification_bedrock_profile_directory_excludes_traversal_config_file() -> None:
+    """A traversal config path does not select the standard AWS directory."""
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("AWS_CONFIG_FILE", "/home/agent/.aws/../../run/awf/secrets/aws-config"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (aws_profile_directory,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == ()
+
+
+@pytest.mark.unit
 def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback() -> None:
     """Vertex clarification does not stage inactive ADC beside explicit credentials."""
     gcloud_auth = AuthMount(
