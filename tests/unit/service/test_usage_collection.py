@@ -117,11 +117,12 @@ def test_isolated_capture_dir_assigns_private_runtime_ownership(
         ownership_calls.append((path, uid, gid))
 
     monkeypatch.setattr(usage_collection.os, "chown", _record_chown)
-    capture_dir = _make_isolated_capture_dir(tmp_path)
+    capture_dir = _make_isolated_capture_dir(tmp_path, workspace_id="ws_capture_owner")
 
     stat = capture_dir.stat()
     assert ownership_calls == [(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)]
     assert S_IMODE(stat.st_mode) == 0o700
+    assert capture_dir.parent == tmp_path / "compose" / "ws_capture_owner" / "usage-captures"
 
 
 @pytest.mark.unit
@@ -137,9 +138,9 @@ def test_isolated_capture_dir_removes_partial_dir_when_ownership_fails(
     monkeypatch.setattr(usage_collection.os, "chown", _fail_chown)
 
     with pytest.raises(PermissionError, match="ownership denied"):
-        _make_isolated_capture_dir(tmp_path)
+        _make_isolated_capture_dir(tmp_path, workspace_id="ws_capture_failure")
 
-    assert list((tmp_path / "usage-captures").iterdir()) == []
+    assert list((tmp_path / "compose" / "ws_capture_failure" / "usage-captures").iterdir()) == []
 
 
 @pytest.mark.unit
@@ -214,6 +215,7 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
     assert "capture_ccusage final" in wrapper_script
     assert ctx.volume_binds[0][1] == "/tmp/awf-ccusage"
     capture_dir = ctx.volume_binds[0][0]
+    assert capture_dir.parent == tmp_path / "compose" / "ws_isolated" / "usage-captures"
     for sample, total_tokens in (("baseline", 5), ("final", 8)):
         (capture_dir / f"{sample}.status").write_text("0\n", encoding="utf-8")
         (capture_dir / f"{sample}.stdout").write_text(
@@ -320,7 +322,7 @@ async def test_isolated_run_records_missing_capture_as_unavailable(
 async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _fail_capture_setup(_work_dir: Path) -> Path:
+    def _fail_capture_setup(_work_dir: Path, *, workspace_id: str) -> Path:
         raise PermissionError("capture ownership denied")
 
     monkeypatch.setattr(usage_collection, "_make_isolated_capture_dir", _fail_capture_setup)

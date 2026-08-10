@@ -190,7 +190,11 @@ class CcusageCollector(UsageSampler):
                 work_dir=self._work_dir,
             )
             capture_dir = (
-                await asyncio.to_thread(_make_isolated_capture_dir, self._work_dir)
+                await asyncio.to_thread(
+                    _make_isolated_capture_dir,
+                    self._work_dir,
+                    workspace_id=workspace_id,
+                )
                 if source is not None
                 else None
             )
@@ -748,9 +752,9 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         )
 
 
-def _make_isolated_capture_dir(work_dir: Path) -> Path:
-    """Create a private host directory for isolated ccusage result files."""
-    root = work_dir / "usage-captures"
+def _make_isolated_capture_dir(work_dir: Path, *, workspace_id: str) -> Path:
+    """Create a private ccusage capture under the workspace's reclaimable compose root."""
+    root = work_dir / "compose" / workspace_id / "usage-captures"
     root.mkdir(parents=True, exist_ok=True)
     capture_dir = Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
     # The root worker bind-mounts this directory into the non-root agent-runtime
