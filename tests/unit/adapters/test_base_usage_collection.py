@@ -424,6 +424,49 @@ async def test_isolated_capture_failure_does_not_mask_timeout_or_container_remov
 
 
 @pytest.mark.unit
+async def test_isolated_timeout_cancellation_during_capture_still_removes_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(
+        events,
+        result=CommandResult(
+            returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON
+        ),
+    )
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+    capture_started = asyncio.Event()
+
+    async def _block_capture(_self: _IsolatedRecordingContext, *, container_name: str) -> None:
+        events.append(f"capture:{container_name}")
+        capture_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(_IsolatedRecordingContext, "capture_final_before_cleanup", _block_capture)
+
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_timeout_capture_cancelled",
+            isolated_worktree_host_path=Path(
+                "/worktrees/ws_isolated_timeout_capture_cancelled/reask"
+            ),
+        )
+    )
+    await asyncio.wait_for(capture_started.wait(), timeout=0.2)
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
+    assert events[-1] == "finalize:cancelled"
+
+
+@pytest.mark.unit
 async def test_sampler_finalized_cancelled_on_cancellation() -> None:
     events: list[str] = []
     sampler = _RecordingSampler(events)

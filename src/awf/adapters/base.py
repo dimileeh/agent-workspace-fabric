@@ -1477,16 +1477,18 @@ class AgentAdapter(ABC):
                 else _failure_reason_for_result(result)
             )
             if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
-                await self._capture_isolated_usage_before_cleanup(
-                    isolated_sampler_ctx,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
-                await cleanup_compose_exec_invocation(
-                    self._runner,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
+                try:
+                    await self._capture_isolated_usage_before_cleanup(
+                        isolated_sampler_ctx,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
+                finally:
+                    await cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
