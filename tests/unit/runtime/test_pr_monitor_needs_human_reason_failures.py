@@ -224,10 +224,17 @@ async def test_non_mutating_verdict_invocation_skips_commit_after_agent_error(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "reason_code",
+    (
+        "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+        "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+    ),
+)
 async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    reason_code: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed legacy sidecar recovery must stop the clarification flow."""
+    """A failed legacy rollback must stop the clarification flow."""
     handled_agent_error = False
 
     async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
@@ -241,7 +248,7 @@ async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery
                 stdout="",
                 stderr="could not restore model sidecar",
             ),
-            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+            reason_code=reason_code,
             details={"services": ("ollama-sidecar",)},
         )
 
@@ -271,6 +278,6 @@ async def test_non_mutating_verdict_invocation_propagates_failed_legacy_recovery
             isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
         )
 
-    assert raised.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+    assert raised.value.reason_code == reason_code
     assert raised.value.details == {"services": ("ollama-sidecar",)}
     assert handled_agent_error is False

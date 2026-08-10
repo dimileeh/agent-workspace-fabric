@@ -86,6 +86,7 @@ _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can cont
 # UUID-qualified suffix lets the orphan reconciler distinguish them from
 # policy-declared companions if creation is interrupted before cleanup.
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+_CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
 
 
 @dataclass(frozen=True)
@@ -1149,7 +1150,10 @@ async def _invoke_cli_for_verdict_result(
             )
         result_stdout = result.stdout
     except AgentRunError as exc:
-        if exc.reason_code == _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED:
+        if exc.reason_code in {
+            _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED,
+            _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED,
+        }:
             raise _MonitorAgentServiceRecoveryFailedError(
                 "clarification model service recovery failed",
                 reason_code=exc.reason_code,
