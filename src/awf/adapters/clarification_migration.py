@@ -56,14 +56,21 @@ async def _reap_persisted_clarification_model_migration(
     network_name = (
         f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net"
     )
-    network_reap_result = await runner.run(
-        [
-            "docker",
-            "network",
-            "rm",
-            network_name,
-        ]
-    )
+    try:
+        network_reap_result = await runner.run(
+            [
+                "docker",
+                "network",
+                "rm",
+                network_name,
+            ]
+        )
+    except Exception as exc:
+        return CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=f"{type(exc).__name__}: {exc}",
+        )
     if not network_reap_result.ok and network_reap_result.stderr.rstrip().endswith(
         f"network {network_name} not found"
     ):

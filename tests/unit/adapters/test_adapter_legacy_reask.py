@@ -503,6 +503,43 @@ class TestIsolatedReaskAdapter:
         }
 
     @pytest.mark.unit
+    async def test_isolated_reask_classifies_network_reap_exception(self, tmp_path: Path) -> None:
+        """A network-reap exception is a terminal cleanup failure."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        class _FailingNetworkReapRunner(FakeCommandRunner):
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 3:
+                    raise RuntimeError("network reap unavailable")
+                return result
+
+        runner = _FailingNetworkReapRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == "RuntimeError: network reap unavailable"
+        assert exc.value.details == {"services": ("ollama-sidecar",)}
+        assert len(runner.calls) == 3
+        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        assert rendered["services"]["ollama-sidecar"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+
+    @pytest.mark.unit
     async def test_isolated_reask_restores_legacy_compose_when_network_reap_is_absent(
         self, tmp_path: Path
     ) -> None:
