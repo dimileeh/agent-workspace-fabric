@@ -1259,6 +1259,53 @@ class TestReadyToMergeComment:
         assert "(+1 more)" in body
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("needs_human", "defer"))
+    def test_blocker_items_reserve_a_slot_for_triaged_merge_blocking_feedback(
+        self,
+        verdict: str,
+    ) -> None:
+        """Keep triage visible when its review independently blocks merging."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        triaged_blocking_feedback = {
+            "kind": "review",
+            "id": "R-triaged-blocking",
+            "author": "triaged reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-triaged-blocking",
+            "body": "A human decision is required.",
+            "verdict": verdict,
+            "agent_verdict_reason": "Choose the intended merge policy.",
+            "is_merge_blocking": True,
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, triaged_blocking_feedback),
+        )
+
+        assert body.count("[changes_requested]") == 7
+        assert "A human decision is required." in body
+        assert f"[{verdict}]" in body
+        assert "-> reason: Choose the intended merge policy." in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
     def test_blocker_items_honor_collected_thread_classification(self) -> None:
         """Verify blocker items honor collected thread classification."""
         body = ready_to_merge_comment(

@@ -520,28 +520,52 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     display_cap = 8
     # Preserve an actionable triage excerpt alongside a full set of
     # changes-requested reviews. Otherwise all eight slots can be consumed
-    # before the human sees why additional feedback needs attention.
+    # before the human sees why additional feedback needs attention. A review
+    # can independently block merge while still having an actionable triage
+    # verdict, so include those items in the reservation as well.
+    triaged_blocking_item_count = sum(
+        _item_text(item, "verdict") in {"defer", "needs_human"} for item in blocking_review_items
+    )
     triaged_item_reservation = min(
-        1, len(bot_items) + len(human_escalation_items) + len(human_items)
+        1,
+        len(bot_items)
+        + len(human_escalation_items)
+        + len(human_items)
+        + triaged_blocking_item_count,
+    )
+    blocking_review_display_limit = display_cap - (
+        0 if triaged_blocking_item_count else triaged_item_reservation
     )
     displayed = 0
     lines: list[str] = []
-    for label, items, display_limit in (
+    for label, items, display_limit, prioritize_triage in (
         (
             "Merge-blocking changes-requested reviews",
             blocking_review_items,
-            display_cap - triaged_item_reservation,
+            blocking_review_display_limit,
+            True,
         ),
-        ("Agent escalated - needs your decision", bot_items, display_cap),
+        ("Agent escalated - needs your decision", bot_items, display_cap, False),
         (
             "Human feedback escalated - needs your decision",
             human_escalation_items,
             display_cap,
+            False,
         ),
-        ("Human feedback deferred by agent", human_items, display_cap),
+        ("Human feedback deferred by agent", human_items, display_cap, False),
     ):
         lines.append(f"{label} ({len(items)}):")
-        for item in sorted(items, key=_blocker_item_sort_key):
+        if prioritize_triage:
+            ordered_items = sorted(
+                items,
+                key=lambda item: (
+                    _item_text(item, "verdict") not in {"defer", "needs_human"},
+                    _blocker_item_sort_key(item),
+                ),
+            )
+        else:
+            ordered_items = sorted(items, key=_blocker_item_sort_key)
+        for item in ordered_items:
             if displayed >= display_limit:
                 continue
             lines.append(_render_blocker_item(item))
