@@ -267,6 +267,19 @@ async def _remove_isolated_reask_worktree(
     return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
 
 
+def _review_item_body_state_key(item_id: str, item_kind: str) -> str | None:
+    """Return the addressed-state key for a supported review feedback item."""
+    if item_kind == "thread":
+        from awf.runtime.pr_monitor import _review_thread_body_state_key
+
+        return _review_thread_body_state_key(item_id)
+    if item_kind == "review":
+        from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_state_key
+
+        return _review_comment_body_state_key(item_id)
+    return None
+
+
 async def _persist_reask_cleanup_failure_after_cancellation(
     runner: PullRequestMonitorRunner,
     *,
@@ -278,6 +291,7 @@ async def _persist_reask_cleanup_failure_after_cancellation(
     item_path: str | None,
     item_line: int | None,
     needs_human_reason: str | None,
+    item_body_hash: str | None,
     cleanup_error: str,
     base_branch: str,
     remote_branch: str | None,
@@ -294,6 +308,11 @@ async def _persist_reask_cleanup_failure_after_cancellation(
             return
         addressed = dict(workspace.monitor_threads_addressed or {})
         addressed[item_id] = "needs_human"
+        if (
+            item_body_hash is not None
+            and (body_state_key := _review_item_body_state_key(item_id, item_kind)) is not None
+        ):
+            addressed[body_state_key] = item_body_hash
         reason_key = _needs_human_reason_state_key(item_id)
         if needs_human_reason is not None:
             addressed[reason_key] = needs_human_reason
@@ -345,6 +364,7 @@ async def _address_thread(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
+    from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
         _sync_needs_human_reason,
@@ -394,6 +414,7 @@ async def _address_thread(
         item_author=getattr(thread, "author", None),
         item_path=getattr(thread, "path", None),
         item_line=getattr(thread, "line", None),
+        item_body_hash=_review_thread_body_hash(thread),
         commit_message=f"fix: address PR review thread {thread.thread_id}",
         compose_project=compose_project,
         compose_file=compose_file,
@@ -479,6 +500,8 @@ async def _address_review_comment_result(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult:
+    from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
+
     prompt_owned_paths = (
         owned_paths
         if owned_paths is not None
@@ -523,6 +546,7 @@ async def _address_review_comment_result(
         item_author=getattr(comment, "author", None),
         item_path=None,
         item_line=None,
+        item_body_hash=_review_comment_body_hash(comment),
         commit_message=f"fix: address PR review comment {comment.comment_id}",
         compose_project=compose_project,
         compose_file=compose_file,
@@ -560,6 +584,7 @@ async def _enforce_needs_human_reason(
     operation_id: str | None,
     operation_type: str | None,
     monitor_log: WorkspaceLogSink | None,
+    item_body_hash: str | None = None,
 ) -> VerdictResult:
     """Bound one re-ask without changing the original blocking verdict."""
     from awf.runtime.pr_monitor_runner.helpers import (
@@ -734,6 +759,16 @@ async def _enforce_needs_human_reason(
                     if cleanup_error is not None:
                         if state is not None:
                             state.mark_addressed(item_id, "needs_human")
+                            if (
+                                item_body_hash is not None
+                                and (
+                                    body_state_key := _review_item_body_state_key(
+                                        item_id, item_kind
+                                    )
+                                )
+                                is not None
+                            ):
+                                state.mark_addressed(body_state_key, item_body_hash)
                             reason_key = _needs_human_reason_state_key(item_id)
                             if needs_human_reason is not None:
                                 state.mark_addressed(reason_key, needs_human_reason)
@@ -750,6 +785,7 @@ async def _enforce_needs_human_reason(
                                 item_path=item_path,
                                 item_line=item_line,
                                 needs_human_reason=needs_human_reason,
+                                item_body_hash=item_body_hash,
                                 cleanup_error=cleanup_error,
                                 base_branch=base_branch,
                                 remote_branch=remote_branch,

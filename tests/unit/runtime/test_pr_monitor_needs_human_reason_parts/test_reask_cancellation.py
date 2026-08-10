@@ -9,9 +9,25 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewComment,
+    ReviewThread,
+    _review_thread_body_hash,
+    _review_thread_body_state_key,
+)
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.helpers import (
+    _drop_stale_review_comment_addressed_state,
+    _drop_stale_review_thread_addressed_state,
+    _review_comment_body_hash,
+    _review_comment_body_state_key,
+)
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _git,
@@ -333,6 +349,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         assert kwargs["workspace_id"] == "ws_reask_post_invocation_cancel_cleanup_failure"
         assert kwargs["item_id"] == "thread_1"
         assert kwargs["needs_human_reason"] == "select a deployment region"
+        assert kwargs["item_body_hash"] == "thread-body-hash"
         assert kwargs["cleanup_error"] == (
             "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
         )
@@ -366,6 +383,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
             item_author=None,
             item_path=None,
             item_line=None,
+            item_body_hash="thread-body-hash",
             commit_message="fix: address thread_1",
             compose_project="project",
             compose_file=Path("compose.yml"),
@@ -392,6 +410,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
     assert persisted_states == [
         {
             "thread_1": "needs_human",
+            "__review_thread_body_hash__:thread_1": "thread-body-hash",
             "__needs_human_reason__:thread_1": "select a deployment region",
         }
     ]
@@ -485,6 +504,7 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
 
 @pytest.mark.unit
 @pytest.mark.parametrize("workspace_exists", (True, False))
+@pytest.mark.parametrize("item_kind", ("thread", "review"))
 @pytest.mark.parametrize(
     ("needs_human_reason", "expected_reason"),
     (
@@ -495,13 +515,14 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
         (None, None),
     ),
 )
-async def test_persist_reask_cleanup_failure_after_cancellation_preserves_only_agent_reason(
+async def test_persist_reask_cleanup_failure_after_cancellation_preserves_feedback_identity(
     monkeypatch: pytest.MonkeyPatch,
     workspace_exists: bool,
+    item_kind: str,
     needs_human_reason: str | None,
     expected_reason: str | None,
 ) -> None:
-    """Durable cleanup failures retain only an actual re-ask reason."""
+    """A durable cleanup blocker retains its exact unresolved-feedback identity."""
     workspace = SimpleNamespace(
         monitor_threads_addressed={
             "other_thread": "fix_committed",
@@ -541,16 +562,37 @@ async def test_persist_reask_cleanup_failure_after_cancellation_preserves_only_a
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
     )
 
+    if item_kind == "thread":
+        feedback = ReviewThread(
+            thread_id="thread_1",
+            path="src/monitor.py",
+            line=17,
+            body_excerpt="worktree cleanup must be fixed",
+            author="reviewer",
+        )
+        body_state_key = _review_thread_body_state_key(feedback.thread_id)
+        item_body_hash = _review_thread_body_hash(feedback)
+    else:
+        feedback = ReviewComment(
+            comment_id="thread_1",
+            body_excerpt="worktree cleanup must be fixed",
+            body="worktree cleanup must be fixed",
+            author="reviewer",
+        )
+        body_state_key = _review_comment_body_state_key(feedback.comment_id)
+        item_body_hash = _review_comment_body_hash(feedback)
+
     await comments._persist_reask_cleanup_failure_after_cancellation(
         runner,
         workspace_id="ws_1",
         pr_number=42,
         item_id="thread_1",
-        item_kind="thread",
+        item_kind=item_kind,
         item_author="reviewer",
         item_path="src/monitor.py",
         item_line=17,
         needs_human_reason=needs_human_reason,
+        item_body_hash=item_body_hash,
         cleanup_error="worktree cleanup failed",
         base_branch="main",
         remote_branch="awf/ws_1",
@@ -561,15 +603,32 @@ async def test_persist_reask_cleanup_failure_after_cancellation_preserves_only_a
 
     if workspace_exists:
         expected_state = {"other_thread": "fix_committed", "thread_1": "needs_human"}
+        expected_state[body_state_key] = item_body_hash
         if expected_reason is not None:
             expected_state["__needs_human_reason__:thread_1"] = expected_reason
         assert workspace.monitor_threads_addressed == expected_state
         assert session.committed is True
+        resumed_state = MonitorState(threads_addressed_ids=dict(expected_state))
+        status = PRStatus(
+            number=42,
+            head_sha="abc123",
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.SUCCESS,
+            unresolved_inline_threads=(feedback,) if item_kind == "thread" else (),
+            unresolved_review_comments=(feedback,) if item_kind == "review" else (),
+            base_behind_count=0,
+            merge_state_status=MergeStateStatus.CLEAN,
+        )
+        if item_kind == "thread":
+            assert _drop_stale_review_thread_addressed_state(status, resumed_state) is False
+        else:
+            assert _drop_stale_review_comment_addressed_state(status, resumed_state) is False
+        assert resumed_state.threads_addressed_ids == expected_state
         assert audit_events == [
             {
                 "workspace_id": "ws_1",
                 "event_type": "workspace.audit.comment_resolution",
-                "action": "address_thread",
+                "action": f"address_{item_kind}",
                 "outcome": "failed",
                 "reason_code": "VALIDATION_WORKTREE_CLEANUP_FAILED",
                 "pr_number": 42,
@@ -581,7 +640,7 @@ async def test_persist_reask_cleanup_failure_after_cancellation_preserves_only_a
                 "monitor_log": None,
                 "evidence": {
                     "item_id": "thread_1",
-                    "item_kind": "thread",
+                    "item_kind": item_kind,
                     "item_author": "reviewer",
                     "item_path": "src/monitor.py",
                     "item_line": 17,
