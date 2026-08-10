@@ -23,11 +23,10 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -45,7 +44,13 @@ from awf.node.compose_diagnostics import (
     _redacted_diagnostics,
 )
 from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
-from awf.service.environment import compose_expand_value
+from awf.node.compose_manager_clarification import (
+    _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED,
+    _attach_persisted_clarification_model_network,
+    _clarification_model_service_names,
+    _is_managed_persisted_clarification_service,
+    _pending_persisted_clarification_model_network_services,
+)
 
 _log = get_logger(__name__)
 
@@ -63,87 +68,6 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
     "unknown flag: --remove-orphans",
 )
-_CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
-_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
-    "x-awf-persisted-clarification-model-network-reconciled"
-)
-
-
-def _is_managed_persisted_clarification_service(service: object) -> bool:
-    """Return whether a persisted service has AWF's clarification signature."""
-    if not isinstance(service, Mapping):
-        return False
-    networks = service.get("networks")
-    return (
-        service.get("profiles") == ["awf-clarification"]
-        and isinstance(networks, list)
-        and "clarification_egress_net" in networks
-        and service.get("command") == ["sh", "-c", "sleep infinity"]
-        and service.get("restart") == "no"
-    )
-
-
-def _clarification_model_service_names(
-    clarification_environment: Iterable[tuple[str, str]], *, service_names: Iterable[str]
-) -> tuple[str, ...]:
-    """Return profile model services selected by clarification's provider URL."""
-
-    environment = dict(clarification_environment)
-    endpoint_names: tuple[str, ...] = _CLARIFICATION_BASE_URL_ENV_NAMES
-    if environment.get("AWF_OPENCODE_OLLAMA_BASE_URL"):
-        endpoint_names += ("AWF_OPENCODE_OLLAMA_BASE_URL",)
-    elif environment.get("OLLAMA_HOST"):
-        endpoint_names += ("OLLAMA_HOST",)
-    names = tuple(service_names)
-    names_by_hostname = {name.lower(): name for name in names}
-    selected_names: set[str] = set()
-    for endpoint_name in endpoint_names:
-        endpoint = environment.get(endpoint_name, "")
-        try:
-            endpoint = compose_expand_value(endpoint, environ=os.environ)
-            if endpoint_name.endswith("OLLAMA_BASE_URL") or endpoint_name == "OLLAMA_HOST":
-                endpoint = endpoint if "://" in endpoint else f"//{endpoint}"
-            hostname = urlsplit(endpoint).hostname
-        except ValueError:
-            continue
-        if hostname and (service_name := names_by_hostname.get(hostname.lower())):
-            selected_names.add(service_name)
-    return tuple(name for name in names if name in selected_names)
-
-
-def _attach_persisted_clarification_model_network(
-    services: dict[object, object],
-    model_service_names: Iterable[str],
-) -> tuple[str, ...]:
-    """Attach legacy rendered model services to clarification's dedicated route."""
-
-    attached_names: list[str] = []
-    for name in model_service_names:
-        service = services.get(name)
-        if not isinstance(service, dict):
-            continue
-        service_networks = service.get("networks")
-        if not isinstance(service_networks, list) or "awf_net" not in service_networks:
-            continue
-        service["networks"] = [*service_networks, "clarification_model_net"]
-        attached_names.append(name)
-    return tuple(attached_names)
-
-
-def _pending_persisted_clarification_model_network_services(
-    document: Mapping[object, object], services: Mapping[object, object]
-) -> tuple[str, ...]:
-    """Return sidecars awaiting a persisted clarification network reconciliation."""
-    if document.get(_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED) is True:
-        return ()
-    return tuple(
-        str(name)
-        for name, service in services.items()
-        if name not in {"agent", "clarification"}
-        and isinstance(service, Mapping)
-        and isinstance(service.get("networks"), list)
-        and "clarification_model_net" in service["networks"]
-    )
 
 
 def _legacy_bind_mount(value: object) -> AuthMount | None:

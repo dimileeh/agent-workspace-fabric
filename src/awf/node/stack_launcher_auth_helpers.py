@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import configparser
 import json
 import posixpath
@@ -16,6 +18,14 @@ from awf.node.compose_manager import AuthMount
 
 _AGENT_HOME = "/home/agent"
 _CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
+_CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = {
+    AgentRuntime.codex: frozenset({"/home/agent/.codex"}),
+    AgentRuntime.claude_code: frozenset({"/home/agent/.claude", "/home/agent/.claude.json"}),
+    AgentRuntime.cursor: frozenset(),
+    AgentRuntime.gemini: frozenset({"/home/agent/.config/gcloud", "/home/agent/.gemini"}),
+    AgentRuntime.opencode: frozenset(),
+    AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
+}
 
 
 def staged_provider_auth_mounts(
@@ -30,6 +40,83 @@ def staged_provider_auth_mounts(
             target=clarification_auth_target(mount.target, index=index),
         )
         for index, mount in enumerate(provider_auth_mounts)
+    )
+
+
+def has_codex_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
+    """Return whether a staged Codex home supplies the file-auth credential."""
+
+    for mount in source_mounts:
+        if mount.target not in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]:
+            continue
+        try:
+            auth = json.loads((Path(mount.source) / "auth.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if _has_codex_auth_credential(auth):
+            return True
+    return False
+
+
+def _has_codex_auth_credential(auth: object) -> bool:
+    """Return whether an auth.json payload contains a Codex credential."""
+
+    if not isinstance(auth, dict):
+        return False
+    if isinstance(api_key := auth.get("OPENAI_API_KEY"), str) and api_key.strip():
+        return True
+    tokens = auth.get("tokens")
+    return (
+        isinstance(tokens, dict)
+        and all(
+            isinstance(value := tokens.get(name), str) and value.strip()
+            for name in ("id_token", "access_token", "refresh_token")
+        )
+        and _has_codex_id_token(tokens["id_token"])
+    )
+
+
+def _has_codex_id_token(value: str) -> bool:
+    """Return whether a token has the JWT payload Codex requires in auth.json."""
+
+    parts = value.split(".")
+    if len(parts) != 3 or not all(parts):
+        return False
+    try:
+        encoded_payload = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = base64.b64decode(encoded_payload, altchars=b"-_", validate=True)
+        return isinstance(json.loads(payload), dict)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
+    """Return whether a staged Claude home supplies its OAuth credential store."""
+
+    for mount in source_mounts:
+        if mount.target != "/home/agent/.claude":
+            continue
+        try:
+            credentials = json.loads(
+                (Path(mount.source) / ".credentials.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if _has_claude_code_auth_credential(credentials):
+            return True
+    return False
+
+
+def _has_claude_code_auth_credential(credentials: object) -> bool:
+    """Return whether a Claude credential payload contains an OAuth access token."""
+
+    if not isinstance(credentials, dict):
+        return False
+    oauth = credentials.get("claudeAiOauth")
+    return (
+        isinstance(oauth, dict)
+        and isinstance(access_token := oauth.get("accessToken"), str)
+        and bool(access_token.strip())
     )
 
 
