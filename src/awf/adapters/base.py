@@ -669,8 +669,7 @@ class AgentAdapter(ABC):
                         # only after restoring the legacy definition so a
                         # failed re-ask does not strand the workspace without
                         # its original model sidecar.
-                        recovery_result: CommandResult | None = None
-                        with contextlib.suppress(Exception):
+                        try:
                             recovery_result = await self._runner.run(
                                 [
                                     "docker",
@@ -693,7 +692,18 @@ class AgentAdapter(ABC):
                                     wait=True,
                                 ),
                             )
-                        if recovery_result is not None and not recovery_result.ok:
+                        except Exception as exc:
+                            raise AgentRunError(
+                                agent=self.name,
+                                result=CommandResult(
+                                    returncode=1,
+                                    stdout="",
+                                    stderr=f"{type(exc).__name__}: {exc}",
+                                ),
+                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                                details={"services": clarification_model_services},
+                            ) from exc
+                        if not recovery_result.ok:
                             raise AgentRunError(
                                 agent=self.name,
                                 result=recovery_result,

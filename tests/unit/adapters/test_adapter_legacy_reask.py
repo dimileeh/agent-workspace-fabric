@@ -519,6 +519,42 @@ class TestIsolatedReaskAdapter:
         assert "run" not in runner.calls[-1].args
 
     @pytest.mark.unit
+    async def test_isolated_reask_surfaces_legacy_model_service_recovery_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """Report a rollback recovery exception instead of the update failure."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        class _FailingLegacyRecoveryRunner(FakeCommandRunner):
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if len(self.calls) == 4:
+                    raise FileNotFoundError("docker not found")
+                return result
+
+        runner = _FailingLegacyRecoveryRunner()
+        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result()
+        runner.queue_result()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
+        assert exc.value.result.returncode == 1
+        assert exc.value.result.stderr == "FileNotFoundError: docker not found"
+        assert exc.value.details == {"services": ("ollama-sidecar",)}
+        assert len(runner.calls) == 4
+
+    @pytest.mark.unit
     async def test_isolated_reask_surfaces_terminal_failure_when_legacy_restore_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
