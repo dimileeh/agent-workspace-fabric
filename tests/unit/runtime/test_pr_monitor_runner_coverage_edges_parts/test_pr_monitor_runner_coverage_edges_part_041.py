@@ -54,6 +54,10 @@ def _runner(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+    # These verdict-handling tests use the direct invocation seam.  Re-ask
+    # isolation itself is covered with real Git worktrees elsewhere; a runner
+    # with an actual worktree root must refuse a missing worktree.
+    runner._worktrees_root = None  # type: ignore[assignment]
     calls: list[dict[str, object]] = []
 
     async def _invoke(**kwargs: object) -> VerdictResult:
