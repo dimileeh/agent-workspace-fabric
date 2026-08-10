@@ -772,6 +772,8 @@ class WorkspaceStackLaunchRequest:
     agent_runtime: AgentRuntime = AgentRuntime.codex
     agent_model: str | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
+    clarification_enabled: bool = True
+    """Whether to add AWF's managed clarification service to the rendered stack."""
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
     """Optional callback invoked when the first compose-up attempt starts."""
@@ -986,6 +988,7 @@ class ComposeStackLauncher:
                 profile_services=services,
                 companions=request.companions,
                 docker_mode=profile.docker.mode,
+                clarification_enabled=request.clarification_enabled,
             )
         # Resolve the effective compose-up budget before pre-building companions so
         # the cache pre-build shares the same subprocess cap the inline `docker
@@ -1045,7 +1048,7 @@ class ComposeStackLauncher:
             services=services,
             companions=companions,
             auth_mounts=tuple(auth_mounts),
-            clarification_enabled=True,
+            clarification_enabled=request.clarification_enabled,
             clarification_agent_environment=_clarification_agent_environment(
                 agent_environment,
                 auth_mounts=auth_mounts,

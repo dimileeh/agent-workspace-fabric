@@ -70,7 +70,7 @@ from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, WorkspaceProfile
 from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
@@ -341,8 +341,13 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
+            clarification_enabled = True
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+                clarification_enabled = all(
+                    companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
+                    for companion in companion_specs
+                )
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
@@ -350,6 +355,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     ),
                     companions=companion_specs,
                     docker_mode=profile.docker.mode,
+                    clarification_enabled=clarification_enabled,
                 )
                 companion_graph_prevalidated = True
             if self._stack_launcher is not None and hosted_pr_adoption:
@@ -366,6 +372,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         agent_runtime=AgentRuntime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
@@ -606,6 +613,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         agent_runtime=AgentRuntime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
                     )

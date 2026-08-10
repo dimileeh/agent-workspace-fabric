@@ -236,8 +236,13 @@ def validate_companion_service_graph(
     profile_services: tuple[ComposeService, ...],
     companions: tuple[CompanionGraphInput, ...],
     docker_mode: DockerMode,
+    clarification_enabled: bool = True,
 ) -> None:
-    """Validate companion/profile service names, dependency targets, and cycles."""
+    """Validate companion/profile service names, dependency targets, and cycles.
+
+    Legacy workspaces that already stored a ``clarification`` companion omit
+    AWF's managed clarification service while retaining that companion identity.
+    """
     profile_names = {service.name for service in profile_services}
     duplicate_companion_names = _duplicate_companion_service_names(companions)
     if duplicate_companion_names:
@@ -247,7 +252,7 @@ def validate_companion_service_graph(
         )
 
     companion_names = {_companion_graph_spec(companion).name for companion in companions}
-    if MANAGED_CLARIFICATION_SERVICE_NAME in companion_names:
+    if clarification_enabled and MANAGED_CLARIFICATION_SERVICE_NAME in companion_names:
         raise ProfileResolutionError(
             f"companion service name {MANAGED_CLARIFICATION_SERVICE_NAME!r} is reserved for "
             "the managed clarification service",

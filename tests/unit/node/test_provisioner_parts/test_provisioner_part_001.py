@@ -660,10 +660,16 @@ class TestSuccess:
             assert reservation.dind_slots == 0
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("companion_name", "clarification_enabled"),
+        [("backend", True), ("clarification", False)],
+    )
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        companion_name: str,
+        clarification_enabled: bool,
     ) -> None:
         class _RecordingGit:
             work_dir = tmp_path / "awf-work"
@@ -729,7 +735,7 @@ class TestSuccess:
                 task_policy={
                     "companions": [
                         {
-                            "name": "backend",
+                            "name": companion_name,
                             "repo_url": "git@github.com:example/backend.git",
                             "base_branch": "main",
                             "build_context": "services/api",
@@ -754,10 +760,10 @@ class TestSuccess:
                 "new_branch": f"awf/{workspace_id}",
             },
             {
-                "workspace_id": f"{workspace_id}__companion__backend",
+                "workspace_id": f"{workspace_id}__companion__{companion_name}",
                 "repo_url": "git@github.com:example/backend.git",
                 "base_branch": "main",
-                "new_branch": f"awf/{workspace_id}/companion/backend",
+                "new_branch": f"awf/{workspace_id}/companion/{companion_name}",
             },
             {
                 "workspace_id": f"{workspace_id}__companion__worker",
@@ -767,15 +773,16 @@ class TestSuccess:
             },
         ]
         companion = launcher.requests[0].companions[0]
-        assert companion.spec.name == "backend"
+        assert companion.spec.name == companion_name
         assert companion.spec.build_context == "services/api"
         assert companion.layout.worktree_path == (
-            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__backend"
+            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__{companion_name}"
         )
         defaulted_companion = launcher.requests[0].companions[1]
         assert defaulted_companion.spec.name == "worker"
         assert defaulted_companion.spec.base_branch is None
         assert launcher.requests[0].companion_graph_prevalidated is True
+        assert launcher.requests[0].clarification_enabled is clarification_enabled
 
     @pytest.mark.unit
     async def test_rejects_invalid_companion_graph_before_materializing_companions(
