@@ -695,12 +695,23 @@ def _clarification_model_provider_auth_mount_targets(
             environment_values.get("AWS_SHARED_CREDENTIALS_FILE", ""), environ=os.environ
         )
         normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
+        bedrock_credential_names = _clarification_claude_code_bedrock_environment_names(
+            environment_values
+        )
         if (
             _clarification_claude_code_backend_enabled(
                 environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
             )
-            and "AWS_PROFILE"
-            in _clarification_claude_code_bedrock_environment_names(environment_values)
+            # The AWS SDK uses the default profile from ~/.aws when no
+            # higher-precedence Bedrock credential source is configured.
+            and not (
+                bedrock_credential_names
+                & (
+                    _CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES
+                    | _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES
+                    | _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+                )
+            )
             and (
                 not aws_shared_credentials_file
                 or normalized_aws_shared_credentials_file.startswith("/home/agent/.aws/")

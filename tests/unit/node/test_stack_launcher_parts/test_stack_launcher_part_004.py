@@ -516,6 +516,35 @@ def test_clarification_inputs_retain_bedrock_profile_directory() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_bedrock_default_profile_directory() -> None:
+    """Bedrock clarification retains the implicit AWS default-profile directory."""
+    aws_profile_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="rw",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_REGION", "us-west-2"),
+    )
+
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (aws_profile_directory,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_mounts == (
+        AuthMount(
+            source=aws_profile_directory.source,
+            target=aws_profile_directory.target,
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("environment_name", "environment_value"),
     (
