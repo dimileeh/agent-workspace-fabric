@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import inspect
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -463,6 +464,60 @@ class TestCodexAdapter:
         ]
 
     @pytest.mark.unit
+    async def test_isolated_reask_restores_legacy_compose_when_upgrade_is_cancelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancellation waits for the upgrade worker before restoring its file edit."""
+        compose_file = tmp_path / "compose.yml"
+        original_compose_file = b"services:\n  agent:\n    image: awf-agent-runtime:latest\n"
+        compose_file.write_bytes(original_compose_file)
+        upgrade_started = Event()
+        finish_upgrade = Event()
+        upgrade_finished = Event()
+
+        def blocking_upgrade(**kwargs: object) -> tuple[str, ...]:
+            upgraded_compose_file = kwargs["compose_file"]
+            assert isinstance(upgraded_compose_file, Path)
+            upgrade_started.set()
+            assert finish_upgrade.wait(timeout=1)
+            upgraded_compose_file.write_text(
+                "services:\n  clarification:\n    image: awf-agent-runtime:latest\n",
+                encoding="utf-8",
+            )
+            upgrade_finished.set()
+            return ("ollama-sidecar",)
+
+        monkeypatch.setattr(
+            adapter_base,
+            "upgrade_persisted_clarification_service",
+            blocking_upgrade,
+        )
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+        task = asyncio.create_task(
+            adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+        )
+
+        assert await asyncio.to_thread(upgrade_started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        finish_upgrade.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert upgrade_finished.is_set()
+        assert compose_file.read_bytes() == original_compose_file
+        assert runner.calls == []
+
+    @pytest.mark.unit
     async def test_isolated_reask_stops_when_legacy_model_service_recreation_fails(
         self, tmp_path: Path
     ) -> None:
@@ -629,7 +684,7 @@ class TestCodexAdapter:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("restore_fails", "expected_shield_calls", "expected_calls"),
-        [(False, 4, 4), (True, 2, 3)],
+        [(False, 5, 4), (True, 3, 3)],
         ids=["legacy-restore-succeeds", "legacy-restore-fails"],
     )
     async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
@@ -688,7 +743,10 @@ class TestCodexAdapter:
         async def cancel_cleanup_and_recovery_shield(task: asyncio.Future[Any]) -> Any:
             nonlocal shield_calls
             shield_calls += 1
-            if shield_calls in {1, 3}:
+            # The first shield protects the legacy upgrade worker. Interrupt
+            # the cleanup and recovery shields below, as this regression is
+            # specifically about cancellation during model recreation.
+            if shield_calls in {2, 4}:
                 raise asyncio.CancelledError
             return await original_shield(task)
 

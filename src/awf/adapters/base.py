@@ -473,13 +473,33 @@ class AgentAdapter(ABC):
             # stacks launched before the clarification service existed can
             # still run the follow-up without re-rendering profile state.
             original_compose_file = await asyncio.to_thread(compose_file.read_bytes)
-            clarification_model_services = await asyncio.to_thread(
-                upgrade_persisted_clarification_service,
-                compose_file=compose_file,
-                workspace_id=workspace_id or compose_project.removeprefix("awf_"),
-                agent_runtime=self.name,
-                agent_model=selected_model,
+            upgrade_task = asyncio.create_task(
+                asyncio.to_thread(
+                    upgrade_persisted_clarification_service,
+                    compose_file=compose_file,
+                    workspace_id=workspace_id or compose_project.removeprefix("awf_"),
+                    agent_runtime=self.name,
+                    agent_model=selected_model,
+                )
             )
+            try:
+                clarification_model_services = await asyncio.shield(upgrade_task)
+            except asyncio.CancelledError:
+                # ``to_thread`` keeps its worker running after this coroutine
+                # is cancelled. Wait for its persisted Compose edit to settle,
+                # then restore the pre-upgrade definition before cancellation
+                # escapes; no model sidecar was recreated yet.
+                while not upgrade_task.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(upgrade_task)
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    upgrade_task.result()
+                with contextlib.suppress(OSError):
+                    _restore_compose_file(
+                        compose_file=compose_file,
+                        contents=original_compose_file,
+                    )
+                raise
             if clarification_model_services:
                 # ``docker compose run --no-deps`` below starts only the
                 # clarification container. Recreate the selected legacy model
