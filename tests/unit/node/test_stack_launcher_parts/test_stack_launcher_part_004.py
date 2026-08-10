@@ -1473,6 +1473,48 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("toggle", "backend_settings"),
+    [
+        (
+            "CLAUDE_CODE_USE_BEDROCK",
+            (
+                ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+                ("AWS_SECRET_ACCESS_KEY", "bedrock-secret"),
+                ("AWS_REGION", "us-west-2"),
+            ),
+        ),
+        (
+            "CLAUDE_CODE_USE_VERTEX",
+            (
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+                ("CLOUD_ML_REGION", "us-central1"),
+            ),
+        ),
+    ],
+)
+def test_clarification_inputs_resolve_host_auth_claude_backend_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+    toggle: str,
+    backend_settings: tuple[tuple[str, str], ...],
+) -> None:
+    """Host-auth Compose placeholders select the enabled Claude backend."""
+    monkeypatch.setenv(toggle, "1")
+    environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        (
+            ("ANTHROPIC_API_KEY", "direct-anthropic-token"),
+            (toggle, f"${{{toggle}}}"),
+            *backend_settings,
+        ),
+        auth_mounts=(),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert environment == ((toggle, f"${{{toggle}}}"), *backend_settings)
+
+
+@pytest.mark.unit
 def test_clarification_environment_computes_provider_names_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

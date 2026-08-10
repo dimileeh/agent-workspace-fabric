@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import posixpath
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -50,6 +51,7 @@ from awf.profiles.compose import (
 )
 from awf.profiles.compose_env import hosted_env_secret_alias_placeholder
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
+from awf.service.environment import compose_expand_value
 
 _HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
 _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
@@ -358,15 +360,29 @@ def _clarification_claude_code_environment_names(
     """Return direct Claude auth or each explicitly enabled managed backend."""
 
     backend_names = set()
-    if environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+    if _clarification_claude_code_backend_enabled(
+        environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+    ):
         backend_names.add("CLAUDE_CODE_USE_BEDROCK")
         backend_names.update(
             _clarification_claude_code_bedrock_environment_names(environment_values)
         )
-    if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1":
+    if _clarification_claude_code_backend_enabled(
+        environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+    ):
         backend_names.add("CLAUDE_CODE_USE_VERTEX")
         backend_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
     return frozenset(backend_names) or _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+
+
+def _clarification_claude_code_backend_enabled(
+    environment_values: dict[str, str],
+    *,
+    backend_name: str,
+) -> bool:
+    """Return whether Compose resolves a Claude managed-backend toggle to ``1``."""
+
+    return compose_expand_value(environment_values.get(backend_name, ""), environ=os.environ) == "1"
 
 
 def _clarification_claude_code_bedrock_environment_names(
@@ -461,7 +477,9 @@ def _clarification_resolve_google_credentials_placeholder(
     environment_values = dict(agent_environment)
     if agent_runtime is not AgentRuntime.gemini and (
         agent_runtime is not AgentRuntime.claude_code
-        or environment_values.get("CLAUDE_CODE_USE_VERTEX") != "1"
+        or not _clarification_claude_code_backend_enabled(
+            environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+        )
     ):
         return agent_environment
     google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
@@ -500,7 +518,9 @@ def _clarification_resolve_aws_web_identity_token_file_placeholder(
     environment_values = dict(agent_environment)
     if (
         agent_runtime is not AgentRuntime.claude_code
-        or environment_values.get("CLAUDE_CODE_USE_BEDROCK") != "1"
+        or not _clarification_claude_code_backend_enabled(
+            environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+        )
     ):
         return agent_environment
     token_file = environment_values.get(_AWS_WEB_IDENTITY_TOKEN_FILE)
@@ -594,7 +614,9 @@ def _clarification_model_provider_auth_mount_targets(
         # mounted directory.
         runtime_auth_mount_targets = (
             frozenset({_GCLOUD_AUTH_MOUNT_TARGET})
-            if environment_values.get("CLAUDE_CODE_USE_VERTEX") == "1"
+            if _clarification_claude_code_backend_enabled(
+                environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+            )
             and (
                 not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
                 or _google_credentials_are_within_gcloud_auth_mount(
@@ -608,7 +630,9 @@ def _clarification_model_provider_auth_mount_targets(
         aws_shared_credentials_file = environment_values.get("AWS_SHARED_CREDENTIALS_FILE", "")
         normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
         if (
-            environment_values.get("CLAUDE_CODE_USE_BEDROCK") == "1"
+            _clarification_claude_code_backend_enabled(
+                environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+            )
             and "AWS_PROFILE"
             in _clarification_claude_code_bedrock_environment_names(environment_values)
             and (
