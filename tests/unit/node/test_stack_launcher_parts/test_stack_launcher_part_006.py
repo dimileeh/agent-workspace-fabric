@@ -51,6 +51,45 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
 
 
 @pytest.mark.unit
+def test_clarification_inputs_stage_claude_custom_ca() -> None:
+    """Claude re-asks retain a declared custom CA trust store."""
+    custom_ca = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/provider-ca.pem",
+        target="/run/awf/secrets/provider-ca.pem",
+        mode="ro",
+    )
+    environment = (
+        ("ANTHROPIC_API_KEY", "anthropic-key"),
+        ("NODE_EXTRA_CA_CERTS", custom_ca.target),
+    )
+
+    clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(custom_ca,),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+    clarification_mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (custom_ca,),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert clarification_environment == (
+        ("ANTHROPIC_API_KEY", "anthropic-key"),
+        ("NODE_EXTRA_CA_CERTS", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert clarification_mounts == (
+        AuthMount(
+            source=custom_ca.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("toggle", "backend_settings"),
     [

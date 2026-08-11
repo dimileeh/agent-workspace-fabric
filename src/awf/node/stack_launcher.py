@@ -159,6 +159,15 @@ _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
     }
 )
 _CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+    }
+)
 _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "OPENAI_API_KEY",
@@ -412,16 +421,21 @@ def _clarification_model_provider_environment_names(
     Claude Code's Bedrock and Vertex toggles select their own credentials and
     settings rather than adding to direct Anthropic authentication. Gemini
     similarly selects one API-key, Google Cloud, access-token, or CLI-file
-    source. Keep every other runtime's settings out of clarification.
+    source. All selected providers retain declared TLS trust stores. Keep every
+    other runtime's settings out of clarification.
     """
 
     environment_values = dict(agent_environment)
     if agent_runtime is AgentRuntime.claude_code:
-        return _clarification_claude_code_environment_names(environment_values)
+        return (
+            _clarification_claude_code_environment_names(environment_values)
+            | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+        )
     if agent_runtime is AgentRuntime.gemini:
-        return _CLARIFICATION_GEMINI_ENV_NAMES[
-            _clarification_gemini_auth_source(environment_values)
-        ]
+        return (
+            _CLARIFICATION_GEMINI_ENV_NAMES[_clarification_gemini_auth_source(environment_values)]
+            | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+        )
 
     provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
     if agent_runtime is AgentRuntime.opencode:
@@ -431,7 +445,7 @@ def _clarification_model_provider_environment_names(
                 frozenset(),
             )
         )
-    return frozenset(provider_names)
+    return frozenset(provider_names | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES)
 
 
 def _clarification_claude_code_environment_names(
