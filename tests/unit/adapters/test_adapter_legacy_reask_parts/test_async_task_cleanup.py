@@ -18,6 +18,7 @@ def test_isolated_reask_skips_git_binds_for_a_non_worktree(tmp_path: Path) -> No
     temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
         tmp_path / "not-a-worktree",
         expected_ref="a" * 40,
+        expected_source_mirror=tmp_path / "source-mirror",
     )
 
     assert temporary_metadata is None

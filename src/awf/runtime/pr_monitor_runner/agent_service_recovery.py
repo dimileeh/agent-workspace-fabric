@@ -94,6 +94,7 @@ async def _run_monitor_agent_with_service_recovery(
     git_preparation: AgentRuntimeGitPreparation | None = None,
     isolated_worktree_host_path: Path | None = None,
     isolated_worktree_ref: str | None = None,
+    isolated_worktree_source_mirror: Path | None = None,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
@@ -152,6 +153,10 @@ async def _run_monitor_agent_with_service_recovery(
                     local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
                 if isolated_worktree_ref is not None:
                     local_run_kwargs["isolated_worktree_ref"] = isolated_worktree_ref
+                if isolated_worktree_source_mirror is not None:
+                    local_run_kwargs["isolated_worktree_source_mirror"] = (
+                        isolated_worktree_source_mirror
+                    )
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
             if isolated_worktree_host_path is not None:

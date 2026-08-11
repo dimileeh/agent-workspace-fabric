@@ -222,9 +222,11 @@ class TestIsolatedReaskAdapter:
             _worktree_path: Path,
             *,
             expected_ref: str,
+            expected_source_mirror: Path,
         ) -> tuple[None, tuple[tuple[Path, str], ...]]:
             nonlocal snapshot_thread
             assert expected_ref == "a" * 40
+            assert expected_source_mirror == tmp_path / "source-mirror"
             snapshot_thread = get_ident()
             return None, ()
 
@@ -242,6 +244,7 @@ class TestIsolatedReaskAdapter:
             prompt=_PROMPT,
             isolated_worktree_host_path=tmp_path / "reask",
             isolated_worktree_ref="a" * 40,
+            isolated_worktree_source_mirror=tmp_path / "source-mirror",
         )
 
         assert snapshot_thread is not None
@@ -260,8 +263,10 @@ class TestIsolatedReaskAdapter:
             _worktree_path: Path,
             *,
             expected_ref: str,
+            expected_source_mirror: Path,
         ) -> tuple[tempfile.TemporaryDirectory[str], tuple[tuple[Path, str], ...]]:
             assert expected_ref == "a" * 40
+            assert expected_source_mirror == tmp_path / "source-mirror"
             snapshot_started.set()
             assert release_snapshot.wait(timeout=1)
             temporary_metadata = tempfile.TemporaryDirectory[str](dir=tmp_path)
@@ -283,6 +288,7 @@ class TestIsolatedReaskAdapter:
                 prompt=_PROMPT,
                 isolated_worktree_host_path=tmp_path / "reask",
                 isolated_worktree_ref="a" * 40,
+                isolated_worktree_source_mirror=tmp_path / "source-mirror",
             )
         )
 
@@ -329,6 +335,7 @@ class TestIsolatedReaskAdapter:
             prompt=_PROMPT,
             isolated_worktree_host_path=worktree_path,
             isolated_worktree_ref=head_oid,
+            isolated_worktree_source_mirror=mirror_path,
         )
 
         args = runner.calls[0].args
@@ -360,6 +367,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -428,13 +436,14 @@ class TestIsolatedReaskAdapter:
 
     def test_isolated_reask_git_metadata_binds_preserve_sha256_format(self, tmp_path: Path) -> None:
         """A credential-free snapshot remains usable for SHA-256 repositories."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
             tmp_path, object_format="sha256"
         )
 
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -483,7 +492,7 @@ class TestIsolatedReaskAdapter:
         self, tmp_path: Path
     ) -> None:
         """A source mirror's shallow boundary remains available to the snapshot clone."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
             tmp_path,
             shallow=True,
         )
@@ -491,6 +500,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -535,6 +545,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -616,6 +627,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=forged_head,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None
@@ -640,6 +652,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None
@@ -665,6 +678,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None
@@ -695,6 +709,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         try:
@@ -745,6 +760,73 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
+    def test_isolated_reask_git_metadata_binds_rejects_foreign_regular_linked_git_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """A regular Git pointer cannot select another mirror with the same HEAD."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        foreign_mirror = tmp_path / "foreign-mirror.git"
+        _git(["clone", "--mirror", str(mirror_path), str(foreign_mirror)], tmp_path)
+        foreign_worktree = tmp_path / "foreign-worktree"
+        _git(
+            [
+                "--git-dir",
+                str(foreign_mirror),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "foreign-reask",
+                str(foreign_worktree),
+                head_oid,
+            ],
+            tmp_path,
+        )
+        foreign_git_dir = foreign_mirror / "worktrees" / foreign_worktree.name
+        (worktree_path / ".git").write_text(f"gitdir: {foreign_git_dir}\n", encoding="utf-8")
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
+    def test_isolated_reask_git_metadata_binds_rejects_unexpected_source_worktree_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A source-mirror entry for another worktree cannot supply a snapshot."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        other_worktree = worktree_path.with_name("other-reask")
+        _git(
+            [
+                "--git-dir",
+                str(mirror_path),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other-reask",
+                str(other_worktree),
+                head_oid,
+            ],
+            tmp_path,
+        )
+        other_git_dir = mirror_path / "worktrees" / other_worktree.name
+        (worktree_path / ".git").write_text(f"gitdir: {other_git_dir}\n", encoding="utf-8")
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None
@@ -754,7 +836,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A sparse worktree Git pointer cannot trigger a path-based read."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         git_file = worktree_path / ".git"
         git_file.write_text("gitdir: ", encoding="utf-8")
         with git_file.open("r+b") as source_file:
@@ -771,6 +853,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None
@@ -780,7 +863,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Replacing `.git` before its descriptor open cannot block the snapshot."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         git_file = worktree_path / ".git"
         real_open = base_isolated_reask.os.open
         replaced_git_file = False
@@ -803,6 +886,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert replaced_git_file
@@ -958,7 +1042,7 @@ class TestIsolatedReaskAdapter:
 
     def test_isolated_reask_git_metadata_binds_preserve_large_indexes(self, tmp_path: Path) -> None:
         """Large normal and split Git indexes remain usable in the snapshot."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         blob_oid = _git(
             ["hash-object", "-w", "--stdin"], worktree_path, input="payload\n"
         ).stdout.strip()
@@ -968,7 +1052,7 @@ class TestIsolatedReaskAdapter:
         )
         _git(["update-index", "--index-info"], worktree_path, input=index_info)
 
-        linked_git_dir = _mirror_path / "worktrees" / worktree_path.name
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         assert (linked_git_dir / "index").stat().st_size > (
             base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES
         )
@@ -976,6 +1060,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1000,6 +1085,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1016,7 +1102,7 @@ class TestIsolatedReaskAdapter:
         self, tmp_path: Path
     ) -> None:
         """A split index snapshot remains usable by Git in the clarification worktree."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         _git(["update-index", "--split-index"], worktree_path)
         shared_index_path = (
             worktree_path / _git(["rev-parse", "--shared-index-path"], worktree_path).stdout.strip()
@@ -1026,6 +1112,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1055,7 +1142,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Shared-index discovery cannot execute an agent-configured fsmonitor hook."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         _git(["update-index", "--split-index"], worktree_path)
         real_run = base_isolated_reask.subprocess.run
         shared_index_commands: list[list[str]] = []
@@ -1070,6 +1157,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1113,6 +1201,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1153,6 +1242,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is not None
@@ -1170,7 +1260,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A failed local snapshot never falls back to shared mirror binds."""
-        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
 
         def _clone_failure(*_args: Any, **_kwargs: Any) -> None:
             raise subprocess.CalledProcessError(1, ["git", "clone"])
@@ -1180,6 +1270,7 @@ class TestIsolatedReaskAdapter:
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,
             expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
         )
 
         assert temporary_metadata is None

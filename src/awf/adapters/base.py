@@ -362,6 +362,7 @@ class AgentAdapter(ABC):
         workdir: str = DEFAULT_AGENT_WORKDIR,
         isolated_worktree_host_path: Path | None = None,
         isolated_worktree_ref: str | None = None,
+        isolated_worktree_source_mirror: Path | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -655,12 +656,16 @@ class AgentAdapter(ABC):
                 # bare mirror. Give non-Codex clarification CLIs only the
                 # credential-free subset needed to discover that checkout.
                 read_only_volume_binds: tuple[tuple[Path, str], ...] = ()
-                if isolated_worktree_ref is not None:
+                if (
+                    isolated_worktree_ref is not None
+                    and isolated_worktree_source_mirror is not None
+                ):
                     git_metadata_task = asyncio.create_task(
                         asyncio.to_thread(
                             _isolated_reask_git_metadata_volume_binds,
                             isolated_worktree_host_path,
                             expected_ref=isolated_worktree_ref,
+                            expected_source_mirror=isolated_worktree_source_mirror,
                         )
                     )
                     try:

@@ -743,11 +743,15 @@ async def test_reask_uses_validated_source_git_context_for_head_and_worktree_cre
         worktree_name=workspace_id,
         tracked_contents="source repository\n",
     )
+    source_mirror = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    ).parent.parent
     reask_contents: list[str] = []
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
+        assert kwargs["isolated_worktree_source_mirror"] == source_mirror
         reask_contents.append((reask / "tracked.txt").read_text(encoding="utf-8"))
         return VerdictResult(verdict="needs_human", reason="select a deployment region")
 

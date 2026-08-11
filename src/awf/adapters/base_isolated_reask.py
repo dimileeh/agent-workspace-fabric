@@ -258,7 +258,12 @@ def _write_isolated_reask_source_config(common_path: Path, expected_ref: str) ->
     raise OSError("re-ask ref does not use a supported Git object format")
 
 
-def _linked_worktree_common_git_dir(snapshot_path: Path, linked_git_dir: Path) -> Path:
+def _linked_worktree_common_git_dir(
+    snapshot_path: Path,
+    linked_git_dir: Path,
+    *,
+    expected_source_mirror: Path,
+) -> Path:
     """Validate the snapshotted common Git directory for a linked worktree."""
     commondir = (snapshot_path / "commondir").read_text(encoding="utf-8").strip()
     if not commondir:
@@ -267,9 +272,9 @@ def _linked_worktree_common_git_dir(snapshot_path: Path, linked_git_dir: Path) -
     if not common_git_dir.is_absolute():
         common_git_dir = linked_git_dir / common_git_dir
     common_git_dir = Path(os.path.normpath(common_git_dir))
-    expected_common_git_dir = Path(os.path.normpath(linked_git_dir.parent.parent))
+    expected_common_git_dir = Path(os.path.normpath(expected_source_mirror))
     if common_git_dir != expected_common_git_dir:
-        raise OSError("linked Git commondir does not match the linked Git directory")
+        raise OSError("linked Git commondir does not match the expected source mirror")
     return common_git_dir
 
 
@@ -277,17 +282,25 @@ def _isolated_reask_git_metadata_volume_binds(
     worktree_path: Path,
     *,
     expected_ref: str,
+    expected_source_mirror: Path | None = None,
 ) -> tuple[tempfile.TemporaryDirectory[str] | None, tuple[tuple[Path, str], ...]]:
     """Build credential-free Git discovery binds for a linked re-ask worktree.
 
     A linked worktree's ``.git`` file points at metadata beneath its shared
     bare mirror. The clarification container instead receives a detached bare
     clone pinned to the requested re-ask ref, preventing it from reading other
-    worktrees' refs or objects. Git needs only selected linked control files
-    and the snapshot's common Git directory to recognise the worktree.
+    worktrees' refs or objects. The pointer must resolve to the validated
+    source mirror's expected worktree entry before any metadata or objects are
+    copied. Git needs only selected linked control files and the snapshot's
+    common Git directory to recognise the worktree.
     """
     linked_git_dir = _isolated_reask_linked_worktree_git_dir(worktree_path)
-    if linked_git_dir is None:
+    if linked_git_dir is None or expected_source_mirror is None:
+        return None, ()
+    expected_linked_git_dir = Path(
+        os.path.normpath(expected_source_mirror / "worktrees" / worktree_path.name)
+    )
+    if Path(os.path.normpath(linked_git_dir)) != expected_linked_git_dir:
         return None, ()
     try:
         # Snapshot the control files through this descriptor. The linked Git
@@ -313,7 +326,11 @@ def _isolated_reask_git_metadata_volume_binds(
         _copy_regular_git_metadata_file_from_directory_fd(
             linked_git_dir_fd, "commondir", snapshot_path / "commondir"
         )
-        common_git_dir = _linked_worktree_common_git_dir(snapshot_path, linked_git_dir)
+        common_git_dir = _linked_worktree_common_git_dir(
+            snapshot_path,
+            linked_git_dir,
+            expected_source_mirror=expected_source_mirror,
+        )
         (snapshot_path / "commondir").write_text(f"{common_git_dir}\n", encoding="utf-8")
         snapshotted_ref = subprocess.run(
             ["git", "--git-dir", str(snapshot_path), "rev-parse", "HEAD"],

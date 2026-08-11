@@ -127,6 +127,7 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
             )
 
     reask_worktree = tmp_path / ".awf-needs-human-reask-test"
+    source_mirror = tmp_path / "source-mirror"
     runner = SimpleNamespace(_deps=SimpleNamespace(adapter=_Adapter()))
     result = await agent_service_recovery._run_monitor_agent_with_service_recovery(
         runner,
@@ -137,6 +138,7 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
         log_source="recovery",
         isolated_worktree_host_path=reask_worktree,
         isolated_worktree_ref="a" * 40,
+        isolated_worktree_source_mirror=source_mirror,
     )
 
     assert result.stdout.endswith("reason")
@@ -149,6 +151,7 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
             "log_source": "recovery",
             "isolated_worktree_host_path": reask_worktree,
             "isolated_worktree_ref": "a" * 40,
+            "isolated_worktree_source_mirror": source_mirror,
         }
     ]
 
@@ -199,10 +202,12 @@ async def test_isolated_reask_ref_passes_from_comment_verdict_to_service_recover
         commit_dirty_changes=False,
         isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
         isolated_worktree_ref="a" * 40,
+        isolated_worktree_source_mirror=tmp_path / "source-mirror",
     )
 
     assert result == VerdictResult(verdict="needs_human", reason="reason")
     assert calls[0]["isolated_worktree_ref"] == "a" * 40
+    assert calls[0]["isolated_worktree_source_mirror"] == tmp_path / "source-mirror"
 
 
 @pytest.mark.unit
