@@ -9,6 +9,7 @@ import pytest
 
 from awf.db.enums import AgentRuntime
 from awf.node import stack_launcher as stack_launcher_mod
+from awf.node import stack_launcher_auth_helpers as stack_launcher_auth_helpers_mod
 from awf.node.compose_manager import AuthMount
 from awf.node.stack_launcher_auth_helpers import (
     aws_profile_path_rewrites,
@@ -1400,10 +1401,11 @@ def test_clarification_retains_credential_process_environment_token_file(tmp_pat
 
 
 @pytest.mark.unit
-def test_clarification_retains_defaulted_credential_process_token_file(
-    tmp_path: Path,
+@pytest.mark.parametrize("operator", (":-", ":=", ":+", ":?"))
+def test_clarification_retains_credential_process_parameter_expansion_token_file(
+    tmp_path: Path, operator: str
 ) -> None:
-    """Defaulted credential-process paths retain the input and fallback mounts."""
+    """Parameter expansions retain their credential input and operand mounts."""
     aws_home = tmp_path / "aws"
     aws_home.mkdir()
     helper = tmp_path / "aws-helper"
@@ -1418,7 +1420,7 @@ def test_clarification_retains_defaulted_credential_process_token_file(
     (aws_home / "config").write_text(
         "[profile awf-bedrock]\n"
         "credential_process = sh -c "
-        f"'{helper_target} --token-file \"${{MY_TOKEN_FILE:-{fallback_token_target}}}\"'\n",
+        f"'{helper_target} --token-file \"${{MY_TOKEN_FILE{operator}{fallback_token_target}}}\"'\n",
         encoding="utf-8",
     )
     aws_profile = AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro")
@@ -1468,3 +1470,15 @@ def test_clarification_retains_defaulted_credential_process_token_file(
             mode="ro",
         ),
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operator", (":=", ":+", ":?"))
+def test_credential_process_references_remaining_parameter_operators(operator: str) -> None:
+    """Credential helpers retain paths and inputs from remaining shell operators."""
+    helper_target = "/run/awf/secrets/aws-helper"
+    token_target = "/run/awf/secrets/credential-process-token"
+
+    assert stack_launcher_auth_helpers_mod._credential_process_references(  # noqa: SLF001
+        f"sh -c '{helper_target} --token-file \"${{TOKEN_FILE{operator}{token_target}}}\"'"
+    ) == ((helper_target, token_target), frozenset({"TOKEN_FILE"}))

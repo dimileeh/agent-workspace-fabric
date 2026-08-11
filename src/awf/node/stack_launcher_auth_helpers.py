@@ -39,7 +39,7 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
     }
 )
 _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
-    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::-|-)(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::[-=+?]|-)(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
 
 
@@ -508,12 +508,13 @@ def _credential_process_path_references(arguments: Sequence[str]) -> tuple[str, 
 
     references: list[str] = []
     for argument in arguments:
-        references.extend(_credential_process_argument_paths(argument))
         with suppress(ValueError):
             nested_arguments = shlex.split(argument)
             if nested_arguments != [argument]:
                 for nested_argument in nested_arguments:
                     references.extend(_credential_process_argument_paths(nested_argument))
+                continue
+        references.extend(_credential_process_argument_paths(argument))
     return tuple(dict.fromkeys(references))
 
 
@@ -522,6 +523,8 @@ def _credential_process_argument_paths(argument: str) -> tuple[str, ...]:
 
     if argument.startswith("/"):
         return (argument,)
+    if _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE.fullmatch(argument):
+        return ()
     _, separator, option_value = argument.partition("=")
     if separator and option_value.startswith("/"):
         return (option_value,)
