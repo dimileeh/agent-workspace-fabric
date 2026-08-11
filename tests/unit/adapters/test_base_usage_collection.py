@@ -867,6 +867,62 @@ async def test_isolated_sink_close_cancellation_removes_detached_container() -> 
 
 
 @pytest.mark.unit
+async def test_isolated_final_cleanup_completes_when_cancelled() -> None:
+    """Cancellation during final cleanup still removes the detached container."""
+    events: list[str] = []
+
+    class _BlockingCleanupRunner(_EventRunner):
+        def __init__(self) -> None:
+            super().__init__(
+                events,
+                result=CommandResult(returncode=0, stdout="ok", stderr=""),
+            )
+            self.cleanup_started = asyncio.Event()
+            self.allow_cleanup = asyncio.Event()
+            self.cleanup_finished = asyncio.Event()
+
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.calls.append(list(args))
+            if "capture-baseline" in args:
+                events.append("baseline")
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if "--detach" in args:
+                events.append("startup")
+                return CommandResult(returncode=0, stdout="", stderr="")
+
+            events.append("cleanup")
+            self.cleanup_started.set()
+            await self.allow_cleanup.wait()
+            self.cleanup_finished.set()
+            return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+
+    runner = _BlockingCleanupRunner()
+    adapter = CodexAdapter(runner=runner, usage_sampler=_IsolatedRecordingSampler(events))
+    task = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_final_cleanup_cancelled",
+            isolated_worktree_host_path=Path(
+                "/worktrees/ws_isolated_final_cleanup_cancelled/reask"
+            ),
+        )
+    )
+
+    await asyncio.wait_for(runner.cleanup_started.wait(), timeout=0.2)
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+
+    runner.allow_cleanup.set()
+    await asyncio.wait_for(runner.cleanup_finished.wait(), timeout=0.2)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.unit
 async def test_isolated_capture_failure_does_not_mask_timeout_or_container_removal() -> None:
     """Verify isolated capture failure does not mask timeout or container removal."""
     events: list[str] = []
