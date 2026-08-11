@@ -46,6 +46,7 @@ from awf.node.compose_diagnostics import (
 from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
 from awf.node.compose_manager_clarification import (
     _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED,
+    _PERSISTED_CLARIFICATION_SERVICE_MANAGED,
     _attach_persisted_clarification_model_network,
     _clarification_model_service_names,
     _is_managed_persisted_clarification_service,
@@ -234,6 +235,7 @@ def upgrade_persisted_clarification_service(
 
     clarification: dict[str, object] = {
         "image": image,
+        _PERSISTED_CLARIFICATION_SERVICE_MANAGED: True,
         "working_dir": agent.get("working_dir", "/workspace"),
         "networks": [
             "clarification_egress_net",
@@ -645,6 +647,7 @@ class ComposeManager:
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
             clarification_enabled=spec.clarification_enabled,
+            clarification_service_marker=_PERSISTED_CLARIFICATION_SERVICE_MANAGED,
             clarification_model_services=clarification_model_services,
             clarification_agent_environment=spec.clarification_agent_environment,
             clarification_auth_mounts=[

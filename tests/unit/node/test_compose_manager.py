@@ -118,6 +118,7 @@ def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git
     clarification = upgraded["services"]["clarification"]
     assert upgraded["services"]["agent"] == original["services"]["agent"]
     assert upgraded["services"]["postgres"] == original["services"]["postgres"]
+    assert clarification["x-awf-persisted-clarification-service-managed"] is True
     assert clarification["profiles"] == ["awf-clarification"]
     assert clarification["networks"] == ["clarification_egress_net"]
     assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
@@ -200,6 +201,7 @@ def test_upgrade_persisted_clarification_service_recognizes_managed_service_sign
             "agent": {"image": "awf-agent-runtime:latest"},
             "clarification": {
                 "image": "awf-agent-runtime:latest",
+                "x-awf-persisted-clarification-service-managed": True,
                 "networks": ["clarification_egress_net"],
                 "profiles": ["awf-clarification"],
                 "command": ["sh", "-c", "sleep infinity"],
@@ -220,6 +222,41 @@ def test_upgrade_persisted_clarification_service_recognizes_managed_service_sign
         )
         is None
     )
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_rejects_unmarked_signature_lookalike(
+    tmp_path: Path,
+) -> None:
+    """A profile service cannot opt into managed behavior through shared fields."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": {
+                "image": "profile-owned:latest",
+                "environment": {"PROFILE_SECRET": "preserve-me"},
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicts with the managed clarification service"):
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+
     assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
 
 
@@ -395,6 +432,7 @@ class TestRender:
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
         clarification = parsed["services"]["clarification"]
 
+        assert clarification["x-awf-persisted-clarification-service-managed"] is True
         assert clarification["profiles"] == ["awf-clarification"]
         assert clarification["networks"] == ["clarification_egress_net"]
         assert parsed["services"]["postgres"]["networks"] == ["awf_net"]

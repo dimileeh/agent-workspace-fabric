@@ -21,6 +21,7 @@ _CLARIFICATION_PROXY_URL_ENV_NAMES = (
 _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
     "x-awf-persisted-clarification-model-network-reconciled"
 )
+_PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
 
 
 def _is_managed_persisted_clarification_service(service: object) -> bool:
@@ -29,7 +30,8 @@ def _is_managed_persisted_clarification_service(service: object) -> bool:
         return False
     networks = service.get("networks")
     return (
-        service.get("profiles") == ["awf-clarification"]
+        service.get(_PERSISTED_CLARIFICATION_SERVICE_MANAGED) is True
+        and service.get("profiles") == ["awf-clarification"]
         and isinstance(networks, list)
         and "clarification_egress_net" in networks
         and service.get("command") == ["sh", "-c", "sleep infinity"]
