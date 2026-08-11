@@ -46,6 +46,9 @@ from awf.node.stack_launcher_auth_helpers import (
     _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    _provider_auth_mount_staging_order as _clarification_provider_auth_mount_staging_order,
+)
+from awf.node.stack_launcher_auth_helpers import (
     aws_external_account_environment_names as _clarification_aws_external_account_environment_names,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -363,7 +366,11 @@ def _clarification_agent_environment(
     staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
     staged_targets = tuple(
         (source.target, staged.target)
-        for source, staged in zip(source_mounts, staged_mounts, strict=True)
+        for source, staged in zip(
+            _clarification_provider_auth_mount_staging_order(source_mounts),
+            staged_mounts,
+            strict=True,
+        )
         if source.target != staged.target
     )
     clarification_environment_names = provider_environment_names

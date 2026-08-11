@@ -46,6 +46,35 @@ def test_clarification_stages_parent_auth_mount_before_nested_file() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_environment_rewrites_child_first_adc_mount_to_staged_file() -> None:
+    """ADC keeps its staged file target when its parent mount is declared second."""
+    credentials = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
+        target="/run/awf/secrets/gcp/credentials.json",
+        mode="ro",
+    )
+    credentials_directory = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/gcp",
+        target="/run/awf/secrets/gcp",
+        mode="ro",
+    )
+
+    environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        (
+            ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", credentials.target),
+        ),
+        auth_mounts=(credentials, credentials_directory),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    )
+
+    assert dict(environment)["GOOGLE_APPLICATION_CREDENTIALS"] == (
+        "/home/agent/.awf/clarification-auth/1"
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_only_selected_adapter_credentials(tmp_path: Path) -> None:
     """Codex clarification cannot read credentials for other coding adapters."""
     mirror = "/host/awf/git/mirrors/repo.git"
