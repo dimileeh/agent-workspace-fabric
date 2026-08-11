@@ -328,6 +328,72 @@ async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_disables_primary_checkout_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-ask checkout cannot run a filter configured by the previous agent."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_filters_disabled")
+    (worktree / ".gitattributes").write_text("filtered.txt filter=poison\n", encoding="utf-8")
+    (worktree / "filtered.txt").write_text("original content\n", encoding="utf-8")
+    _git(worktree, "add", ".gitattributes", "filtered.txt")
+    _git(worktree, "commit", "-qm", "add filtered file")
+    filter_marker = tmp_path / "smudge-filter-ran"
+    _git(
+        worktree,
+        "config",
+        "filter.poison.smudge",
+        f"touch '{filter_marker}'; cat",
+    )
+    _git(worktree, "config", "filter.poison.clean", "cat")
+    _git(worktree, "config", "filter.poison.required", "true")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert reask_worktree is not None
+    assert not filter_marker.exists()
+    assert (reask_worktree.path / "filtered.txt").read_text(
+        encoding="utf-8"
+    ) == "original content\n"
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_fail_closed_when_filter_probe_fails() -> None:
+    """An unreadable filter configuration cannot lead to an unsafe checkout."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=2, stderr="config unreadable")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not determine checkout filters"):
+        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_reject_unexpected_config_key() -> None:
+    """A malformed filter key cannot be passed into the host Git command."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=0, stdout="filter.poison/unsafe.smudge\n")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(
+        _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
+    ):
+        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_is_removed_when_ownership_repair_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -569,6 +635,7 @@ async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
     worktree = _init_real_worktree(tmp_path, "ws_reask_create_failure")
     command_runner = FakeCommandRunner()
     command_runner.queue_result(returncode=0)  # primary-worktree status
+    command_runner.queue_result(returncode=1)  # no configured checkout filters
     command_runner.queue_result(returncode=1, stderr="worktree add failed")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
@@ -579,8 +646,8 @@ async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert "worktree" in command_runner.calls[1].args
-    assert "add" in command_runner.calls[1].args
+    assert "worktree" in command_runner.calls[2].args
+    assert "add" in command_runner.calls[2].args
 
 
 @pytest.mark.unit

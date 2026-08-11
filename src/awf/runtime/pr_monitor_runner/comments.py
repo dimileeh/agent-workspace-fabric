@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import fcntl
 import os
+import re
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -88,6 +89,9 @@ _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can cont
 # policy-declared companions if creation is interrupted before cleanup.
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+_FILTER_DRIVER_CONFIG_KEY_RE = re.compile(
+    r"^(filter\.[A-Za-z0-9][A-Za-z0-9._-]*)\.(?:smudge|process)$"
+)
 
 
 @dataclass(frozen=True)
@@ -161,6 +165,54 @@ async def _check_reask_primary_worktree_clean(
     return None
 
 
+async def _checkout_filter_overrides(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+) -> tuple[str, ...]:
+    """Return Git options that prevent configured checkout filters from running."""
+    configured_filters = await runner._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "config",
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(smudge|process)$",
+        )
+    )
+    if configured_filters.returncode == 1:
+        return ()
+    if not configured_filters.ok:
+        raise _MonitorPolicyBlockedError(
+            "Could not determine checkout filters before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    driver_prefixes: set[str] = set()
+    for config_key in configured_filters.stdout.splitlines():
+        match = _FILTER_DRIVER_CONFIG_KEY_RE.fullmatch(config_key)
+        if match is None:
+            raise _MonitorPolicyBlockedError(
+                "Could not safely disable checkout filters before the NEEDS_HUMAN reason re-ask.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
+        driver_prefixes.add(match.group(1))
+
+    return tuple(
+        option
+        for driver_prefix in sorted(driver_prefixes)
+        for option in (
+            "-c",
+            f"{driver_prefix}.smudge=",
+            "-c",
+            f"{driver_prefix}.process=",
+            "-c",
+            f"{driver_prefix}.required=false",
+        )
+    )
+
+
 async def _create_isolated_reask_worktree(
     runner: PullRequestMonitorRunner,
     *,
@@ -175,6 +227,10 @@ async def _create_isolated_reask_worktree(
         return None
 
     await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
+    checkout_filter_overrides = await _checkout_filter_overrides(
+        runner,
+        worktree_path=worktree_path,
+    )
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
     path = worktree_path.parent / (
@@ -229,10 +285,12 @@ async def _create_isolated_reask_worktree(
             git_worktree_command(
                 worktree_path,
                 # The primary mirror is writable by the prior agent. Disable
-                # its default hooks directory while the control plane creates
-                # this host-side clarification checkout.
+                # its default hooks directory and every configured checkout
+                # filter while the control plane creates this host-side
+                # clarification checkout.
                 "-c",
                 "core.hooksPath=/dev/null",
+                *checkout_filter_overrides,
                 "worktree",
                 "add",
                 "--detach",
