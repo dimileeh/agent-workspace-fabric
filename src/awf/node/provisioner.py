@@ -341,11 +341,15 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
-            clarification_enabled = all(
-                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
-            )
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+            clarification_enabled = all(
+                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
+            ) and all(
+                companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
+                for companion in companion_specs
+            )
+            if self._stack_launcher is not None:
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
