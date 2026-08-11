@@ -47,6 +47,8 @@ def _copy_regular_git_metadata_file_from_directory_fd(
 ) -> None:
     """Copy one regular Git metadata file from an already-open directory."""
     source_fd: int | None = None
+    destination_created = False
+    copy_succeeded = False
     try:
         source_fd = os.open(
             source_name,
@@ -60,20 +62,26 @@ def _copy_regular_git_metadata_file_from_directory_fd(
             raise OSError(f"Git metadata source exceeds size limit: {source_name}")
         copied_bytes = 0
         with destination.open("xb") as dest_file:
+            destination_created = True
             while True:
                 chunk = os.read(
                     source_fd,
                     64 * 1024 if max_bytes is None else min(64 * 1024, max_bytes - copied_bytes),
                 )
                 if not chunk:
+                    copy_succeeded = True
                     return
                 dest_file.write(chunk)
                 copied_bytes += len(chunk)
                 if max_bytes is not None and copied_bytes == max_bytes:
                     if os.read(source_fd, 1):
                         raise OSError(f"Git metadata source exceeds size limit: {source_name}")
+                    copy_succeeded = True
                     return
     finally:
+        if destination_created and not copy_succeeded:
+            with contextlib.suppress(OSError):
+                destination.unlink()
         if source_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(source_fd)

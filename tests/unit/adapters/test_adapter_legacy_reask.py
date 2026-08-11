@@ -792,6 +792,7 @@ class TestIsolatedReaskAdapter:
             base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
 
         assert grew_source
+        assert not destination.exists()
 
     def test_isolated_reask_git_metadata_binds_preserve_large_indexes(self, tmp_path: Path) -> None:
         """Large normal and split Git indexes remain usable in the snapshot."""
