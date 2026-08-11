@@ -420,7 +420,9 @@ def _clarification_expanded_provider_path_value(name: str, value: str) -> str:
     """Resolve Compose expressions in provider file-path settings."""
 
     if name in (
-        _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+        _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
+        | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+        | frozenset({"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"})
     ):
         return compose_expand_value(value, environ=os.environ)
     return value

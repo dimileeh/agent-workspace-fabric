@@ -138,6 +138,53 @@ def test_clarification_inputs_retain_bedrock_container_credentials_and_token_fil
 
 
 @pytest.mark.unit
+def test_clarification_inputs_expand_bedrock_container_token_file_before_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bedrock stages a defaulted Compose container-token file mount."""
+    authorization_token_file = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-container-authorization-token",
+        target="/run/awf/secrets/aws-container-authorization-token",
+        mode="ro",
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://credentials.awf.test/v2/credentials"),
+        (
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            "${AWF_TEST_CONTAINER_TOKEN_FILE:-/run/awf/secrets/aws-container-authorization-token}",
+        ),
+    )
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+    monkeypatch.delenv("AWF_TEST_CONTAINER_TOKEN_FILE", raising=False)
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=(authorization_token_file,),
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_REGION", "us-west-2"),
+        ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://credentials.awf.test/v2/credentials"),
+        ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "/home/agent/.awf/clarification-auth/0"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (authorization_token_file,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(
+            source=authorization_token_file.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("environment_values", "expected_names"),
     [
