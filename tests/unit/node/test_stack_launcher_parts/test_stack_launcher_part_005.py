@@ -15,6 +15,7 @@ from awf.node.companion_services import (
 from awf.node.compose_manager import AuthMount
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.node.stack_launcher_hosted_secret_helpers import _hosted_env_secret_alias_pairs
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from tests.unit.node.test_stack_launcher_parts._helpers import (
     _FailingDeclaredLeaseResolver,
@@ -367,7 +368,7 @@ def test_hosted_env_secret_alias_pairs_ignores_unknown_provider() -> None:
     )
 
     assert (
-        stack_launcher_mod._hosted_env_secret_alias_pairs(
+        _hosted_env_secret_alias_pairs(
             secret,
             provider="unknown",
         )
