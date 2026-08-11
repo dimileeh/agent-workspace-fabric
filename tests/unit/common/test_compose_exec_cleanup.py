@@ -540,6 +540,46 @@ def test_isolated_compose_run_uses_restricted_clarification_service() -> None:
     ]
 
 
+def test_persistent_isolated_compose_run_monitors_agent_via_docker_exec() -> None:
+    """A retained clarification container keeps final sampling out of agent argv."""
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="reask_persistent_test",
+        preserve_stdin=True,
+        keep_container_running=True,
+    )
+
+    assert invocation.startup_args is not None
+    run_idx = invocation.startup_args.index("run")
+    assert invocation.startup_args[run_idx : run_idx + 8] == [
+        "run",
+        "--detach",
+        "--no-deps",
+        "-T",
+        "--name",
+        invocation.container_name,
+        "-w",
+        "/workspace",
+    ]
+    assert "--rm" not in invocation.startup_args
+    assert "codex" not in invocation.startup_args
+    assert invocation.args[:7] == [
+        "docker",
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        invocation.container_name,
+        "sh",
+    ]
+    assert invocation.args[-3:] == ["codex", "exec", "-"]
+
+
 def test_isolated_compose_run_mounts_linked_git_metadata_read_only() -> None:
     """A re-ask exposes its backing linked-worktree metadata without write access."""
     mirror_path = Path("/worktrees/mirrors/owner-repo.git")

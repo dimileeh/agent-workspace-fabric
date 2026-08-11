@@ -64,14 +64,6 @@ class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
         """Return AWF-owned host paths the isolated invocation may write to."""
 
-    @property
-    def agent_completion_marker(self) -> str | None:
-        """Return the wrapper marker emitted before final usage collection.
-
-        ``None`` means the context does not wrap the agent command and the
-        adapter must use its ordinary command watchdog.
-        """
-
 
 @runtime_checkable
 class IsolatedUsageSampler(Protocol):

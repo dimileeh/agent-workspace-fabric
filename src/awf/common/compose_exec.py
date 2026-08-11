@@ -90,6 +90,7 @@ class TrackedIsolatedComposeRun:
     wrapper_script: str
     container_name: str
     cleanup_args: list[str]
+    startup_args: list[str] | None = None
 
 
 def build_tracked_compose_exec(
@@ -155,8 +156,15 @@ def build_isolated_tracked_compose_run(
     preserve_stdin: bool = False,
     read_only_volume_binds: Sequence[tuple[Path, str]] = (),
     extra_volume_binds: Sequence[tuple[Path, str]] = (),
+    keep_container_running: bool = False,
 ) -> TrackedIsolatedComposeRun:
-    """Build a one-off clarification run with a child worktree and AWF mounts."""
+    """Build a one-off clarification run with a child worktree and AWF mounts.
+
+    When ``keep_container_running`` is set, the detached clarification
+    container hosts a separately monitored ``docker exec`` agent process. This
+    lets AWF capture usage after the agent exits without placing a completion
+    sentinel in the agent's argv or stdout.
+    """
 
     if not cli_args:
         raise ValueError("cli_args must not be empty")
@@ -164,7 +172,7 @@ def build_isolated_tracked_compose_run(
     _validate_invocation_id(invocation_id)
     wrapper_script = _tracked_exec_wrapper_script(preserve_stdin=preserve_stdin)
     container_name = f"awf-reask-{invocation_id}"
-    args = [
+    run_args = [
         "docker",
         "compose",
         "-p",
@@ -172,7 +180,7 @@ def build_isolated_tracked_compose_run(
         "-f",
         str(compose_file),
         "run",
-        "--rm",
+        *(("--detach",) if keep_container_running else ("--rm",)),
         "--no-deps",
         "-T",
         "--name",
@@ -194,14 +202,41 @@ def build_isolated_tracked_compose_run(
             for host_path, container_path in extra_volume_binds
             for option in ("-v", f"{host_path}:{container_path}:rw")
         ),
-        service,
-        "sh",
-        "-lc",
-        wrapper_script,
-        "awf-exec",
-        invocation_id,
-        *cli_args,
     ]
+    startup_args: list[str] | None = None
+    if keep_container_running:
+        startup_args = [
+            *run_args,
+            service,
+            "sh",
+            "-lc",
+            "while :; do sleep 2147483647 & wait $!; done",
+        ]
+        args = [
+            "docker",
+            "exec",
+            "-i",
+            "-w",
+            DEFAULT_AGENT_WORKDIR,
+            container_name,
+            "sh",
+            "-lc",
+            wrapper_script,
+            "awf-exec",
+            invocation_id,
+            *cli_args,
+        ]
+    else:
+        args = [
+            *run_args,
+            service,
+            "sh",
+            "-lc",
+            wrapper_script,
+            "awf-exec",
+            invocation_id,
+            *cli_args,
+        ]
     return TrackedIsolatedComposeRun(
         args=args,
         invocation_id=invocation_id,
@@ -213,6 +248,7 @@ def build_isolated_tracked_compose_run(
         wrapper_script=wrapper_script,
         container_name=container_name,
         cleanup_args=["docker", "container", "rm", "--force", container_name],
+        startup_args=startup_args,
     )
 
 

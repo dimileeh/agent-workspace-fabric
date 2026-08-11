@@ -16,7 +16,7 @@ import pytest
 from awf.adapters import base as base_module
 from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
-from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult
+from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, COMMAND_TIMEOUT_REASON, CommandResult
 from awf.db.enums import AgentRuntime
 
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -63,13 +63,11 @@ class _IsolatedRecordingContext(_RecordingContext):
         *,
         capture_error: Exception | None = None,
         baseline_error: Exception | None = None,
-        agent_completion_marker: str | None = None,
     ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._capture_error = capture_error
         self._baseline_error = baseline_error
-        self._agent_completion_marker = agent_completion_marker
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
         """Exercise the capture_final_before_cleanup test helper."""
@@ -101,11 +99,6 @@ class _IsolatedRecordingContext(_RecordingContext):
         """Return the configured isolated-capture volume bindings."""
         return ((Path("/tmp/awf-usage-capture"), "/tmp/awf-ccusage"),)
 
-    @property
-    def agent_completion_marker(self) -> str | None:
-        """Return the test-only marker emitted after the agent command exits."""
-        return self._agent_completion_marker
-
 
 class _IsolatedRecordingSampler(_RecordingSampler):
     """Test double used by the surrounding scenario."""
@@ -117,14 +110,12 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         start_error: Exception | None = None,
         capture_error: Exception | None = None,
         baseline_error: Exception | None = None,
-        agent_completion_marker: str | None = None,
     ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._isolated_start_error = start_error
         self._capture_error = capture_error
         self._baseline_error = baseline_error
-        self._agent_completion_marker = agent_completion_marker
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
         """Exercise the start_isolated test helper."""
@@ -136,7 +127,6 @@ class _IsolatedRecordingSampler(_RecordingSampler):
             self._events,
             capture_error=self._capture_error,
             baseline_error=self._baseline_error,
-            agent_completion_marker=self._agent_completion_marker,
         )
 
 
@@ -175,8 +165,11 @@ class _EventRunner:
         self.streaming_calls: list[list[str]] = []
 
     async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
-        # Targeted cleanup on timeout/cancellation funnels through here.
-        self._events.append("cleanup")
+        if "--detach" in args:
+            self._events.append("startup")
+        else:
+            # Targeted cleanup on timeout/cancellation funnels through here.
+            self._events.append("cleanup")
         self.calls.append(list(args))
         return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
 
@@ -227,13 +220,15 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     )
 
     assert result.ok
-    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
+    assert events[:4] == ["start_isolated", "baseline", "startup", "agent"]
+    assert events[-2:] == ["cleanup", "finalize:success"]
+    assert events[-3].startswith("capture:awf-reask-")
     assert sampler.start_kwargs is not None
     assert sampler.start_kwargs["provider"] is AgentRuntime.codex
     assert sampler.start_kwargs["cli_args"][:2] == ["codex", "exec"]
     args = runner.streaming_calls[0]
-    assert "clarification" in args
-    assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
+    assert args[:2] == ["docker", "exec"]
+    assert "clarification" not in args
     assert "agent-cli" in args
     assert "capture-baseline" not in args
 
@@ -242,7 +237,7 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
 async def test_isolated_final_usage_capture_is_not_charged_to_agent_timeout() -> None:
     """A final probe after CLI completion cannot turn success into a timeout."""
 
-    marker = "\x1eagent-complete\x1f\n"
+    completion_like_output = "\x1eawf-isolated-agent-complete\x1f\n"
     events: list[str] = []
 
     class _FinalProbeRunner(_EventRunner):
@@ -254,7 +249,6 @@ async def test_isolated_final_usage_capture_is_not_charged_to_agent_timeout() ->
             self,
             args: list[str],
             *,
-            on_stdout: Any = None,
             wall_timeout_seconds: float | None = None,
             idle_timeout_seconds: float | None = None,
             **_kwargs: Any,
@@ -262,20 +256,10 @@ async def test_isolated_final_usage_capture_is_not_charged_to_agent_timeout() ->
             self._events.append("agent")
             self.streaming_calls.append(list(args))
             self.watchdog_timeouts.append((wall_timeout_seconds, idle_timeout_seconds))
-            if wall_timeout_seconds is not None or idle_timeout_seconds is not None:
-                return CommandResult(
-                    returncode=124,
-                    stdout="",
-                    stderr="command wall timeout after 0.01s\n",
-                    reason_code=COMMAND_TIMEOUT_REASON,
-                )
-            assert on_stdout is not None
-            await on_stdout(marker[:7])
-            await on_stdout(marker[7:])
             await asyncio.sleep(0.02)
-            return CommandResult(returncode=0, stdout=marker, stderr="")
+            return CommandResult(returncode=0, stdout=completion_like_output, stderr="")
 
-    sampler = _IsolatedRecordingSampler(events, agent_completion_marker=marker)
+    sampler = _IsolatedRecordingSampler(events)
     runner = _FinalProbeRunner()
     adapter = CodexAdapter(
         runner=runner,
@@ -295,22 +279,22 @@ async def test_isolated_final_usage_capture_is_not_charged_to_agent_timeout() ->
     )
 
     assert result.ok
-    assert result.stdout == ""
-    assert runner.watchdog_timeouts == [(None, None)]
-    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
+    assert result.stdout == completion_like_output
+    assert runner.watchdog_timeouts == [(0.01, 0.01)]
+    assert events[:4] == ["start_isolated", "baseline", "startup", "agent"]
+    assert events[-2:] == ["cleanup", "finalize:success"]
+    assert events[-3].startswith("capture:awf-reask-")
 
 
 @pytest.mark.unit
-async def test_isolated_agent_idle_timeout_precedes_completion_marker() -> None:
-    """The dedicated watchdog still stops a silent CLI before it completes."""
+async def test_isolated_agent_idle_timeout_precedes_final_usage_capture() -> None:
+    """The direct exec watchdog still stops a silent CLI before final capture."""
 
-    marker = "\x1eagent-complete\x1f"
     events: list[str] = []
 
     class _SilentAgentRunner(_EventRunner):
         def __init__(self) -> None:
             super().__init__(events, result=CommandResult(returncode=0, stdout="", stderr=""))
-            self.cancelled = False
             self.watchdog_timeouts: list[tuple[float | None, float | None]] = []
 
         async def run_streaming(
@@ -329,15 +313,11 @@ async def test_isolated_agent_idle_timeout_precedes_completion_marker() -> None:
                     returncode=124,
                     stdout="",
                     stderr="command idle timeout after 0.01s without output\n",
-                    reason_code=base_module.COMMAND_IDLE_TIMEOUT_REASON,
+                    reason_code=COMMAND_IDLE_TIMEOUT_REASON,
                 )
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled = True
-                raise
+            raise AssertionError("direct exec watchdog timeouts were not forwarded")
 
-    sampler = _IsolatedRecordingSampler(events, agent_completion_marker=marker)
+    sampler = _IsolatedRecordingSampler(events)
     runner = _SilentAgentRunner()
     adapter = CodexAdapter(
         runner=runner,
@@ -356,44 +336,42 @@ async def test_isolated_agent_idle_timeout_precedes_completion_marker() -> None:
         )
 
     assert excinfo.value.reason_code == "AGENT_IDLE_TIMEOUT"
-    assert runner.cancelled
-    assert runner.watchdog_timeouts == [(None, None)]
+    assert runner.watchdog_timeouts == [(1.0, 0.01)]
     capture_event = next(event for event in events if event.startswith("capture:"))
     assert events.index(capture_event) < events.index("cleanup")
     assert events[-1] == "finalize:timeout"
 
 
 @pytest.mark.unit
-async def test_isolated_agent_static_marker_does_not_disable_watchdog() -> None:
-    """A marker from adversarial input cannot impersonate the wrapper signal."""
+async def test_isolated_agent_output_cannot_disable_direct_exec_watchdog() -> None:
+    """Completion-like agent output cannot affect the direct exec watchdog."""
 
-    completion_marker = "\x1eawf-isolated-agent-complete:unpredictable-token\x1f\n"
-    static_marker = "\x1eawf-isolated-agent-complete\x1f\n"
+    completion_like_output = "\x1eawf-isolated-agent-complete\x1f\n"
     events: list[str] = []
 
     class _StaticMarkerAgentRunner(_EventRunner):
         def __init__(self) -> None:
             super().__init__(events, result=CommandResult(returncode=0, stdout="", stderr=""))
-            self.cancelled = False
 
         async def run_streaming(
             self,
             args: list[str],
             *,
-            on_stdout: Any = None,
+            wall_timeout_seconds: float | None = None,
+            idle_timeout_seconds: float | None = None,
             **_kwargs: Any,
         ) -> CommandResult:
             self._events.append("agent")
             self.streaming_calls.append(list(args))
-            assert on_stdout is not None
-            await on_stdout(static_marker)
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled = True
-                raise
+            assert (wall_timeout_seconds, idle_timeout_seconds) == (1.0, 0.01)
+            return CommandResult(
+                returncode=124,
+                stdout=completion_like_output,
+                stderr="command idle timeout after 0.01s without output\n",
+                reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+            )
 
-    sampler = _IsolatedRecordingSampler(events, agent_completion_marker=completion_marker)
+    sampler = _IsolatedRecordingSampler(events)
     runner = _StaticMarkerAgentRunner()
     adapter = CodexAdapter(
         runner=runner,
@@ -412,7 +390,42 @@ async def test_isolated_agent_static_marker_does_not_disable_watchdog() -> None:
         )
 
     assert excinfo.value.reason_code == "AGENT_IDLE_TIMEOUT"
-    assert runner.cancelled
+    assert runner.streaming_calls[0][:2] == ["docker", "exec"]
+
+
+@pytest.mark.unit
+async def test_isolated_container_start_failure_cleans_up_without_running_agent() -> None:
+    """A detached-container startup failure cannot leave the re-ask behind."""
+    events: list[str] = []
+
+    class _StartFailureRunner(_EventRunner):
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.calls.append(list(args))
+            if "--detach" in args:
+                self._events.append("startup")
+                return CommandResult(returncode=1, stdout="", stderr="container failed to start")
+            self._events.append("cleanup")
+            return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+
+        async def run_streaming(self, *_args: Any, **_kwargs: Any) -> CommandResult:
+            raise AssertionError("agent exec must not run after container startup failure")
+
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _StartFailureRunner(events, result=CommandResult(returncode=0, stdout="", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    with pytest.raises(AgentRunError):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_start_failure",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_start_failure/reask"),
+        )
+
+    assert events[:3] == ["start_isolated", "baseline", "startup"]
+    assert events[-2:] == ["cleanup", "finalize:failed"]
+    assert events[-3].startswith("capture:awf-reask-")
 
 
 @pytest.mark.unit
@@ -432,7 +445,9 @@ async def test_isolated_baseline_capture_failure_does_not_mask_agent_run() -> No
     )
 
     assert result.ok
-    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
+    assert events[:4] == ["start_isolated", "baseline", "startup", "agent"]
+    assert events[-2:] == ["cleanup", "finalize:success"]
+    assert events[-3].startswith("capture:awf-reask-")
 
 
 @pytest.mark.unit

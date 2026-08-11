@@ -213,15 +213,11 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
         cli_args=["codex", "exec", "-"],
     )
 
-    # The baseline probe runs in its own clarification invocation, before the
-    # watchdog-protected agent command starts. The main wrapper remains only to
-    # preserve the final reading before its disposable container is removed.
-    assert ctx.cli_args[:2] == ["sh", "-lc"]
-    assert "capture_ccusage baseline" not in ctx.cli_args[2]
-    assert "final.status" in ctx.cli_args[2]
-    assert ctx.agent_completion_marker is not None
-    assert ctx.agent_completion_marker in ctx.cli_args[2]
-    assert ctx.agent_completion_marker != "\x1eawf-isolated-agent-complete\x1f\n"
+    # The agent command stays direct: AWF retains the clarification container
+    # separately and invokes the final probe after the watched CLI has exited.
+    # No completion value is placed in the agent's shell argv or stdout stream.
+    assert ctx.cli_args == ["codex", "exec", "-"]
+    assert not hasattr(ctx, "agent_completion_marker")
     next_ctx = await collector.start_isolated(
         compose_project="proj",
         compose_file=_COMPOSE_FILE,
@@ -229,8 +225,7 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    assert next_ctx.agent_completion_marker is not None
-    assert next_ctx.agent_completion_marker != ctx.agent_completion_marker
+    assert next_ctx.cli_args == ["codex", "exec", "-"]
     baseline_script = ctx.baseline_cli_args[2]
     assert ctx.baseline_cli_args[:2] == ["sh", "-lc"]
     assert "ccusage codex daily --json --offline" in baseline_script
