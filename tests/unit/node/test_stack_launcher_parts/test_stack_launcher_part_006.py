@@ -90,6 +90,34 @@ def test_clarification_inputs_stage_claude_custom_ca() -> None:
 
 
 @pytest.mark.unit
+def test_clarification_inputs_retain_claude_backend_proxy_settings() -> None:
+    """Claude managed-backend re-asks retain profile-declared proxy transport."""
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_ACCESS_KEY_ID", "bedrock-access-key"),
+        ("AWS_SECRET_ACCESS_KEY", "bedrock-secret-key"),
+        ("HTTPS_PROXY", "https://proxy.example.test:8443"),
+        ("HTTP_PROXY", "http://proxy.example.test:8080"),
+        ("ALL_PROXY", "socks5://proxy.example.test:1080"),
+        ("NO_PROXY", "localhost,.example.test"),
+        ("https_proxy", "https://proxy.example.test:8443"),
+        ("http_proxy", "http://proxy.example.test:8080"),
+        ("all_proxy", "socks5://proxy.example.test:1080"),
+        ("no_proxy", "localhost,.example.test"),
+    )
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(),
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=AgentRuntime.claude_code,
+        )
+        == environment
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("toggle", "backend_settings"),
     [

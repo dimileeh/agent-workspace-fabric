@@ -168,6 +168,21 @@ _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES = frozenset(
         "SSL_CERT_FILE",
     }
 )
+_CLARIFICATION_PROVIDER_PROXY_ENV_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+_CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES = (
+    _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES | _CLARIFICATION_PROVIDER_PROXY_ENV_NAMES
+)
 _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "OPENAI_API_KEY",
@@ -429,12 +444,12 @@ def _clarification_model_provider_environment_names(
     if agent_runtime is AgentRuntime.claude_code:
         return (
             _clarification_claude_code_environment_names(environment_values)
-            | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+            | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
         )
     if agent_runtime is AgentRuntime.gemini:
         return (
             _CLARIFICATION_GEMINI_ENV_NAMES[_clarification_gemini_auth_source(environment_values)]
-            | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+            | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
         )
 
     provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
@@ -445,7 +460,7 @@ def _clarification_model_provider_environment_names(
                 frozenset(),
             )
         )
-    return frozenset(provider_names | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES)
+    return frozenset(provider_names | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES)
 
 
 def _clarification_claude_code_environment_names(
