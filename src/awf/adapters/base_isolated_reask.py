@@ -5,17 +5,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import shutil
 import stat
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Final
 
 from awf.adapters.runtime_executor import AgentRuntimeExecResult
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.node.git_manager import linked_worktree_git_dir, mirror_path_for_worktree
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
+_MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
 
 
 def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destination: Path) -> None:
@@ -30,13 +31,24 @@ def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destinat
             dir_fd=source_dir_fd,
         )
         fds.append(source_fd)
-        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+        file_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"Git metadata source is not a regular file: {source_name}")
-        with (
-            os.fdopen(source_fd, "rb", closefd=False) as source_file,
-            destination.open("xb") as dest_file,
-        ):
-            shutil.copyfileobj(source_file, dest_file)
+        if file_stat.st_size > _MAX_ISOLATED_REASK_GIT_METADATA_BYTES:
+            raise OSError(f"Git metadata source exceeds size limit: {source_name}")
+        copied_bytes = 0
+        with destination.open("xb") as dest_file:
+            while copied_bytes < _MAX_ISOLATED_REASK_GIT_METADATA_BYTES:
+                chunk = os.read(
+                    source_fd,
+                    min(64 * 1024, _MAX_ISOLATED_REASK_GIT_METADATA_BYTES - copied_bytes),
+                )
+                if not chunk:
+                    return
+                dest_file.write(chunk)
+                copied_bytes += len(chunk)
+            if os.read(source_fd, 1):
+                raise OSError(f"Git metadata source exceeds size limit: {source_name}")
     finally:
         for fd in fds:
             with contextlib.suppress(OSError):

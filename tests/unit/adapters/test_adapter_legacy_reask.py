@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -498,6 +499,55 @@ class TestIsolatedReaskAdapter:
             base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
 
         assert not destination.exists()
+
+    def test_copy_regular_git_metadata_file_rejects_oversized_sparse_file(
+        self, tmp_path: Path
+    ) -> None:
+        """The metadata copy helper rejects oversized sparse files before copying."""
+        source_dir = tmp_path / "linked-git"
+        source_dir.mkdir()
+        source = source_dir / "HEAD"
+        source.touch()
+        with source.open("r+b") as source_file:
+            source_file.truncate(base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES + 1)
+        destination = tmp_path / "snapshot" / "HEAD"
+        destination.parent.mkdir()
+
+        with pytest.raises(OSError, match="exceeds size limit"):
+            base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
+
+        assert not destination.exists()
+
+    def test_copy_regular_git_metadata_file_rejects_file_that_grows_after_stat(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The metadata copy helper enforces its cap while reading a raced file."""
+        source_dir = tmp_path / "linked-git"
+        source_dir.mkdir()
+        source = source_dir / "HEAD"
+        source.write_bytes(b"safe")
+        destination = tmp_path / "snapshot" / "HEAD"
+        destination.parent.mkdir()
+        real_fstat = base_isolated_reask.os.fstat
+        grew_source = False
+
+        def _grow_source_after_stat(fd: int) -> os.stat_result:
+            nonlocal grew_source
+            file_stat = real_fstat(fd)
+            if not grew_source and stat.S_ISREG(file_stat.st_mode):
+                with source.open("r+b") as source_file:
+                    source_file.truncate(
+                        base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES + 1
+                    )
+                grew_source = True
+            return file_stat
+
+        monkeypatch.setattr(base_isolated_reask.os, "fstat", _grow_source_after_stat)
+
+        with pytest.raises(OSError, match="exceeds size limit"):
+            base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
+
+        assert grew_source
 
     def test_isolated_reask_git_metadata_binds_copy_split_index_backing_file(
         self, tmp_path: Path
