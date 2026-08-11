@@ -37,6 +37,7 @@ class PersistedClarificationModelNetworkAttachment:
     network_name: str
     created_network: bool = False
     connected_container_ids: list[str] = field(default_factory=list)
+    reconnecting_endpoints: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _clarification_model_network_name(*, compose_project: str, workspace_id: str | None) -> str:
@@ -132,14 +133,44 @@ async def _attach_persisted_clarification_model_network(
             # us, and rollback must still detach that possible connection.
             attachment.connected_container_ids.append(container_id)
             network_connect_result = await runner.run(
-                ["docker", "network", "connect", attachment.network_name, container_id]
+                [
+                    "docker",
+                    "network",
+                    "connect",
+                    "--alias",
+                    service,
+                    attachment.network_name,
+                    container_id,
+                ]
             )
             if network_connect_result.ok:
                 continue
             if _network_is_already_connected(network_connect_result):
                 attachment.connected_container_ids.pop()
-            else:
+                attachment.reconnecting_endpoints.append((container_id, service))
+                network_disconnect_result = await runner.run(
+                    ["docker", "network", "disconnect", attachment.network_name, container_id]
+                )
+                if not network_disconnect_result.ok and not _network_is_not_connected(
+                    network_disconnect_result
+                ):
+                    return attachment, network_disconnect_result
+                network_connect_result = await runner.run(
+                    [
+                        "docker",
+                        "network",
+                        "connect",
+                        "--alias",
+                        service,
+                        attachment.network_name,
+                        container_id,
+                    ]
+                )
+                if network_connect_result.ok:
+                    attachment.reconnecting_endpoints.pop()
+                    continue
                 return attachment, network_connect_result
+            return attachment, network_connect_result
     return attachment, CommandResult(returncode=0, stdout="", stderr="")
 
 
@@ -162,6 +193,25 @@ async def _rollback_persisted_clarification_model_network(
             and not _network_is_not_connected(network_disconnect_result)
         ):
             return network_disconnect_result
+    for container_id, service in reversed(attachment.reconnecting_endpoints):
+        try:
+            network_connect_result = await runner.run(
+                [
+                    "docker",
+                    "network",
+                    "connect",
+                    "--alias",
+                    service,
+                    attachment.network_name,
+                    container_id,
+                ]
+            )
+        except Exception as exc:
+            return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
+        if not network_connect_result.ok and not _network_is_already_connected(
+            network_connect_result
+        ):
+            return network_connect_result
     if not attachment.created_network:
         return CommandResult(returncode=0, stdout="", stderr="")
     try:
