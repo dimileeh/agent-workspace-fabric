@@ -22,6 +22,9 @@ are a no-op here.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,16 @@ _log = get_logger(__name__)
 
 AWF_SCRATCH_BLOCK_START = "# >>> awf-managed agent scratch"
 AWF_SCRATCH_BLOCK_END = "# <<< awf-managed agent scratch"
+
+_SAFE_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+_SAFE_EXCLUDE_OPEN_FLAGS = (
+    os.O_RDWR
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
 
 
 def _strip_managed_block(content: str) -> str:
@@ -88,6 +101,100 @@ def _render_managed_block(patterns: tuple[str, ...]) -> str:
     return f"{AWF_SCRATCH_BLOCK_START}\n{body}\n{AWF_SCRATCH_BLOCK_END}\n"
 
 
+def _open_scratch_directory(path: Path) -> int:
+    """Open or create a directory path without following any component links."""
+    if path.is_absolute():
+        directory_fd = os.open(path.anchor, _SAFE_DIRECTORY_OPEN_FLAGS)
+        parts = path.parts[1:]
+    else:
+        directory_fd = os.open(".", _SAFE_DIRECTORY_OPEN_FLAGS)
+        parts = path.parts
+
+    try:
+        for part in parts:
+            if part in {"", ".", ".."}:
+                raise OSError(f"unsafe Git scratch exclude directory path: {path}")
+            try:
+                child_fd = os.open(part, _SAFE_DIRECTORY_OPEN_FLAGS, dir_fd=directory_fd)
+            except FileNotFoundError:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=directory_fd)
+                child_fd = os.open(part, _SAFE_DIRECTORY_OPEN_FLAGS, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(directory_fd)
+        raise
+    return directory_fd
+
+
+def _open_regular_scratch_exclude(exclude_path: Path) -> int:
+    """Open ``info/exclude`` safely, rejecting symlinks and special files.
+
+    The preceding agent can write shared mirror metadata before a re-ask starts.
+    Anchor the exclude leaf at a no-follow ``info`` descriptor so a swapped
+    directory or leaf cannot redirect the control-plane write or make it block.
+    """
+    info_fd = _open_scratch_directory(exclude_path.parent)
+    try:
+        try:
+            exclude_fd = os.open(
+                exclude_path.name,
+                _SAFE_EXCLUDE_OPEN_FLAGS,
+                dir_fd=info_fd,
+            )
+        except FileNotFoundError:
+            exclude_fd = os.open(
+                exclude_path.name,
+                _SAFE_EXCLUDE_OPEN_FLAGS | os.O_CREAT | os.O_EXCL,
+                0o666,
+                dir_fd=info_fd,
+            )
+    finally:
+        os.close(info_fd)
+
+    try:
+        if not stat.S_ISREG(os.fstat(exclude_fd).st_mode):
+            raise OSError(f"Git scratch exclude is not a regular file: {exclude_path}")
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(exclude_fd)
+        raise
+    return exclude_fd
+
+
+def _rewrite_scratch_exclude(exclude_path: Path, scratch_paths: tuple[str, ...]) -> None:
+    """Rewrite one safely-opened exclude descriptor with AWF's managed block."""
+    exclude_fd = _open_regular_scratch_exclude(exclude_path)
+    try:
+        existing_bytes = bytearray()
+        while chunk := os.read(exclude_fd, 64 * 1024):
+            existing_bytes.extend(chunk)
+        existing = existing_bytes.decode("utf-8")
+        prefix = _strip_managed_block(existing)
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        # Union with any patterns a different adapter already wrote to this
+        # shared (linked-worktree) exclude file so a *sequential* second adapter
+        # does not clobber the first's scratch exclusions (``_render`` dedups).
+        # Under truly concurrent different-adapter writes this read-modify-write
+        # is racy; see the docstring for the bounded, self-healing tradeoff.
+        merged = _extract_managed_patterns(existing) + scratch_paths
+        rendered = (prefix + _render_managed_block(merged)).encode("utf-8")
+        os.lseek(exclude_fd, 0, os.SEEK_SET)
+        os.ftruncate(exclude_fd, 0)
+        written = 0
+        while written < len(rendered):
+            count = os.write(exclude_fd, rendered[written:])
+            if count == 0:
+                raise OSError("could not write Git scratch exclude")
+            written += count
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(exclude_fd)
+
+
 async def apply_agent_scratch_excludes(
     *,
     run_git: GitRunner,
@@ -138,22 +245,11 @@ async def apply_agent_scratch_excludes(
         exclude_path = worktree_path / exclude_path
 
     try:
-        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-        prefix = _strip_managed_block(existing)
-        if prefix and not prefix.endswith("\n"):
-            prefix += "\n"
-        # Union with any patterns a different adapter already wrote to this
-        # shared (linked-worktree) exclude file so a *sequential* second adapter
-        # does not clobber the first's scratch exclusions (``_render`` dedups).
-        # Under truly concurrent different-adapter writes this read-modify-write
-        # is racy; see the docstring for the bounded, self-healing tradeoff.
-        merged = _extract_managed_patterns(existing) + scratch_paths
-        exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        exclude_path.write_text(prefix + _render_managed_block(merged), encoding="utf-8")
+        _rewrite_scratch_exclude(exclude_path, scratch_paths)
     except (OSError, ValueError) as exc:
         # ``ValueError`` covers ``UnicodeDecodeError`` (a ``ValueError`` subclass)
-        # raised by ``read_text(encoding="utf-8")`` when ``info/exclude`` holds
-        # non-UTF-8 bytes — degrade gracefully like any other exclude I/O failure.
+        # raised while decoding non-UTF-8 ``info/exclude`` bytes — degrade
+        # gracefully like any other exclude I/O failure.
         logger.warning(
             "agent_scratch.exclude_write_failed",
             worktree_path=str(worktree_path),

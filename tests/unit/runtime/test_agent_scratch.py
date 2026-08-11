@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.runtime import agent_scratch
 from awf.runtime.agent_scratch import (
     AWF_SCRATCH_BLOCK_END,
     AWF_SCRATCH_BLOCK_START,
@@ -298,10 +300,10 @@ async def test_exclude_write_oserror_is_handled_gracefully(
     worktree = _init_real_worktree(tmp_path)
     run_git = _real_run_git(worktree)
 
-    def _boom(self: Path, *args: object, **kwargs: object) -> int:
+    def _boom(*_args: object, **_kwargs: object) -> int:
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_text", _boom)
+    monkeypatch.setattr(agent_scratch.os, "write", _boom)
 
     applied = await apply_agent_scratch_excludes(
         run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
@@ -329,3 +331,61 @@ async def test_non_utf8_exclude_is_handled_gracefully(tmp_path: Path) -> None:
     )
 
     assert applied is False
+
+
+@pytest.mark.unit
+async def test_exclude_symlink_is_refused_without_truncating_its_target(tmp_path: Path) -> None:
+    """An agent cannot redirect the control-plane write through ``info/exclude``."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    target = tmp_path / "host-file"
+    target.write_text("must stay intact\n", encoding="utf-8")
+    exclude.unlink()
+    exclude.symlink_to(target)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert target.read_text(encoding="utf-8") == "must stay intact\n"
+
+
+@pytest.mark.unit
+async def test_exclude_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    """A FIFO substituted for ``info/exclude`` cannot hang the worker."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    exclude.unlink()
+    os.mkfifo(exclude)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+
+
+@pytest.mark.unit
+async def test_exclude_info_directory_symlink_is_refused(tmp_path: Path) -> None:
+    """An agent cannot redirect the control-plane write through ``info`` itself."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    info_dir = exclude.parent
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_exclude = outside_dir / "exclude"
+    outside_exclude.write_text("must stay intact\n", encoding="utf-8")
+    exclude.unlink()
+    info_dir.rmdir()
+    info_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert outside_exclude.read_text(encoding="utf-8") == "must stay intact\n"
