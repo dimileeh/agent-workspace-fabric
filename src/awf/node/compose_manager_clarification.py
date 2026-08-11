@@ -9,6 +9,14 @@ from urllib.parse import urlsplit
 from awf.service.environment import compose_expand_value
 
 _CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+_CLARIFICATION_PROXY_URL_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
 _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
     "x-awf-persisted-clarification-model-network-reconciled"
 )
@@ -31,10 +39,13 @@ def _is_managed_persisted_clarification_service(service: object) -> bool:
 def _clarification_model_service_names(
     clarification_environment: Iterable[tuple[str, str]], *, service_names: Iterable[str]
 ) -> tuple[str, ...]:
-    """Return profile model services selected by clarification's provider URL."""
+    """Return profile services selected by clarification's provider or proxy URL."""
 
     environment = dict(clarification_environment)
-    endpoint_names: tuple[str, ...] = _CLARIFICATION_BASE_URL_ENV_NAMES
+    endpoint_names: tuple[str, ...] = (
+        *_CLARIFICATION_BASE_URL_ENV_NAMES,
+        *_CLARIFICATION_PROXY_URL_ENV_NAMES,
+    )
     if environment.get("AWF_OPENCODE_OLLAMA_BASE_URL"):
         endpoint_names += ("AWF_OPENCODE_OLLAMA_BASE_URL",)
     elif environment.get("OLLAMA_HOST"):

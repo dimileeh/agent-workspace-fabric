@@ -332,6 +332,52 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_model_servic
 
 
 @pytest.mark.unit
+def test_upgrade_persisted_clarification_service_routes_to_selected_proxy_service(
+    tmp_path: Path,
+) -> None:
+    """Legacy clarification can reach a profile proxy service."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "proxy": {
+                        "image": "squid:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {"HTTP_PROXY": "http://proxy:3128"},
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == ("proxy",)
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["networks"] == [
+        "clarification_egress_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["proxy"]["networks"] == [
+        "awf_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["postgres"]["networks"] == ["awf_net"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("endpoint_name", "agent_runtime", "agent_model", "model_service_name"),
     [
@@ -538,6 +584,35 @@ class TestRender:
             "internal": True,
         }
         assert parsed["x-awf-persisted-clarification-model-network-reconciled"] is True
+
+    @pytest.mark.unit
+    def test_clarification_reaches_selected_profile_proxy_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS proxy gets a dedicated clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(("HTTPS_PROXY", "http://proxy:3128"),),
+                    services=(
+                        ComposeService(name="proxy", image="squid:latest"),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["proxy"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
 
     @pytest.mark.unit
     def test_clarification_reaches_selected_companion_model_service(
