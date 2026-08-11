@@ -16,6 +16,7 @@ from awf.common.companions import isolated_reask_worktree_liveness_lock_path
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 from awf.node.git_manager import GitOperationError
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner import agent_service_recovery, comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import (
@@ -313,13 +314,16 @@ async def test_isolated_reask_worktree_is_removed_when_ownership_repair_fails(
 
     monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
 
-    with pytest.raises(_MonitorPolicyBlockedError, match="Could not repair isolated worktree"):
+    with pytest.raises(
+        _MonitorPolicyBlockedError, match="Could not repair isolated worktree"
+    ) as exc_info:
         await comments._create_isolated_reask_worktree(
             runner,
             worktree_path=worktree,
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
+    assert exc_info.value.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
     assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 

@@ -36,6 +36,7 @@ from awf.runtime.monitor_prompts import (
     ready_to_merge_comment,
 )
 from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
@@ -302,7 +303,8 @@ async def _create_isolated_reask_worktree(
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             )
         raise _MonitorPolicyBlockedError(
-            "Could not repair isolated worktree ownership before the NEEDS_HUMAN reason re-ask."
+            "Could not repair isolated worktree ownership before the NEEDS_HUMAN reason re-ask.",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         )
 
     return reask_worktree
