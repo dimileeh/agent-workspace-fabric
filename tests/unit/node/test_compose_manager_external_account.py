@@ -533,10 +533,12 @@ def test_legacy_clarification_entrypoint_rewrites_executable_subject_token_path(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operator", (":-", "-", ":=", "="))
 def test_legacy_clarification_entrypoint_rewrites_defaulted_executable_token_path(
     tmp_path: Path,
+    operator: str,
 ) -> None:
-    """Defaulted executable paths point at the staged fallback token."""
+    """Parameter-expanded executable paths point at the staged fallback token."""
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     helper_target = "/run/awf/secrets/google/external-account-helper"
@@ -552,7 +554,7 @@ def test_legacy_clarification_entrypoint_rewrites_defaulted_executable_token_pat
                     "executable": {
                         "command": (
                             f"sh -c '{helper_target} --token-file "
-                            f'"${{MY_TOKEN_FILE:-{fallback_token_target}}}"\''
+                            f'"${{MY_TOKEN_FILE{operator}{fallback_token_target}}}"\''
                         )
                     }
                 },
@@ -589,7 +591,7 @@ def test_legacy_clarification_entrypoint_rewrites_defaulted_executable_token_pat
         "executable"
     ]
     assert executable["command"] == (
-        f"sh -c '{staged_helper} --token-file \"${{MY_TOKEN_FILE:-{staged_fallback_token}}}\"'"
+        f"sh -c '{staged_helper} --token-file \"${{MY_TOKEN_FILE{operator}{staged_fallback_token}}}\"'"
     )
 
 
