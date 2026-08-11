@@ -743,10 +743,18 @@ def _notify_human_reason(
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
     bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
-    # An outdated human thread has an AWF-generated diagnosis that tells the
-    # operator whether it needs resolution or will be retried. Keep that detail
-    # ahead of the generic escalation fallback, without letting a bot retry
-    # obscure an unrelated human escalation.
+    # A current human escalation must outrank any outdated-thread diagnosis,
+    # even if it has no agent-provided reason. Keep the detailed diagnosis for
+    # outdated-only cases ahead of the generic fallback below.
+    current_item_ids = {
+        *(thread.thread_id for thread in status.unresolved_inline_threads),
+        *(comment.comment_id for comment in status.unresolved_review_comments),
+    }
+    if any(
+        item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
+        for item in human_items
+    ):
+        return "human review feedback needs human input and remains unresolved"
     for item in human_items:
         awf_blocker_reason = item.get("awf_blocker_reason")
         if isinstance(awf_blocker_reason, str) and awf_blocker_reason:

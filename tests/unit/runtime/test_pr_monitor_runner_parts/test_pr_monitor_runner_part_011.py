@@ -139,6 +139,40 @@ class TestNotificationAndGraceHelpers:
         )
 
     @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_escalation_over_human_retry(self) -> None:
+        """A current escalation must not be hidden by an outdated human retry."""
+        human_review = ReviewComment(
+            comment_id="C-human",
+            body_excerpt="a maintainer needs to decide this",
+            author="human",
+        )
+        human_outdated_thread = ReviewThread(
+            thread_id="T-human-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="retry resolving this thread",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                human_review.comment_id: "needs_human",
+                _outdated_resolve_requeued_key(human_outdated_thread.thread_id): "requeued",
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(human_review,)),
+                    outdated_unresolved_inline_threads=(human_outdated_thread,),
+                ),
+                state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+
+    @pytest.mark.unit
     def test_notify_human_reason_keeps_outdated_thread_diagnosis(self) -> None:
         """An outdated human escalation retains its actionable AWF diagnosis."""
         outdated_thread = ReviewThread(
