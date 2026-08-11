@@ -123,13 +123,28 @@ def _has_codex_id_token(value: str) -> bool:
 
 
 def _read_bounded_clarification_auth_credential(directory: str, filename: str) -> str | None:
-    """Read one regular credential file without following a writable path replacement."""
-    directory_fd: int | None = None
+    """Read one regular credential file without following writable path replacements."""
+    relative_path = Path(filename)
+    if (
+        relative_path.is_absolute()
+        or not relative_path.parts
+        or any(part == ".." for part in relative_path.parts)
+    ):
+        return None
+    directory_fds: list[int] = []
     credential_fd: int | None = None
     try:
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory_fds.append(directory_fd)
+        for component in relative_path.parts[:-1]:
+            directory_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            directory_fds.append(directory_fd)
         credential_fd = os.open(
-            filename,
+            relative_path.name,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=directory_fd,
         )
@@ -154,7 +169,7 @@ def _read_bounded_clarification_auth_credential(directory: str, filename: str) -
     except (OSError, UnicodeDecodeError):
         return None
     finally:
-        for fd in (credential_fd, directory_fd):
+        for fd in (credential_fd, *reversed(directory_fds)):
             if fd is not None:
                 with suppress(OSError):
                     os.close(fd)
@@ -425,6 +440,18 @@ def _mounted_file_source(
 ) -> Path | None:
     """Return the source for a target from its most-specific declared mount."""
 
+    mount = _mounted_file_mount(auth_mounts, target=target, mirror_target=mirror_target)
+    return None if mount is None else mounted_file_source(mount, target)
+
+
+def _mounted_file_mount(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    target: str,
+    mirror_target: str,
+) -> AuthMount | None:
+    """Return the most-specific declared mount containing a target file."""
+
     matching_mounts = tuple(
         mount
         for mount in auth_mounts
@@ -433,8 +460,27 @@ def _mounted_file_source(
     )
     if not matching_mounts:
         return None
-    mount = max(matching_mounts, key=lambda candidate: len(posixpath.normpath(candidate.target)))
-    return mounted_file_source(mount, target)
+    return max(matching_mounts, key=lambda candidate: len(posixpath.normpath(candidate.target)))
+
+
+def _read_bounded_mounted_clarification_auth_credential(
+    mount: AuthMount,
+    *,
+    target: str,
+) -> str | None:
+    """Read a bounded regular credential file through the selected declared mount."""
+
+    normalized_target = posixpath.normpath(target)
+    normalized_mount_target = posixpath.normpath(mount.target)
+    if normalized_target == normalized_mount_target:
+        source = Path(mount.source)
+        return _read_bounded_clarification_auth_credential(str(source.parent), source.name)
+    if not path_is_below(normalized_target, normalized_mount_target):
+        return None
+    return _read_bounded_clarification_auth_credential(
+        mount.source,
+        posixpath.relpath(normalized_target, normalized_mount_target),
+    )
 
 
 def external_account_credential_source_paths(
@@ -639,16 +685,22 @@ def _external_account_credential_source(
     )
     if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
         return None
-    adc_source = _mounted_file_source(
+    adc_mount = _mounted_file_mount(
         auth_mounts,
         target=google_credentials,
         mirror_target=mirror_target,
     )
-    if adc_source is None:
+    if adc_mount is None:
+        return None
+    adc_configuration_content = _read_bounded_mounted_clarification_auth_credential(
+        adc_mount,
+        target=google_credentials,
+    )
+    if adc_configuration_content is None:
         return None
     try:
-        adc_configuration = json.loads(adc_source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        adc_configuration = json.loads(adc_configuration_content)
+    except json.JSONDecodeError:
         return None
     if (
         not isinstance(adc_configuration, dict)

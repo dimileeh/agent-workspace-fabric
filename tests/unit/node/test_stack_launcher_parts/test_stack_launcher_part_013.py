@@ -222,6 +222,92 @@ def test_external_account_executable_output_file_is_staged(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_external_account_ignores_symlinked_adc_under_writable_mount(tmp_path: Path) -> None:
+    """A writable Gemini ADC symlink cannot redirect discovery to another file."""
+    gemini_home = tmp_path / "gemini"
+    gemini_home.mkdir()
+    adc_target = "/home/agent/.gemini/application_default_credentials.json"
+    subject_token_target = "/run/secrets/google/subject-token"
+    outside_adc = tmp_path / "outside-adc.json"
+    outside_adc.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gemini_home / "application_default_credentials.json").symlink_to(outside_adc)
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
+
+    assert _external_account_credential_source_references(
+        (
+            AuthMount(str(gemini_home), "/home/agent/.gemini", "rw"),
+            AuthMount(str(subject_token), subject_token_target, "ro"),
+        ),
+        agent_environment=(("GOOGLE_APPLICATION_CREDENTIALS", adc_target),),
+        provider_environment_names=frozenset({"GOOGLE_APPLICATION_CREDENTIALS"}),
+        mirror_target="/host/awf/git/mirror.git",
+        allowed_credential_process_environment_names=None,
+    ) == ((), frozenset())
+
+
+@pytest.mark.unit
+def test_external_account_ignores_fifo_adc_under_writable_mount(tmp_path: Path) -> None:
+    """A writable Gemini ADC FIFO cannot block external-account discovery."""
+    gemini_home = tmp_path / "gemini"
+    gemini_home.mkdir()
+    adc_target = "/home/agent/.gemini/application_default_credentials.json"
+    os.mkfifo(gemini_home / "application_default_credentials.json")
+
+    assert _external_account_credential_source_references(
+        (AuthMount(str(gemini_home), "/home/agent/.gemini", "rw"),),
+        agent_environment=(("GOOGLE_APPLICATION_CREDENTIALS", adc_target),),
+        provider_environment_names=frozenset({"GOOGLE_APPLICATION_CREDENTIALS"}),
+        mirror_target="/host/awf/git/mirror.git",
+        allowed_credential_process_environment_names=None,
+    ) == ((), frozenset())
+
+
+@pytest.mark.unit
+def test_external_account_ignores_oversized_adc_under_writable_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An oversized writable Gemini ADC is rejected without materializing it."""
+    gemini_home = tmp_path / "gemini"
+    gemini_home.mkdir()
+    adc_target = "/home/agent/.gemini/application_default_credentials.json"
+    subject_token_target = "/run/secrets/google/subject-token"
+    adc = gemini_home / "application_default_credentials.json"
+    adc.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+                "padding": "x" * (1024 * 1024),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _unexpected_read(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized ADC should not be read")
+
+    monkeypatch.setattr(stack_launcher_auth_helpers_mod.os, "read", _unexpected_read)
+
+    assert _external_account_credential_source_references(
+        (AuthMount(str(gemini_home), "/home/agent/.gemini", "rw"),),
+        agent_environment=(("GOOGLE_APPLICATION_CREDENTIALS", adc_target),),
+        provider_environment_names=frozenset({"GOOGLE_APPLICATION_CREDENTIALS"}),
+        mirror_target="/host/awf/git/mirror.git",
+        allowed_credential_process_environment_names=None,
+    ) == ((), frozenset())
+
+
+@pytest.mark.unit
 def test_external_account_ignores_non_mapping_credential_source(tmp_path: Path) -> None:
     """Malformed ADC credential sources cannot select arbitrary clarification mounts."""
     adc = tmp_path / "external-account.json"
