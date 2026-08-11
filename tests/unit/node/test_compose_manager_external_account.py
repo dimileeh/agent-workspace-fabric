@@ -647,6 +647,55 @@ def test_legacy_clarification_entrypoint_rewrites_staged_aws_profile_paths(
 
 
 @pytest.mark.unit
+def test_legacy_clarification_entrypoint_rewrites_escaped_aws_credential_process_path(
+    tmp_path: Path,
+) -> None:
+    """Escaped credential-process option paths point at staged auth files."""
+    source_root = tmp_path / "clarification-source"
+    source_aws = source_root / "0"
+    source_aws.mkdir(parents=True)
+    helper_target = "/run/awf/secrets/aws-helper"
+    token_target = "/run/awf/secrets/subject token"
+    staged_aws = tmp_path / "clarification-auth" / "aws"
+    staged_helper = tmp_path / "clarification-auth" / "aws-helper"
+    staged_token = tmp_path / "clarification-auth" / "subject-token"
+    (source_aws / "config").write_text(
+        "[profile awf-bedrock]\n"
+        f"credential_process = {helper_target} --token-file={token_target.replace(' ', r'\ ')}\n",
+        encoding="utf-8",
+    )
+    (source_root / "1").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source_root / "2").write_text("token", encoding="utf-8")
+    entrypoint = legacy_clarification_entrypoint(3, rewrite_aws_profile_paths=True)
+    script = entrypoint[2].replace("/run/awf/clarification-auth", str(source_root))
+
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "AWS_PROFILE": "awf-bedrock",
+            "AWS_CONFIG_FILE": str(staged_aws / "config"),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_aws),
+            "AWF_CLARIFICATION_AUTH_TARGET_1": str(staged_helper),
+            "AWF_CLARIFICATION_AUTH_TARGET_2": str(staged_token),
+            "AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES": json.dumps(
+                [
+                    [helper_target, str(staged_helper)],
+                    [token_target, str(staged_token)],
+                ]
+            ),
+        },
+    )
+
+    configuration = configparser.RawConfigParser(interpolation=None)
+    configuration.read(staged_aws / "config", encoding="utf-8")
+    assert configuration.get("profile awf-bedrock", "credential_process") == (
+        f"{staged_helper} --token-file={staged_token}"
+    )
+
+
+@pytest.mark.unit
 def test_upgrade_persisted_clarification_stages_aws_profile_helper(tmp_path: Path) -> None:
     """Persisted clarification carries active AWS profile helper rewrites forward."""
     aws_home = tmp_path / "aws"
