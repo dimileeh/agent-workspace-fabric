@@ -116,25 +116,21 @@ def _source_head_snapshot_ref(head_snapshot: str) -> str | None:
     return snapshot_ref
 
 
-def _resolve_pinned_source_head(
+def _snapshot_pinned_source_symbolic_ref(
     source_mirror: Path,
-    *,
-    head_snapshot: str,
+    symbolic_ref: str,
 ) -> str:
-    """Resolve a captured source ``HEAD`` to one immutable commit ID."""
-    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
-    if snapshot_ref is None:
-        raise ValueError("refusing ownership repair: invalid source Git HEAD snapshot")
+    """Return one commit ID from a symbolic HEAD ref in a pinned mirror."""
     try:
         result = subprocess.run(
             [
                 "git",
                 "--git-dir",
                 str(source_mirror),
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                f"{snapshot_ref}^{{commit}}",
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "--count=2",
+                symbolic_ref,
             ],
             capture_output=True,
             text=True,
@@ -144,10 +140,70 @@ def _resolve_pinned_source_head(
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("refusing ownership repair: cannot resolve source Git HEAD") from exc
 
-    resolved_head = result.stdout.strip()
-    if result.returncode != 0 or _source_head_snapshot_ref(resolved_head) != resolved_head:
+    refs = result.stdout.strip().splitlines()
+    if result.returncode != 0 or len(refs) != 1:
         raise ValueError("refusing ownership repair: cannot resolve source Git HEAD")
-    return resolved_head
+    ref_name, separator, snapshot_commit = refs[0].partition(" ")
+    if (
+        ref_name != symbolic_ref
+        or not separator
+        or _source_head_snapshot_ref(snapshot_commit) != snapshot_commit
+    ):
+        raise ValueError("refusing ownership repair: cannot resolve source Git HEAD")
+    return snapshot_commit
+
+
+def _resolve_pinned_source_head(
+    source_mirror: Path,
+    *,
+    head_snapshot: str,
+) -> str:
+    """Resolve a captured source ``HEAD`` to one immutable commit ID."""
+    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
+    if snapshot_ref is None:
+        raise ValueError("refusing ownership repair: invalid source Git HEAD snapshot")
+    source_mirror_fd: int | None = None
+    try:
+        source_mirror_fd = os.open(source_mirror, _PINNED_DIRECTORY_OPEN_FLAGS)
+        pinned_source_mirror = Path(f"/proc/{os.getpid()}/fd/{source_mirror_fd}")
+        snapshot_commit = (
+            _snapshot_pinned_source_symbolic_ref(pinned_source_mirror, snapshot_ref)
+            if snapshot_ref.startswith("refs/")
+            else snapshot_ref
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(pinned_source_mirror),
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{snapshot_commit}^{{commit}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PINNED_SOURCE_HEAD_RESOLUTION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
+        )
+        resolved_head = result.stdout.strip()
+        if (
+            result.returncode != 0
+            or _source_head_snapshot_ref(resolved_head) != resolved_head
+            or resolved_head.lower() != snapshot_commit.lower()
+        ):
+            raise ValueError("refusing ownership repair: cannot resolve source Git HEAD")
+        if snapshot_ref.startswith("refs/") and (
+            _snapshot_pinned_source_symbolic_ref(pinned_source_mirror, snapshot_ref)
+            != snapshot_commit
+        ):
+            raise ValueError("refusing ownership repair: source Git HEAD changed while resolving")
+        return resolved_head
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("refusing ownership repair: cannot resolve source Git HEAD") from exc
+    finally:
+        if source_mirror_fd is not None:
+            os.close(source_mirror_fd)
 
 
 def _linked_worktree_git_dir_from_contents(worktree_path: Path, content: str) -> Path:

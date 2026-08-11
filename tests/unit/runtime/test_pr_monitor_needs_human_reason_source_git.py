@@ -176,6 +176,61 @@ def test_validated_source_worktree_git_context_rejects_head_resolution_errors(
 
 
 @pytest.mark.unit
+def test_validated_source_worktree_git_context_rejects_symbolic_ref_moved_during_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symbolic HEAD must not resolve a ref changed after its snapshot."""
+    workspace_id = "ws_symbolic_ref_race"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    mirror = source_git_dir.parent.parent
+    source_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    (source / "attacker.txt").write_text("attacker content\n", encoding="utf-8")
+    _git(source, "add", "attacker.txt")
+    _git(source, "commit", "-qm", "attacker")
+    attacker_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    source_ref = f"refs/heads/awf/{workspace_id}"
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "update-ref", source_ref, source_head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (source_git_dir / "HEAD").write_text(f"ref: {source_ref}\n", encoding="utf-8")
+    original_run = subprocess.run
+    ref_moved = False
+
+    def _move_ref_during_resolution(
+        args: list[str], *args_: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal ref_moved
+        if not ref_moved and "rev-parse" in args:
+            ref_moved = True
+            original_run(
+                ["git", "--git-dir", str(mirror), "update-ref", source_ref, attacker_head],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return original_run(args, *args_, **kwargs)
+
+    monkeypatch.setattr(ownership.subprocess, "run", _move_ref_during_resolution)
+
+    with pytest.raises(ValueError, match="source Git HEAD changed"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+    assert ref_moved is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir", "HEAD"])
 def test_validated_source_worktree_git_context_rejects_fifo_control_files(
     tmp_path: Path,
