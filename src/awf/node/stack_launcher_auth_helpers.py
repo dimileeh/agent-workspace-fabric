@@ -232,9 +232,13 @@ def aws_profile_credential_paths(
             credential_process = configuration.get(section, "credential_process", fallback=None)
             if isinstance(credential_process, str):
                 with suppress(ValueError):
-                    references.extend(
-                        value for value in shlex.split(credential_process) if value.startswith("/")
-                    )
+                    for argument in shlex.split(credential_process):
+                        if argument.startswith("/"):
+                            references.append(argument)
+                            continue
+                        _, separator, option_value = argument.partition("=")
+                        if separator and option_value.startswith("/"):
+                            references.append(option_value)
             web_identity_token_file = configuration.get(
                 section, "web_identity_token_file", fallback=None
             )
