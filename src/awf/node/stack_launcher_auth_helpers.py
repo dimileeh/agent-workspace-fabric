@@ -430,7 +430,10 @@ def _external_account_credential_source(
 ) -> dict[str, object] | None:
     """Return the credential source from the selected external-account ADC."""
 
-    google_credentials = dict(agent_environment).get("GOOGLE_APPLICATION_CREDENTIALS")
+    google_credentials = compose_expand_value(
+        dict(agent_environment).get("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        environ=os.environ,
+    )
     if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
         return None
     adc_mount = next(

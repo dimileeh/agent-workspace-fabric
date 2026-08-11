@@ -795,6 +795,64 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 
 @pytest.mark.unit
+def test_clarification_stages_external_account_subject_token_for_aliased_adc_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """External-account discovery resolves an aliased ADC path before reading it."""
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
+    adc_config = tmp_path / "external-account-adc.json"
+    subject_token_target = "/run/awf/secrets/google/subject-token"
+    adc_target = "/run/awf/secrets/google/external-account-adc.json"
+    adc_config.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(subject_token), target=subject_token_target, mode="ro"
+    )
+    monkeypatch.delenv("AWF_TEST_ADC_PATH", raising=False)
+    agent_environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+        (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            f"${{AWF_TEST_ADC_PATH:-{adc_target}}}",
+        ),
+    )
+
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (adc_mount, subject_token_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == (
+        AuthMount(
+            source=str(adc_config),
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(subject_token),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+    )
+    assert external_account_subject_token_file_rewrites(
+        (adc_mount, subject_token_mount),
+        agent_environment=agent_environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/1"),)
+
+
+@pytest.mark.unit
 def test_clarification_rewrites_nested_external_account_subject_token_mount(
     tmp_path: Path,
 ) -> None:
