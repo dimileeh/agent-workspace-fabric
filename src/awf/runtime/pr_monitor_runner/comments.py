@@ -337,9 +337,12 @@ async def _create_isolated_reask_worktree(
                 # The primary mirror is writable by the prior agent. Disable
                 # its default hooks directory and every filter effective for
                 # this linked worktree while Git populates the clarification
-                # checkout.
+                # checkout. Disable the configured filesystem monitor too:
+                # a string-valued core.fsmonitor is an executable hook path.
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
                 *checkout_filter_overrides,
                 "checkout",
                 "--detach",

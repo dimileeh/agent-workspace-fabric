@@ -328,6 +328,56 @@ async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_disables_primary_fsmonitor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-ask checkout cannot run a monitor command from the prior agent."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_fsmonitor_disabled")
+    fsmonitor_marker = tmp_path / "fsmonitor-ran"
+    fsmonitor = tmp_path / "fsmonitor"
+    fsmonitor.write_text(
+        f"#!/bin/sh\\ntouch '{fsmonitor_marker}'\\nprintf 'token\\n'\\n",
+        encoding="utf-8",
+    )
+    fsmonitor.chmod(0o755)
+    _git(worktree, "config", "core.fsmonitor", str(fsmonitor))
+
+    class _RecordingLocalCommandRunner(_LocalCommandRunner):
+        """Record Git invocations while exercising the real checkout path."""
+
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        async def run(self, args: list[str]) -> CommandResult:
+            """Record and run a Git command against the temporary worktree."""
+            self.commands.append(args)
+            return await super().run(args)
+
+    command_runner = _RecordingLocalCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert reask_worktree is not None
+    assert not fsmonitor_marker.exists()
+    checkout_commands = [args for args in command_runner.commands if "checkout" in args]
+    assert len(checkout_commands) == 1
+    assert "core.fsmonitor=false" in checkout_commands[0]
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_disables_primary_checkout_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
