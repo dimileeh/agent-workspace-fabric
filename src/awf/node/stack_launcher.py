@@ -44,6 +44,9 @@ from awf.node.stack_launcher_auth_helpers import (
     aws_external_account_environment_names as _clarification_aws_external_account_environment_names,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_credential_environment_names as _clarification_aws_profile_credential_environment_names,
+)
+from awf.node.stack_launcher_auth_helpers import (
     aws_profile_credential_mounts as _clarification_aws_profile_credential_mounts,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -51,6 +54,9 @@ from awf.node.stack_launcher_auth_helpers import (
 )
 from awf.node.stack_launcher_auth_helpers import (
     clarification_auth_target as _helper_clarification_auth_target,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    external_account_credential_source_environment_names as _clarification_external_account_credential_source_environment_names,
 )
 from awf.node.stack_launcher_auth_helpers import (
     external_account_subject_token_file_rewrites as _clarification_external_account_subject_token_file_rewrites,
@@ -335,6 +341,14 @@ def _clarification_agent_environment(
         agent_runtime=agent_runtime,
         agent_model=agent_model,
     )
+    credential_process_environment_names = _clarification_credential_process_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
     source_mounts = _clarification_provider_auth_mounts(
         auth_mounts,
         agent_environment=agent_environment,
@@ -353,7 +367,9 @@ def _clarification_agent_environment(
         )
         if source.target != staged.target
     )
-    clarification_environment_names = provider_environment_names
+    clarification_environment_names = (
+        provider_environment_names | credential_process_environment_names
+    )
     if agent_runtime is AgentRuntime.gemini or (
         agent_runtime is AgentRuntime.claude_code
         and _GOOGLE_APPLICATION_CREDENTIALS in provider_environment_names
@@ -386,7 +402,12 @@ def _clarification_agent_environment(
     return tuple(
         (
             name,
-            _clarification_staged_provider_path_value(name, value, staged_targets),
+            _clarification_staged_provider_path_value(
+                name,
+                value,
+                staged_targets,
+                credential_process_environment_names=credential_process_environment_names,
+            ),
         )
         for name, value in agent_environment
         if name in clarification_environment_names
@@ -413,11 +434,19 @@ def _clarification_expanded_provider_path_value(name: str, value: str) -> str:
 
 
 def _clarification_staged_provider_path_value(
-    name: str, value: str, staged_targets: Sequence[tuple[str, str]]
+    name: str,
+    value: str,
+    staged_targets: Sequence[tuple[str, str]],
+    *,
+    credential_process_environment_names: frozenset[str] = frozenset(),
 ) -> str:
     """Rewrite an expanded provider path without substituting an unmounted credential."""
 
-    expanded_value = _clarification_expanded_provider_path_value(name, value)
+    expanded_value = (
+        compose_expand_value(value, environ=os.environ)
+        if name in credential_process_environment_names
+        else _clarification_expanded_provider_path_value(name, value)
+    )
     staged_value = _clarification_staged_auth_value(expanded_value, staged_targets)
     if (
         name in {_AWS_WEB_IDENTITY_TOKEN_FILE, _GOOGLE_APPLICATION_CREDENTIALS}
@@ -752,6 +781,14 @@ def _clarification_provider_auth_mounts(
         agent_environment,
         provider_mount_targets=provider_mount_targets,
     )
+    credential_process_environment_names = _clarification_credential_process_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
     return _selected_provider_auth_mounts(
         auth_mounts,
         provider_mount_targets=provider_mount_targets,
@@ -760,15 +797,51 @@ def _clarification_provider_auth_mounts(
             agent_environment=agent_environment,
             mirror_target=mirror_target,
             provider_environment_names=provider_environment_names,
+            allowed_credential_process_environment_names=credential_process_environment_names,
         ),
         aws_profile_credential_mounts=_clarification_aws_profile_credential_mounts(
             auth_mounts,
             agent_environment=agent_environment,
             provider_mount_targets=aws_profile_mount_targets,
             mirror_target=mirror_target,
+            allowed_credential_process_environment_names=credential_process_environment_names,
         ),
         mirror_target=mirror_target,
     )
+
+
+def _clarification_credential_process_environment_names(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None,
+    provider_environment_names: frozenset[str],
+) -> frozenset[str]:
+    """Return non-Git inputs referenced by selected credential helper commands."""
+
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    names = _clarification_aws_profile_credential_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=_clarification_aws_profile_mount_targets(
+            agent_environment,
+            provider_mount_targets=provider_mount_targets,
+        ),
+        mirror_target=mirror_target,
+    ) | _clarification_external_account_credential_source_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
+    )
+    return frozenset(name for name in names if not _is_clarification_git_auth_environment(name))
 
 
 def _clarification_aws_profile_mount_targets(

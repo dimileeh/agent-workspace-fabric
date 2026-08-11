@@ -1095,7 +1095,8 @@ def test_clarification_stages_external_account_executable_source_mounts(
                 "credential_source": {
                     "executable": {
                         "command": (
-                            f"{non_normalized_helper_target} --subject-token={subject_token_target}"
+                            "sh -c "
+                            f"'{non_normalized_helper_target} --subject-token \"$EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE\"'"
                         ),
                     }
                 },
@@ -1112,6 +1113,8 @@ def test_clarification_stages_external_account_executable_source_mounts(
         *environment,
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
         ("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "1"),
+        ("EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE", subject_token_target),
+        ("UNRELATED_SECRET", "must-not-leak"),
     )
 
     clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
@@ -1131,6 +1134,10 @@ def test_clarification_stages_external_account_executable_source_mounts(
         "/home/agent/.awf/clarification-auth/0"
     )
     assert dict(clarification_environment)["GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"] == "1"
+    assert dict(clarification_environment)["EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE"] == (
+        "/home/agent/.awf/clarification-auth/2"
+    )
+    assert "UNRELATED_SECRET" not in dict(clarification_environment)
     assert clarification_mounts == (
         AuthMount(
             source=str(adc_config),
@@ -1326,6 +1333,69 @@ def test_clarification_stages_credential_process_option_value_mount(tmp_path: Pa
     ) == (
         (helper_target, "/home/agent/.awf/clarification-auth/1"),
         (token_target, "/home/agent/.awf/clarification-auth/2"),
+    )
+
+
+@pytest.mark.unit
+def test_clarification_retains_credential_process_environment_token_file(tmp_path: Path) -> None:
+    """Credential-process environment paths retain only their declared token mount."""
+    aws_home = tmp_path / "aws"
+    aws_home.mkdir()
+    helper = tmp_path / "aws-helper"
+    token = tmp_path / "credential-process-token"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    helper_target = "/run/awf/secrets/aws-helper"
+    token_target = "/run/awf/secrets/credential-process-token"
+    ssh_auth_socket_target = "/run/awf/secrets/ssh-agent.sock"
+    (aws_home / "config").write_text(
+        "[profile awf-bedrock]\n"
+        "credential_process = sh -c "
+        f'\'{helper_target} --token-file "$MY_TOKEN_FILE" --ssh-auth "$SSH_AUTH_SOCK"\'\n',
+        encoding="utf-8",
+    )
+    aws_profile = AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro")
+    helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
+    token_mount = AuthMount(source=str(token), target=token_target, mode="ro")
+    ssh_auth_socket_mount = AuthMount(
+        source=str(tmp_path / "ssh-agent.sock"), target=ssh_auth_socket_target, mode="ro"
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("MY_TOKEN_FILE", token_target),
+        ("SSH_AUTH_SOCK", ssh_auth_socket_target),
+        ("UNRELATED_SECRET", "must-not-leak"),
+    )
+    mounts = (aws_profile, helper_mount, token_mount, ssh_auth_socket_mount)
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("MY_TOKEN_FILE", "/home/agent/.awf/clarification-auth/2"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro"),
+        AuthMount(
+            source=str(helper),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(token),
+            target="/home/agent/.awf/clarification-auth/2",
+            mode="ro",
+        ),
     )
 
 

@@ -8,6 +8,7 @@ import configparser
 import json
 import os
 import posixpath
+import re
 import shlex
 from collections.abc import Sequence
 from contextlib import suppress
@@ -36,6 +37,9 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
     }
+)
+_CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
 
 
@@ -206,14 +210,53 @@ def aws_profile_credential_paths(
     agent_environment: tuple[tuple[str, str], ...],
     provider_mount_targets: frozenset[str],
     mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return declared paths referenced by the active AWS profile files."""
+
+    return _aws_profile_credential_references(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=provider_mount_targets,
+        mirror_target=mirror_target,
+        allowed_credential_process_environment_names=allowed_credential_process_environment_names,
+    )[0]
+
+
+def aws_profile_credential_environment_names(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_mount_targets: frozenset[str],
+    mirror_target: str,
+) -> frozenset[str]:
+    """Return environment inputs referenced by active AWS credential processes."""
+
+    return _aws_profile_credential_references(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=provider_mount_targets,
+        mirror_target=mirror_target,
+        allowed_credential_process_environment_names=None,
+    )[1]
+
+
+def _aws_profile_credential_references(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_mount_targets: frozenset[str],
+    mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None,
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Return declared paths and environment inputs for active AWS profiles."""
 
     profile_name = compose_expand_value(
         dict(agent_environment).get("AWS_PROFILE") or "default",
         environ=os.environ,
     )
     references: list[str] = []
+    environment_names: set[str] = set()
     configurations: list[configparser.RawConfigParser] = []
     for profile_file in _aws_profile_file_targets(provider_mount_targets):
         source = _mounted_file_source(
@@ -249,14 +292,11 @@ def aws_profile_credential_paths(
                 continue
             credential_process = configuration.get(section, "credential_process", fallback=None)
             if isinstance(credential_process, str):
-                with suppress(ValueError):
-                    for argument in shlex.split(credential_process):
-                        if argument.startswith("/"):
-                            references.append(argument)
-                            continue
-                        _, separator, option_value = argument.partition("=")
-                        if separator and option_value.startswith("/"):
-                            references.append(option_value)
+                credential_process_paths, credential_process_environment_names = (
+                    _credential_process_references(credential_process)
+                )
+                references.extend(credential_process_paths)
+                environment_names.update(credential_process_environment_names)
             web_identity_token_file = configuration.get(
                 section, "web_identity_token_file", fallback=None
             )
@@ -265,18 +305,29 @@ def aws_profile_credential_paths(
             source_profile = configuration.get(section, "source_profile", fallback=None)
             if source_profile:
                 pending_profile_names.update({source_profile} - processed_profile_names)
-    return tuple(
-        reference
-        for index, reference in enumerate(references)
-        if reference not in references[:index]
-        and any(
-            mount.target != mirror_target
-            and (
-                mount.target == posixpath.normpath(reference)
-                or path_is_below(reference, mount.target)
-            )
-            for mount in auth_mounts
+    references.extend(
+        _environment_value_paths(
+            environment_names
+            if allowed_credential_process_environment_names is None
+            else environment_names & allowed_credential_process_environment_names,
+            agent_environment,
         )
+    )
+    return (
+        tuple(
+            reference
+            for index, reference in enumerate(references)
+            if reference not in references[:index]
+            and any(
+                mount.target != mirror_target
+                and (
+                    mount.target == posixpath.normpath(reference)
+                    or path_is_below(reference, mount.target)
+                )
+                for mount in auth_mounts
+            )
+        ),
+        frozenset(environment_names),
     )
 
 
@@ -286,6 +337,7 @@ def aws_profile_credential_mounts(
     agent_environment: tuple[tuple[str, str], ...],
     provider_mount_targets: frozenset[str],
     mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return declared mounts named by the active AWS profile configuration."""
 
@@ -294,6 +346,7 @@ def aws_profile_credential_mounts(
         agent_environment=agent_environment,
         provider_mount_targets=provider_mount_targets,
         mirror_target=mirror_target,
+        allowed_credential_process_environment_names=allowed_credential_process_environment_names,
     )
     return tuple(
         mount
@@ -349,8 +402,46 @@ def external_account_credential_source_paths(
     agent_environment: tuple[tuple[str, str], ...],
     provider_environment_names: frozenset[str],
     mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return declared paths needed by a selected external-account ADC."""
+
+    return _external_account_credential_source_references(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
+        allowed_credential_process_environment_names=allowed_credential_process_environment_names,
+    )[0]
+
+
+def external_account_credential_source_environment_names(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_environment_names: frozenset[str],
+    mirror_target: str,
+) -> frozenset[str]:
+    """Return environment inputs used by a selected external-account helper."""
+
+    return _external_account_credential_source_references(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
+        allowed_credential_process_environment_names=None,
+    )[1]
+
+
+def _external_account_credential_source_references(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    provider_environment_names: frozenset[str],
+    mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None,
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Return declared paths and environment inputs for an external-account helper."""
 
     credential_source = _external_account_credential_source(
         auth_mounts,
@@ -359,29 +450,89 @@ def external_account_credential_source_paths(
         mirror_target=mirror_target,
     )
     if credential_source is None:
-        return ()
+        return (), frozenset()
 
     paths: list[str] = []
+    environment_names: set[str] = set()
     subject_token_file = credential_source.get("file")
     if isinstance(subject_token_file, str) and subject_token_file.startswith("/"):
         paths.append(posixpath.normpath(subject_token_file))
     executable = credential_source.get("executable")
     if not isinstance(executable, dict):
-        return tuple(dict.fromkeys(paths))
+        return tuple(dict.fromkeys(paths)), frozenset()
     command = executable.get("command")
     if isinstance(command, str):
-        with suppress(ValueError):
-            for argument in shlex.split(command):
-                if argument.startswith("/"):
-                    paths.append(posixpath.normpath(argument))
-                    continue
-                _, separator, option_value = argument.partition("=")
-                if separator and option_value.startswith("/"):
-                    paths.append(posixpath.normpath(option_value))
+        command_paths, command_environment_names = _credential_process_references(command)
+        paths.extend(posixpath.normpath(path) for path in command_paths)
+        environment_names.update(command_environment_names)
     output_file = executable.get("output_file")
     if isinstance(output_file, str) and output_file.startswith("/"):
         paths.append(posixpath.normpath(output_file))
-    return tuple(dict.fromkeys(paths))
+    paths.extend(
+        _environment_value_paths(
+            environment_names
+            if allowed_credential_process_environment_names is None
+            else environment_names & allowed_credential_process_environment_names,
+            agent_environment,
+        )
+    )
+    return tuple(dict.fromkeys(paths)), frozenset(environment_names)
+
+
+def _credential_process_references(command: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Return absolute path and environment references from a valid helper command."""
+
+    with suppress(ValueError):
+        arguments = shlex.split(command)
+        paths = _credential_process_path_references(arguments)
+        environment_names = frozenset(
+            environment_name
+            for argument in arguments
+            for match in _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE.finditer(argument)
+            if (environment_name := match.group("braced") or match.group("plain"))
+        )
+        return paths, environment_names
+    return (), frozenset()
+
+
+def _credential_process_path_references(arguments: Sequence[str]) -> tuple[str, ...]:
+    """Return absolute paths from helper arguments, including shell-command bodies."""
+
+    references: list[str] = []
+    for argument in arguments:
+        references.extend(_credential_process_argument_paths(argument))
+        with suppress(ValueError):
+            nested_arguments = shlex.split(argument)
+            if nested_arguments != [argument]:
+                for nested_argument in nested_arguments:
+                    references.extend(_credential_process_argument_paths(nested_argument))
+    return tuple(dict.fromkeys(references))
+
+
+def _credential_process_argument_paths(argument: str) -> tuple[str, ...]:
+    """Return absolute path values from one helper argument."""
+
+    if argument.startswith("/"):
+        return (argument,)
+    _, separator, option_value = argument.partition("=")
+    if separator and option_value.startswith("/"):
+        return (option_value,)
+    return ()
+
+
+def _environment_value_paths(
+    environment_names: set[str],
+    agent_environment: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    """Return absolute declared paths held by selected credential environment inputs."""
+
+    environment_values = dict(agent_environment)
+    return tuple(
+        value
+        for name in environment_names
+        if (value := compose_expand_value(environment_values.get(name, ""), environ=os.environ))
+        and value.startswith("/")
+    )
 
 
 def is_aws_external_account_credential_source(
@@ -464,6 +615,7 @@ def external_account_subject_token_mounts(
     agent_environment: tuple[tuple[str, str], ...],
     provider_environment_names: frozenset[str],
     mirror_target: str,
+    allowed_credential_process_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return declared mounts needed by a selected external-account ADC file."""
 
@@ -472,6 +624,7 @@ def external_account_subject_token_mounts(
         agent_environment=agent_environment,
         provider_environment_names=provider_environment_names,
         mirror_target=mirror_target,
+        allowed_credential_process_environment_names=allowed_credential_process_environment_names,
     )
     if not credential_source_paths:
         return ()
