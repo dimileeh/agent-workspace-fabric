@@ -33,6 +33,15 @@ def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -
     return None
 
 
+def _outdated_thread_notification_verdict(state: MonitorState, thread: ReviewThread) -> str:
+    """Return the public state label for a known blocking outdated thread."""
+    if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+        return "needs_human"
+    if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
+        return "awaiting_retry"
+    return "new_feedback"
+
+
 def _collect_defer_items(
     status: PRStatus, state: MonitorState
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -79,7 +88,7 @@ def _collect_defer_items(
             }
         )
     for thread in status.outdated_unresolved_inline_threads:
-        if _outdated_thread_blocker_reason(state, thread) is None:
+        if (awf_blocker_reason := _outdated_thread_blocker_reason(state, thread)) is None:
             continue
         is_bot = _is_bot_review_thread(thread)
         bucket = bot_items if is_bot else human_items
@@ -93,10 +102,11 @@ def _collect_defer_items(
                 "line": thread.line,
                 "url": thread.url,
                 "body": thread.body_excerpt,
-                "verdict": "needs_human",
+                "verdict": _outdated_thread_notification_verdict(state, thread),
                 "agent_verdict_reason": state.threads_addressed_ids.get(
                     _needs_human_reason_state_key(thread.thread_id)
                 ),
+                "awf_blocker_reason": awf_blocker_reason,
             }
         )
     for comment in status.unresolved_review_comments:

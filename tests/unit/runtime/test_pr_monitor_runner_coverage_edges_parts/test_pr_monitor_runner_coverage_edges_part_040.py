@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -48,6 +49,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 def _status(
     *,
     threads: tuple[ReviewThread, ...] = (),
+    outdated_threads: tuple[ReviewThread, ...] = (),
     reviews: tuple[ReviewComment, ...] = (),
     blocking_reviews: tuple[ReviewComment, ...] = (),
 ) -> PRStatus:
@@ -62,6 +64,7 @@ def _status(
         blocking_reviews=blocking_reviews,
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=outdated_threads,
     )
 
 
@@ -420,6 +423,58 @@ def test_deferred_item_collection_keeps_existing_forge_urls() -> None:
 
     assert bot_items[0]["url"] == thread.url
     assert human_items[0]["url"] == review.url
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("state_entries", "expected_verdict", "expected_awf_reason"),
+    (
+        (
+            {
+                "T-outdated": "fix_committed",
+                _outdated_resolve_requeued_key("T-outdated"): "requeued",
+            },
+            "awaiting_retry",
+            "AWF could not yet resolve this outdated thread and will retry before merging",
+        ),
+        (
+            {
+                "T-outdated": "fix_committed",
+                "__review_thread_body_hash__:T-outdated": "stale hash",
+            },
+            "new_feedback",
+            "new feedback was added to this outdated thread after AWF addressed it",
+        ),
+    ),
+)
+def test_outdated_blocker_collection_keeps_awf_reason_separate_from_agent_verdict(
+    state_entries: dict[str, str], expected_verdict: str, expected_awf_reason: str
+) -> None:
+    """Outdated retry states are AWF blockers, not agent escalations."""
+    thread = ReviewThread(
+        thread_id="T-outdated",
+        path="src/monitor.py",
+        line=91,
+        body_excerpt="The original finding.",
+        author="review-bot[bot]",
+        url="https://github.example/reviews/T-outdated",
+    )
+
+    bot_items, human_items = _collect_defer_items(
+        _status(outdated_threads=(thread,)), MonitorState(threads_addressed_ids=state_entries)
+    )
+
+    assert human_items == []
+    assert len(bot_items) == 1
+    assert bot_items[0]["verdict"] == expected_verdict
+    assert bot_items[0]["agent_verdict_reason"] is None
+    assert bot_items[0]["awf_blocker_reason"] == expected_awf_reason
+    assert (
+        _notify_human_reason(
+            _status(outdated_threads=(thread,)), MonitorState(threads_addressed_ids=state_entries)
+        )
+        == expected_awf_reason
+    )
 
 
 @pytest.mark.unit

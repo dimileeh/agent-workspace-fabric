@@ -369,12 +369,15 @@ async def test_blocking_outdated_thread_gets_human_notification(
     assert terminal is False
     _, reason, ws_status = await _read_attention(factory, ws_id)
     assert ws_status == WorkspaceStatus.monitoring_pr.value
-    assert reason == "human review feedback needs human input and remains unresolved"
+    assert reason == "AWF could not resolve this outdated thread and needs human input"
     comment_calls = _calls(cmd, _is_pr_comment)
     assert len(comment_calls) == 1
     body = comment_calls[0][comment_calls[0].index("--body") + 1]
     assert "needs human attention" in body
     assert "src/app.py:10" in body
+    assert "Outdated feedback awaiting AWF resolution (1):" in body
+    assert "-> AWF status: AWF could not resolve this outdated thread" in body
+    assert "no reason given by agent" not in body
     assert "All 5 AWF gates are green" not in body
 
 

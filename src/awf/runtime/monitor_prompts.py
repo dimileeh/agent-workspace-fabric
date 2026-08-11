@@ -495,11 +495,15 @@ def ready_to_merge_comment(
 
 def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     """Render rich, untrusted human-action context for a public PR comment."""
+    outdated_items: list[Mapping[str, object]] = []
     bot_items: list[Mapping[str, object]] = []
     human_escalation_items: list[Mapping[str, object]] = []
     human_items: list[Mapping[str, object]] = []
     blocking_review_items: list[Mapping[str, object]] = []
     for item in blocker_items:
+        if _item_text(item, "awf_blocker_reason"):
+            outdated_items.append(item)
+            continue
         if (
             item.get("is_merge_blocking") is True
             or _item_text(item, "verdict") == "changes_requested"
@@ -526,12 +530,13 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
     # merge blockers are sorted first below, while this reservation preserves
     # separately rendered escalation feedback.
     triaged_item_reservation = min(
-        1, len(bot_items) + len(human_escalation_items) + len(human_items)
+        1, len(outdated_items) + len(bot_items) + len(human_escalation_items) + len(human_items)
     )
     blocking_review_display_limit = display_cap - triaged_item_reservation
     displayed = 0
     lines: list[str] = []
     for label, items, display_limit, prioritize_triage in (
+        ("Outdated feedback awaiting AWF resolution", outdated_items, display_cap, False),
         (
             "Merge-blocking changes-requested reviews",
             blocking_review_items,
@@ -599,8 +604,17 @@ def _render_blocker_item(item: Mapping[str, object]) -> str:
     reason = _redact_and_escape_markdown_inline(
         _truncate_blocker_excerpt(redact_secrets(_item_text(item, "agent_verdict_reason")))
     )
+    awf_blocker_reason = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "awf_blocker_reason")))
+    )
     if verdict == "changes_requested":
         return f"- {location_text} [{verdict}] {excerpt}"
+    if awf_blocker_reason:
+        agent_reason_text = f"; agent verdict reason: {reason}" if reason else ""
+        return (
+            f"- {location_text} [{verdict}] {excerpt} "
+            f"-> AWF status: {awf_blocker_reason}{agent_reason_text}"
+        )
     reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
     return f"- {location_text} [{verdict}] {excerpt} {reason_text}"
 

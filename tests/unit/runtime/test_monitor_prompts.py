@@ -1016,6 +1016,50 @@ class TestReadyToMergeComment:
         assert "-> ⚠ no reason given by agent" in body
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("agent_reason", "expected_agent_reason_text"),
+        (
+            (None, ""),
+            (
+                "The agent separately requested a release-policy decision.",
+                "; agent verdict reason: The agent separately requested a release-policy decision.",
+            ),
+        ),
+    )
+    def test_blocker_items_render_outdated_awf_status_without_agent_escalation(
+        self, agent_reason: str | None, expected_agent_reason_text: str
+    ) -> None:
+        """Verify retrying an outdated resolution is attributed to AWF, not an agent."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="AWF could not yet resolve this outdated thread and will retry before merging",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T-outdated",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T-outdated",
+                    "body": "The original finding.",
+                    "verdict": "awaiting_retry",
+                    "agent_verdict_reason": agent_reason,
+                    "awf_blocker_reason": (
+                        "AWF could not yet resolve this outdated thread and will retry before merging"
+                    ),
+                },
+            ),
+        )
+
+        assert "Outdated feedback awaiting AWF resolution (1):" in body
+        assert "Agent escalated - needs your decision (0):" in body
+        assert "[awaiting_retry]" in body
+        assert "-> AWF status: AWF could not yet resolve this outdated thread" in body
+        assert expected_agent_reason_text in body
+        assert "no reason given by agent" not in body
+
+    @pytest.mark.unit
     def test_blocker_item_truncates_long_agent_verdict_reason(self) -> None:
         """Verify blocker item truncates long agent verdict reason."""
         long_reason = "y" * 200

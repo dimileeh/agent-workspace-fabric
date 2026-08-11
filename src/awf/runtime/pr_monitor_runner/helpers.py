@@ -743,6 +743,10 @@ def _notify_human_reason(
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
     bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
+    for item in bot_items + human_items:
+        awf_blocker_reason = item.get("awf_blocker_reason")
+        if isinstance(awf_blocker_reason, str) and awf_blocker_reason:
+            return awf_blocker_reason
     if any(item.get("verdict") == "needs_human" for item in human_items):
         return "human review feedback needs human input and remains unresolved"
     if human_items:

@@ -161,11 +161,19 @@ class TestCollectDeferItems:
             requeued.thread_id,
             fresh_feedback.thread_id,
         ]
-        assert all(item["verdict"] == "needs_human" for item in humans)
-        # Keep an actual agent reason, but do not mislabel AWF merge-state
-        # fallbacks as agent-provided reasons. The renderer uses its honest
-        # no-reason marker for the latter two items.
+        assert [item["verdict"] for item in humans] == [
+            "needs_human",
+            "awaiting_retry",
+            "new_feedback",
+        ]
+        # Keep an actual agent reason separate from the AWF state that blocks
+        # the other two threads; those states are not agent escalations.
         assert [item["agent_verdict_reason"] for item in humans] == [agent_reason, None, None]
+        assert [item["awf_blocker_reason"] for item in humans] == [
+            "AWF could not resolve this outdated thread and needs human input",
+            "AWF could not yet resolve this outdated thread and will retry before merging",
+            "new feedback was added to this outdated thread after AWF addressed it",
+        ]
 
     @pytest.mark.unit
     def test_non_deferred_review_comments_are_excluded(self) -> None:
