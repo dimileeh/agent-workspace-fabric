@@ -193,6 +193,7 @@ async def _rollback_persisted_clarification_model_network(
     attachment: PersistedClarificationModelNetworkAttachment,
 ) -> CommandResult:
     """Undo only the live network attachments made by a failed legacy re-ask."""
+    first_failure: CommandResult | None = None
     for container_id in reversed(attachment.connected_container_ids):
         try:
             network_disconnect_result = await runner.run(
@@ -200,13 +201,15 @@ async def _rollback_persisted_clarification_model_network(
                 timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
-        if (
+            network_disconnect_result = CommandResult(
+                returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+            )
+        if first_failure is None and (
             not network_disconnect_result.ok
             and not _network_is_absent(network_disconnect_result, attachment.network_name)
             and not _network_is_not_connected(network_disconnect_result)
         ):
-            return network_disconnect_result
+            first_failure = network_disconnect_result
     for container_id, service in reversed(attachment.reconnecting_endpoints):
         try:
             network_connect_result = await runner.run(
@@ -222,20 +225,28 @@ async def _rollback_persisted_clarification_model_network(
                 timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
-        if not network_connect_result.ok and not _network_is_already_connected(
-            network_connect_result
+            network_connect_result = CommandResult(
+                returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+            )
+        if (
+            first_failure is None
+            and not network_connect_result.ok
+            and not _network_is_already_connected(network_connect_result)
         ):
-            return network_connect_result
+            first_failure = network_connect_result
     if not attachment.created_network:
-        return CommandResult(returncode=0, stdout="", stderr="")
+        return first_failure or CommandResult(returncode=0, stdout="", stderr="")
     try:
         network_remove_result = await runner.run(
             ["docker", "network", "rm", attachment.network_name],
             timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
+        network_remove_result = CommandResult(
+            returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+        )
     if _network_is_absent(network_remove_result, attachment.network_name):
-        return CommandResult(returncode=0, stdout=network_remove_result.stdout, stderr="")
-    return network_remove_result
+        network_remove_result = CommandResult(
+            returncode=0, stdout=network_remove_result.stdout, stderr=""
+        )
+    return first_failure or network_remove_result

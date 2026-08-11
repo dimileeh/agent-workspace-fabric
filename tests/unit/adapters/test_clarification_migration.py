@@ -116,6 +116,42 @@ async def test_rollback_persisted_model_network_bounds_cleanup_commands() -> Non
 
 
 @pytest.mark.unit
+async def test_rollback_persisted_model_network_continues_after_cleanup_failure() -> None:
+    """A failed cleanup action does not strand later endpoints or the network."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="first endpoint remains attached")
+    runner.queue_result()
+    runner.queue_result()
+    runner.queue_result()
+    attachment = PersistedClarificationModelNetworkAttachment(
+        network_name=network_name,
+        created_network=True,
+        connected_container_ids=["first-model-container", "second-model-container"],
+        reconnecting_endpoints=[("existing-model-container", "ollama-sidecar")],
+    )
+
+    result = await _rollback_persisted_clarification_model_network(runner, attachment=attachment)
+
+    assert result.stderr == "first endpoint remains attached"
+    assert [call.args for call in runner.calls] == [
+        ["docker", "network", "disconnect", network_name, "second-model-container"],
+        ["docker", "network", "disconnect", network_name, "first-model-container"],
+        [
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "ollama-sidecar",
+            network_name,
+            "existing-model-container",
+        ],
+        ["docker", "network", "rm", network_name],
+    ]
+    _assert_bounded_migration_calls(runner)
+
+
+@pytest.mark.unit
 async def test_attach_persisted_model_network_returns_failed_network_creation() -> None:
     """A failed network create is returned so callers can restore the Compose change."""
     runner = FakeCommandRunner()
