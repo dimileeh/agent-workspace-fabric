@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from awf.adapters.base_hosted_identity import (
+    _buffered_output_not_streamed,
+    _hosted_identity_int,
+    _hosted_identity_str,
+    _hosted_identity_str_tuple,
+    _prepend_missing_streamed_output,
+)
 from awf.adapters.base_isolated_reask import (
     _discard_hosted_execute_task_result,
     _discard_isolated_reask_git_metadata_task_result,
@@ -33,17 +40,8 @@ from awf.adapters.clarification_migration import (
 )
 from awf.adapters.failure_reasons import _failure_reason_for_result
 from awf.adapters.provider_failures import classify_provider_failure
-from awf.adapters.registry_api import (
-    _REGISTRY as _REGISTRY,
-)
-from awf.adapters.registry_api import (
-    get_adapter as get_adapter,
-)
-from awf.adapters.registry_api import (
-    register_adapter as register_adapter,
-)
-from awf.adapters.run_results import AgentRunError as AgentRunError
-from awf.adapters.run_results import AgentRunResult as AgentRunResult
+from awf.adapters.registry_api import _REGISTRY, get_adapter, register_adapter
+from awf.adapters.run_results import AgentRunError, AgentRunResult
 from awf.adapters.runtime_executor import (
     _HOSTED_TIMEOUT_REASONS,
     _HOSTED_TIMEOUT_RETURN_CODE,
@@ -95,6 +93,7 @@ from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 
+__all__ = ("AgentRunError", "AgentRunResult", "_REGISTRY", "get_adapter", "register_adapter")
 _log = get_logger(__name__)
 
 
@@ -128,8 +127,7 @@ async def _await_task_despite_cancellation(task: asyncio.Task[Any]) -> tuple[Any
     return task.result(), cancellation_requested
 
 
-# Prepended to every agent prompt. Encodes contract invariants the
-# agent must honour inside an AWF workspace.
+# Prepended to every agent prompt. Encodes AWF workspace contract invariants.
 _AWF_PROMPT_PREAMBLE = """\
 ## AWF workspace contract (DO NOT VIOLATE)
 
@@ -177,53 +175,6 @@ branch that AWF has already created for you. Your contract:
 ---
 
 """
-
-
-def _prepend_missing_streamed_output(*, chunks: list[str], buffered: str) -> str:
-    streamed = "".join(chunks)
-    if not streamed:
-        return buffered
-    if buffered.startswith(streamed):
-        return buffered
-    if streamed.startswith(buffered):
-        return streamed
-    return streamed + buffered
-
-
-def _buffered_output_not_streamed(*, chunks: list[str], buffered: str) -> str:
-    if not buffered:
-        return ""
-    streamed = "".join(chunks)
-    if not streamed:
-        return buffered
-    if buffered.startswith(streamed):
-        return buffered[len(streamed) :]
-    if streamed.startswith(buffered):
-        return ""
-    return buffered
-
-
-def _hosted_identity_str(identity: dict[str, Any] | None, key: str) -> str | None:
-    if identity is None:
-        return None
-    value = identity.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _hosted_identity_int(identity: dict[str, Any] | None, key: str) -> int | None:
-    if identity is None:
-        return None
-    value = identity.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _hosted_identity_str_tuple(identity: dict[str, Any] | None, key: str) -> tuple[str, ...]:
-    if identity is None:
-        return ()
-    value = identity.get(key)
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
 
 
 @dataclass(frozen=True)

@@ -7,12 +7,37 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.common.commands import CommandResult
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.runtime.pr_monitor_runner import comment_verdict, comments
 from awf.runtime.pr_monitor_runner.comments_source_git import (
     _reask_source_mirror_command,
     _rev_parse_pinned_reask_source_head,
 )
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_fail_closed_when_filter_probe_fails() -> None:
+    """An unreadable filter configuration cannot lead to an unsafe checkout."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=2, stderr="config unreadable")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not determine checkout filters"):
+        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_reject_unexpected_config_key() -> None:
+    """A malformed filter key cannot be passed into the host Git command."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=0, stdout="filter.poison/unsafe.smudge\n")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(
+        _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
+    ):
+        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
 
 
 @pytest.mark.unit

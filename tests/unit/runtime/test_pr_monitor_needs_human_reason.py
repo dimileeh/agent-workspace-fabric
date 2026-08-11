@@ -737,30 +737,6 @@ async def test_isolated_reask_worktree_disables_filters_from_linked_worktree_inc
 
 
 @pytest.mark.unit
-async def test_checkout_filter_overrides_fail_closed_when_filter_probe_fails() -> None:
-    """An unreadable filter configuration cannot lead to an unsafe checkout."""
-    command_runner = FakeCommandRunner()
-    command_runner.queue_result(returncode=2, stderr="config unreadable")
-    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
-
-    with pytest.raises(_MonitorPolicyBlockedError, match="Could not determine checkout filters"):
-        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
-
-
-@pytest.mark.unit
-async def test_checkout_filter_overrides_reject_unexpected_config_key() -> None:
-    """A malformed filter key cannot be passed into the host Git command."""
-    command_runner = FakeCommandRunner()
-    command_runner.queue_result(returncode=0, stdout="filter.poison/unsafe.smudge\n")
-    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
-
-    with pytest.raises(
-        _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
-    ):
-        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
-
-
-@pytest.mark.unit
 async def test_isolated_reask_worktree_cleans_up_when_effective_filter_probe_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
