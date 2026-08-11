@@ -149,11 +149,8 @@ def _isolated_reask_linked_worktree_git_dir(worktree_path: Path) -> Path | None:
         return None
     git_dir = Path(content.removeprefix(prefix).strip())
     if not git_dir.is_absolute():
-        git_dir = worktree_path / git_dir
-    try:
-        return git_dir.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
+        return Path(os.path.normpath(worktree_path / git_dir))
+    return git_dir
 
 
 def _copy_git_object_directory(source: Path, destination: Path) -> None:

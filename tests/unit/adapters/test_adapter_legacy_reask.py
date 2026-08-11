@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -703,6 +704,23 @@ class TestIsolatedReaskAdapter:
             if temporary_metadata is not None:
                 temporary_metadata.cleanup()
 
+    def test_isolated_reask_linked_worktree_git_dir_preserves_relative_symlink_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A relative Git pointer is normalized without following a linked-dir symlink."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        linked_git_dir = tmp_path / "linked-git"
+        replacement_git_dir = tmp_path / "replacement-linked-git"
+        replacement_git_dir.mkdir()
+        linked_git_dir.symlink_to(replacement_git_dir, target_is_directory=True)
+        (worktree_path / ".git").write_text("gitdir: ../linked-git\n", encoding="utf-8")
+
+        assert (
+            base_isolated_reask._isolated_reask_linked_worktree_git_dir(worktree_path)
+            == linked_git_dir
+        )
+
     def test_isolated_reask_git_metadata_binds_reject_symlinked_linked_git_dir_before_clone(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -710,8 +728,9 @@ class TestIsolatedReaskAdapter:
         mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         displaced_git_dir = tmp_path / "displaced-linked-git"
-        replacement_git_dir = tmp_path / "replacement-linked-git"
-        replacement_git_dir.mkdir()
+        replacement_mirror = tmp_path / "replacement-mirror.git"
+        shutil.copytree(mirror_path, replacement_mirror)
+        replacement_git_dir = replacement_mirror / "worktrees" / worktree_path.name
         linked_git_dir.rename(displaced_git_dir)
         linked_git_dir.symlink_to(replacement_git_dir, target_is_directory=True)
         real_run = base_isolated_reask.subprocess.run
