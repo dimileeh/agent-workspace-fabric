@@ -601,10 +601,10 @@ class TestIsolatedReaskAdapter:
         assert args.index("clarification", args.index("run")) > args.index("run")
 
     @pytest.mark.unit
-    async def test_isolated_reask_recreates_selected_legacy_model_service_before_clarification(
+    async def test_isolated_reask_attaches_selected_legacy_model_service_without_recreation(
         self, tmp_path: Path
     ) -> None:
-        """A legacy sidecar is ready on its new model network before the re-ask."""
+        """A stateful legacy sidecar keeps its container while gaining the route."""
         compose_file = tmp_path / "compose.yml"
         compose_file.write_text(
             yaml.safe_dump(
@@ -629,6 +629,13 @@ class TestIsolatedReaskAdapter:
             encoding="utf-8",
         )
         runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=1,
+            stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
+        )
+        runner.queue_result()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result()
         adapter = OpenCodeAdapter(runner=runner)
         profile = WorkspaceProfile.model_validate(
             {
@@ -649,23 +656,42 @@ class TestIsolatedReaskAdapter:
 
         assert runner.calls[0].args == [
             "docker",
+            "network",
+            "inspect",
+            "awf-ws_legacy-clarification-model-net",
+        ]
+        assert runner.calls[1].args == [
+            "docker",
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            "com.docker.compose.project=awf_ws_legacy",
+            "--label",
+            "com.docker.compose.network=clarification_model_net",
+            "awf-ws_legacy-clarification-model-net",
+        ]
+        assert runner.calls[2].args == [
+            "docker",
             "compose",
             "-p",
             "awf_ws_legacy",
             "-f",
             str(compose_file),
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "--wait",
-            "--wait-timeout",
-            "123",
+            "ps",
+            "-q",
             "ollama-sidecar",
         ]
-        assert runner.calls[0].timeout_seconds == 306.0
-        assert "run" in runner.calls[1].args
-        assert runner.calls[1].args[runner.calls[1].args.index("run") + 1 :][0:3] == [
+        assert runner.calls[3].args == [
+            "docker",
+            "network",
+            "connect",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
+        ]
+        assert all("--force-recreate" not in call.args for call in runner.calls)
+        assert "run" in runner.calls[4].args
+        assert runner.calls[4].args[runner.calls[4].args.index("run") + 1 :][0:3] == [
             "--rm",
             "--no-deps",
             "-T",
@@ -675,7 +701,7 @@ class TestIsolatedReaskAdapter:
     async def test_isolated_reask_reconciles_interrupted_legacy_model_migration_once(
         self, tmp_path: Path
     ) -> None:
-        """A retry completes a migration persisted before its sidecar recreation."""
+        """A retry attaches an existing sidecar before recording reconciliation."""
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
         assert adapter_base.upgrade_persisted_clarification_service(
             compose_file=compose_file,
@@ -685,6 +711,9 @@ class TestIsolatedReaskAdapter:
         ) == ("ollama-sidecar",)
 
         runner = FakeCommandRunner()
+        runner.queue_result()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result()
         adapter = OpenCodeAdapter(runner=runner)
 
         await adapter.run(
@@ -696,8 +725,13 @@ class TestIsolatedReaskAdapter:
             isolated_worktree_host_path=tmp_path / "reask",
         )
 
-        assert "up" in runner.calls[0].args
-        assert "ollama-sidecar" in runner.calls[0].args
+        assert runner.calls[2].args == [
+            "docker",
+            "network",
+            "connect",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
+        ]
         assert (
             yaml.safe_load(compose_file.read_text(encoding="utf-8"))[
                 "x-awf-persisted-clarification-model-network-reconciled"
@@ -714,18 +748,17 @@ class TestIsolatedReaskAdapter:
             isolated_worktree_host_path=tmp_path / "reask",
         )
 
-        assert len(runner.calls) == 3
+        assert len(runner.calls) == 5
         assert "run" in runner.calls[-1].args
 
     @pytest.mark.unit
-    async def test_isolated_reask_runs_after_persisted_migration_marker_failure(
+    async def test_isolated_reask_retries_existing_network_after_marker_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A marker-write failure leaves a safe retry path without blocking clarification."""
+        """A failed marker retries idempotently without replacing the sidecar."""
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
         def fail_marker(*, compose_file: Path) -> None:
-            """Exercise the fail_marker test helper."""
             del compose_file
             raise ValueError("disk full")
 
@@ -735,19 +768,31 @@ class TestIsolatedReaskAdapter:
             fail_marker,
         )
         runner = FakeCommandRunner()
+        runner.queue_result()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result()
+        runner.queue_result()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result(
+            returncode=1,
+            stderr="endpoint with name stateful-model-container already exists in network",
+        )
         adapter = OpenCodeAdapter(runner=runner)
 
-        await adapter.run(
-            compose_project="awf_ws_legacy",
-            compose_file=compose_file,
-            prompt=_PROMPT,
-            model="ollama/kimi-k2.6:cloud",
-            workspace_id="ws_legacy",
-            isolated_worktree_host_path=tmp_path / "reask",
-        )
+        for _ in range(2):
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
 
-        assert "up" in runner.calls[0].args
-        assert "run" in runner.calls[1].args
+        assert all("--force-recreate" not in call.args for call in runner.calls)
+        assert "run" in runner.calls[3].args
+        assert "run" in runner.calls[-1].args
         assert (
             yaml.safe_load(compose_file.read_text(encoding="utf-8"))[
                 "x-awf-persisted-clarification-model-network-reconciled"
@@ -756,90 +801,23 @@ class TestIsolatedReaskAdapter:
         )
 
     @pytest.mark.unit
-    async def test_isolated_reask_restores_legacy_compose_when_upgrade_is_cancelled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Cancellation waits for the upgrade worker before restoring its file edit."""
-        compose_file = tmp_path / "compose.yml"
-        original_compose_file = b"services:\n  agent:\n    image: awf-agent-runtime:latest\n"
-        compose_file.write_bytes(original_compose_file)
-        upgrade_started = Event()
-        finish_upgrade = Event()
-        upgrade_finished = Event()
-
-        def blocking_upgrade(**kwargs: object) -> tuple[str, ...]:
-            """Exercise the blocking_upgrade test helper."""
-            upgraded_compose_file = kwargs["compose_file"]
-            assert isinstance(upgraded_compose_file, Path)
-            upgrade_started.set()
-            assert finish_upgrade.wait(timeout=1)
-            upgraded_compose_file.write_text(
-                "services:\n  clarification:\n    image: awf-agent-runtime:latest\n",
-                encoding="utf-8",
-            )
-            upgrade_finished.set()
-            return ("ollama-sidecar",)
-
-        monkeypatch.setattr(
-            adapter_base,
-            "upgrade_persisted_clarification_service",
-            blocking_upgrade,
-        )
-        runner = FakeCommandRunner()
-        adapter = OpenCodeAdapter(runner=runner)
-        task = asyncio.create_task(
-            adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-        )
-
-        assert await asyncio.to_thread(upgrade_started.wait, 1)
-        task.cancel()
-        await asyncio.sleep(0)
-        assert not task.done()
-        finish_upgrade.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert upgrade_finished.is_set()
-        assert compose_file.read_bytes() == original_compose_file
-        assert runner.calls == []
-
-    @pytest.mark.unit
-    async def test_isolated_reask_stops_when_legacy_model_service_recreation_fails(
+    async def test_isolated_reask_rolls_back_only_new_network_attachments(
         self, tmp_path: Path
     ) -> None:
-        """Do not launch an unreachable clarification container after a failed update."""
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "ollama-sidecar": {
-                            "image": "ollama/ollama:latest",
-                            "networks": ["awf_net"],
-                        },
-                        "agent": {
-                            "image": "awf-agent-runtime:latest",
-                            "environment": {
-                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
-                            },
-                            "networks": ["awf_net"],
-                        },
-                    },
-                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
-                },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
+        """A failed second attachment leaves stateful model containers untouched."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        original_compose_file = compose_file.read_bytes()
         runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
+        runner.queue_result(
+            returncode=1,
+            stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
+        )
+        runner.queue_result()
+        runner.queue_result(stdout="first-model-container\nsecond-model-container\n")
+        runner.queue_result()
+        runner.queue_result(returncode=1, stderr="could not attach second model")
+        runner.queue_result()
+        runner.queue_result(returncode=1, stderr="container is not connected to network")
         adapter = OpenCodeAdapter(runner=runner)
 
         with pytest.raises(AgentRunError) as exc:
@@ -853,169 +831,119 @@ class TestIsolatedReaskAdapter:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
-        assert len(runner.calls) == 4
-        assert "run" not in runner.calls[0].args
-        assert runner.calls[1].args == [
+        assert runner.calls[5].args == [
             "docker",
-            "compose",
-            "-p",
-            "awf_ws_legacy",
-            "-f",
-            str(compose_file),
-            "rm",
-            "--stop",
-            "--force",
-            "ollama-sidecar",
+            "network",
+            "disconnect",
+            "awf-ws_legacy-clarification-model-net",
+            "second-model-container",
         ]
-        assert runner.calls[2].args == [
+        assert runner.calls[6].args == [
+            "docker",
+            "network",
+            "disconnect",
+            "awf-ws_legacy-clarification-model-net",
+            "first-model-container",
+        ]
+        assert runner.calls[7].args == [
             "docker",
             "network",
             "rm",
             "awf-ws_legacy-clarification-model-net",
         ]
-        assert runner.calls[3].args == [
-            "docker",
-            "compose",
-            "-p",
-            "awf_ws_legacy",
-            "-f",
-            str(compose_file),
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "--wait",
-            "--wait-timeout",
-            "300",
-            "ollama-sidecar",
-        ]
-        assert runner.calls[3].timeout_seconds == 660.0
-        assert (
-            "clarification"
-            not in yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"]
-        )
+        assert all("rm" not in call.args or "compose" not in call.args for call in runner.calls)
+        assert all("--force-recreate" not in call.args for call in runner.calls)
+        assert compose_file.read_bytes() == original_compose_file
 
-        await adapter.run(
-            compose_project="awf_ws_legacy",
-            compose_file=compose_file,
-            prompt=_PROMPT,
-            model="ollama/kimi-k2.6:cloud",
-            workspace_id="ws_legacy",
-            isolated_worktree_host_path=tmp_path / "reask",
+    @pytest.mark.unit
+    async def test_isolated_reask_cancellation_detaches_the_existing_sidecar(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation after connect never requires model-sidecar recreation."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        original_compose_file = compose_file.read_bytes()
+
+        class _CancellingConnectRunner(FakeCommandRunner):
+            """Cancel immediately after Docker can have applied the connection."""
+
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if args[0:3] == ["docker", "network", "connect"]:
+                    raise asyncio.CancelledError
+                return result
+
+        runner = _CancellingConnectRunner()
+        runner.queue_result(
+            returncode=1,
+            stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
         )
+        runner.queue_result()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result()
+        runner.queue_result()
+        runner.queue_result()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
 
         assert runner.calls[4].args == [
             "docker",
-            "compose",
-            "-p",
-            "awf_ws_legacy",
-            "-f",
-            str(compose_file),
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "--wait",
-            "--wait-timeout",
-            "300",
-            "ollama-sidecar",
+            "network",
+            "disconnect",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
         ]
-        assert runner.calls[4].timeout_seconds == 660.0
-        assert "run" in runner.calls[5].args
+        assert runner.calls[5].args == [
+            "docker",
+            "network",
+            "rm",
+            "awf-ws_legacy-clarification-model-net",
+        ]
+        assert all("--force-recreate" not in call.args for call in runner.calls)
+        assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
-    async def test_isolated_reask_keeps_migration_compose_when_network_reap_fails(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("network_exists", "container_ids", "expected_calls"),
+        [
+            (False, "", 4),
+            (True, "", 2),
+        ],
+        ids=["new-network", "existing-network"],
+    )
+    async def test_isolated_reask_refuses_to_start_without_a_live_model_sidecar(
+        self,
+        tmp_path: Path,
+        network_exists: bool,
+        container_ids: str,
+        expected_calls: int,
     ) -> None:
-        """A failed network reap retains its Compose declaration for later teardown."""
-        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        runner.queue_result()
-        runner.queue_result(returncode=1, stderr="network still has active endpoints")
-        adapter = OpenCodeAdapter(runner=runner)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
-        assert exc.value.result.stderr == "network still has active endpoints"
-        assert exc.value.details == {"services": ("ollama-sidecar",)}
-        assert len(runner.calls) == 3
-        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-        assert rendered["services"]["ollama-sidecar"]["networks"] == [
-            "awf_net",
-            "clarification_model_net",
-        ]
-        assert rendered["networks"]["clarification_model_net"] == {
-            "name": "awf-ws_legacy-clarification-model-net",
-            "internal": True,
-        }
-
-    @pytest.mark.unit
-    async def test_isolated_reask_classifies_network_reap_exception(self, tmp_path: Path) -> None:
-        """A network-reap exception is a terminal cleanup failure."""
-        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-
-        class _FailingNetworkReapRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 3:
-                    raise RuntimeError("network reap unavailable")
-                return result
-
-        runner = _FailingNetworkReapRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        runner.queue_result()
-        adapter = OpenCodeAdapter(runner=runner)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
-        assert exc.value.result.stderr == "RuntimeError: network reap unavailable"
-        assert exc.value.details == {"services": ("ollama-sidecar",)}
-        assert len(runner.calls) == 3
-        rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-        assert rendered["services"]["ollama-sidecar"]["networks"] == [
-            "awf_net",
-            "clarification_model_net",
-        ]
-
-    @pytest.mark.unit
-    async def test_isolated_reask_restores_legacy_compose_when_network_reap_is_absent(
-        self, tmp_path: Path
-    ) -> None:
-        """An already-reaped model network is a successful rollback cleanup."""
+        """A migration never starts clarification against an absent model endpoint."""
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
         original_compose_file = compose_file.read_bytes()
         runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        runner.queue_result()
-        runner.queue_result(
-            returncode=1,
-            stderr=(
-                "Error response from daemon: network "
-                "awf-ws_legacy-clarification-model-net not found"
-            ),
-        )
+        if network_exists:
+            runner.queue_result()
+        else:
+            runner.queue_result(
+                returncode=1,
+                stderr=(
+                    "Error response from daemon: network "
+                    "awf-ws_legacy-clarification-model-net not found"
+                ),
+            )
+            runner.queue_result()
+        runner.queue_result(stdout=container_ids)
+        if not network_exists:
+            runner.queue_result()
         adapter = OpenCodeAdapter(runner=runner)
 
         with pytest.raises(AgentRunError) as exc:
@@ -1029,400 +957,26 @@ class TestIsolatedReaskAdapter:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
-        assert len(runner.calls) == 4
-        assert compose_file.read_bytes() == original_compose_file
-
-    @pytest.mark.unit
-    async def test_isolated_reask_surfaces_legacy_model_service_recovery_failure(
-        self, tmp_path: Path
-    ) -> None:
-        """Report a failed rollback recovery instead of the original update failure."""
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "ollama-sidecar": {
-                            "image": "ollama/ollama:latest",
-                            "networks": ["awf_net"],
-                        },
-                        "agent": {
-                            "image": "awf-agent-runtime:latest",
-                            "environment": {
-                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
-                            },
-                            "networks": ["awf_net"],
-                        },
-                    },
-                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
-                },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        runner.queue_result()
-        runner.queue_result()
-        runner.queue_result(returncode=1, stderr="could not restore model sidecar")
-        adapter = OpenCodeAdapter(runner=runner)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-        assert exc.value.result.returncode == 1
-        assert exc.value.result.stderr == "could not restore model sidecar"
-        assert exc.value.details == {"services": ("ollama-sidecar",)}
-        assert len(runner.calls) == 4
-        assert "run" not in runner.calls[-1].args
-
-    @pytest.mark.unit
-    async def test_isolated_reask_surfaces_legacy_model_service_recovery_exception(
-        self, tmp_path: Path
-    ) -> None:
-        """Report a rollback recovery exception instead of the update failure."""
-        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-
-        class _FailingLegacyRecoveryRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 4:
-                    raise FileNotFoundError("docker not found")
-                return result
-
-        runner = _FailingLegacyRecoveryRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        runner.queue_result()
-        runner.queue_result()
-        adapter = OpenCodeAdapter(runner=runner)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-        assert exc.value.result.returncode == 1
-        assert exc.value.result.stderr == "FileNotFoundError: docker not found"
-        assert exc.value.details == {"services": ("ollama-sidecar",)}
-        assert len(runner.calls) == 4
-
-    @pytest.mark.unit
-    async def test_isolated_reask_surfaces_terminal_failure_when_legacy_restore_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Do not recreate from the migrated definition if legacy restore fails."""
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "ollama-sidecar": {
-                            "image": "ollama/ollama:latest",
-                            "networks": ["awf_net"],
-                        },
-                        "agent": {
-                            "image": "awf-agent-runtime:latest",
-                            "environment": {
-                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
-                            },
-                            "networks": ["awf_net"],
-                        },
-                    },
-                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
-                },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="could not recreate model sidecar")
-        adapter = OpenCodeAdapter(runner=runner)
-
-        def fail_restore(*, compose_file: Path, contents: bytes) -> None:
-            """Exercise the fail_restore test helper."""
-            del compose_file, contents
-            raise OSError("disk full")
-
-        monkeypatch.setattr(adapter_base, "_restore_compose_file", fail_restore)
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-        assert exc.value.details == {"services": ("ollama-sidecar",)}
-        assert len(runner.calls) == 3
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("restore_fails", "expected_shield_calls", "expected_calls"),
-        [(False, 5, 4), (True, 3, 3)],
-        ids=["legacy-restore-succeeds", "legacy-restore-fails"],
-    )
-    async def test_isolated_reask_rolls_back_legacy_migration_when_model_recreation_is_cancelled(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        restore_fails: bool,
-        expected_shield_calls: int,
-        expected_calls: int,
-    ) -> None:
-        """Cancellation restores a legacy sidecar only after its definition is restored."""
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "ollama-sidecar": {
-                            "image": "ollama/ollama:latest",
-                            "networks": ["awf_net"],
-                        },
-                        "agent": {
-                            "image": "awf-agent-runtime:latest",
-                            "environment": {
-                                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
-                            },
-                            "networks": ["awf_net"],
-                        },
-                    },
-                    "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
-                },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
-        original_compose_file = compose_file.read_bytes()
-
-        class _CancellingSidecarUpdateRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 1:
-                    raise asyncio.CancelledError
-                return result
-
-        runner = _CancellingSidecarUpdateRunner()
-        adapter = OpenCodeAdapter(runner=runner)
-        if restore_fails:
-
-            def fail_restore(*, compose_file: Path, contents: bytes) -> None:
-                """Exercise the fail_restore test helper."""
-                del compose_file, contents
-                raise OSError("disk full")
-
-            monkeypatch.setattr(adapter_base, "_restore_compose_file", fail_restore)
-        original_shield = asyncio.shield
-        shield_calls = 0
-
-        async def cancel_cleanup_and_recovery_shield(task: asyncio.Future[Any]) -> Any:
-            """Exercise the cancel_cleanup_and_recovery_shield test helper."""
-            nonlocal shield_calls
-            shield_calls += 1
-            # The first shield protects the legacy upgrade worker. Interrupt
-            # the cleanup and recovery shields below, as this regression is
-            # specifically about cancellation during model recreation.
-            if shield_calls in {2, 4}:
-                raise asyncio.CancelledError
-            return await original_shield(task)
-
-        monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_cleanup_and_recovery_shield)
-
-        if restore_fails:
-            with pytest.raises(AgentRunError) as exc:
-                await adapter.run(
-                    compose_project="awf_ws_legacy",
-                    compose_file=compose_file,
-                    prompt=_PROMPT,
-                    model="ollama/kimi-k2.6:cloud",
-                    workspace_id="ws_legacy",
-                    isolated_worktree_host_path=tmp_path / "reask",
-                )
-
-            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-            assert exc.value.result.stderr == "OSError: disk full"
-            assert exc.value.details == {"services": ("ollama-sidecar",)}
-        else:
-            with pytest.raises(asyncio.CancelledError):
-                await adapter.run(
-                    compose_project="awf_ws_legacy",
-                    compose_file=compose_file,
-                    prompt=_PROMPT,
-                    model="ollama/kimi-k2.6:cloud",
-                    workspace_id="ws_legacy",
-                    isolated_worktree_host_path=tmp_path / "reask",
-                )
-
-        assert shield_calls == expected_shield_calls
         assert len(runner.calls) == expected_calls
-        assert runner.calls[1].args == [
-            "docker",
-            "compose",
-            "-p",
-            "awf_ws_legacy",
-            "-f",
-            str(compose_file),
-            "rm",
-            "--stop",
-            "--force",
-            "ollama-sidecar",
-        ]
-        assert runner.calls[2].args == [
-            "docker",
-            "network",
-            "rm",
-            "awf-ws_legacy-clarification-model-net",
-        ]
-        if restore_fails:
-            assert runner.calls[-1].args == [
-                "docker",
-                "network",
-                "rm",
-                "awf-ws_legacy-clarification-model-net",
-            ]
-        else:
-            assert runner.calls[3].args == [
-                "docker",
-                "compose",
-                "-p",
-                "awf_ws_legacy",
-                "-f",
-                str(compose_file),
-                "up",
-                "-d",
-                "--no-deps",
-                "--force-recreate",
-                "--wait",
-                "--wait-timeout",
-                "300",
-                "ollama-sidecar",
-            ]
-            assert runner.calls[3].timeout_seconds == 660.0
-            assert compose_file.read_bytes() == original_compose_file
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("recovery_raises", [False, True], ids=["nonzero", "raises"])
-    async def test_isolated_reask_surfaces_failed_legacy_recovery_after_cancellation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_raises: bool
-    ) -> None:
-        """Do not discard recovery failure after cancelled model recreation."""
-        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-        original_compose_file = compose_file.read_bytes()
-
-        class _CancellingThenFailingRecoveryRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 1:
-                    raise asyncio.CancelledError
-                if len(self.calls) == 4:
-                    if recovery_raises:
-                        raise RuntimeError("could not restore model sidecar")
-                    return CommandResult(
-                        returncode=1,
-                        stdout="",
-                        stderr="could not restore model sidecar",
-                    )
-                return result
-
-        runner = _CancellingThenFailingRecoveryRunner()
-        adapter = OpenCodeAdapter(runner=runner)
-        if recovery_raises:
-            original_shield = asyncio.shield
-            shield_calls = 0
-
-            async def cancel_recovery_shield(task: asyncio.Future[Any]) -> Any:
-                """Exercise the cancel_recovery_shield test helper."""
-                nonlocal shield_calls
-                shield_calls += 1
-                if shield_calls == 3:
-                    await asyncio.sleep(0)
-                    raise asyncio.CancelledError
-                return await original_shield(task)
-
-            monkeypatch.setattr(adapter_base.asyncio, "shield", cancel_recovery_shield)
-
-        if recovery_raises:
-            with pytest.raises(AgentRunError) as exc:
-                await adapter.run(
-                    compose_project="awf_ws_legacy",
-                    compose_file=compose_file,
-                    prompt=_PROMPT,
-                    model="ollama/kimi-k2.6:cloud",
-                    workspace_id="ws_legacy",
-                    isolated_worktree_host_path=tmp_path / "reask",
-                )
-
-            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-            assert exc.value.result.returncode == 1
-            assert exc.value.result.stderr == "RuntimeError: could not restore model sidecar"
-            assert exc.value.details == {"services": ("ollama-sidecar",)}
-            assert shield_calls == 3
-        else:
-            with pytest.raises(AgentRunError) as exc:
-                await adapter.run(
-                    compose_project="awf_ws_legacy",
-                    compose_file=compose_file,
-                    prompt=_PROMPT,
-                    model="ollama/kimi-k2.6:cloud",
-                    workspace_id="ws_legacy",
-                    isolated_worktree_host_path=tmp_path / "reask",
-                )
-
-            assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
-            assert exc.value.result.stderr == "could not restore model sidecar"
-            assert exc.value.details == {"services": ("ollama-sidecar",)}
-
-        assert len(runner.calls) == 4
+        assert all("run" not in call.args for call in runner.calls)
+        assert all("--force-recreate" not in call.args for call in runner.calls)
         assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
-    async def test_isolated_reask_keeps_migration_compose_when_cancelled_network_reap_fails(
+    async def test_isolated_reask_preserves_migration_when_network_cleanup_fails(
         self, tmp_path: Path
     ) -> None:
-        """Cancellation cannot restore a file that would orphan a failed network reap."""
+        """A failed detach is surfaced instead of mutating the model sidecar."""
         compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-
-        class _CancellingSidecarUpdateRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 1:
-                    raise asyncio.CancelledError
-                return result
-
-        runner = _CancellingSidecarUpdateRunner()
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=1,
+            stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
+        )
         runner.queue_result()
-        runner.queue_result()
-        runner.queue_result(returncode=1, stderr="network still has active endpoints")
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result(returncode=1, stderr="could not attach model")
+        runner.queue_result(returncode=1, stderr="network endpoint remains attached")
         adapter = OpenCodeAdapter(runner=runner)
 
         with pytest.raises(AgentRunError) as exc:
@@ -1436,57 +990,10 @@ class TestIsolatedReaskAdapter:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
-        assert exc.value.result.stderr == "network still has active endpoints"
-        assert len(runner.calls) == 3
+        assert exc.value.result.stderr == "network endpoint remains attached"
         rendered = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
         assert rendered["services"]["ollama-sidecar"]["networks"] == [
             "awf_net",
             "clarification_model_net",
         ]
-        assert rendered["networks"]["clarification_model_net"] == {
-            "name": "awf-ws_legacy-clarification-model-net",
-            "internal": True,
-        }
-
-    @pytest.mark.unit
-    async def test_isolated_reask_restores_legacy_compose_when_cancelled_network_reap_is_absent(
-        self, tmp_path: Path
-    ) -> None:
-        """Cancellation succeeds when another cleanup already removed the network."""
-        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
-        original_compose_file = compose_file.read_bytes()
-
-        class _CancellingSidecarUpdateRunner(FakeCommandRunner):
-            """Test double used by the surrounding scenario."""
-
-            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
-                """Run this test double and record the invocation."""
-                result = await super().run(args, **kwargs)
-                if len(self.calls) == 1:
-                    raise asyncio.CancelledError
-                return result
-
-        runner = _CancellingSidecarUpdateRunner()
-        runner.queue_result()
-        runner.queue_result()
-        runner.queue_result(
-            returncode=1,
-            stderr=(
-                "Error response from daemon: network "
-                "awf-ws_legacy-clarification-model-net not found"
-            ),
-        )
-        adapter = OpenCodeAdapter(runner=runner)
-
-        with pytest.raises(asyncio.CancelledError):
-            await adapter.run(
-                compose_project="awf_ws_legacy",
-                compose_file=compose_file,
-                prompt=_PROMPT,
-                model="ollama/kimi-k2.6:cloud",
-                workspace_id="ws_legacy",
-                isolated_worktree_host_path=tmp_path / "reask",
-            )
-
-        assert len(runner.calls) == 4
-        assert compose_file.read_bytes() == original_compose_file
+        assert all("--force-recreate" not in call.args for call in runner.calls)

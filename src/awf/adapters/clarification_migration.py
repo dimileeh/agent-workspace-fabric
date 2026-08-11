@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
@@ -29,17 +30,77 @@ def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
                 temporary_path.unlink()
 
 
-async def _reap_persisted_clarification_model_migration(
+@dataclass
+class PersistedClarificationModelNetworkAttachment:
+    """Runtime network state added while upgrading a legacy clarification run."""
+
+    network_name: str
+    created_network: bool = False
+    connected_container_ids: list[str] = field(default_factory=list)
+
+
+def _clarification_model_network_name(*, compose_project: str, workspace_id: str | None) -> str:
+    """Return the stable runtime name for a legacy clarification model network."""
+    return f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net"
+
+
+def _network_is_absent(result: CommandResult, network_name: str) -> bool:
+    """Return whether Docker reported that a model network has already gone away."""
+    return not result.ok and result.stderr.rstrip().endswith(f"network {network_name} not found")
+
+
+def _network_is_already_connected(result: CommandResult) -> bool:
+    """Return whether an idempotent network connect found its existing endpoint."""
+    detail = f"{result.stdout}\n{result.stderr}".lower()
+    return "already connected" in detail or "endpoint with name" in detail and "exists" in detail
+
+
+def _network_is_not_connected(result: CommandResult) -> bool:
+    """Return whether an idempotent disconnect found no endpoint to remove."""
+    detail = f"{result.stdout}\n{result.stderr}".lower()
+    return "not connected" in detail or "no such endpoint" in detail
+
+
+async def _attach_persisted_clarification_model_network(
     runner: AsyncCommandRunner,
     *,
     compose_project: str,
     compose_file: Path,
     workspace_id: str | None,
     clarification_model_services: tuple[str, ...],
-) -> CommandResult:
-    """Remove migrated sidecars and return the result of reaping their network."""
-    with contextlib.suppress(Exception):
-        await runner.run(
+    attachment: PersistedClarificationModelNetworkAttachment | None = None,
+) -> tuple[PersistedClarificationModelNetworkAttachment, CommandResult]:
+    """Connect live legacy model sidecars to clarification without recreating them."""
+    if attachment is None:
+        attachment = PersistedClarificationModelNetworkAttachment(
+            network_name=_clarification_model_network_name(
+                compose_project=compose_project, workspace_id=workspace_id
+            )
+        )
+    network_inspect_result = await runner.run(
+        ["docker", "network", "inspect", attachment.network_name]
+    )
+    if not network_inspect_result.ok:
+        if not _network_is_absent(network_inspect_result, attachment.network_name):
+            return attachment, network_inspect_result
+        network_create_result = await runner.run(
+            [
+                "docker",
+                "network",
+                "create",
+                "--internal",
+                "--label",
+                f"com.docker.compose.project={compose_project}",
+                "--label",
+                "com.docker.compose.network=clarification_model_net",
+                attachment.network_name,
+            ]
+        )
+        if not network_create_result.ok:
+            return attachment, network_create_result
+        attachment.created_network = True
+    for service in clarification_model_services:
+        container_ids_result = await runner.run(
             [
                 "docker",
                 "compose",
@@ -47,34 +108,68 @@ async def _reap_persisted_clarification_model_migration(
                 compose_project,
                 "-f",
                 str(compose_file),
-                "rm",
-                "--stop",
-                "--force",
-                *clarification_model_services,
+                "ps",
+                "-q",
+                service,
             ]
         )
-    network_name = (
-        f"awf-{workspace_id or compose_project.removeprefix('awf_')}-clarification-model-net"
-    )
+        if not container_ids_result.ok:
+            return attachment, container_ids_result
+        container_ids = tuple(
+            dict.fromkeys(
+                container_id.strip() for container_id in container_ids_result.stdout.splitlines()
+            )
+        )
+        if not container_ids:
+            return attachment, CommandResult(
+                returncode=1,
+                stdout="",
+                stderr=f"no running container found for clarification model service {service}",
+            )
+        for container_id in container_ids:
+            # Record before awaiting: cancellation can arrive after Docker
+            # connects the endpoint but before its subprocess result reaches
+            # us, and rollback must still detach that possible connection.
+            attachment.connected_container_ids.append(container_id)
+            network_connect_result = await runner.run(
+                ["docker", "network", "connect", attachment.network_name, container_id]
+            )
+            if network_connect_result.ok:
+                continue
+            if _network_is_already_connected(network_connect_result):
+                attachment.connected_container_ids.pop()
+            else:
+                return attachment, network_connect_result
+    return attachment, CommandResult(returncode=0, stdout="", stderr="")
+
+
+async def _rollback_persisted_clarification_model_network(
+    runner: AsyncCommandRunner,
+    *,
+    attachment: PersistedClarificationModelNetworkAttachment,
+) -> CommandResult:
+    """Undo only the live network attachments made by a failed legacy re-ask."""
+    for container_id in reversed(attachment.connected_container_ids):
+        try:
+            network_disconnect_result = await runner.run(
+                ["docker", "network", "disconnect", attachment.network_name, container_id]
+            )
+        except Exception as exc:
+            return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
+        if (
+            not network_disconnect_result.ok
+            and not _network_is_absent(network_disconnect_result, attachment.network_name)
+            and not _network_is_not_connected(network_disconnect_result)
+        ):
+            return network_disconnect_result
+    if not attachment.created_network:
+        return CommandResult(returncode=0, stdout="", stderr="")
     try:
-        network_reap_result = await runner.run(
-            [
-                "docker",
-                "network",
-                "rm",
-                network_name,
-            ]
+        network_remove_result = await runner.run(
+            ["docker", "network", "rm", attachment.network_name]
         )
     except Exception as exc:
-        return CommandResult(
-            returncode=1,
-            stdout="",
-            stderr=f"{type(exc).__name__}: {exc}",
-        )
-    if not network_reap_result.ok and network_reap_result.stderr.rstrip().endswith(
-        f"network {network_name} not found"
-    ):
-        # Another teardown can win the network-removal race. Docker reports
-        # that idempotent state as an error, but the migration is reaped.
-        return CommandResult(returncode=0, stdout=network_reap_result.stdout, stderr="")
-    return network_reap_result
+        return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
+    if _network_is_absent(network_remove_result, attachment.network_name):
+        return CommandResult(returncode=0, stdout=network_remove_result.stdout, stderr="")
+    return network_remove_result

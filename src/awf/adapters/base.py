@@ -25,8 +25,11 @@ from awf.adapters.base_isolated_reask import (
     _isolated_reask_git_metadata_volume_binds,
 )
 from awf.adapters.clarification_migration import (
-    _reap_persisted_clarification_model_migration,
+    PersistedClarificationModelNetworkAttachment,
+    _attach_persisted_clarification_model_network,
+    _clarification_model_network_name,
     _restore_compose_file,
+    _rollback_persisted_clarification_model_network,
 )
 from awf.adapters.failure_reasons import _failure_reason_for_result
 from awf.adapters.provider_failures import classify_provider_failure
@@ -76,7 +79,6 @@ from awf.common.compose_exec import (
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import (
-    compose_up_capture_timeout_seconds,
     mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )
@@ -420,50 +422,31 @@ class AgentAdapter(ABC):
                     )
                 raise
             if clarification_model_services:
-                # ``docker compose run --no-deps`` below starts only the
-                # clarification container. Recreate the selected legacy model
-                # services first so Docker applies the newly-rendered dedicated
-                # model network to their already-running containers.
-                readiness_timeout_seconds = (
-                    profile.docker.startup_timeout_seconds if profile is not None else 300
+                # The profile may keep downloaded models and other runtime
+                # initialization in a model sidecar's writable layer. Attach
+                # its existing container to the dedicated network instead of
+                # recreating it solely for this reason-only re-ask.
+                attachment = PersistedClarificationModelNetworkAttachment(
+                    network_name=_clarification_model_network_name(
+                        compose_project=compose_project, workspace_id=workspace_id
+                    )
                 )
                 try:
-                    model_service_update = await self._runner.run(
-                        [
-                            "docker",
-                            "compose",
-                            "-p",
-                            compose_project,
-                            "-f",
-                            str(compose_file),
-                            "up",
-                            "-d",
-                            "--no-deps",
-                            "--force-recreate",
-                            "--wait",
-                            "--wait-timeout",
-                            str(readiness_timeout_seconds),
-                            *clarification_model_services,
-                        ],
-                        timeout_seconds=compose_up_capture_timeout_seconds(
-                            readiness_timeout_seconds,
-                            wait=True,
-                        ),
+                    (
+                        attachment,
+                        model_service_update,
+                    ) = await _attach_persisted_clarification_model_network(
+                        self._runner,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        workspace_id=workspace_id,
+                        clarification_model_services=clarification_model_services,
+                        attachment=attachment,
                     )
                 except asyncio.CancelledError:
-                    # The persisted network migration is not complete until
-                    # Compose has recreated the selected model sidecars. This
-                    # cleanup completes before restoring the legacy definition:
-                    # a second shutdown cancellation cannot interrupt it and
-                    # strand the migrated network because the restored Compose
-                    # file no longer declares it.
                     cleanup_task = asyncio.create_task(
-                        _reap_persisted_clarification_model_migration(
-                            self._runner,
-                            compose_project=compose_project,
-                            compose_file=compose_file,
-                            workspace_id=workspace_id,
-                            clarification_model_services=clarification_model_services,
+                        _rollback_persisted_clarification_model_network(
+                            self._runner, attachment=attachment
                         )
                     )
                     while not cleanup_task.done():
@@ -477,16 +460,12 @@ class AgentAdapter(ABC):
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         ) from None
-                    restored_legacy_compose = False
                     try:
                         _restore_compose_file(
                             compose_file=compose_file,
                             contents=original_compose_file,
                         )
                     except OSError as exc:
-                        # Reaping removed the model sidecars. Without the
-                        # legacy Compose definition, cancellation would leave
-                        # no recoverable model endpoint for the monitor.
                         raise AgentRunError(
                             agent=self.name,
                             result=CommandResult(
@@ -494,68 +473,16 @@ class AgentAdapter(ABC):
                                 stdout="",
                                 stderr=f"{type(exc).__name__}: {exc}",
                             ),
-                            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         ) from exc
-                    else:
-                        restored_legacy_compose = True
-                    if restored_legacy_compose:
-                        # Reaping deliberately removed the model sidecars. Run
-                        # the same recovery as the nonzero-result rollback
-                        # before cancellation escapes, so the restored legacy
-                        # definition still has a reachable model endpoint.
-                        recovery_task = asyncio.create_task(
-                            self._runner.run(
-                                [
-                                    "docker",
-                                    "compose",
-                                    "-p",
-                                    compose_project,
-                                    "-f",
-                                    str(compose_file),
-                                    "up",
-                                    "-d",
-                                    "--no-deps",
-                                    "--force-recreate",
-                                    "--wait",
-                                    "--wait-timeout",
-                                    str(readiness_timeout_seconds),
-                                    *clarification_model_services,
-                                ],
-                                timeout_seconds=compose_up_capture_timeout_seconds(
-                                    readiness_timeout_seconds,
-                                    wait=True,
-                                ),
-                            )
-                        )
-                        while not recovery_task.done():
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await asyncio.shield(recovery_task)
-                        try:
-                            cancelled_recovery_result = recovery_task.result()
-                        except Exception as exc:
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=CommandResult(
-                                    returncode=1,
-                                    stdout="",
-                                    stderr=f"{type(exc).__name__}: {exc}",
-                                ),
-                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
-                                details={"services": clarification_model_services},
-                            ) from exc
-                        if not cancelled_recovery_result.ok:
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=cancelled_recovery_result,
-                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
-                                details={"services": clarification_model_services},
-                            ) from None
                     raise
                 except Exception:
-                    # Runner failures also mean the model sidecars may not
-                    # have received the new network. Restore the persisted
-                    # migration so a later re-ask can retry it safely.
+                    if attachment is not None:
+                        with contextlib.suppress(Exception):
+                            await _rollback_persisted_clarification_model_network(
+                                self._runner, attachment=attachment
+                            )
                     with contextlib.suppress(OSError):
                         await asyncio.to_thread(
                             _restore_compose_file,
@@ -564,20 +491,8 @@ class AgentAdapter(ABC):
                         )
                     raise
                 if not model_service_update.ok:
-                    # The sidecars did not receive the new network, so roll
-                    # back the persisted migration. A later re-ask can then
-                    # perform the migration again instead of running against
-                    # a clarification network with no reachable model.
-                    # ``compose down`` only removes networks declared by the
-                    # current Compose file. Stop and remove the migrated
-                    # sidecars, then reap their now-unused network before
-                    # restoring the legacy file that does not declare it.
-                    cleanup_result = await _reap_persisted_clarification_model_migration(
-                        self._runner,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        workspace_id=workspace_id,
-                        clarification_model_services=clarification_model_services,
+                    cleanup_result = await _rollback_persisted_clarification_model_network(
+                        self._runner, attachment=attachment
                     )
                     if not cleanup_result.ok:
                         raise AgentRunError(
@@ -586,7 +501,6 @@ class AgentAdapter(ABC):
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         )
-                    restored_legacy_compose = False
                     try:
                         await asyncio.to_thread(
                             _restore_compose_file,
@@ -594,66 +508,12 @@ class AgentAdapter(ABC):
                             contents=original_compose_file,
                         )
                     except OSError:
-                        # Reaping has removed the legacy sidecars. If the
-                        # persisted Compose file cannot be restored, the
-                        # workspace is left with neither a usable legacy
-                        # definition nor a running model endpoint. Surface
-                        # that terminal lifecycle damage to the monitor.
                         raise AgentRunError(
                             agent=self.name,
                             result=model_service_update,
-                            reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         ) from None
-                    else:
-                        restored_legacy_compose = True
-                    if restored_legacy_compose:
-                        # The migrated containers were deliberately removed
-                        # before their dedicated network. Start replacements
-                        # only after restoring the legacy definition so a
-                        # failed re-ask does not strand the workspace without
-                        # its original model sidecar.
-                        try:
-                            recovery_result = await self._runner.run(
-                                [
-                                    "docker",
-                                    "compose",
-                                    "-p",
-                                    compose_project,
-                                    "-f",
-                                    str(compose_file),
-                                    "up",
-                                    "-d",
-                                    "--no-deps",
-                                    "--force-recreate",
-                                    "--wait",
-                                    "--wait-timeout",
-                                    str(readiness_timeout_seconds),
-                                    *clarification_model_services,
-                                ],
-                                timeout_seconds=compose_up_capture_timeout_seconds(
-                                    readiness_timeout_seconds,
-                                    wait=True,
-                                ),
-                            )
-                        except Exception as exc:
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=CommandResult(
-                                    returncode=1,
-                                    stdout="",
-                                    stderr=f"{type(exc).__name__}: {exc}",
-                                ),
-                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
-                                details={"services": clarification_model_services},
-                            ) from exc
-                        if not recovery_result.ok:
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=recovery_result,
-                                reason_code="CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
-                                details={"services": clarification_model_services},
-                            )
                     raise AgentRunError(
                         agent=self.name,
                         result=model_service_update,
