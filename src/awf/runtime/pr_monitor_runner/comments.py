@@ -88,6 +88,9 @@ _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can cont
 # policy-declared companions if creation is interrupted before cleanup.
 _CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED = "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED"
 _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+# Git expands include.path before creating the linked worktree. The writable
+# mirror can therefore point an include at a special file that never responds.
+_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS = 30.0
 _FILTER_DRIVER_CONFIG_KEY_RE = re.compile(
     r"^(filter\.[A-Za-z0-9][A-Za-z0-9._-]*)\.(?:smudge|process)$"
 )
@@ -293,7 +296,8 @@ async def _create_isolated_reask_worktree(
                 "--no-checkout",
                 str(path),
                 restore_ref,
-            )
+            ),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
     except (GitOperationError, OSError, RuntimeError):
         _release_isolated_reask_liveness_lock(reask_worktree)

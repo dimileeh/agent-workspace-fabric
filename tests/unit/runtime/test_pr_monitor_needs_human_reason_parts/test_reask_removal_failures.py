@@ -48,7 +48,9 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
     class _FailingWorktreeRemoveRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(
@@ -56,7 +58,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
                     stdout="",
                     stderr="worktree remove failed",
                 )
-            return await super().run(args)
+            return await super().run(args, timeout_seconds=timeout_seconds)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -143,11 +145,13 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
     class _ExceptionalWorktreeRemoveRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
-            return await super().run(args)
+            return await super().run(args, timeout_seconds=timeout_seconds)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""

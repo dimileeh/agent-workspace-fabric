@@ -59,9 +59,14 @@ def _init_real_worktree(tmp_path: Path, workspace_id: str) -> Path:
 class _LocalCommandRunner:
     """Run the PR monitor's git commands against a temporary real worktree."""
 
-    async def run(self, args: list[str]) -> CommandResult:
+    async def run(
+        self,
+        args: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
         """Run this test double and record the invocation."""
-        proc = subprocess.run(args, capture_output=True, text=True)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout_seconds)
         return CommandResult(
             returncode=proc.returncode,
             stdout=proc.stdout,
@@ -455,6 +460,51 @@ async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_bounds_creation_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An included special file cannot block isolated-worktree creation forever."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_creation_timeout")
+
+    class _RecordingLocalCommandRunner(_LocalCommandRunner):
+        """Capture the timeout used for the linked-worktree creation command."""
+
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            """Record the requested timeout and run the real Git command."""
+            if "worktree" in args and "add" in args:
+                self.timeouts.append(timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds)
+
+    command_runner = _RecordingLocalCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert command_runner.timeouts == [comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS]
+    assert reask_worktree is not None
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_disables_primary_fsmonitor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,10 +526,12 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
         def __init__(self) -> None:
             self.commands: list[list[str]] = []
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Record and run a Git command against the temporary worktree."""
             self.commands.append(args)
-            return await super().run(args)
+            return await super().run(args, timeout_seconds=timeout_seconds)
 
     command_runner = _RecordingLocalCommandRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
@@ -679,11 +731,13 @@ async def test_isolated_reask_worktree_blocks_when_filter_probe_cleanup_fails(
     class _FailedFilterProbeWithFailedCleanupRunner(_LocalCommandRunner):
         """Fail the linked-worktree probe after it is registered, then its removal."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run real setup commands except for the synthetic failure points."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "config" in args:
                 return CommandResult(returncode=2, stdout=result.stdout, stderr="config unreadable")
             return result
@@ -819,11 +873,13 @@ async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raise
     class _GitAddRaisesRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "add" in args:
                 raise RuntimeError("worktree add failed")
-            return await super().run(args)
+            return await super().run(args, timeout_seconds=timeout_seconds)
 
     def _record_lock(path: Path) -> tuple[int, Path]:
         """Record lock for this test."""
@@ -969,9 +1025,11 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
     class _NonzeroAfterWorktreeAddRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "worktree" in args and "add" in args:
                 return CommandResult(
                     returncode=1,
@@ -1006,11 +1064,13 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_fails(
     class _NonzeroSetupWithFailedCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
                 failure_stage == "population" and "checkout" in args
             ):
@@ -1098,11 +1158,13 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_raises(
     class _NonzeroSetupWithExceptionalCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
                 failure_stage == "population" and "checkout" in args
             ):
@@ -1168,9 +1230,11 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
     class _CancelAfterWorktreeAddRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
@@ -1197,9 +1261,11 @@ async def test_isolated_reask_worktree_removes_checkout_when_filter_probe_is_can
     class _CancelDuringFilterProbeRunner(_LocalCommandRunner):
         """Cancel after the linked worktree is registered and its config is read."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run setup until the effective filter configuration is queried."""
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "config" in args:
                 raise asyncio.CancelledError
             return result
@@ -1274,15 +1340,17 @@ async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancella
     class _CancelAfterWorktreeAddWithBlockingCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
-                result = await super().run(args)
+                result = await super().run(args, timeout_seconds=timeout_seconds)
                 cleanup_finished.set()
                 return result
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
@@ -1320,11 +1388,13 @@ async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_
     class _CancelAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None
+        ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args)
+            result = await super().run(args, timeout_seconds=timeout_seconds)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
