@@ -57,10 +57,17 @@ class _RecordingSampler:
 class _IsolatedRecordingContext(_RecordingContext):
     """Test double used by the surrounding scenario."""
 
-    def __init__(self, events: list[str], *, capture_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        capture_error: Exception | None = None,
+        baseline_error: Exception | None = None,
+    ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._capture_error = capture_error
+        self._baseline_error = baseline_error
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
         """Exercise the capture_final_before_cleanup test helper."""
@@ -68,10 +75,22 @@ class _IsolatedRecordingContext(_RecordingContext):
         if self._capture_error is not None:
             raise self._capture_error
 
+    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+        """Record the standalone baseline probe before the agent invocation."""
+        assert "capture-baseline" in invocation_args
+        self._events.append("baseline")
+        if self._baseline_error is not None:
+            raise self._baseline_error
+
+    @property
+    def baseline_cli_args(self) -> list[str]:
+        """Return the standalone baseline probe command."""
+        return ["capture-baseline"]
+
     @property
     def cli_args(self) -> list[str]:
         """Return the configured command-line arguments."""
-        return ["wrapped-agent-cli"]
+        return ["agent-cli"]
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
@@ -88,11 +107,13 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         *,
         start_error: Exception | None = None,
         capture_error: Exception | None = None,
+        baseline_error: Exception | None = None,
     ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._isolated_start_error = start_error
         self._capture_error = capture_error
+        self._baseline_error = baseline_error
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
         """Exercise the start_isolated test helper."""
@@ -100,7 +121,11 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         self.start_kwargs = kwargs
         if self._isolated_start_error is not None:
             raise self._isolated_start_error
-        return _IsolatedRecordingContext(self._events, capture_error=self._capture_error)
+        return _IsolatedRecordingContext(
+            self._events,
+            capture_error=self._capture_error,
+            baseline_error=self._baseline_error,
+        )
 
 
 class _DelayedIsolatedRecordingSampler(_RecordingSampler):
@@ -190,14 +215,35 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     )
 
     assert result.ok
-    assert events == ["start_isolated", "agent", "finalize:success"]
+    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
     assert sampler.start_kwargs is not None
     assert sampler.start_kwargs["provider"] is AgentRuntime.codex
     assert sampler.start_kwargs["cli_args"][:2] == ["codex", "exec"]
     args = runner.streaming_calls[0]
     assert "clarification" in args
     assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
-    assert "wrapped-agent-cli" in args
+    assert "agent-cli" in args
+    assert "capture-baseline" not in args
+
+
+@pytest.mark.unit
+async def test_isolated_baseline_capture_failure_does_not_mask_agent_run() -> None:
+    """A diagnostic baseline failure cannot prevent the clarification CLI from running."""
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events, baseline_error=RuntimeError("probe failed"))
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated_baseline_failure",
+        isolated_worktree_host_path=Path("/worktrees/ws_isolated_baseline_failure/reask"),
+    )
+
+    assert result.ok
+    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
 
 
 @pytest.mark.unit

@@ -650,7 +650,7 @@ class _CcusageSampleContext(UsageSampleContext):
 
 
 class _IsolatedCcusageSampleContext(_CcusageSampleContext):
-    """Imports ccusage readings collected inside one disposable container."""
+    """Imports ccusage readings collected inside isolated clarification containers."""
 
     def __init__(
         self,
@@ -686,10 +686,50 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         self._capture_dir = capture_dir
         self._capture_unavailable_reason = capture_unavailable_reason
         self._capture_sample = "baseline"
+        self._baseline_captured_before_agent = False
+
+    @property
+    def baseline_cli_args(self) -> list[str] | None:
+        """Return the standalone pre-agent baseline capture command."""
+
+        if self._capture_dir is None or self._source is None:
+            return None
+        return [
+            "sh",
+            "-lc",
+            _isolated_ccusage_capture_script(
+                source=str(self._source),
+                timeout_seconds=self._collector._command_timeout_seconds,
+                sample_name="baseline",
+            ),
+        ]
+
+    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+        """Run and import the isolated baseline before the agent watchdog starts."""
+
+        if self.baseline_cli_args is None:
+            return
+        try:
+            await self._collector._runner.run_streaming(
+                invocation_args,
+                wall_timeout_seconds=self._collector._command_timeout_seconds,
+                idle_timeout_seconds=self._collector._command_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.isolated_baseline_error",
+                workspace_id=self._workspace_id,
+                exc_info=True,
+            )
+        self._capture_sample = "baseline"
+        await self._capture_baseline()
+        self._baseline_captured_before_agent = True
 
     @property
     def cli_args(self) -> list[str]:
-        """Wrap the agent CLI so both readings use its copied provider home."""
+        """Wrap the agent CLI only to capture its final reading before removal."""
 
         if self._capture_dir is None:
             return list(self._agent_cli_args)
@@ -739,8 +779,9 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             if self._source is None:
                 await self._safe_sample(phase="final", run_status=status)
                 return
-            self._capture_sample = "baseline"
-            await self._capture_baseline()
+            if not self._baseline_captured_before_agent:
+                self._capture_sample = "baseline"
+                await self._capture_baseline()
             self._capture_sample = "final"
             await self._safe_sample(phase="final", run_status=status)
         finally:
@@ -777,22 +818,17 @@ def _make_isolated_capture_dir(work_dir: Path, *, workspace_id: str) -> Path:
 
 
 def _isolated_ccusage_wrapper_script(*, source: str, timeout_seconds: float) -> str:
-    """Return the shell wrapper that captures ccusage before and after the agent."""
+    """Return the shell wrapper that captures ccusage after the agent exits."""
     quoted_source = shlex.quote(source)
     return f"""
 set +e
-capture_ccusage() {{
-  sample_name=$1
-  timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
-    > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stdout\" \\
-    2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.stderr\"
-  ccusage_status=$?
-  printf '%s\\n' \"$ccusage_status\" > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/$sample_name.status\"
-}}
-capture_ccusage baseline
 \"$@\"
 agent_status=$?
-capture_ccusage final
+timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
+  > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stdout\" \\
+  2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stderr\"
+ccusage_status=$?
+printf '%s\\n' \"$ccusage_status\" > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.status\"
 exit \"$agent_status\"
 """.strip()
 

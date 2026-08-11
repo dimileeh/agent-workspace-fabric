@@ -185,7 +185,7 @@ async def test_ccusage_argv_per_provider(
 
 
 @pytest.mark.unit
-async def test_isolated_run_imports_ccusage_samples_before_container_removal(
+async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watchdog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,12 +207,17 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
         cli_args=["codex", "exec", "-"],
     )
 
+    # The baseline probe runs in its own clarification invocation, before the
+    # watchdog-protected agent command starts. The main wrapper remains only to
+    # preserve the final reading before its disposable container is removed.
     assert ctx.cli_args[:2] == ["sh", "-lc"]
-    wrapper_script = ctx.cli_args[2]
-    assert "ccusage codex daily --json --offline" in wrapper_script
-    assert "timeout 3.5s ccusage codex daily --json --offline" in wrapper_script
-    assert "capture_ccusage baseline" in wrapper_script
-    assert "capture_ccusage final" in wrapper_script
+    assert "capture_ccusage baseline" not in ctx.cli_args[2]
+    assert "final.status" in ctx.cli_args[2]
+    baseline_script = ctx.baseline_cli_args[2]
+    assert ctx.baseline_cli_args[:2] == ["sh", "-lc"]
+    assert "ccusage codex daily --json --offline" in baseline_script
+    assert "timeout 3.5s ccusage codex daily --json --offline" in baseline_script
+    assert "baseline.stdout" in baseline_script
     assert ctx.volume_binds[0][1] == "/tmp/awf-ccusage"
     capture_dir = ctx.volume_binds[0][0]
     assert capture_dir.parent == tmp_path / "compose" / "ws_isolated" / "usage-captures"
@@ -232,6 +237,65 @@ async def test_isolated_run_imports_ccusage_samples_before_container_removal(
     assert snapshot.total_tokens == 3
     assert not capture_dir.exists()
     await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_isolated_baseline_probe_is_collected_before_agent_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-agent probe is bounded separately and anchors the final delta."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+
+    class _ProbeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+        async def run_streaming(self, args: list[str], **kwargs: Any) -> CommandResult:
+            self.calls.append((list(args), kwargs))
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = _ProbeRunner()
+    collector = CcusageCollector(
+        runner=runner,
+        work_dir=tmp_path,
+        clock=FakeClock(),
+        command_timeout_seconds=3.5,
+    )
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_pre_agent_baseline",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    capture_dir = ctx.volume_binds[0][0]
+    (capture_dir / "baseline.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "baseline.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 5}}), encoding="utf-8"
+    )
+    (capture_dir / "baseline.stderr").write_text("", encoding="utf-8")
+
+    await ctx.capture_baseline_before_agent(invocation_args=["separate-baseline-probe"])
+
+    assert runner.calls == [
+        (
+            ["separate-baseline-probe"],
+            {"wall_timeout_seconds": 3.5, "idle_timeout_seconds": 3.5},
+        )
+    ]
+    (capture_dir / "baseline.status").write_text("not-a-status\n", encoding="utf-8")
+    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "final.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+    )
+    (capture_dir / "final.stderr").write_text("", encoding="utf-8")
+
+    await ctx.finalize(status="success")
+
+    snapshot = read_latest_usage_snapshot("ws_isolated_pre_agent_baseline", work_dir=tmp_path)
+    assert snapshot is not None
+    assert snapshot.total_tokens == 3
 
 
 @pytest.mark.unit
@@ -401,6 +465,7 @@ async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
     )
 
     assert ctx.cli_args == ["codex", "exec", "-"]
+    assert ctx.baseline_cli_args is None
     assert ctx.volume_binds == ()
     await ctx.capture_final_before_cleanup(container_name="awf-reask-capture-setup-failure")
     assert runner.calls == []

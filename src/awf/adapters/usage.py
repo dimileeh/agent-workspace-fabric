@@ -45,12 +45,19 @@ class UsageSampler(Protocol):
 class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
     """Usage capture configuration for a disposable clarification container."""
 
+    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+        """Capture the baseline before the agent CLI watchdog starts."""
+
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
         """Capture usage while the disposable container is still running."""
 
     @property
+    def baseline_cli_args(self) -> list[str] | None:
+        """Return a standalone baseline probe command when capture is available."""
+
+    @property
     def cli_args(self) -> list[str]:
-        """Return the agent command wrapped with in-container usage collection."""
+        """Return the agent command wrapped only with final in-container capture."""
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:

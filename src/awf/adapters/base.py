@@ -741,6 +741,25 @@ class AgentAdapter(ABC):
                             _discard_isolated_reask_git_metadata_task_result
                         )
                     raise
+                if isolated_sampler_ctx is not None:
+                    baseline_cli_args = isolated_sampler_ctx.baseline_cli_args
+                    if baseline_cli_args is not None:
+                        baseline_invocation = build_isolated_tracked_compose_run(
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            cli_args=baseline_cli_args,
+                            source=log_source,
+                            label=self.name.value,
+                            worktree_host_path=isolated_worktree_host_path,
+                            preserve_stdin=True,
+                            read_only_volume_binds=read_only_volume_binds,
+                            extra_volume_binds=isolated_sampler_ctx.volume_binds,
+                        )
+                        await self._capture_isolated_usage_baseline_before_agent(
+                            isolated_sampler_ctx,
+                            invocation_args=baseline_invocation.args,
+                            workspace_id=workspace_id,
+                        )
                 invocation = build_isolated_tracked_compose_run(
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -841,6 +860,27 @@ class AgentAdapter(ABC):
             workspace_id=workspace_id,
             cli_args=cli_args,
         )
+
+    async def _capture_isolated_usage_baseline_before_agent(
+        self,
+        sampler_ctx: IsolatedUsageSampleContext,
+        *,
+        invocation_args: list[str],
+        workspace_id: str | None,
+    ) -> None:
+        """Best-effort baseline capture kept outside the agent CLI watchdog."""
+        try:
+            await sampler_ctx.capture_baseline_before_agent(invocation_args=invocation_args)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                phase="capture_isolated_baseline",
+                exc_info=True,
+            )
 
     async def _finalize_usage_sampling(
         self,
