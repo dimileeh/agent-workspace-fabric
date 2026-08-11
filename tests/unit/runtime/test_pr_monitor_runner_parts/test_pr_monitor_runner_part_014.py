@@ -7,12 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     CheckTiming,
     MonitorState,
     ReviewComment,
     ReviewThread,
     ReviewThreadComment,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import MonitorRunnerConfig
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -103,6 +105,66 @@ class TestCollectDeferItems:
         bots, humans = _collect_defer_items(_status(inline=(t,)), state)
         assert bots == []
         assert humans == []
+
+    @pytest.mark.unit
+    def test_blocking_outdated_threads_are_collected_for_human_notification(self) -> None:
+        permanent_failure = ReviewThread(
+            thread_id="T-outdated-permanent",
+            path="src/permanent.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        requeued = ReviewThread(
+            thread_id="T-outdated-requeued",
+            path="src/requeued.py",
+            line=2,
+            body_excerpt="resolution requeued",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        fresh_feedback = ReviewThread(
+            thread_id="T-outdated-fresh",
+            path="src/fresh.py",
+            line=3,
+            body_excerpt="new reviewer feedback",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                permanent_failure.thread_id: "needs_human",
+                _outdated_resolve_requeued_key(requeued.thread_id): "requeued",
+                fresh_feedback.thread_id: "fix_committed",
+                _review_thread_body_state_key(fresh_feedback.thread_id): "stale-body-hash",
+            }
+        )
+
+        bots, humans = _collect_defer_items(
+            replace(
+                _status(),
+                outdated_unresolved_inline_threads=(
+                    permanent_failure,
+                    requeued,
+                    fresh_feedback,
+                ),
+            ),
+            state,
+        )
+
+        assert bots == []
+        assert [item["id"] for item in humans] == [
+            permanent_failure.thread_id,
+            requeued.thread_id,
+            fresh_feedback.thread_id,
+        ]
+        assert all(item["verdict"] == "needs_human" for item in humans)
+        assert [item["agent_verdict_reason"] for item in humans] == [
+            "AWF could not resolve this outdated thread and needs human input",
+            "AWF could not yet resolve this outdated thread and will retry before merging",
+            "new feedback was added to this outdated thread after AWF addressed it",
+        ]
 
     @pytest.mark.unit
     def test_non_deferred_review_comments_are_excluded(self) -> None:

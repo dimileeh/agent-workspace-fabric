@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,7 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
     ReviewComment,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_done_key,
@@ -19,6 +21,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_wait_seconds,
     _initial_review_grace_wall_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
+    _needs_human_reason_state_key,
     _notify_human_reason,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -40,6 +43,22 @@ class TestNotificationAndGraceHelpers:
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
         reasonless_escalation_state = MonitorState(threads_addressed_ids={"C-human": "needs_human"})
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        outdated_state = MonitorState(
+            threads_addressed_ids={
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
 
         assert "merge-blocking changes-requested review" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
@@ -74,6 +93,13 @@ class TestNotificationAndGraceHelpers:
                 reasonless_escalation_state,
             )
             == "human review feedback needs human input and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
+                replace(_status(), outdated_unresolved_inline_threads=(outdated_thread,)),
+                outdated_state,
+            )
+            == "the outdated thread could not be resolved"
         )
         assert _notify_human_reason(_status(), MonitorState()) is None
 

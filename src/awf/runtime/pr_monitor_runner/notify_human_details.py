@@ -6,17 +6,31 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
+    ReviewThread,
     _is_bot_author,
     _is_bot_review_thread,
+    _outdated_thread_has_fresh_feedback,
 )
 
 
 def _needs_human_reason_state_key(item_id: str) -> str:
     """Return the persisted state key for a blocker item's human reason."""
     return f"__needs_human_reason__:{item_id}"
+
+
+def _outdated_thread_blocker_reason(state: MonitorState, thread: ReviewThread) -> str | None:
+    """Return why an outdated thread currently blocks the merge decision."""
+    if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+        return "AWF could not resolve this outdated thread and needs human input"
+    if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
+        return "AWF could not yet resolve this outdated thread and will retry before merging"
+    if _outdated_thread_has_fresh_feedback(state, thread):
+        return "new feedback was added to this outdated thread after AWF addressed it"
+    return None
 
 
 def _collect_defer_items(
@@ -35,7 +49,9 @@ def _collect_defer_items(
     ``needs_human`` item blocks the merge just as a ``defer`` one does, so
     dropping it would let the terminal artifact and notification under-report
     the open feedback. Each item carries its ``verdict`` so consumers can tell
-    the two apart.
+    the two apart. Outdated threads are included only when they match one of
+    the decision core's merge-blocking states, and receive a fallback reason
+    because they are otherwise absent from the actionable feedback feeds.
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
@@ -59,6 +75,28 @@ def _collect_defer_items(
                 "agent_verdict_reason": state.threads_addressed_ids.get(
                     _needs_human_reason_state_key(thread.thread_id)
                 ),
+            }
+        )
+    for thread in status.outdated_unresolved_inline_threads:
+        if (fallback_reason := _outdated_thread_blocker_reason(state, thread)) is None:
+            continue
+        is_bot = _is_bot_review_thread(thread)
+        bucket = bot_items if is_bot else human_items
+        bucket.append(
+            {
+                "kind": "thread",
+                "id": thread.thread_id,
+                "author": thread.author,
+                "is_bot": is_bot,
+                "path": thread.path,
+                "line": thread.line,
+                "url": thread.url,
+                "body": thread.body_excerpt,
+                "verdict": "needs_human",
+                "agent_verdict_reason": state.threads_addressed_ids.get(
+                    _needs_human_reason_state_key(thread.thread_id)
+                )
+                or fallback_reason,
             }
         )
     for comment in status.unresolved_review_comments:
