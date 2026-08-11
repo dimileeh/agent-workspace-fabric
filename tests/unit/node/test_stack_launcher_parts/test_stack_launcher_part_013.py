@@ -193,6 +193,34 @@ def test_aws_profile_credential_paths_ignore_missing_selected_profile(tmp_path: 
 
 
 @pytest.mark.unit
+def test_aws_profile_credential_paths_reject_symlinked_profile_file(tmp_path: Path) -> None:
+    """A writable AWS profile symlink cannot redirect clarification discovery."""
+    aws_home = tmp_path / "aws"
+    aws_home.mkdir()
+    helper = tmp_path / "aws-helper"
+    helper_target = "/run/awf/secrets/aws-helper"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    outside_profile = tmp_path / "outside-profile"
+    outside_profile.write_text(
+        f"[profile selected]\ncredential_process = {helper_target} --json\n",
+        encoding="utf-8",
+    )
+    (aws_home / "config").symlink_to(outside_profile)
+    aws_profile = AuthMount(str(aws_home), "/home/agent/.aws", "rw")
+    helper_mount = AuthMount(str(helper), helper_target, "ro")
+
+    assert (
+        aws_profile_credential_paths(
+            (aws_profile, helper_mount),
+            agent_environment=(("AWS_PROFILE", "selected"),),
+            provider_mount_targets=frozenset({aws_profile.target}),
+            mirror_target="/host/awf/git/mirror.git",
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 def test_external_account_executable_output_file_is_staged(tmp_path: Path) -> None:
     """External-account executable output files remain available to the isolated agent."""
     adc = tmp_path / "external-account.json"

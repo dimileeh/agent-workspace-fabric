@@ -315,18 +315,23 @@ def _aws_profile_credential_references(
     environment_names: set[str] = set()
     configurations: list[configparser.RawConfigParser] = []
     for profile_file in _aws_profile_file_targets(provider_mount_targets):
-        source = _mounted_file_source(
+        mount = _mounted_file_mount(
             auth_mounts,
             target=profile_file,
             mirror_target=mirror_target,
         )
-        if source is None:
+        if mount is None:
+            continue
+        content = _read_bounded_mounted_clarification_auth_credential(
+            mount,
+            target=profile_file,
+        )
+        if content is None:
             continue
         try:
             configuration = configparser.RawConfigParser(interpolation=None)
-            with source.open(encoding="utf-8") as profile_source:
-                configuration.read_file(profile_source)
-        except (OSError, UnicodeDecodeError, configparser.Error):
+            configuration.read_string(content)
+        except configparser.Error:
             continue
         configurations.append(configuration)
 
@@ -430,18 +435,6 @@ def _aws_profile_file_targets(provider_mount_targets: frozenset[str]) -> tuple[s
         else:
             profile_files.append(normalized_target)
     return tuple(profile_files)
-
-
-def _mounted_file_source(
-    auth_mounts: Sequence[AuthMount],
-    *,
-    target: str,
-    mirror_target: str,
-) -> Path | None:
-    """Return the source for a target from its most-specific declared mount."""
-
-    mount = _mounted_file_mount(auth_mounts, target=target, mirror_target=mirror_target)
-    return None if mount is None else mounted_file_source(mount, target)
 
 
 def _mounted_file_mount(
