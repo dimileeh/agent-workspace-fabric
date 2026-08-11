@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.runtime import ownership
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 
@@ -67,6 +69,140 @@ def _init_mirrored_worktree(
         text=True,
     )
     return worktree
+
+
+@pytest.mark.unit
+def test_validated_source_worktree_git_context_reads_control_files_from_pinned_fds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation must not reopen writable source Git metadata by pathname."""
+    workspace_id = "ws_pinned_metadata_reads"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name in {".git", "commondir", "gitdir"}:
+            raise AssertionError(f"path-based control-file read: {self}")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    context = ownership.validated_source_worktree_git_context(source, workspace_id)
+    try:
+        assert context.mirror_path == source_git_dir.parent.parent
+        assert str(context.linked_git_dir).startswith("/proc/")
+    finally:
+        os.close(context.linked_git_dir_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir"])
+def test_validated_source_worktree_git_context_rejects_fifo_control_files(
+    tmp_path: Path,
+    control_file: str,
+) -> None:
+    """A FIFO in writable source Git metadata must fail closed without a read."""
+    workspace_id = f"ws_fifo_{control_file.removeprefix('.')}"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    control_path = (
+        source / control_file if control_file == ".git" else source_git_dir / control_file
+    )
+    control_path.unlink()
+    os.mkfifo(control_path)
+
+    with pytest.raises(ValueError, match="Git metadata"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir"])
+def test_validated_source_worktree_git_context_rejects_symlinked_control_files(
+    tmp_path: Path,
+    control_file: str,
+) -> None:
+    """A symlink cannot redirect a source Git control-file read."""
+    workspace_id = f"ws_symlink_{control_file.removeprefix('.')}"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    control_path = (
+        source / control_file if control_file == ".git" else source_git_dir / control_file
+    )
+    control_path.unlink()
+    control_path.symlink_to(tmp_path / "replacement")
+
+    with pytest.raises(ValueError, match="Git metadata"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+
+@pytest.mark.unit
+def test_validated_source_worktree_git_context_rejects_oversized_control_file(
+    tmp_path: Path,
+) -> None:
+    """An oversized source Git control file must be rejected before it is read."""
+    workspace_id = "ws_oversized_metadata"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    commondir = source_git_dir / "commondir"
+    with commondir.open("wb") as file:
+        file.truncate(1024 * 1024 + 1)
+
+    with pytest.raises(ValueError, match="size limit"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+
+@pytest.mark.unit
+def test_validated_source_worktree_git_context_keeps_commondir_fallback(
+    tmp_path: Path,
+) -> None:
+    """A missing commondir retains the established linked-metadata fallback."""
+    workspace_id = "ws_missing_commondir"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    (source_git_dir / "commondir").unlink()
+
+    context = ownership.validated_source_worktree_git_context(source, workspace_id)
+    try:
+        assert context.mirror_path == source_git_dir.parent.parent
+    finally:
+        os.close(context.linked_git_dir_fd)
 
 
 class _EnvLocalCommandRunner:

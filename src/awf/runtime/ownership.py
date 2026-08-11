@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 from awf.node.git_manager import (
     linked_worktree_git_dir,
@@ -26,6 +27,13 @@ _PINNED_DIRECTORY_OPEN_FLAGS = (
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
 )
+_GIT_METADATA_FILE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+_MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES: Final = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -37,17 +45,97 @@ class ValidatedSourceWorktreeGitContext:
     linked_git_dir_fd: int
 
 
-def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
+def _read_bounded_regular_git_metadata_file_at(
+    directory_fd: int,
+    filename: str,
+    *,
+    required: bool = True,
+) -> str | None:
+    """Read one small Git control file without following a raced replacement."""
+    try:
+        file_fd = os.open(filename, _GIT_METADATA_FILE_OPEN_FLAGS, dir_fd=directory_fd)
+    except FileNotFoundError:
+        if not required:
+            return None
+        raise ValueError(f"refusing ownership repair: missing Git metadata {filename}") from None
+    except OSError as exc:
+        raise ValueError(f"refusing ownership repair: cannot open Git metadata {filename}") from exc
+
+    try:
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(
+                f"refusing ownership repair: Git metadata {filename} must be a regular file"
+            )
+        if file_stat.st_size > _MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES:
+            raise ValueError(
+                f"refusing ownership repair: Git metadata {filename} exceeds size limit"
+            )
+        chunks: list[bytes] = []
+        total_bytes = 0
+        while total_bytes < _MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES:
+            chunk = os.read(
+                file_fd,
+                min(64 * 1024, _MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES - total_bytes),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_bytes += len(chunk)
+        if total_bytes == _MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES and os.read(file_fd, 1):
+            raise ValueError(
+                f"refusing ownership repair: Git metadata {filename} exceeds size limit"
+            )
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"refusing ownership repair: Git metadata {filename} is not valid UTF-8"
+            ) from exc
+    except OSError as exc:
+        raise ValueError(f"refusing ownership repair: cannot read Git metadata {filename}") from exc
+    finally:
+        os.close(file_fd)
+
+
+def _linked_worktree_git_dir_from_contents(worktree_path: Path, content: str) -> Path:
+    """Resolve the Git admin directory named by a validated source `.git` file."""
+    prefix = "gitdir: "
+    if not content.startswith(prefix):
+        raise ValueError(
+            "refusing ownership repair: source workspace Git metadata lacks a gitdir pointer"
+        )
+    git_dir = Path(content.removeprefix(prefix).strip())
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+    try:
+        return git_dir.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "refusing ownership repair: cannot resolve source workspace Git metadata "
+            f"for workspace {worktree_path}"
+        ) from exc
+
+
+def _mirror_path_from_linked_git_dir(
+    linked_git_dir: Path, *, linked_git_dir_fd: int | None = None
+) -> Path:
     """Resolve a linked worktree's mirror from an already trusted gitdir read."""
     commondir = linked_git_dir / "commondir"
     try:
-        if commondir.is_file():
+        if linked_git_dir_fd is not None:
+            raw_common_dir = _read_bounded_regular_git_metadata_file_at(
+                linked_git_dir_fd, "commondir", required=False
+            )
+        elif commondir.is_file():
             raw_common_dir = commondir.read_text(encoding="utf-8").strip()
-            if raw_common_dir:
-                common_dir = Path(raw_common_dir)
-                if not common_dir.is_absolute():
-                    common_dir = linked_git_dir / common_dir
-                return common_dir.resolve()
+        else:
+            raw_common_dir = None
+        if raw_common_dir:
+            common_dir = Path(raw_common_dir.strip())
+            if not common_dir.is_absolute():
+                common_dir = linked_git_dir / common_dir
+            return common_dir.resolve()
         if str(linked_git_dir).startswith(f"/proc/{os.getpid()}/fd/"):
             return (linked_git_dir / ".." / "..").resolve()
         return linked_git_dir.parent.parent.resolve()
@@ -58,17 +146,29 @@ def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
         ) from exc
 
 
-def _validate_linked_git_dir_backref(linked_git_dir: Path, worktree_path: Path) -> None:
+def _validate_linked_git_dir_backref(
+    linked_git_dir: Path,
+    worktree_path: Path,
+    *,
+    linked_git_dir_fd: int | None = None,
+) -> None:
     """Validate Git's reciprocal metadata pointer for suffixed worktree dirs."""
     metadata_gitdir = linked_git_dir / "gitdir"
     expected_git_file = worktree_path / ".git"
-    if expected_git_file.is_symlink() or not expected_git_file.is_file():
+    if linked_git_dir_fd is None and (
+        expected_git_file.is_symlink() or not expected_git_file.is_file()
+    ):
         raise ValueError(
             "refusing ownership repair: workspace git metadata must be a "
             f"non-symlink file at {expected_git_file}"
         )
     try:
-        raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
+        if linked_git_dir_fd is not None:
+            raw_gitdir = _read_bounded_regular_git_metadata_file_at(linked_git_dir_fd, "gitdir")
+            assert raw_gitdir is not None
+            raw_gitdir = raw_gitdir.strip()
+        else:
+            raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
         if not raw_gitdir:
             raise ValueError(
                 "refusing ownership repair: linked-worktree metadata has an empty "
@@ -103,6 +203,7 @@ def _validated_layout_mirror_for_linked_git_dir(
     linked_git_dir_name: str,
     worktree_path: Path,
     workspace_id: str,
+    linked_git_dir_fd: int | None = None,
 ) -> Path:
     """Validate a linked-worktree directory and return its trusted mirror.
 
@@ -111,7 +212,12 @@ def _validated_layout_mirror_for_linked_git_dir(
     the expected ``<worktrees_root>/../mirrors`` hierarchy for this
     worktree path and match this workspace's metadata entry.
     """
-    mirror_path = _mirror_path_from_linked_git_dir(linked_git_dir)
+    if linked_git_dir_fd is None:
+        mirror_path = _mirror_path_from_linked_git_dir(linked_git_dir)
+    else:
+        mirror_path = _mirror_path_from_linked_git_dir(
+            linked_git_dir, linked_git_dir_fd=linked_git_dir_fd
+        )
     expected_mirror_root = worktree_path.parent.parent / "mirrors"
     resolved_expected_root = expected_mirror_root.resolve()
     resolved_mirror = mirror_path.resolve()
@@ -135,7 +241,12 @@ def _validated_layout_mirror_for_linked_git_dir(
                 "refusing ownership repair: linked-worktree metadata points to another "
                 f"workspace. expected workspace id {workspace_id}, got {linked_git_dir_name}"
             )
-        _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
+        if linked_git_dir_fd is None:
+            _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
+        else:
+            _validate_linked_git_dir_backref(
+                linked_git_dir, worktree_path, linked_git_dir_fd=linked_git_dir_fd
+            )
 
     return mirror_path
 
@@ -178,12 +289,19 @@ def validated_source_worktree_git_context(
     procfs directory path names the opened descriptor, so replacing the
     writable admin-directory path after validation cannot redirect Git.
     """
-    linked_git_dir = linked_worktree_git_dir(worktree_path)
-    if linked_git_dir is None:
+    try:
+        worktree_fd = os.open(worktree_path, _PINNED_DIRECTORY_OPEN_FLAGS)
+    except OSError as exc:
         raise ValueError(
-            "refusing ownership repair: cannot read linked-worktree git metadata "
+            "refusing ownership repair: cannot open source workspace Git metadata "
             f"for workspace {worktree_path}"
-        )
+        ) from exc
+    try:
+        source_git_file = _read_bounded_regular_git_metadata_file_at(worktree_fd, ".git")
+        assert source_git_file is not None
+        linked_git_dir = _linked_worktree_git_dir_from_contents(worktree_path, source_git_file)
+    finally:
+        os.close(worktree_fd)
     try:
         linked_git_dir_fd = os.open(linked_git_dir, _PINNED_DIRECTORY_OPEN_FLAGS)
     except OSError as exc:
@@ -199,8 +317,13 @@ def validated_source_worktree_git_context(
             linked_git_dir_name=linked_git_dir.name,
             worktree_path=worktree_path,
             workspace_id=workspace_id,
+            linked_git_dir_fd=linked_git_dir_fd,
         )
-        _validate_linked_git_dir_backref(pinned_linked_git_dir, worktree_path)
+        _validate_linked_git_dir_backref(
+            pinned_linked_git_dir,
+            worktree_path,
+            linked_git_dir_fd=linked_git_dir_fd,
+        )
     except BaseException:
         os.close(linked_git_dir_fd)
         raise
