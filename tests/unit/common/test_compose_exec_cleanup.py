@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 import awf.common.compose_exec as compose_exec
-from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
+from awf.common.commands import (
+    COMMAND_TIMEOUT_REASON,
+    AsyncioSubprocessRunner,
+    CommandResult,
+    FakeCommandRunner,
+)
 from awf.common.compose_exec import (
     ComposeExecCleanupError,
     build_cleanup_compose_exec,
@@ -653,3 +658,30 @@ async def test_isolated_compose_run_cleanup_raises_when_container_remains() -> N
 
     with pytest.raises(ComposeExecCleanupError, match="daemon unavailable"):
         await cleanup_compose_exec_invocation(runner, invocation)
+
+
+@pytest.mark.unit
+async def test_isolated_compose_run_cleanup_times_out_as_cleanup_error() -> None:
+    """A stalled Docker daemon cannot indefinitely block isolated cleanup."""
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=124,
+        stderr="command timed out after 30s\n",
+        reason_code=COMMAND_TIMEOUT_REASON,
+    )
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_cleanup_timeout",
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="command timed out") as exc_info:
+        await cleanup_compose_exec_invocation(runner, invocation)
+
+    assert runner.calls[0].timeout_seconds == compose_exec.ISOLATED_CLEANUP_TIMEOUT_SECONDS
+    assert exc_info.value.cleanup_result is not None
+    assert exc_info.value.cleanup_result.reason_code == COMMAND_TIMEOUT_REASON

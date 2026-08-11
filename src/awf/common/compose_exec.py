@@ -32,6 +32,9 @@ the CLI's actual start directory; coupling them through this constant keeps a
 future workdir change from silently regressing the #620 root cause."""
 
 EXEC_PROCESS_CLEANUP_FAILED = "EXEC_PROCESS_CLEANUP_FAILED"
+ISOLATED_CLEANUP_TIMEOUT_SECONDS: Final[float] = 30.0
+"""Maximum time to wait for removal of an isolated clarification container."""
+
 _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _log = get_logger(__name__)
@@ -289,7 +292,10 @@ async def cleanup_compose_exec_invocation(
             invocation_id=invocation.invocation_id,
             reason_code=EXEC_PROCESS_CLEANUP_FAILED,
         )
-        result = await runner.run(invocation.cleanup_args)
+        result = await runner.run(
+            invocation.cleanup_args,
+            timeout_seconds=ISOLATED_CLEANUP_TIMEOUT_SECONDS,
+        )
         output = f"{result.stdout}\n{result.stderr}".lower()
         if result.ok or "no such container" in output:
             _log.info(
