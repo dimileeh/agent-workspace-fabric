@@ -1401,7 +1401,7 @@ def test_clarification_retains_credential_process_environment_token_file(tmp_pat
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operator", (":-", ":=", ":+", ":?"))
+@pytest.mark.parametrize("operator", (":-", "-", ":=", "=", ":+", "+", ":?", "?"))
 def test_clarification_retains_credential_process_parameter_expansion_token_file(
     tmp_path: Path, operator: str
 ) -> None:

@@ -39,7 +39,7 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
     }
 )
 _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
-    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::[-=+?]|-)(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::?[-=+?])(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
 
 
