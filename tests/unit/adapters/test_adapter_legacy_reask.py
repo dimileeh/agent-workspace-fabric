@@ -1287,6 +1287,8 @@ class TestIsolatedReaskAdapter:
             "docker",
             "network",
             "inspect",
+            "--format",
+            '{{ range $container_id, $_ := .Containers }}{{ printf "%s\\n" $container_id }}{{ end }}',
             "awf-ws_legacy-clarification-model-net",
         ]
         assert runner.calls[1].args[:8] == [
@@ -1561,6 +1563,53 @@ class TestIsolatedReaskAdapter:
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_cancellation_preserves_endpoint_existing_before_connect(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation after an uncertain connect keeps a pre-existing endpoint."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        class _CancellingFirstConnectRunner(FakeCommandRunner):
+            """Cancel after Docker can have handled the initial connect request."""
+
+            cancelled_connect = False
+
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if args[0:3] == ["docker", "network", "connect"] and not self.cancelled_connect:
+                    self.cancelled_connect = True
+                    raise asyncio.CancelledError
+                return result
+
+        runner = _CancellingFirstConnectRunner()
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result(stdout="stateful-model-container\n")
+        runner.queue_result()
+        runner.queue_result()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert runner.calls[3].args == [
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "ollama-sidecar",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
+        ]
+        assert all("disconnect" not in call.args for call in runner.calls)
 
     @pytest.mark.unit
     async def test_isolated_reask_rolls_back_only_new_network_attachments(

@@ -19,6 +19,9 @@ _NETWORK_CREATION_MARKER_LABEL: Final[str] = "io.awf.clarification-network-creat
 _NETWORK_CREATION_MARKER_FORMAT: Final[str] = (
     f'{{{{ with .Labels }}}}{{{{ index . "{_NETWORK_CREATION_MARKER_LABEL}" }}}}{{{{ end }}}}'
 )
+_NETWORK_CONNECTED_CONTAINER_IDS_FORMAT: Final[str] = (
+    r'{{ range $container_id, $_ := .Containers }}{{ printf "%s\n" $container_id }}{{ end }}'
+)
 
 
 def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
@@ -90,8 +93,20 @@ async def _attach_persisted_clarification_model_network(
             )
         )
     network_inspect_result = await runner.run(
-        ["docker", "network", "inspect", attachment.network_name],
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            _NETWORK_CONNECTED_CONTAINER_IDS_FORMAT,
+            attachment.network_name,
+        ],
         timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
+    )
+    preexisting_container_ids = frozenset(
+        container_id.strip()
+        for container_id in network_inspect_result.stdout.splitlines()
+        if container_id.strip()
     )
     if not network_inspect_result.ok:
         if not _network_is_absent(network_inspect_result, attachment.network_name):
@@ -121,6 +136,7 @@ async def _attach_persisted_clarification_model_network(
             return attachment, network_create_result
         attachment.created_network = True
         attachment.pending_network_creation_marker = None
+        preexisting_container_ids = frozenset()
     for service in clarification_model_services:
         container_ids_result = await runner.run(
             [
@@ -152,8 +168,13 @@ async def _attach_persisted_clarification_model_network(
         for container_id in container_ids:
             # Record before awaiting: cancellation can arrive after Docker
             # connects the endpoint but before its subprocess result reaches
-            # us, and rollback must still detach that possible connection.
-            attachment.connected_container_ids.append(container_id)
+            # us. Preserve endpoints that predate this attempt, while still
+            # detaching endpoints added by this attempt during rollback.
+            endpoint_preexisted = container_id in preexisting_container_ids
+            if endpoint_preexisted:
+                attachment.reconnecting_endpoints.append((container_id, service))
+            else:
+                attachment.connected_container_ids.append(container_id)
             network_connect_result = await runner.run(
                 [
                     "docker",
@@ -169,8 +190,9 @@ async def _attach_persisted_clarification_model_network(
             if network_connect_result.ok:
                 continue
             if _network_is_already_connected(network_connect_result):
-                attachment.connected_container_ids.pop()
-                attachment.reconnecting_endpoints.append((container_id, service))
+                if not endpoint_preexisted:
+                    attachment.connected_container_ids.pop()
+                    attachment.reconnecting_endpoints.append((container_id, service))
                 network_disconnect_result = await runner.run(
                     ["docker", "network", "disconnect", attachment.network_name, container_id],
                     timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
