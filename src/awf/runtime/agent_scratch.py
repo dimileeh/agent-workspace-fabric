@@ -26,7 +26,7 @@ import contextlib
 import os
 import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from awf.common.logging import get_logger
 from awf.runtime.validation_worktree import GitRunner
@@ -45,6 +45,7 @@ _SAFE_EXCLUDE_OPEN_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
 )
+_MAX_SCRATCH_EXCLUDE_BYTES: Final = 1_048_576
 
 
 def _strip_managed_block(content: str) -> str:
@@ -155,8 +156,11 @@ def _open_regular_scratch_exclude(exclude_path: Path) -> int:
         os.close(info_fd)
 
     try:
-        if not stat.S_ISREG(os.fstat(exclude_fd).st_mode):
+        exclude_stat = os.fstat(exclude_fd)
+        if not stat.S_ISREG(exclude_stat.st_mode):
             raise OSError(f"Git scratch exclude is not a regular file: {exclude_path}")
+        if exclude_stat.st_size > _MAX_SCRATCH_EXCLUDE_BYTES:
+            raise OSError(f"Git scratch exclude exceeds size limit: {exclude_path}")
     except OSError:
         with contextlib.suppress(OSError):
             os.close(exclude_fd)
@@ -169,8 +173,16 @@ def _rewrite_scratch_exclude(exclude_path: Path, scratch_paths: tuple[str, ...])
     exclude_fd = _open_regular_scratch_exclude(exclude_path)
     try:
         existing_bytes = bytearray()
-        while chunk := os.read(exclude_fd, 64 * 1024):
+        while len(existing_bytes) <= _MAX_SCRATCH_EXCLUDE_BYTES:
+            chunk = os.read(
+                exclude_fd,
+                min(64 * 1024, _MAX_SCRATCH_EXCLUDE_BYTES + 1 - len(existing_bytes)),
+            )
+            if not chunk:
+                break
             existing_bytes.extend(chunk)
+        if len(existing_bytes) > _MAX_SCRATCH_EXCLUDE_BYTES:
+            raise OSError(f"Git scratch exclude exceeds size limit: {exclude_path}")
         existing = existing_bytes.decode("utf-8")
         prefix = _strip_managed_block(existing)
         if prefix and not prefix.endswith("\n"):

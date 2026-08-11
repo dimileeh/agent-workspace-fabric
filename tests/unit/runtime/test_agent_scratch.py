@@ -334,6 +334,54 @@ async def test_non_utf8_exclude_is_handled_gracefully(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_oversized_exclude_is_handled_without_rewriting(tmp_path: Path) -> None:
+    """A large regular exclude file cannot exhaust the monitor process."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    original = b"x" * (agent_scratch._MAX_SCRATCH_EXCLUDE_BYTES + 1)  # noqa: SLF001
+    exclude.write_bytes(original)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert exclude.read_bytes() == original
+
+
+@pytest.mark.unit
+async def test_exclude_growth_during_read_is_handled_without_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that grows after ``fstat`` cannot bypass the read cap."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    original = b"x" * agent_scratch._MAX_SCRATCH_EXCLUDE_BYTES  # noqa: SLF001
+    exclude.write_bytes(original)
+    real_read = agent_scratch.os.read
+    appended = False
+
+    def _read_after_growth(fd: int, size: int) -> bytes:
+        nonlocal appended
+        if size == 1 and not appended:
+            appended = True
+            os.write(fd, b"x")
+            os.lseek(fd, -1, os.SEEK_CUR)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(agent_scratch.os, "read", _read_after_growth)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert exclude.read_bytes() == original + b"x"
+
+
+@pytest.mark.unit
 async def test_exclude_symlink_is_refused_without_truncating_its_target(tmp_path: Path) -> None:
     """An agent cannot redirect the control-plane write through ``info/exclude``."""
     worktree = _init_real_worktree(tmp_path)
