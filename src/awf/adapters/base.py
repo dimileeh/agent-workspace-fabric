@@ -679,9 +679,11 @@ class AgentAdapter(ABC):
                                 _discard_isolated_reask_git_metadata_task_result
                             )
                         raise
+                keep_isolated_container_running = False
                 if isolated_sampler_ctx is not None:
                     baseline_cli_args = isolated_sampler_ctx.baseline_cli_args
                     if baseline_cli_args is not None:
+                        keep_isolated_container_running = True
                         baseline_invocation = build_isolated_tracked_compose_run(
                             compose_project=compose_project,
                             compose_file=compose_file,
@@ -710,10 +712,10 @@ class AgentAdapter(ABC):
                     extra_volume_binds=(
                         () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
                     ),
-                    # Isolated usage is captured through worker-owned docker
-                    # command results, so it needs a running container for the
-                    # final probe but must not receive a writable evidence bind.
-                    keep_container_running=isolated_sampler_ctx is not None,
+                    # Keep the container only when worker-owned usage capture
+                    # has a final probe to run. Unsupported sources use the
+                    # normal one-shot clarification invocation.
+                    keep_container_running=keep_isolated_container_running,
                 )
             args = invocation.args
             _log.info(

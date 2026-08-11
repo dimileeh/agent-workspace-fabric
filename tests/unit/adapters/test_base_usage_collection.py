@@ -86,7 +86,7 @@ class _IsolatedRecordingContext(_RecordingContext):
             raise self._baseline_error
 
     @property
-    def baseline_cli_args(self) -> list[str]:
+    def baseline_cli_args(self) -> list[str] | None:
         """Return the standalone baseline probe command."""
         return ["capture-baseline"]
 
@@ -99,6 +99,15 @@ class _IsolatedRecordingContext(_RecordingContext):
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
         """The worker-owned capture path does not require a volume binding."""
         return ()
+
+
+class _UnsupportedIsolatedRecordingContext(_IsolatedRecordingContext):
+    """An isolated context without a source that supports usage capture."""
+
+    @property
+    def baseline_cli_args(self) -> list[str] | None:
+        """Expose the absence of a standalone usage-capture probe."""
+        return None
 
 
 class _IsolatedRecordingSampler(_RecordingSampler):
@@ -129,6 +138,16 @@ class _IsolatedRecordingSampler(_RecordingSampler):
             capture_error=self._capture_error,
             baseline_error=self._baseline_error,
         )
+
+
+class _UnsupportedIsolatedRecordingSampler(_RecordingSampler):
+    """Provide an isolated sampler whose provider has no ccusage source."""
+
+    async def start_isolated(self, **kwargs: Any) -> _UnsupportedIsolatedRecordingContext:
+        """Exercise the unavailable-isolated-capture test helper."""
+        self._events.append("start_isolated")
+        self.start_kwargs = kwargs
+        return _UnsupportedIsolatedRecordingContext(self._events)
 
 
 class _DelayedIsolatedRecordingSampler(_RecordingSampler):
@@ -276,6 +295,31 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     assert "clarification" not in args
     assert "agent-cli" in args
     assert "capture-baseline" not in args
+
+
+@pytest.mark.unit
+async def test_isolated_sampler_without_capture_uses_one_shot_clarification_run() -> None:
+    """Unsupported usage sources do not retain a container for a no-op probe."""
+    events: list[str] = []
+    sampler = _UnsupportedIsolatedRecordingSampler(events)
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated_unsupported",
+        isolated_worktree_host_path=Path("/worktrees/ws_isolated_unsupported/reask"),
+    )
+
+    assert result.ok
+    assert events == ["start_isolated", "agent", "finalize:success"]
+    args = runner.streaming_calls[0]
+    assert "--rm" in args
+    assert "--detach" not in args
+    assert args[:2] == ["docker", "compose"]
+    assert "agent-cli" in args
 
 
 @pytest.mark.unit
