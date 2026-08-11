@@ -28,7 +28,7 @@ _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = 
     AgentRuntime.opencode: frozenset(),
     AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
 }
-_GEMINI_AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
+_AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
     {
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -389,14 +389,14 @@ def is_aws_external_account_credential_source(
     return credential_source is not None and credential_source.get("environment_id") == "aws1"
 
 
-def gemini_aws_external_account_environment_names(
+def aws_external_account_environment_names(
     auth_mounts: Sequence[AuthMount],
     *,
     agent_environment: tuple[tuple[str, str], ...],
     provider_environment_names: frozenset[str],
     mirror_target: str,
 ) -> frozenset[str]:
-    """Return AWS inputs required by a Gemini AWS external-account ADC."""
+    """Return AWS inputs required by a selected Google AWS external-account ADC."""
 
     if not is_aws_external_account_credential_source(
         auth_mounts,
@@ -405,7 +405,7 @@ def gemini_aws_external_account_environment_names(
         mirror_target=mirror_target,
     ):
         return frozenset()
-    return _GEMINI_AWS_EXTERNAL_ACCOUNT_ENV_NAMES
+    return _AWS_EXTERNAL_ACCOUNT_ENV_NAMES
 
 
 def _external_account_credential_source(

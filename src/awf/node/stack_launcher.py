@@ -46,6 +46,9 @@ from awf.node.stack_launcher_auth_helpers import (
     _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    aws_external_account_environment_names as _clarification_aws_external_account_environment_names,
+)
+from awf.node.stack_launcher_auth_helpers import (
     aws_profile_credential_mounts as _clarification_aws_profile_credential_mounts,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -59,9 +62,6 @@ from awf.node.stack_launcher_auth_helpers import (
 )
 from awf.node.stack_launcher_auth_helpers import (
     external_account_subject_token_mounts as _clarification_external_account_subject_token_mounts,
-)
-from awf.node.stack_launcher_auth_helpers import (
-    gemini_aws_external_account_environment_names as _clarification_gemini_aws_external_account_environment_names,
 )
 from awf.node.stack_launcher_auth_helpers import (
     has_claude_code_file_auth as _clarification_has_claude_code_file_auth,
@@ -332,14 +332,15 @@ def _clarification_agent_environment(
         if source.target != staged.target
     )
     clarification_environment_names = provider_environment_names
-    if agent_runtime is AgentRuntime.gemini:
-        clarification_environment_names |= (
-            _clarification_gemini_aws_external_account_environment_names(
-                auth_mounts,
-                agent_environment=agent_environment,
-                provider_environment_names=provider_environment_names,
-                mirror_target=mirror_target,
-            )
+    if agent_runtime is AgentRuntime.gemini or (
+        agent_runtime is AgentRuntime.claude_code
+        and _GOOGLE_APPLICATION_CREDENTIALS in provider_environment_names
+    ):
+        clarification_environment_names |= _clarification_aws_external_account_environment_names(
+            auth_mounts,
+            agent_environment=agent_environment,
+            provider_environment_names=provider_environment_names,
+            mirror_target=mirror_target,
         )
     if (
         prefer_file_auth

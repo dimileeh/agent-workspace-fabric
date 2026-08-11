@@ -688,9 +688,11 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("environment_id", "expected_aws_environment"),
+    ("agent_runtime", "vertex_environment", "environment_id", "expected_aws_environment"),
     (
         (
+            AgentRuntime.gemini,
+            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
             "aws1",
             (
                 ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
@@ -700,15 +702,41 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
                 ("AWS_DEFAULT_REGION", "us-west-2"),
             ),
         ),
-        ("azure1", ()),
+        (AgentRuntime.gemini, (("GOOGLE_GENAI_USE_VERTEXAI", "1"),), "azure1", ()),
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+            ),
+            "aws1",
+            (
+                ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
+                ("AWS_SECRET_ACCESS_KEY", "static-secret"),
+                ("AWS_SESSION_TOKEN", "static-session-token"),
+                ("AWS_REGION", "us-east-1"),
+                ("AWS_DEFAULT_REGION", "us-west-2"),
+            ),
+        ),
+        (
+            AgentRuntime.claude_code,
+            (
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
+            ),
+            "azure1",
+            (),
+        ),
     ),
 )
-def test_clarification_retains_aws_inputs_only_for_gemini_aws_external_account_adc(
+def test_clarification_retains_aws_inputs_only_for_aws_external_account_adc(
     tmp_path: Path,
+    agent_runtime: AgentRuntime,
+    vertex_environment: tuple[tuple[str, str], ...],
     environment_id: str,
     expected_aws_environment: tuple[tuple[str, str], ...],
 ) -> None:
-    """Only Gemini AWS external-account ADC retains injected AWS credentials."""
+    """Google Vertex AWS external-account ADCs retain injected AWS credentials."""
     adc_config = tmp_path / "external-account-adc.json"
     adc_target = "/run/awf/secrets/google/external-account-adc.json"
     adc_config.write_text(
@@ -722,7 +750,7 @@ def test_clarification_retains_aws_inputs_only_for_gemini_aws_external_account_a
     )
     adc_mount = AuthMount(source=str(adc_config), target=adc_target, mode="ro")
     environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        *vertex_environment,
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
         ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
         ("AWS_SECRET_ACCESS_KEY", "static-secret"),
@@ -736,13 +764,13 @@ def test_clarification_retains_aws_inputs_only_for_gemini_aws_external_account_a
         environment,
         auth_mounts=(adc_mount,),
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=agent_runtime,
     )
 
     assert (
         clarification_environment
         == (
-            ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+            *vertex_environment,
             ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
         )
         + expected_aws_environment
