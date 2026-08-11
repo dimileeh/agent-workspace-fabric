@@ -533,12 +533,15 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
 
         def __init__(self) -> None:
             self.commands: list[list[str]] = []
+            self.primary_status_timeouts: list[float | None] = []
 
         async def run(
             self, args: list[str], *, timeout_seconds: float | None = None
         ) -> CommandResult:
             """Record and run a Git command against the temporary worktree."""
             self.commands.append(args)
+            if args[args.index("-C") + 1] == str(worktree) and "status" in args:
+                self.primary_status_timeouts.append(timeout_seconds)
             return await super().run(args, timeout_seconds=timeout_seconds)
 
     command_runner = _RecordingLocalCommandRunner()
@@ -580,6 +583,10 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
     ]
     assert len(primary_status_commands) == 2
     assert all("core.fsmonitor=false" in args for args in primary_status_commands)
+    assert command_runner.primary_status_timeouts == [
+        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+    ]
     checkout_commands = [args for args in command_runner.commands if "checkout" in args]
     assert len(checkout_commands) == 1
     assert "core.fsmonitor=false" in checkout_commands[0]

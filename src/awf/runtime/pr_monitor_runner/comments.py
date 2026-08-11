@@ -122,7 +122,8 @@ async def _prepare_reask_primary_worktree(
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
         return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args)
+            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
 
     adapter = getattr(runner._deps, "adapter", None)
@@ -155,7 +156,8 @@ async def _check_reask_primary_worktree_clean(
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
         return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args)
+            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
 
     check = await check_validation_worktree_clean(
