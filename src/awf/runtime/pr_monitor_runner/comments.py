@@ -1096,6 +1096,7 @@ async def _enforce_needs_human_reason(
             isolated_worktree_host_path=(
                 reask_worktree.path if reask_worktree is not None else None
             ),
+            isolated_worktree_ref=(reask_restore_ref if reask_worktree is not None else None),
         )
     except (
         ProviderRecoveryAuthError,
@@ -1299,6 +1300,7 @@ async def _invoke_cli_for_verdict_result(
     operation_start_head: str | None = None,
     commit_dirty_changes: bool = True,
     isolated_worktree_host_path: Path | None = None,
+    isolated_worktree_ref: str | None = None,
 ) -> VerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -1314,6 +1316,7 @@ async def _invoke_cli_for_verdict_result(
         operation_start_head=operation_start_head,
         commit_dirty_changes=commit_dirty_changes,
         isolated_worktree_host_path=isolated_worktree_host_path,
+        isolated_worktree_ref=isolated_worktree_ref,
     )
 
 

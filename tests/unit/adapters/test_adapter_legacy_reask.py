@@ -182,8 +182,11 @@ class TestIsolatedReaskAdapter:
 
         def record_snapshot_thread(
             _worktree_path: Path,
+            *,
+            expected_ref: str,
         ) -> tuple[None, tuple[tuple[Path, str], ...]]:
             nonlocal snapshot_thread
+            assert expected_ref == "a" * 40
             snapshot_thread = get_ident()
             return None, ()
 
@@ -200,6 +203,7 @@ class TestIsolatedReaskAdapter:
             compose_file=_COMPOSE_FILE,
             prompt=_PROMPT,
             isolated_worktree_host_path=tmp_path / "reask",
+            isolated_worktree_ref="a" * 40,
         )
 
         assert snapshot_thread is not None
@@ -216,7 +220,10 @@ class TestIsolatedReaskAdapter:
 
         def create_snapshot_after_cancellation(
             _worktree_path: Path,
+            *,
+            expected_ref: str,
         ) -> tuple[tempfile.TemporaryDirectory[str], tuple[tuple[Path, str], ...]]:
+            assert expected_ref == "a" * 40
             snapshot_started.set()
             assert release_snapshot.wait(timeout=1)
             temporary_metadata = tempfile.TemporaryDirectory[str](dir=tmp_path)
@@ -237,6 +244,7 @@ class TestIsolatedReaskAdapter:
                 compose_file=_COMPOSE_FILE,
                 prompt=_PROMPT,
                 isolated_worktree_host_path=tmp_path / "reask",
+                isolated_worktree_ref="a" * 40,
             )
         )
 
@@ -270,7 +278,7 @@ class TestIsolatedReaskAdapter:
         """Non-Codex re-asks see only self-contained Git metadata snapshots."""
         runner = FakeCommandRunner()
         adapter = OpenCodeAdapter(runner=runner)
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         (mirror_path / "config").write_text(
             '[remote "origin"]\n\turl = https://token@github.example/repo.git\n',
@@ -282,6 +290,7 @@ class TestIsolatedReaskAdapter:
             compose_file=_COMPOSE_FILE,
             prompt=_PROMPT,
             isolated_worktree_host_path=worktree_path,
+            isolated_worktree_ref=head_oid,
         )
 
         args = runner.calls[0].args
@@ -311,7 +320,8 @@ class TestIsolatedReaskAdapter:
         )
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -327,7 +337,7 @@ class TestIsolatedReaskAdapter:
                 "gitdir",
                 "index",
             }
-            assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/reask\n"
+            assert (snapshot_path / "HEAD").read_text(encoding="utf-8") == f"{head_oid}\n"
             assert (snapshot_path / "commondir").read_text(
                 encoding="utf-8"
             ) == "/awf-clarification-git-common\n"
@@ -385,7 +395,8 @@ class TestIsolatedReaskAdapter:
         )
 
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -460,7 +471,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _replace_controls_before_clone)
 
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -483,12 +495,36 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_rejects_head_other_than_requested_ref(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A changed linked-worktree HEAD cannot redirect a re-ask snapshot."""
+        mirror_path, worktree_path, head_oid, unrelated_oid = _linked_reask_worktree(tmp_path)
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        (linked_git_dir / "HEAD").write_text(f"{unrelated_oid}\n", encoding="utf-8")
+        real_run = base_isolated_reask.subprocess.run
+
+        def _fail_if_clone(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[:2] == ["git", "clone"]:
+                raise AssertionError("must reject a HEAD other than the requested re-ask ref")
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _fail_if_clone)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
     @pytest.mark.parametrize("commondir", ("", "../"))
     def test_isolated_reask_git_metadata_binds_rejects_unexpected_commondir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, commondir: str
     ) -> None:
         """A malformed common-directory control file prevents Git from cloning."""
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         (linked_git_dir / "commondir").write_text(f"{commondir}\n", encoding="utf-8")
         real_run = base_isolated_reask.subprocess.run
@@ -501,7 +537,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _fail_if_clone)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is None
@@ -511,7 +548,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Snapshotting refuses a HEAD symlink installed after opening its directory."""
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         replacement_head = tmp_path / "replacement-head"
         replacement_head.write_text("ref: refs/heads/reask\n", encoding="utf-8")
@@ -530,7 +567,8 @@ class TestIsolatedReaskAdapter:
         )
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         try:
@@ -544,7 +582,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A linked-admin-directory symlink cannot become the clone source."""
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         displaced_git_dir = tmp_path / "displaced-linked-git"
         replacement_git_dir = tmp_path / "replacement-linked-git"
@@ -561,7 +599,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _fail_if_clone)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is None
@@ -633,7 +672,7 @@ class TestIsolatedReaskAdapter:
         self, tmp_path: Path
     ) -> None:
         """A split index snapshot remains usable by Git in the clarification worktree."""
-        _mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         _git(["update-index", "--split-index"], worktree_path)
         shared_index_path = (
             worktree_path / _git(["rev-parse", "--shared-index-path"], worktree_path).stdout.strip()
@@ -641,7 +680,8 @@ class TestIsolatedReaskAdapter:
         assert shared_index_path.is_file()
 
         temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -671,7 +711,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Optional split-index discovery cannot discard a completed snapshot."""
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         real_run = base_isolated_reask.subprocess.run
 
         def _shared_index_lookup_failure(command: list[str], *args: Any, **kwargs: Any) -> Any:
@@ -688,7 +728,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _shared_index_lookup_failure)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -706,7 +747,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """An external shared-index path cannot discard a completed snapshot."""
-        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         external_shared_index = tmp_path / "sharedindex.external"
         external_shared_index.write_bytes(b"external split-index backing file")
         real_run = base_isolated_reask.subprocess.run
@@ -725,7 +766,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _external_shared_index)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is not None
@@ -743,7 +785,7 @@ class TestIsolatedReaskAdapter:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A failed local snapshot never falls back to shared mirror binds."""
-        _mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
 
         def _clone_failure(*_args: Any, **_kwargs: Any) -> None:
             raise subprocess.CalledProcessError(1, ["git", "clone"])
@@ -751,7 +793,8 @@ class TestIsolatedReaskAdapter:
         monkeypatch.setattr(base_isolated_reask.subprocess, "run", _clone_failure)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path
+            worktree_path,
+            expected_ref=head_oid,
         )
 
         assert temporary_metadata is None

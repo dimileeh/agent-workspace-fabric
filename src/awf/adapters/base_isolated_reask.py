@@ -81,14 +81,16 @@ def _linked_worktree_common_git_dir(snapshot_path: Path, linked_git_dir: Path) -
 
 def _isolated_reask_git_metadata_volume_binds(
     worktree_path: Path,
+    *,
+    expected_ref: str,
 ) -> tuple[tempfile.TemporaryDirectory[str] | None, tuple[tuple[Path, str], ...]]:
     """Build credential-free Git discovery binds for a linked re-ask worktree.
 
     A linked worktree's ``.git`` file points at metadata beneath its shared
     bare mirror. The clarification container instead receives a detached bare
-    clone of its current HEAD, preventing it from reading other worktrees'
-    refs or objects. Git needs only selected linked control files and the
-    snapshot's common Git directory to recognise the worktree.
+    clone pinned to the requested re-ask ref, preventing it from reading other
+    worktrees' refs or objects. Git needs only selected linked control files
+    and the snapshot's common Git directory to recognise the worktree.
     """
     linked_git_dir = linked_worktree_git_dir(worktree_path)
     if linked_git_dir is None:
@@ -119,6 +121,18 @@ def _isolated_reask_git_metadata_volume_binds(
         )
         common_git_dir = _linked_worktree_common_git_dir(snapshot_path, linked_git_dir)
         (snapshot_path / "commondir").write_text(f"{common_git_dir}\n", encoding="utf-8")
+        snapshotted_ref = subprocess.run(
+            ["git", "--git-dir", str(snapshot_path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        if snapshotted_ref != expected_ref:
+            raise OSError("linked Git HEAD does not match the requested re-ask ref")
+        # Snapshot HEAD may be symbolic. Pin it after validation so a writer
+        # to the shared mirror cannot move the selected ref before clone.
+        (snapshot_path / "HEAD").write_text(f"{expected_ref}\n", encoding="utf-8")
         subprocess.run(
             [
                 "git",

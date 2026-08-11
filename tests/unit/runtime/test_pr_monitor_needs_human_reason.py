@@ -96,6 +96,7 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
         prompt="state the reason",
         log_source="recovery",
         isolated_worktree_host_path=reask_worktree,
+        isolated_worktree_ref="a" * 40,
     )
 
     assert result.stdout.endswith("reason")
@@ -107,8 +108,61 @@ async def test_reask_worktree_is_passed_to_the_agent_adapter(tmp_path: Path) -> 
             "workspace_id": "ws_reask",
             "log_source": "recovery",
             "isolated_worktree_host_path": reask_worktree,
+            "isolated_worktree_ref": "a" * 40,
         }
     ]
+
+
+@pytest.mark.unit
+async def test_isolated_reask_ref_passes_from_comment_verdict_to_service_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trusted re-ask ref reaches the service-recovery adapter call."""
+    calls: list[dict[str, object]] = []
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**kwargs: object) -> AgentRunResult:
+        calls.append(dict(kwargs))
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: NEEDS_HUMAN: reason",
+            stderr="",
+        )
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    workspace_id = "ws_reask"
+    (tmp_path / workspace_id).mkdir()
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: None)
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="state the reason",
+        commit_message="fix: address thread_1",
+        compose_project="awf_ws_reask",
+        compose_file=tmp_path / "compose.yml",
+        commit_dirty_changes=False,
+        isolated_worktree_host_path=tmp_path / ".awf-needs-human-reask-test",
+        isolated_worktree_ref="a" * 40,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="reason")
+    assert calls[0]["isolated_worktree_ref"] == "a" * 40
 
 
 @pytest.mark.unit

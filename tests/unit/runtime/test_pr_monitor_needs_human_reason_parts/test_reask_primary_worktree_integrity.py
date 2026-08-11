@@ -99,12 +99,14 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
     (worktree / ".gitignore").write_text("*.env\n.venv/\n", encoding="utf-8")
     _git(worktree, "add", ".gitignore")
     _git(worktree, "commit", "-qm", "ignore dependencies")
+    reask_ref = _git(worktree, "rev-parse", "HEAD").stdout.strip()
     reask_worktree_paths: list[Path] = []
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
         reask = kwargs["isolated_worktree_host_path"]
         assert isinstance(reask, Path)
+        assert kwargs["isolated_worktree_ref"] == reask_ref
         reask_worktree_paths.append(reask)
         assert not (reask / ".venv").exists()
         (reask / ".env").write_text("MODE=clarification-edit\n", encoding="utf-8")

@@ -123,6 +123,7 @@ async def _invoke_cli_for_verdict_result(
     operation_start_head: str | None = None,
     commit_dirty_changes: bool = True,
     isolated_worktree_host_path: Path | None = None,
+    isolated_worktree_ref: str | None = None,
 ) -> VerdictResult:
     """Run the monitor agent and parse its verdict without losing reason details."""
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
@@ -175,6 +176,7 @@ async def _invoke_cli_for_verdict_result(
                 operation_start_head=operation_start_head,
                 state=state,
                 isolated_worktree_host_path=isolated_worktree_host_path,
+                isolated_worktree_ref=isolated_worktree_ref,
             )
         else:
             result = await runner._run_monitor_agent_with_service_recovery(
