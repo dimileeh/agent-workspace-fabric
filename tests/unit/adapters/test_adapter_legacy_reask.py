@@ -44,7 +44,7 @@ def _git(
 
 
 def _linked_reask_worktree(
-    tmp_path: Path, *, object_format: str | None = None
+    tmp_path: Path, *, object_format: str | None = None, shallow: bool = False
 ) -> tuple[Path, Path, str, str]:
     """Create a re-ask worktree and an unrelated branch in its shared mirror."""
     origin = tmp_path / "origin"
@@ -68,8 +68,13 @@ def _linked_reask_worktree(
 
     mirror_path = tmp_path / "awf-work" / "mirrors" / "owner-repo.git"
     mirror_path.parent.mkdir(parents=True)
+    clone_command = ["git", "clone", "--mirror"]
+    if shallow:
+        clone_command.extend(["--depth", "1", origin.as_uri()])
+    else:
+        clone_command.append(str(origin))
     subprocess.run(
-        ["git", "clone", "--mirror", str(origin), str(mirror_path)],
+        [*clone_command, str(mirror_path)],
         check=True,
         capture_output=True,
         text=True,
@@ -473,6 +478,30 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_preserve_shallow_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        """A source mirror's shallow boundary remains available to the snapshot clone."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
+            tmp_path,
+            shallow=True,
+        )
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            common_path = Path(temporary_metadata.name) / "common-git"
+            assert (
+                _git(["--git-dir", str(common_path), "rev-parse", "HEAD"], tmp_path).stdout.strip()
+                == head_oid
+            )
+        finally:
+            temporary_metadata.cleanup()
+
     def test_isolated_reask_git_metadata_binds_snapshot_controls_before_clone(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -526,6 +555,70 @@ class TestIsolatedReaskAdapter:
             )
         finally:
             temporary_metadata.cleanup()
+
+    def test_isolated_reask_git_metadata_binds_excludes_alternates_added_before_snapshot_clone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A raced source alternate cannot supply objects to the snapshot clone."""
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        alternate_origin = tmp_path / "alternate-origin"
+        alternate_origin.mkdir()
+        _git(["init", "-q", "-b", "alternate"], alternate_origin)
+        _git(["config", "user.name", "AWF Test"], alternate_origin)
+        _git(["config", "user.email", "awf@test.local"], alternate_origin)
+        (alternate_origin / "private.txt").write_text(
+            "separate host private object\n", encoding="utf-8"
+        )
+        _git(["add", "private.txt"], alternate_origin)
+        _git(["commit", "-q", "-m", "alternate"], alternate_origin)
+        alternate_blob = _git(["rev-parse", "HEAD:private.txt"], alternate_origin).stdout.strip()
+        alternate_mirror = tmp_path / "alternate-mirror.git"
+        _git(["clone", "--mirror", str(alternate_origin), str(alternate_mirror)], tmp_path)
+        forged_tree = _git(
+            ["--git-dir", str(mirror_path), "mktree", "--missing"],
+            tmp_path,
+            input=f"100644 blob {alternate_blob}\tREADME.md\n",
+        ).stdout.strip()
+        forged_head = _git(
+            [
+                "-c",
+                "user.email=awf@example.com",
+                "-c",
+                "user.name=AWF Test",
+                "--git-dir",
+                str(mirror_path),
+                "commit-tree",
+                forged_tree,
+            ],
+            tmp_path,
+        ).stdout.strip()
+        _git(
+            ["--git-dir", str(mirror_path), "update-ref", "refs/heads/reask", forged_head], tmp_path
+        )
+        real_run = base_isolated_reask.subprocess.run
+
+        def _add_alternates_before_snapshot_clone(
+            command: list[str], *args: Any, **kwargs: Any
+        ) -> Any:
+            if command[-2:] == ["rev-parse", "HEAD"]:
+                alternates_path = mirror_path / "objects" / "info" / "alternates"
+                alternates_path.parent.mkdir(parents=True, exist_ok=True)
+                alternates_path.write_text(f"{alternate_mirror / 'objects'}\n", encoding="utf-8")
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(
+            base_isolated_reask.subprocess,
+            "run",
+            _add_alternates_before_snapshot_clone,
+        )
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=forged_head,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
 
     def test_isolated_reask_git_metadata_binds_rejects_head_other_than_requested_ref(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

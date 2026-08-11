@@ -43,7 +43,7 @@ def _copy_regular_git_metadata_file_from_directory_fd(
     source_name: str,
     destination: Path,
     *,
-    max_bytes: int = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
+    max_bytes: int | None = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
 ) -> None:
     """Copy one regular Git metadata file from an already-open directory."""
     source_fd: int | None = None
@@ -56,25 +56,98 @@ def _copy_regular_git_metadata_file_from_directory_fd(
         file_stat = os.fstat(source_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"Git metadata source is not a regular file: {source_name}")
-        if file_stat.st_size > max_bytes:
+        if max_bytes is not None and file_stat.st_size > max_bytes:
             raise OSError(f"Git metadata source exceeds size limit: {source_name}")
         copied_bytes = 0
         with destination.open("xb") as dest_file:
-            while copied_bytes < max_bytes:
+            while True:
                 chunk = os.read(
                     source_fd,
-                    min(64 * 1024, max_bytes - copied_bytes),
+                    64 * 1024 if max_bytes is None else min(64 * 1024, max_bytes - copied_bytes),
                 )
                 if not chunk:
                     return
                 dest_file.write(chunk)
                 copied_bytes += len(chunk)
-            if os.read(source_fd, 1):
-                raise OSError(f"Git metadata source exceeds size limit: {source_name}")
+                if max_bytes is not None and copied_bytes == max_bytes:
+                    if os.read(source_fd, 1):
+                        raise OSError(f"Git metadata source exceeds size limit: {source_name}")
+                    return
     finally:
         if source_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(source_fd)
+
+
+def _copy_git_object_directory(source: Path, destination: Path) -> None:
+    """Copy Git objects without following links or preserving alternates."""
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _copy_git_object_directory_from_fd(source_fd, destination, relative_path=Path())
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(source_fd)
+
+
+def _copy_git_object_directory_from_fd(
+    source_fd: int,
+    destination: Path,
+    *,
+    relative_path: Path,
+) -> None:
+    """Copy regular object-store entries from an already-open directory."""
+    destination.mkdir()
+    for name in os.listdir(source_fd):
+        # A source-mirror alternates file is precisely the untrusted object
+        # lookup this snapshot is intended to prevent.
+        if relative_path == Path("info") and name == "alternates":
+            continue
+        entry_stat = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        destination_entry = destination / name
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=source_fd,
+            )
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    raise OSError(f"Git object source is not a directory: {name}")
+                _copy_git_object_directory_from_fd(
+                    child_fd,
+                    destination_entry,
+                    relative_path=relative_path / name,
+                )
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(child_fd)
+        elif stat.S_ISREG(entry_stat.st_mode):
+            _copy_regular_git_metadata_file_from_directory_fd(
+                source_fd,
+                name,
+                destination_entry,
+                max_bytes=None,
+            )
+        else:
+            raise OSError(f"Git object source is not a regular file or directory: {name}")
+
+
+def _write_isolated_reask_source_config(common_path: Path, expected_ref: str) -> None:
+    """Write only the object-format settings required by the snapshot source."""
+    if len(expected_ref) == 40:
+        common_path.joinpath("config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+            encoding="utf-8",
+        )
+        return
+    if len(expected_ref) == 64:
+        common_path.joinpath("config").write_text(
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n"
+            "[extensions]\n\tobjectformat = sha256\n",
+            encoding="utf-8",
+        )
+        return
+    raise OSError("re-ask ref does not use a supported Git object format")
 
 
 def _linked_worktree_common_git_dir(snapshot_path: Path, linked_git_dir: Path) -> Path:
@@ -146,6 +219,20 @@ def _isolated_reask_git_metadata_volume_binds(
         # Snapshot HEAD may be symbolic. Pin it after validation so a writer
         # to the shared mirror cannot move the selected ref before clone.
         (snapshot_path / "HEAD").write_text(f"{expected_ref}\n", encoding="utf-8")
+        source_common_path = temporary_path / "source-common-git"
+        source_common_path.mkdir()
+        (source_common_path / "refs").mkdir()
+        _copy_git_object_directory(common_git_dir / "objects", source_common_path / "objects")
+        _write_isolated_reask_source_config(source_common_path, expected_ref)
+        with contextlib.suppress(FileNotFoundError):
+            _copy_regular_git_metadata_file(
+                common_git_dir,
+                "shallow",
+                source_common_path / "shallow",
+            )
+        # The bare clone must read objects from the immutable copy above, not
+        # through the writable source mirror's common directory.
+        (snapshot_path / "commondir").write_text(f"{source_common_path}\n", encoding="utf-8")
         subprocess.run(
             [
                 "git",
