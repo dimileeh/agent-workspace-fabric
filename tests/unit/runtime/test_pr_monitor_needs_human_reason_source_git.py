@@ -528,6 +528,88 @@ async def test_reask_uses_validated_source_git_context_for_head_and_worktree_cre
 
 
 @pytest.mark.unit
+async def test_reask_does_not_fall_back_to_primary_checkout_when_source_git_file_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validated source must not use the unisolated test-double re-ask seam."""
+    workspace_id = "ws_missing_source_git_file"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    reask_invocations: list[dict[str, object]] = []
+    unavailable_reasons: list[str] = []
+
+    class _SourceGitFileRemovingRunner(_EnvLocalCommandRunner):
+        """Remove the writable source control file after its pinned HEAD lookup."""
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if args[-2:] == ["rev-parse", "HEAD"]:
+                (source / ".git").unlink()
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask_invocations.append(dict(kwargs))
+        pytest.fail("a lost real Git control file must not trigger an unisolated re-ask")
+
+    async def _record_needs_human_reason_missing(_runner: object, **kwargs: object) -> None:
+        unavailable_reasons.append(str(kwargs["reason_code"]))
+
+    async def _unexpected_rev_parse_head(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a linked source must resolve HEAD through its pinned admin directory")
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_SourceGitFileRemovingRunner()),
+        _worktrees_root=source.parent,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_unexpected_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_record_needs_human_reason_missing",
+        _record_needs_human_reason_missing,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=tmp_path / "compose.yml",
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert reask_invocations == []
+    assert unavailable_reasons == ["NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"]
+    assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_reask_pins_validated_source_admin_directory_through_head_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

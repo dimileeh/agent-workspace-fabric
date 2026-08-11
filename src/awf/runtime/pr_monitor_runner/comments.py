@@ -1082,6 +1082,11 @@ async def _enforce_needs_human_reason(
                     source_git_dir_fd=reask_source_git_dir_fd,
                     on_cleanup_failure_after_cancellation=_persist_cleanup_failure_after_cancellation,
                 )
+                if reask_worktree is None:
+                    raise _MonitorPolicyBlockedError(
+                        "Source worktree Git control file disappeared before the NEEDS_HUMAN reason re-ask.",
+                        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    )
             elif getattr(runner, "_deps", None) is not None:
                 if worktree_path.exists():
                     raise RuntimeError("worktree has no Git control file")
