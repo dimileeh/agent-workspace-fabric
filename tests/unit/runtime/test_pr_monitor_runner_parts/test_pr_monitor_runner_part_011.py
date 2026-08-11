@@ -139,6 +139,27 @@ class TestNotificationAndGraceHelpers:
         )
 
     @pytest.mark.unit
+    def test_notify_human_reason_keeps_outdated_thread_diagnosis(self) -> None:
+        """An outdated human escalation retains its actionable AWF diagnosis."""
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(threads_addressed_ids={outdated_thread.thread_id: "needs_human"})
+
+        assert (
+            _notify_human_reason(
+                replace(_status(), outdated_unresolved_inline_threads=(outdated_thread,)),
+                state,
+            )
+            == "AWF could not resolve this outdated thread and needs human input"
+        )
+
+    @pytest.mark.unit
     def test_initial_review_grace_state_converts_between_wall_and_monotonic_time(self) -> None:
         pr_number = 42
         started_key = _initial_review_grace_started_key(pr_number)
