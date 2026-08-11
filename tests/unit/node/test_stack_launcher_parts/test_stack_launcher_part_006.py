@@ -51,16 +51,19 @@ def test_clarification_inputs_exclude_unselected_claude_backend_settings() -> No
 
 
 @pytest.mark.unit
-def test_clarification_inputs_stage_claude_custom_ca() -> None:
-    """Claude re-asks retain a declared custom CA trust store."""
+def test_clarification_inputs_stage_claude_defaulted_custom_ca(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude re-asks expand and stage a defaulted custom CA trust store."""
     custom_ca = AuthMount(
         source="/host/awf/secret-leases/ws_launcher/provider-ca.pem",
         target="/run/awf/secrets/provider-ca.pem",
         mode="ro",
     )
+    monkeypatch.delenv("NODE_EXTRA_CA_CERTS", raising=False)
     environment = (
         ("ANTHROPIC_API_KEY", "anthropic-key"),
-        ("NODE_EXTRA_CA_CERTS", custom_ca.target),
+        ("NODE_EXTRA_CA_CERTS", "${NODE_EXTRA_CA_CERTS:-/run/awf/secrets/provider-ca.pem}"),
     )
 
     clarification_environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001

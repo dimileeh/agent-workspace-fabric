@@ -400,7 +400,7 @@ def _clarification_agent_environment(
         (
             name,
             _clarification_staged_auth_value(
-                _clarification_expanded_aws_profile_file_value(name, value), staged_targets
+                _clarification_expanded_provider_path_value(name, value), staged_targets
             ),
         )
         for name, value in agent_environment
@@ -409,10 +409,12 @@ def _clarification_agent_environment(
     )
 
 
-def _clarification_expanded_aws_profile_file_value(name: str, value: str) -> str:
-    """Resolve Compose expressions in Bedrock profile-file locations."""
+def _clarification_expanded_provider_path_value(name: str, value: str) -> str:
+    """Resolve Compose expressions in provider file-path settings."""
 
-    if name in _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES:
+    if name in (
+        _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+    ):
         return compose_expand_value(value, environ=os.environ)
     return value
 
@@ -769,7 +771,7 @@ def _clarification_aws_profile_mount_targets(
     """Return selected AWS profile-file mount targets, if any."""
 
     explicit_profile_files = {
-        _clarification_expanded_aws_profile_file_value(name, value)
+        _clarification_expanded_provider_path_value(name, value)
         for name, value in agent_environment
         if name in _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
     }
@@ -909,7 +911,7 @@ def _clarification_model_provider_auth_mount_targets(
     return (
         runtime_auth_mount_targets
         | frozenset(
-            _clarification_expanded_aws_profile_file_value(name, value)
+            _clarification_expanded_provider_path_value(name, value)
             for name, value in agent_environment
             if name in names
         )
