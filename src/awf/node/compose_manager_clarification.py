@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from awf.service.environment import compose_expand_value
 
 _CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+_CLARIFICATION_CREDENTIAL_ENDPOINT_ENV_NAMES = ("AWS_CONTAINER_CREDENTIALS_FULL_URI",)
 _CLARIFICATION_PROXY_URL_ENV_NAMES = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -44,6 +45,7 @@ def _clarification_model_service_names(
     environment = dict(clarification_environment)
     endpoint_names: tuple[str, ...] = (
         *_CLARIFICATION_BASE_URL_ENV_NAMES,
+        *_CLARIFICATION_CREDENTIAL_ENDPOINT_ENV_NAMES,
         *_CLARIFICATION_PROXY_URL_ENV_NAMES,
     )
     if environment.get("AWF_OPENCODE_OLLAMA_BASE_URL"):

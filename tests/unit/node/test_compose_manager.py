@@ -378,6 +378,58 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_proxy_servic
 
 
 @pytest.mark.unit
+def test_upgrade_persisted_clarification_service_routes_to_container_credential_service(
+    tmp_path: Path,
+) -> None:
+    """Legacy Bedrock clarification can reach its credential-broker service."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "credential-broker": {
+                        "image": "example/credential-broker:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "CLAUDE_CODE_USE_BEDROCK": "1",
+                            "AWS_REGION": "us-west-2",
+                            "AWS_CONTAINER_CREDENTIALS_FULL_URI": (
+                                "http://credential-broker:8080/credentials"
+                            ),
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == ("credential-broker",)
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["networks"] == [
+        "clarification_egress_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["credential-broker"]["networks"] == [
+        "awf_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["postgres"]["networks"] == ["awf_net"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("endpoint_name", "agent_runtime", "agent_model", "model_service_name"),
     [
@@ -609,6 +661,42 @@ class TestRender:
             "clarification_model_net",
         ]
         assert parsed["services"]["proxy"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+
+    @pytest.mark.unit
+    def test_clarification_reaches_selected_container_credential_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS container-credential URI gets the clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        (
+                            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                            "http://credential-broker:8080/credentials",
+                        ),
+                    ),
+                    services=(
+                        ComposeService(
+                            name="credential-broker", image="example/credential-broker:latest"
+                        ),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["credential-broker"]["networks"] == [
             "awf_net",
             "clarification_model_net",
         ]
