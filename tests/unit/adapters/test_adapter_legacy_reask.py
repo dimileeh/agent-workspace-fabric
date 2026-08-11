@@ -29,7 +29,9 @@ _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
 
 
-def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _git(
+    args: list[str], cwd: Path, *, input: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a Git setup or inspection command for an isolated re-ask fixture."""
     return subprocess.run(
         ["git", *args],
@@ -37,6 +39,7 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         check=True,
         capture_output=True,
         text=True,
+        input=input,
     )
 
 
@@ -91,6 +94,35 @@ def _linked_reask_worktree(
         text=True,
     )
     return mirror_path, worktree_path, head_oid, unrelated_oid
+
+
+def _assert_snapshot_index_is_usable(
+    temporary_metadata: tempfile.TemporaryDirectory[str],
+    *,
+    worktree_path: Path,
+    source_index_path: Path,
+) -> None:
+    """Assert that a copied index is byte-identical and readable by Git."""
+    snapshot_path = Path(temporary_metadata.name) / "linked-git"
+    assert (snapshot_path / source_index_path.name).read_bytes() == source_index_path.read_bytes()
+    (snapshot_path / "commondir").write_text(
+        f"{Path(temporary_metadata.name) / 'common-git'}\n", encoding="utf-8"
+    )
+    assert (
+        _git(
+            [
+                "--git-dir",
+                str(snapshot_path),
+                "--work-tree",
+                str(worktree_path),
+                "ls-files",
+                "--error-unmatch",
+                "metadata/large-index-entry-15999.txt",
+            ],
+            worktree_path,
+        ).stdout.strip()
+        == "metadata/large-index-entry-15999.txt"
+    )
 
 
 def _write_legacy_opencode_ollama_compose(tmp_path: Path) -> Path:
@@ -667,6 +699,62 @@ class TestIsolatedReaskAdapter:
             base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
 
         assert grew_source
+
+    def test_isolated_reask_git_metadata_binds_preserve_large_indexes(self, tmp_path: Path) -> None:
+        """Large normal and split Git indexes remain usable in the snapshot."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        blob_oid = _git(
+            ["hash-object", "-w", "--stdin"], worktree_path, input="payload\n"
+        ).stdout.strip()
+        index_info = "".join(
+            f"100644 {blob_oid}\tmetadata/large-index-entry-{index:05d}.txt\n"
+            for index in range(16_000)
+        )
+        _git(["update-index", "--index-info"], worktree_path, input=index_info)
+
+        linked_git_dir = _mirror_path / "worktrees" / worktree_path.name
+        assert (linked_git_dir / "index").stat().st_size > (
+            base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES
+        )
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            _assert_snapshot_index_is_usable(
+                temporary_metadata,
+                worktree_path=worktree_path,
+                source_index_path=linked_git_dir / "index",
+            )
+        finally:
+            temporary_metadata.cleanup()
+
+        _git(["update-index", "--split-index"], worktree_path)
+        shared_index_path = (
+            worktree_path / _git(["rev-parse", "--shared-index-path"], worktree_path).stdout.strip()
+        ).resolve()
+        assert (
+            shared_index_path.stat().st_size
+            > base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES
+        )
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            _assert_snapshot_index_is_usable(
+                temporary_metadata,
+                worktree_path=worktree_path,
+                source_index_path=shared_index_path,
+            )
+        finally:
+            temporary_metadata.cleanup()
 
     def test_isolated_reask_git_metadata_binds_copy_split_index_backing_file(
         self, tmp_path: Path

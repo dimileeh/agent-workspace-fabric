@@ -17,20 +17,33 @@ from awf.node.git_manager import linked_worktree_git_dir
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
 _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
+_MAX_ISOLATED_REASK_GIT_INDEX_BYTES: Final = 64 * 1024 * 1024
 
 
-def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destination: Path) -> None:
+def _copy_regular_git_metadata_file(
+    source_dir: Path,
+    source_name: str,
+    destination: Path,
+    *,
+    max_bytes: int = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
+) -> None:
     """Copy one linked-worktree control file without following a raced symlink."""
     source_dir_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        _copy_regular_git_metadata_file_from_directory_fd(source_dir_fd, source_name, destination)
+        _copy_regular_git_metadata_file_from_directory_fd(
+            source_dir_fd, source_name, destination, max_bytes=max_bytes
+        )
     finally:
         with contextlib.suppress(OSError):
             os.close(source_dir_fd)
 
 
 def _copy_regular_git_metadata_file_from_directory_fd(
-    source_dir_fd: int, source_name: str, destination: Path
+    source_dir_fd: int,
+    source_name: str,
+    destination: Path,
+    *,
+    max_bytes: int = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
 ) -> None:
     """Copy one regular Git metadata file from an already-open directory."""
     source_fd: int | None = None
@@ -43,14 +56,14 @@ def _copy_regular_git_metadata_file_from_directory_fd(
         file_stat = os.fstat(source_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"Git metadata source is not a regular file: {source_name}")
-        if file_stat.st_size > _MAX_ISOLATED_REASK_GIT_METADATA_BYTES:
+        if file_stat.st_size > max_bytes:
             raise OSError(f"Git metadata source exceeds size limit: {source_name}")
         copied_bytes = 0
         with destination.open("xb") as dest_file:
-            while copied_bytes < _MAX_ISOLATED_REASK_GIT_METADATA_BYTES:
+            while copied_bytes < max_bytes:
                 chunk = os.read(
                     source_fd,
-                    min(64 * 1024, _MAX_ISOLATED_REASK_GIT_METADATA_BYTES - copied_bytes),
+                    min(64 * 1024, max_bytes - copied_bytes),
                 )
                 if not chunk:
                     return
@@ -170,7 +183,10 @@ def _isolated_reask_git_metadata_volume_binds(
         (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
         try:
             _copy_regular_git_metadata_file_from_directory_fd(
-                linked_git_dir_fd, "index", snapshot_path / "index"
+                linked_git_dir_fd,
+                "index",
+                snapshot_path / "index",
+                max_bytes=_MAX_ISOLATED_REASK_GIT_INDEX_BYTES,
             )
         except OSError:
             # The index is optional; a raced link, special file, or missing index
@@ -196,6 +212,7 @@ def _isolated_reask_git_metadata_volume_binds(
                     linked_git_dir_fd,
                     shared_index_relative_path.name,
                     snapshot_path / shared_index_relative_path.name,
+                    max_bytes=_MAX_ISOLATED_REASK_GIT_INDEX_BYTES,
                 )
             except (OSError, subprocess.SubprocessError, ValueError):
                 # The split-index backing file is optional; retain the regular
