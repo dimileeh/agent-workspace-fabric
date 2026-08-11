@@ -87,10 +87,11 @@ def test_validated_source_worktree_git_context_reads_control_files_from_pinned_f
     source_git_dir = Path(
         (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
     )
+    expected_head_snapshot = (source_git_dir / "HEAD").read_text(encoding="utf-8")
     real_read_text = Path.read_text
 
     def _read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if self.name in {".git", "commondir", "gitdir"}:
+        if self.name in {".git", "commondir", "gitdir", "HEAD"}:
             raise AssertionError(f"path-based control-file read: {self}")
         return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -100,12 +101,13 @@ def test_validated_source_worktree_git_context_reads_control_files_from_pinned_f
     try:
         assert context.mirror_path == source_git_dir.parent.parent
         assert str(context.linked_git_dir).startswith("/proc/")
+        assert context.head_snapshot == expected_head_snapshot
     finally:
         os.close(context.linked_git_dir_fd)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir"])
+@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir", "HEAD"])
 def test_validated_source_worktree_git_context_rejects_fifo_control_files(
     tmp_path: Path,
     control_file: str,
@@ -132,7 +134,7 @@ def test_validated_source_worktree_git_context_rejects_fifo_control_files(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir"])
+@pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir", "HEAD"])
 def test_validated_source_worktree_git_context_rejects_symlinked_control_files(
     tmp_path: Path,
     control_file: str,
@@ -609,6 +611,118 @@ async def test_reask_uses_validated_source_git_context_for_head_and_worktree_cre
 
 
 @pytest.mark.unit
+async def test_reask_uses_validated_head_snapshot_when_source_head_changes_transiently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored source HEAD cannot redirect the clarification checkout."""
+    workspace_id = "ws_head_snapshot"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    mirror = source_git_dir.parent.parent
+    expected_head_snapshot = (source_git_dir / "HEAD").read_text(encoding="utf-8")
+    attacker = tmp_path / "attacker"
+    subprocess.run(
+        ["git", "clone", "-q", str(mirror), str(attacker)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(attacker, "config", "user.email", "awf@example.com")
+    _git(attacker, "config", "user.name", "AWF Test")
+    (attacker / "tracked.txt").write_text("attacker repository\n", encoding="utf-8")
+    _git(attacker, "add", "tracked.txt")
+    _git(attacker, "commit", "-qm", "attacker")
+    attacker_head = _git(attacker, "rev-parse", "HEAD").stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(attacker), "push", "-q", "origin", "HEAD:refs/heads/attacker"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    reask_contents: list[str] = []
+
+    class _HeadMutatingRunner(_EnvLocalCommandRunner):
+        """Replace then restore HEAD while the monitor resolves its revision."""
+
+        def __init__(self) -> None:
+            self.mutated = False
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if not self.mutated and "rev-parse" in args:
+                self.mutated = True
+                (source_git_dir / "HEAD").write_text(f"{attacker_head}\n", encoding="utf-8")
+                try:
+                    return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+                finally:
+                    (source_git_dir / "HEAD").write_text(expected_head_snapshot, encoding="utf-8")
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        reask_contents.append((reask / "tracked.txt").read_text(encoding="utf-8"))
+        return VerdictResult(verdict="needs_human", reason="select a deployment region")
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_HeadMutatingRunner()),
+        _worktrees_root=source.parent,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+    )
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=tmp_path / "compose.yml",
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select a deployment region")
+    assert reask_contents == ["source repository\n"]
+    assert (source_git_dir / "HEAD").read_text(encoding="utf-8") == expected_head_snapshot
+    assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_reask_does_not_fall_back_to_primary_checkout_when_source_git_file_disappears(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -625,7 +739,7 @@ async def test_reask_does_not_fall_back_to_primary_checkout_when_source_git_file
     unavailable_reasons: list[str] = []
 
     class _SourceGitFileRemovingRunner(_EnvLocalCommandRunner):
-        """Remove the writable source control file after its pinned HEAD lookup."""
+        """Remove the writable source control file after snapshot resolution."""
 
         async def run(
             self,
@@ -634,7 +748,7 @@ async def test_reask_does_not_fall_back_to_primary_checkout_when_source_git_file
             timeout_seconds: float | None = None,
             env: dict[str, str] | None = None,
         ) -> CommandResult:
-            if args[-2:] == ["rev-parse", "HEAD"]:
+            if "rev-parse" in args and "--verify" in args:
                 (source / ".git").unlink()
             return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 

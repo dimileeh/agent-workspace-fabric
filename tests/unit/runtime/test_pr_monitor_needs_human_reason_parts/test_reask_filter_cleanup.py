@@ -140,6 +140,7 @@ async def test_pinned_reask_head_read_returns_the_pinned_revision() -> None:
         await _rev_parse_pinned_reask_source_head(
             runner,
             Path("/worktrees/ws_1/.git/worktrees/reask"),
+            head_snapshot="ref: refs/heads/awf/ws_1\n",
             timeout_seconds=30.0,
         )
         == expected_ref
@@ -149,7 +150,9 @@ async def test_pinned_reask_head_read_returns_the_pinned_revision() -> None:
         "--git-dir",
         "/worktrees/ws_1/.git/worktrees/reask",
         "rev-parse",
-        "HEAD",
+        "--verify",
+        "--end-of-options",
+        "refs/heads/awf/ws_1^{commit}",
     ]
     assert command_runner.timeout_seconds == 30.0
 
@@ -168,6 +171,58 @@ async def test_pinned_reask_head_read_returns_none_for_git_failure() -> None:
         await _rev_parse_pinned_reask_source_head(
             runner,
             Path("/worktrees/ws_1/.git/worktrees/reask"),
+            head_snapshot="ref: refs/heads/awf/ws_1\n",
+            timeout_seconds=30.0,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_pinned_reask_head_read_accepts_a_detached_head_snapshot() -> None:
+    """A detached source worktree resolves its captured object ID directly."""
+    expected_ref = "b" * 40
+
+    class _HeadRunner:
+        def __init__(self) -> None:
+            self.args: list[str] | None = None
+
+        async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            self.args = args
+            return CommandResult(returncode=0, stdout=f"{expected_ref}\n", stderr="")
+
+    command_runner = _HeadRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    assert (
+        await _rev_parse_pinned_reask_source_head(
+            runner,
+            Path("/worktrees/ws_1/.git/worktrees/reask"),
+            head_snapshot=f"{expected_ref}\n",
+            timeout_seconds=30.0,
+        )
+        == expected_ref
+    )
+    assert command_runner.args is not None
+    assert command_runner.args[-1] == f"{expected_ref}^{{commit}}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_snapshot", ["ref: HEAD\n", "not a commit\n", "z" * 40])
+async def test_pinned_reask_head_read_rejects_unsafe_head_snapshots(head_snapshot: str) -> None:
+    """Malformed snapshots must not cause Git to reopen a mutable HEAD alias."""
+
+    class _UnexpectedRunner:
+        async def run(self, _args: list[str], **_kwargs: object) -> CommandResult:
+            pytest.fail("an unsafe HEAD snapshot must not invoke Git")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_UnexpectedRunner()))
+
+    assert (
+        await _rev_parse_pinned_reask_source_head(
+            runner,
+            Path("/worktrees/ws_1/.git/worktrees/reask"),
+            head_snapshot=head_snapshot,
             timeout_seconds=30.0,
         )
         is None

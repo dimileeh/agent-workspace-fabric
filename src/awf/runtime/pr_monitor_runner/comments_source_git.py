@@ -47,9 +47,36 @@ async def _rev_parse_pinned_reask_source_head(
     runner: Any,
     source_git_dir: Path,
     *,
+    head_snapshot: str,
     timeout_seconds: float,
 ) -> str | None:
-    """Resolve a source HEAD through its pinned linked-worktree admin directory."""
+    """Resolve a captured source HEAD without reopening mutable ``HEAD`` metadata."""
+    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
+    if snapshot_ref is None:
+        return None
+    result = await runner._deps.runner.run(
+        _pinned_git_dir_command(
+            source_git_dir,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{snapshot_ref}^{{commit}}",
+        ),
+        timeout_seconds=timeout_seconds,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
+
+
+async def _read_pinned_reask_source_head(
+    runner: Any,
+    source_git_dir: Path,
+    *,
+    timeout_seconds: float,
+) -> str | None:
+    """Read the current source HEAD for the post-re-ask integrity check."""
     result = await runner._deps.runner.run(
         _pinned_git_dir_command(source_git_dir, "rev-parse", "HEAD"),
         timeout_seconds=timeout_seconds,
@@ -58,3 +85,16 @@ async def _rev_parse_pinned_reask_source_head(
     if not result.ok:
         return None
     return result.stdout.strip() or None
+
+
+def _source_head_snapshot_ref(head_snapshot: str) -> str | None:
+    """Return one safe commit-ish from a regular-file ``HEAD`` snapshot."""
+    snapshot_ref = head_snapshot.strip()
+    if snapshot_ref.startswith("ref: "):
+        symbolic_ref = snapshot_ref.removeprefix("ref: ").strip()
+        return symbolic_ref if symbolic_ref.startswith("refs/") else None
+    if len(snapshot_ref) not in {40, 64}:
+        return None
+    if not all(char in "0123456789abcdefABCDEF" for char in snapshot_ref):
+        return None
+    return snapshot_ref

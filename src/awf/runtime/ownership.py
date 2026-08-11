@@ -43,6 +43,7 @@ class ValidatedSourceWorktreeGitContext:
     mirror_path: Path
     linked_git_dir: Path
     linked_git_dir_fd: int
+    head_snapshot: str
 
 
 def _read_bounded_regular_git_metadata_file_at(
@@ -326,6 +327,8 @@ def validated_source_worktree_git_context(
             worktree_path,
             linked_git_dir_fd=linked_git_dir_fd,
         )
+        head_snapshot = _read_bounded_regular_git_metadata_file_at(linked_git_dir_fd, "HEAD")
+        assert head_snapshot is not None
     except BaseException:
         os.close(linked_git_dir_fd)
         raise
@@ -333,6 +336,7 @@ def validated_source_worktree_git_context(
         mirror_path=mirror_path,
         linked_git_dir=pinned_linked_git_dir,
         linked_git_dir_fd=linked_git_dir_fd,
+        head_snapshot=head_snapshot,
     )
 
 

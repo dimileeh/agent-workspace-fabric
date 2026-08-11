@@ -58,6 +58,7 @@ from awf.runtime.pr_monitor_runner.comments_reask_audit import (
 )
 from awf.runtime.pr_monitor_runner.comments_source_git import (
     _pinned_linked_worktree_command,
+    _read_pinned_reask_source_head,
     _reask_source_mirror_command,
     _rev_parse_pinned_reask_source_head,
 )
@@ -193,7 +194,7 @@ async def _check_reask_primary_worktree_clean(
         return check.message or "Primary worktree changed during the NEEDS_HUMAN reason re-ask."
 
     current_head = (
-        await _rev_parse_pinned_reask_source_head(
+        await _read_pinned_reask_source_head(
             runner,
             source_git_dir,
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
@@ -1061,6 +1062,7 @@ async def _enforce_needs_human_reason(
                 reask_restore_ref = await _rev_parse_pinned_reask_source_head(
                     runner,
                     source_git_dir,
+                    head_snapshot=source_git_context.head_snapshot,
                     timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
                 )
                 if reask_restore_ref is None:
