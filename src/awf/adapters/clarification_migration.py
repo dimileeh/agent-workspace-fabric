@@ -84,6 +84,10 @@ async def _attach_persisted_clarification_model_network(
     if not network_inspect_result.ok:
         if not _network_is_absent(network_inspect_result, attachment.network_name):
             return attachment, network_inspect_result
+        # Record before awaiting: cancellation can arrive after Docker creates
+        # the network but before its subprocess result reaches us, and rollback
+        # must still remove that possible network.
+        attachment.created_network = True
         network_create_result = await runner.run(
             [
                 "docker",
@@ -99,7 +103,6 @@ async def _attach_persisted_clarification_model_network(
         )
         if not network_create_result.ok:
             return attachment, network_create_result
-        attachment.created_network = True
     for service in clarification_model_services:
         container_ids_result = await runner.run(
             [

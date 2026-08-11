@@ -1040,6 +1040,48 @@ class TestIsolatedReaskAdapter:
         assert compose_file.read_bytes() == original_compose_file
 
     @pytest.mark.unit
+    async def test_isolated_reask_cancellation_removes_network_created_before_runner_returns(
+        self, tmp_path: Path
+    ) -> None:
+        """Cancellation after network creation removes the possibly-created network."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        class _CancellingCreateRunner(FakeCommandRunner):
+            """Cancel immediately after Docker can have created the network."""
+
+            async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+                result = await super().run(args, **kwargs)
+                if args[0:3] == ["docker", "network", "create"]:
+                    raise asyncio.CancelledError
+                return result
+
+        runner = _CancellingCreateRunner()
+        runner.queue_result(
+            returncode=1,
+            stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
+        )
+        runner.queue_result()
+        runner.queue_result()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert runner.calls[2].args == [
+            "docker",
+            "network",
+            "rm",
+            "awf-ws_legacy-clarification-model-net",
+        ]
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("network_exists", "container_ids", "expected_calls"),
         [
