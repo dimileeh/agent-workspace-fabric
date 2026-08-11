@@ -72,7 +72,9 @@ def _runner(
 
 
 async def _reason_events(
-    factory: async_sessionmaker[AsyncSession], workspace_id: str
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    reason_code: str = "NEEDS_HUMAN_REASON_MISSING",
 ) -> list[object]:
     async with factory() as session:
         return [
@@ -82,7 +84,7 @@ async def _reason_events(
                 event_type="workspace.audit.comment_resolution",
                 limit=20,
             )
-            if event.reason_code == "NEEDS_HUMAN_REASON_MISSING"
+            if event.reason_code == reason_code
         ]
 
 
@@ -182,9 +184,6 @@ async def test_thread_refusal_or_reask_error_keeps_blocking_verdict_and_records_
 @pytest.mark.parametrize(
     "recovery_error",
     [
-        ProviderRecoveryRetryError(),
-        ProviderRecoveryFallbackError(),
-        ProviderRecoveryAuthError(),
         _MonitorAgentServiceRecoveryFailedError("agent service recovery failed"),
         _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded"),
         ComposeExecCleanupError(
@@ -223,6 +222,64 @@ async def test_thread_reask_reraises_loop_recovery_exceptions(
 
     assert len(calls) == 2
     assert await _reason_events(factory, workspace_id) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        ProviderRecoveryRetryError(),
+        ProviderRecoveryFallbackError(),
+        ProviderRecoveryAuthError(),
+    ],
+)
+async def test_thread_reask_provider_recovery_keeps_blocker_and_records_unavailable_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    provider_error: Exception,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=46)
+    runner, calls = _runner(
+        factory,
+        tmp_path,
+        [VerdictResult(verdict="needs_human"), provider_error],
+    )
+    thread = ReviewThread(
+        thread_id="T-provider-recovery", path="src/recovery.py", line=7, body_excerpt="?"
+    )
+    state = MonitorState(
+        threads_addressed_ids={_needs_human_reason_state_key(thread.thread_id): "stale reason"}
+    )
+
+    verdict = await comments._address_thread(
+        runner,  # type: ignore[arg-type]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=46,
+        thread=thread,
+        compose_project="awf-test",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        owned_paths=(),
+        task_tag=None,
+        base_branch="main",
+        remote_branch="feature",
+        operation_id="op-provider-recovery",
+        operation_type="comment_repair",
+    )
+
+    assert verdict == "needs_human"
+    assert len(calls) == 2
+    assert _needs_human_reason_state_key(thread.thread_id) not in state.threads_addressed_ids
+    events = await _reason_events(
+        factory,
+        workspace_id,
+        reason_code="NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE",
+    )
+    assert len(events) == 1
+    assert events[0].payload is not None
+    assert events[0].payload["operation_id"] == "op-provider-recovery"
+    assert events[0].payload["evidence"]["item_id"] == thread.thread_id
 
 
 @pytest.mark.unit
