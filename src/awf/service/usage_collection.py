@@ -91,6 +91,7 @@ DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 # guards against a future pin that might reject a missing ``--config`` target.
 _CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
 _ISOLATED_CCUSAGE_CAPTURE_DIR: Final = "/tmp/awf-ccusage"
+_ISOLATED_AGENT_COMPLETION_MARKER: Final = "\x1eawf-isolated-agent-complete\x1f\n"
 
 
 class _Clock(Protocol):
@@ -757,6 +758,14 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         ]
 
     @property
+    def agent_completion_marker(self) -> str | None:
+        """Signal when the wrapped agent command exits before final sampling."""
+
+        if self._capture_dir is None or self._source is None:
+            return None
+        return _ISOLATED_AGENT_COMPLETION_MARKER
+
+    @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
         """Expose the AWF-owned result mount for the disposable container."""
 
@@ -836,6 +845,7 @@ def _isolated_ccusage_wrapper_script(*, source: str, timeout_seconds: float) -> 
 set +e
 \"$@\"
 agent_status=$?
+printf '%s' {shlex.quote(_ISOLATED_AGENT_COMPLETION_MARKER)}
 timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
   > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stdout\" \\
   2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stderr\"

@@ -219,6 +219,8 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
     assert ctx.cli_args[:2] == ["sh", "-lc"]
     assert "capture_ccusage baseline" not in ctx.cli_args[2]
     assert "final.status" in ctx.cli_args[2]
+    assert ctx.agent_completion_marker is not None
+    assert ctx.agent_completion_marker in ctx.cli_args[2]
     baseline_script = ctx.baseline_cli_args[2]
     assert ctx.baseline_cli_args[:2] == ["sh", "-lc"]
     assert "ccusage codex daily --json --offline" in baseline_script

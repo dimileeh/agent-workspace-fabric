@@ -62,6 +62,7 @@ from awf.adapters.usage import (
     UsageSampler,
 )
 from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
     CommandResult,
@@ -115,6 +116,69 @@ _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
+
+
+class _IsolatedCompletionMarkerFilter:
+    """Remove a split-safe isolated-wrapper completion marker from stdout."""
+
+    def __init__(self, marker: str) -> None:
+        self._marker = marker
+        self._pending = ""
+        self.agent_completed = False
+
+    def consume(self, chunk: str) -> str:
+        """Record marker arrival and return only output safe to forward."""
+
+        buffered = self._pending + chunk
+        marker_parts = buffered.split(self._marker)
+        if len(marker_parts) > 1:
+            self.agent_completed = True
+        output = "".join(marker_parts[:-1])
+        tail = marker_parts[-1]
+        prefix_length = _marker_prefix_suffix_length(tail, self._marker)
+        if prefix_length:
+            output += tail[:-prefix_length]
+            self._pending = tail[-prefix_length:]
+        else:
+            output += tail
+            self._pending = ""
+        return output
+
+    def finish(self) -> str:
+        """Return any incomplete marker prefix when the stream closes."""
+
+        pending = self._pending
+        self._pending = ""
+        return pending
+
+
+def _marker_prefix_suffix_length(value: str, marker: str) -> int:
+    """Return the longest suffix of ``value`` that starts ``marker``."""
+
+    for length in range(min(len(value), len(marker) - 1), 0, -1):
+        if value.endswith(marker[:length]):
+            return length
+    return 0
+
+
+def _agent_watchdog_timeout_result(
+    reason_code: str,
+    *,
+    wall_timeout_seconds: float,
+    idle_timeout_seconds: float,
+) -> CommandResult:
+    """Build the same timeout result the streaming runner would return."""
+
+    if reason_code == COMMAND_IDLE_TIMEOUT_REASON:
+        stderr = f"command idle timeout after {idle_timeout_seconds:g}s without output\n"
+    else:
+        stderr = f"command wall timeout after {wall_timeout_seconds:g}s\n"
+    return CommandResult(
+        returncode=124,
+        stdout="",
+        stderr=stderr,
+        reason_code=reason_code,
+    )
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -1245,14 +1309,28 @@ class AgentAdapter(ABC):
             run_streaming = getattr(self._runner, "run_streaming", None)
             try:
                 if run_streaming is not None:
-                    result = await run_streaming(
-                        args,
-                        input_bytes=prompt_input,
-                        on_stdout=sinks.write_stdout if sinks is not None else None,
-                        on_stderr=sinks.write_stderr if sinks is not None else None,
-                        wall_timeout_seconds=self._agent_wall_timeout_seconds,
-                        idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                    completion_marker = (
+                        None
+                        if isolated_sampler_ctx is None
+                        else isolated_sampler_ctx.agent_completion_marker
                     )
+                    if not completion_marker:
+                        result = await run_streaming(
+                            args,
+                            input_bytes=prompt_input,
+                            on_stdout=sinks.write_stdout if sinks is not None else None,
+                            on_stderr=sinks.write_stderr if sinks is not None else None,
+                            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                        )
+                    else:
+                        result = await self._run_isolated_agent_cli_with_watchdog(
+                            run_streaming=run_streaming,
+                            args=args,
+                            prompt_input=prompt_input,
+                            sinks=sinks,
+                            completion_marker=completion_marker,
+                        )
                 else:
                     _log.warning(
                         "agent.run.watchdog_unavailable",
@@ -1371,6 +1449,82 @@ class AgentAdapter(ABC):
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
+        )
+
+    async def _run_isolated_agent_cli_with_watchdog(
+        self,
+        *,
+        run_streaming: Any,
+        args: list[str],
+        prompt_input: bytes,
+        sinks: CommandLogSinks | None,
+        completion_marker: str,
+    ) -> CommandResult:
+        """Watch only the isolated agent CLI, not its bounded final usage probe."""
+
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        last_output_at = started_at
+        marker_filter = _IsolatedCompletionMarkerFilter(completion_marker)
+
+        async def _on_stdout(chunk: str) -> None:
+            nonlocal last_output_at
+            last_output_at = loop.time()
+            filtered = marker_filter.consume(chunk)
+            if filtered and sinks is not None:
+                await sinks.write_stdout(filtered)
+
+        async def _on_stderr(chunk: str) -> None:
+            nonlocal last_output_at
+            last_output_at = loop.time()
+            if sinks is not None:
+                await sinks.write_stderr(chunk)
+
+        stream_task = asyncio.create_task(
+            run_streaming(
+                args,
+                input_bytes=prompt_input,
+                on_stdout=_on_stdout,
+                on_stderr=_on_stderr,
+            )
+        )
+        try:
+            while not stream_task.done() and not marker_filter.agent_completed:
+                now = loop.time()
+                wall_deadline = started_at + self._agent_wall_timeout_seconds
+                idle_deadline = last_output_at + self._agent_idle_timeout_seconds
+                timeout_reason: str | None = None
+                if now >= wall_deadline:
+                    timeout_reason = COMMAND_TIMEOUT_REASON
+                elif now >= idle_deadline:
+                    timeout_reason = COMMAND_IDLE_TIMEOUT_REASON
+                if timeout_reason is not None:
+                    stream_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stream_task
+                    return _agent_watchdog_timeout_result(
+                        timeout_reason,
+                        wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                        idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                    )
+                next_deadline = min(wall_deadline, idle_deadline)
+                await asyncio.wait({stream_task}, timeout=max(next_deadline - now, 0.0))
+
+            result = await stream_task
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stream_task
+            pending = marker_filter.finish()
+            if pending and sinks is not None:
+                await sinks.write_stdout(pending)
+
+        return CommandResult(
+            returncode=result.returncode,
+            stdout=result.stdout.replace(completion_marker, ""),
+            stderr=result.stderr,
+            reason_code=result.reason_code,
         )
 
     async def _capture_isolated_usage_before_cleanup(

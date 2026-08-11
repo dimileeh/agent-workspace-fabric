@@ -63,11 +63,13 @@ class _IsolatedRecordingContext(_RecordingContext):
         *,
         capture_error: Exception | None = None,
         baseline_error: Exception | None = None,
+        agent_completion_marker: str | None = None,
     ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._capture_error = capture_error
         self._baseline_error = baseline_error
+        self._agent_completion_marker = agent_completion_marker
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
         """Exercise the capture_final_before_cleanup test helper."""
@@ -99,6 +101,11 @@ class _IsolatedRecordingContext(_RecordingContext):
         """Return the configured isolated-capture volume bindings."""
         return ((Path("/tmp/awf-usage-capture"), "/tmp/awf-ccusage"),)
 
+    @property
+    def agent_completion_marker(self) -> str | None:
+        """Return the test-only marker emitted after the agent command exits."""
+        return self._agent_completion_marker
+
 
 class _IsolatedRecordingSampler(_RecordingSampler):
     """Test double used by the surrounding scenario."""
@@ -110,12 +117,14 @@ class _IsolatedRecordingSampler(_RecordingSampler):
         start_error: Exception | None = None,
         capture_error: Exception | None = None,
         baseline_error: Exception | None = None,
+        agent_completion_marker: str | None = None,
     ) -> None:
         """Initialize this test double."""
         super().__init__(events)
         self._isolated_start_error = start_error
         self._capture_error = capture_error
         self._baseline_error = baseline_error
+        self._agent_completion_marker = agent_completion_marker
 
     async def start_isolated(self, **kwargs: Any) -> _IsolatedRecordingContext:
         """Exercise the start_isolated test helper."""
@@ -127,6 +136,7 @@ class _IsolatedRecordingSampler(_RecordingSampler):
             self._events,
             capture_error=self._capture_error,
             baseline_error=self._baseline_error,
+            agent_completion_marker=self._agent_completion_marker,
         )
 
 
@@ -226,6 +236,131 @@ async def test_isolated_sampler_captures_usage_inside_clarification_container() 
     assert "/tmp/awf-usage-capture:/tmp/awf-ccusage:rw" in args
     assert "agent-cli" in args
     assert "capture-baseline" not in args
+
+
+@pytest.mark.unit
+async def test_isolated_final_usage_capture_is_not_charged_to_agent_timeout() -> None:
+    """A final probe after CLI completion cannot turn success into a timeout."""
+
+    marker = "\x1eagent-complete\x1f\n"
+    events: list[str] = []
+
+    class _FinalProbeRunner(_EventRunner):
+        def __init__(self) -> None:
+            super().__init__(events, result=CommandResult(returncode=0, stdout="", stderr=""))
+            self.watchdog_timeouts: list[tuple[float | None, float | None]] = []
+
+        async def run_streaming(
+            self,
+            args: list[str],
+            *,
+            on_stdout: Any = None,
+            wall_timeout_seconds: float | None = None,
+            idle_timeout_seconds: float | None = None,
+            **_kwargs: Any,
+        ) -> CommandResult:
+            self._events.append("agent")
+            self.streaming_calls.append(list(args))
+            self.watchdog_timeouts.append((wall_timeout_seconds, idle_timeout_seconds))
+            if wall_timeout_seconds is not None or idle_timeout_seconds is not None:
+                return CommandResult(
+                    returncode=124,
+                    stdout="",
+                    stderr="command wall timeout after 0.01s\n",
+                    reason_code=COMMAND_TIMEOUT_REASON,
+                )
+            assert on_stdout is not None
+            await on_stdout(marker[:7])
+            await on_stdout(marker[7:])
+            await asyncio.sleep(0.02)
+            return CommandResult(returncode=0, stdout=marker, stderr="")
+
+    sampler = _IsolatedRecordingSampler(events, agent_completion_marker=marker)
+    runner = _FinalProbeRunner()
+    adapter = CodexAdapter(
+        runner=runner,
+        usage_sampler=sampler,
+        agent_wall_timeout_seconds=0.01,
+        agent_idle_timeout_seconds=0.01,
+    )
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated_final_usage_outside_timeout",
+        isolated_worktree_host_path=Path(
+            "/worktrees/ws_isolated_final_usage_outside_timeout/reask"
+        ),
+    )
+
+    assert result.ok
+    assert result.stdout == ""
+    assert runner.watchdog_timeouts == [(None, None)]
+    assert events == ["start_isolated", "baseline", "agent", "finalize:success"]
+
+
+@pytest.mark.unit
+async def test_isolated_agent_idle_timeout_precedes_completion_marker() -> None:
+    """The dedicated watchdog still stops a silent CLI before it completes."""
+
+    marker = "\x1eagent-complete\x1f"
+    events: list[str] = []
+
+    class _SilentAgentRunner(_EventRunner):
+        def __init__(self) -> None:
+            super().__init__(events, result=CommandResult(returncode=0, stdout="", stderr=""))
+            self.cancelled = False
+            self.watchdog_timeouts: list[tuple[float | None, float | None]] = []
+
+        async def run_streaming(
+            self,
+            args: list[str],
+            *,
+            wall_timeout_seconds: float | None = None,
+            idle_timeout_seconds: float | None = None,
+            **_kwargs: Any,
+        ) -> CommandResult:
+            self._events.append("agent")
+            self.streaming_calls.append(list(args))
+            self.watchdog_timeouts.append((wall_timeout_seconds, idle_timeout_seconds))
+            if wall_timeout_seconds is not None or idle_timeout_seconds is not None:
+                return CommandResult(
+                    returncode=124,
+                    stdout="",
+                    stderr="command idle timeout after 0.01s without output\n",
+                    reason_code=base_module.COMMAND_IDLE_TIMEOUT_REASON,
+                )
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    sampler = _IsolatedRecordingSampler(events, agent_completion_marker=marker)
+    runner = _SilentAgentRunner()
+    adapter = CodexAdapter(
+        runner=runner,
+        usage_sampler=sampler,
+        agent_wall_timeout_seconds=1.0,
+        agent_idle_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_idle_timeout",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_idle_timeout/reask"),
+        )
+
+    assert excinfo.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.cancelled
+    assert runner.watchdog_timeouts == [(None, None)]
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
+    assert events[-1] == "finalize:timeout"
 
 
 @pytest.mark.unit
