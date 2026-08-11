@@ -460,18 +460,19 @@ async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
 
 
 @pytest.mark.unit
-async def test_isolated_reask_worktree_bounds_creation_command(
+async def test_isolated_reask_worktree_bounds_creation_and_checkout_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An included special file cannot block isolated-worktree creation forever."""
+    """An included special file cannot block re-ask worktree setup forever."""
     worktree = _init_real_worktree(tmp_path, "ws_reask_creation_timeout")
 
     class _RecordingLocalCommandRunner(_LocalCommandRunner):
         """Capture the timeout used for the linked-worktree creation command."""
 
         def __init__(self) -> None:
-            self.timeouts: list[float | None] = []
+            self.creation_timeouts: list[float | None] = []
+            self.checkout_timeouts: list[float | None] = []
 
         async def run(
             self,
@@ -481,7 +482,9 @@ async def test_isolated_reask_worktree_bounds_creation_command(
         ) -> CommandResult:
             """Record the requested timeout and run the real Git command."""
             if "worktree" in args and "add" in args:
-                self.timeouts.append(timeout_seconds)
+                self.creation_timeouts.append(timeout_seconds)
+            if "checkout" in args:
+                self.checkout_timeouts.append(timeout_seconds)
             return await super().run(args, timeout_seconds=timeout_seconds)
 
     command_runner = _RecordingLocalCommandRunner()
@@ -499,7 +502,12 @@ async def test_isolated_reask_worktree_bounds_creation_command(
         restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
     )
 
-    assert command_runner.timeouts == [comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS]
+    assert command_runner.creation_timeouts == [
+        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
+    ]
+    assert command_runner.checkout_timeouts == [
+        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
+    ]
     assert reask_worktree is not None
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
 

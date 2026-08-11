@@ -358,7 +358,8 @@ async def _create_isolated_reask_worktree(
                 "--no-recurse-submodules",
                 "--detach",
                 restore_ref,
-            )
+            ),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
     except asyncio.CancelledError:
         # The linked worktree is registered before its checkout, so cleanup
