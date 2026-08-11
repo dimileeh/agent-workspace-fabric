@@ -16,6 +16,7 @@ import pytest
 from awf.adapters import base as base_module
 from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest, AgentRuntimeExecResult
 from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, COMMAND_TIMEOUT_REASON, CommandResult
 from awf.db.enums import AgentRuntime
 
@@ -181,6 +182,24 @@ class _EventRunner:
         return self._result
 
 
+class _CancellingHostedExecutor:
+    """Hosted executor double that records cancellation from the adapter watchdog."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, _request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return AgentRuntimeExecResult(returncode=0, stdout="ok", stderr="")
+
+
 @pytest.mark.unit
 async def test_sampler_started_before_agent_and_finalized_on_success() -> None:
     events: list[str] = []
@@ -201,6 +220,32 @@ async def test_sampler_started_before_agent_and_finalized_on_success() -> None:
     assert sampler.start_kwargs["provider"] is AgentRuntime.codex
     assert sampler.start_kwargs["compose_project"] == "proj"
     assert sampler.start_kwargs["workspace_id"] == "ws_ok"
+
+
+@pytest.mark.unit
+async def test_hosted_adapter_cancellation_cancels_its_executor_task() -> None:
+    """Cancelling a hosted run must also stop the in-flight executor operation."""
+    executor = _CancellingHostedExecutor()
+    adapter = CodexAdapter(
+        runner=_EventRunner([], result=CommandResult(returncode=0, stdout="", stderr="")),
+        runtime_executor=executor,
+    )
+
+    run = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_hosted_cancelled",
+        )
+    )
+    await executor.started.wait()
+    run.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    await asyncio.wait_for(executor.cancelled.wait(), timeout=1)
 
 
 @pytest.mark.unit
@@ -466,6 +511,88 @@ async def test_isolated_baseline_capture_failure_does_not_mask_agent_run() -> No
     assert events[:4] == ["start_isolated", "baseline", "startup", "agent"]
     assert events[-2:] == ["cleanup", "finalize:success"]
     assert events[-3].startswith("capture:awf-reask-")
+
+
+@pytest.mark.unit
+async def test_isolated_baseline_capture_cancellation_propagates() -> None:
+    """Shutdown cancellation is never converted into a best-effort sampler warning."""
+    events: list[str] = []
+    sampler = _IsolatedRecordingSampler(events, baseline_error=asyncio.CancelledError())
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_baseline_cancelled",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_baseline_cancelled/reask"),
+        )
+
+    assert events[:2] == ["start_isolated", "baseline"]
+    assert "agent" not in events
+
+
+@pytest.mark.unit
+async def test_isolated_agent_uses_legacy_runner_when_streaming_is_unavailable() -> None:
+    """Clarification still runs and returns its output with runners lacking watchdog streaming."""
+    events: list[str] = []
+
+    class _LegacyRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.calls.append(args)
+            return CommandResult(returncode=0, stdout="legacy stdout", stderr="legacy stderr")
+
+    class _Sinks:
+        def __init__(self) -> None:
+            self.stdout: list[str] = []
+            self.stderr: list[str] = []
+
+        async def write_stdout(self, value: str) -> None:
+            self.stdout.append(value)
+
+        async def write_stderr(self, value: str) -> None:
+            self.stderr.append(value)
+
+        async def close(self) -> None:
+            return None
+
+    class _LogStore:
+        def __init__(self) -> None:
+            self.sinks = _Sinks()
+
+        async def open_command_streams(self, **_kwargs: Any) -> _Sinks:
+            return self.sinks
+
+    runner = _LegacyRunner()
+    log_store = _LogStore()
+    adapter = CodexAdapter(
+        runner=runner,
+        usage_sampler=_IsolatedRecordingSampler(events),
+        log_store=log_store,
+    )
+
+    result = await adapter.run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        prompt="do work",
+        workspace_id="ws_isolated_legacy_runner",
+        isolated_worktree_host_path=Path("/worktrees/ws_isolated_legacy_runner/reask"),
+    )
+
+    assert result.ok
+    assert result.stdout == "legacy stdout"
+    assert len(runner.calls) == 3
+    assert "--detach" in runner.calls[0]
+    assert "agent-cli" in runner.calls[1]
+    assert runner.calls[2][:3] == ["docker", "container", "rm"]
+    assert events[:2] == ["start_isolated", "baseline"]
+    assert log_store.sinks.stdout == ["legacy stdout"]
+    assert log_store.sinks.stderr == ["legacy stderr"]
 
 
 @pytest.mark.unit

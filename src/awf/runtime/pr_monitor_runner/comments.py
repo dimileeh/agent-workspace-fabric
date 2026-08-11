@@ -20,12 +20,10 @@ from awf.common.companions import (
     isolated_reask_worktree_liveness_lock_path,
 )
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
-    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -54,6 +52,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _owned_paths_for_prompt_or_empty as _owned_paths_for_prompt_or_empty,
+)
+from awf.runtime.pr_monitor_runner.comments_source_git import (
+    _pinned_linked_worktree_command,
+    _reask_source_mirror_command,
+    _rev_parse_pinned_reask_source_head,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -114,54 +117,6 @@ class _IsolatedReaskWorktree:
 
 class _IsolatedReaskWorktreeCleanupFailedError(_MonitorPolicyBlockedError):
     """Raised when an unsuccessfully created re-ask checkout cannot be removed."""
-
-
-def _pinned_linked_worktree_command(
-    worktree_path: Path,
-    source_git_dir: Path,
-    *args: str,
-) -> list[str]:
-    """Build a command that ignores the primary checkout's mutable `.git` file."""
-    return [
-        "git",
-        *git_safe_directory_config_args(worktree_path),
-        "--git-dir",
-        str(source_git_dir),
-        "--work-tree",
-        str(worktree_path),
-        *args,
-    ]
-
-
-def _pinned_git_dir_command(git_dir: Path, *args: str) -> list[str]:
-    """Build a command against source Git metadata that validation pinned."""
-    return ["git", "--git-dir", str(git_dir), *args]
-
-
-def _reask_source_mirror_command(
-    worktree_path: Path,
-    source_mirror: Path | None,
-    *args: str,
-) -> list[str]:
-    """Build a source-mirror command without consulting the source `.git` when pinned."""
-    if source_mirror is not None:
-        return _pinned_git_dir_command(source_mirror, *args)
-    return git_worktree_command(worktree_path, *args)
-
-
-async def _rev_parse_pinned_reask_source_head(
-    runner: PullRequestMonitorRunner,
-    source_git_dir: Path,
-) -> str | None:
-    """Resolve a source HEAD through its pinned linked-worktree admin directory."""
-    result = await runner._deps.runner.run(
-        _pinned_git_dir_command(source_git_dir, "rev-parse", "HEAD"),
-        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-        env=git_env_without_object_lookup_overrides(),
-    )
-    if not result.ok:
-        return None
-    return result.stdout.strip() or None
 
 
 async def _prepare_reask_primary_worktree(
@@ -234,7 +189,11 @@ async def _check_reask_primary_worktree_clean(
         return check.message or "Primary worktree changed during the NEEDS_HUMAN reason re-ask."
 
     current_head = (
-        await _rev_parse_pinned_reask_source_head(runner, source_git_dir)
+        await _rev_parse_pinned_reask_source_head(
+            runner,
+            source_git_dir,
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+        )
         if source_git_dir is not None
         else await runner._rev_parse_head(worktree_path)
     )
@@ -1047,6 +1006,7 @@ async def _enforce_needs_human_reason(
                     reask_restore_ref = await _rev_parse_pinned_reask_source_head(
                         runner,
                         source_git_dir,
+                        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
                     )
                 else:
                     reask_restore_ref = await runner._rev_parse_head(

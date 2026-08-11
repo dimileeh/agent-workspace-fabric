@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 from collections.abc import AsyncIterator
@@ -21,6 +22,8 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.service import gc_reconcile
 from awf.service.gc_classify import (
+    PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
     PATH_DELETE_PERMISSION_DENIED,
     PATH_DELETED,
 )
@@ -696,6 +699,85 @@ def test_pre_checkout_reaper_rechecks_liveness_before_unlink(
     assert lock_path.exists()
 
 
+@pytest.mark.unit
+def test_pre_checkout_reaper_keeps_markers_when_the_lock_directory_cannot_be_scanned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable marker directory is preserved rather than guessed to be stale."""
+    lock_dir = tmp_path / "git" / "worktrees" / ".awf-isolated-reask-locks"
+    lock_dir.mkdir(parents=True)
+    original_glob = Path.glob
+
+    def _unreadable_glob(path: Path, pattern: str):
+        if path == lock_dir and pattern == "*.lock":
+            raise OSError("lock directory is unreadable")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", _unreadable_glob)
+
+    gc_reconcile._reap_stale_pre_checkout_isolated_reask_liveness_locks(tmp_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_snapshot_reaper_skips_metadata_when_it_disappears_during_age_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot that races with external cleanup never aborts the whole reaper."""
+    snapshot = _make_dir(
+        tmp_path / "git" / ".awf-clarification-git-racing--snapshot",
+        age_seconds=7_200.0,
+        now=10_000.0,
+    )
+    original_stat = Path.stat
+    snapshot_stat_calls = 0
+
+    def _vanishing_snapshot_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal snapshot_stat_calls
+        if path == snapshot:
+            snapshot_stat_calls += 1
+            if snapshot_stat_calls == 3:
+                raise OSError("snapshot disappeared")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _vanishing_snapshot_stat)
+
+    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(  # noqa: SLF001
+        tmp_path,
+        now=10_000.0,
+        min_age_hours=0,
+    )
+
+    assert snapshot_stat_calls == 3
+
+
+@pytest.mark.unit
+def test_snapshot_reaper_retains_snapshot_when_filesystem_removal_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed stale-snapshot removal is logged and leaves the source metadata recoverable."""
+    snapshot = _make_dir(
+        tmp_path / "git" / ".awf-clarification-git-legacy--snapshot",
+        age_seconds=7_200.0,
+        now=10_000.0,
+    )
+
+    def _raise_removal_error(_path: Path) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(gc_reconcile.shutil, "rmtree", _raise_removal_error)
+
+    gc_reconcile._reap_stale_clarification_git_metadata_snapshots(  # noqa: SLF001
+        tmp_path,
+        now=10_000.0,
+        min_age_hours=0,
+    )
+
+    assert snapshot.exists()
+
+
 async def test_reap_removes_interrupted_reask_worktree_through_git_metadata(
     tmp_path: Path,
 ) -> None:
@@ -916,6 +998,39 @@ async def test_already_removed_dir_is_idempotent_success(
     assert result.status == "ok"
     assert result.reaped_count == 1
     assert result.reaped[0].status == "already_removed"
+
+
+@pytest.mark.parametrize(
+    ("error_number", "expected_error", "expected_reason"),
+    [
+        (errno.ENOENT, None, PATH_ALREADY_REMOVED),
+        (errno.EACCES, "[Errno 13] Permission denied", PATH_DELETE_PERMISSION_DENIED),
+        (errno.EIO, "[Errno 5] Input/output error", PATH_DELETE_FAILED),
+    ],
+)
+def test_gc_path_build_failure_preserves_idempotency_and_reason_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    expected_error: str | None,
+    expected_reason: str,
+) -> None:
+    """A scan-time filesystem error is translated before it can abort a GC sweep."""
+
+    def _unreadable_gc_path(_kind: str, _path: Path) -> object:
+        raise OSError(error_number, os.strerror(error_number))
+
+    monkeypatch.setattr(gc_reconcile, "_gc_path", _unreadable_gc_path)
+
+    deleted, error, reason_code = gc_reconcile.build_and_delete_gc_path(
+        "worktree",
+        tmp_path / "ws_orphan",
+        work_dir=tmp_path,
+    )
+
+    assert deleted is False
+    assert error == expected_error
+    assert reason_code == expected_reason
 
 
 @pytest.mark.usefixtures("engine")

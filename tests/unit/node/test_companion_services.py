@@ -14,6 +14,7 @@ from awf.node.companion_services import (
     CompanionEnvironmentSecretRef,
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
+    _hosted_companion_repo_url,
     companion_service_from_materialized,
     companion_specs_from_task_policy,
     optional_env_secret_compose_placeholder,
@@ -66,6 +67,22 @@ def test_companion_specs_from_task_policy_normalizes_optional_values(
     assert service.volumes == (
         ("cache-volume", "/cache"),
         (str(companion_root / "fixtures"), "/fixtures"),
+    )
+
+
+@pytest.mark.unit
+def test_hosted_companion_source_url_leaves_malformed_url_unchanged() -> None:
+    """An unparsable source URL is retained rather than risking a lossy rewrite."""
+    malformed_url = "https://[malformed-host/repository.git"
+
+    assert _hosted_companion_repo_url(malformed_url) == malformed_url
+
+
+@pytest.mark.unit
+def test_hosted_companion_source_url_keeps_passwordless_ssh_username() -> None:
+    """A passwordless SSH user is identity, not a secret, while query data is discarded."""
+    assert _hosted_companion_repo_url("ssh://git@host.example/repository.git?trace=1") == (
+        "ssh://git@host.example/repository.git"
     )
 
 

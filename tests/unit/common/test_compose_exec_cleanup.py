@@ -207,6 +207,19 @@ def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
         )
 
 
+def test_isolated_run_rejects_empty_agent_command() -> None:
+    """A clarification container must never start without its agent command."""
+    with pytest.raises(ValueError, match="cli_args"):
+        compose_exec.build_isolated_tracked_compose_run(
+            compose_project="awf_ws_123",
+            compose_file=Path("/tmp/ws/compose.yml"),
+            cli_args=[],
+            source="clarification",
+            label="codex",
+            worktree_host_path=Path("/tmp/ws/reask"),
+        )
+
+
 @pytest.mark.unit
 async def test_tracked_exec_wrapper_preserves_stdin_when_requested() -> None:
     stdin_path = Path("/tmp/awf-exec/awf_stdin_probe/stdin")

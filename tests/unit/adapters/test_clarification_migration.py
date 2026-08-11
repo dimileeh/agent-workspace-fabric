@@ -113,3 +113,140 @@ async def test_rollback_persisted_model_network_bounds_cleanup_commands() -> Non
 
     assert result.ok
     _assert_bounded_migration_calls(runner)
+
+
+@pytest.mark.unit
+async def test_attach_persisted_model_network_returns_failed_network_creation() -> None:
+    """A failed network create is returned so callers can restore the Compose change."""
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1,
+        stderr="Error response from daemon: network awf-ws_legacy-clarification-model-net not found",
+    )
+    runner.queue_result(returncode=1, stderr="network create denied")
+
+    attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert attachment.created_network is True
+    assert result.stderr == "network create denied"
+
+
+@pytest.mark.unit
+async def test_attach_persisted_model_network_returns_sidecar_discovery_failure() -> None:
+    """A legacy re-ask does not continue when its model sidecar cannot be resolved."""
+    runner = FakeCommandRunner()
+    runner.queue_result()
+    runner.queue_result(returncode=1, stderr="compose ps unavailable")
+
+    _attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert result.stderr == "compose ps unavailable"
+
+
+@pytest.mark.unit
+async def test_attach_persisted_model_network_preserves_reconnect_failure() -> None:
+    """An endpoint that cannot be detached is reported instead of silently retried."""
+    runner = FakeCommandRunner()
+    runner.queue_result()
+    runner.queue_result(stdout="stateful-model-container\n")
+    runner.queue_result(
+        returncode=1,
+        stderr="endpoint with name stateful-model-container already exists in network",
+    )
+    runner.queue_result(returncode=1, stderr="network disconnect denied")
+
+    attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert attachment.reconnecting_endpoints == [("stateful-model-container", "ollama-sidecar")]
+    assert result.stderr == "network disconnect denied"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("attachment", "operation"),
+    [
+        pytest.param(
+            PersistedClarificationModelNetworkAttachment(
+                network_name="awf-ws_legacy-clarification-model-net",
+                connected_container_ids=["model-container"],
+            ),
+            "disconnect",
+            id="disconnect",
+        ),
+        pytest.param(
+            PersistedClarificationModelNetworkAttachment(
+                network_name="awf-ws_legacy-clarification-model-net",
+                reconnecting_endpoints=[("model-container", "ollama-sidecar")],
+            ),
+            "connect",
+            id="reconnect",
+        ),
+        pytest.param(
+            PersistedClarificationModelNetworkAttachment(
+                network_name="awf-ws_legacy-clarification-model-net",
+                created_network=True,
+            ),
+            "rm",
+            id="remove-network",
+        ),
+    ],
+)
+async def test_rollback_persisted_model_network_reports_runner_exceptions(
+    attachment: PersistedClarificationModelNetworkAttachment,
+    operation: str,
+) -> None:
+    """Unexpected Docker client errors are returned as durable rollback failures."""
+
+    class _RaisingRunner:
+        async def run(self, args: list[str], **_kwargs: object):  # type: ignore[no-untyped-def]
+            assert operation in args
+            raise RuntimeError(f"{operation} failed")
+
+    result = await _rollback_persisted_clarification_model_network(
+        _RaisingRunner(),  # type: ignore[arg-type]
+        attachment=attachment,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == f"RuntimeError: {operation} failed"
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_treats_absent_network_as_complete() -> None:
+    """A concurrent Docker network removal is an idempotent rollback success."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1,
+        stdout="network was already removed",
+        stderr=f"Error response from daemon: network {network_name} not found",
+    )
+
+    result = await _rollback_persisted_clarification_model_network(
+        runner,
+        attachment=PersistedClarificationModelNetworkAttachment(
+            network_name=network_name,
+            created_network=True,
+        ),
+    )
+
+    assert result.ok
+    assert result.stdout == "network was already removed"
