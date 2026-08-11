@@ -1253,7 +1253,10 @@ class AgentAdapter(ABC):
                     else None
                 )
                 if startup_args is not None:
-                    startup_result = await self._runner.run(startup_args)
+                    startup_result = await self._runner.run(
+                        startup_args,
+                        timeout_seconds=self._agent_wall_timeout_seconds,
+                    )
                     if not startup_result.ok:
                         result = startup_result
                     elif run_streaming is not None:

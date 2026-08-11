@@ -394,16 +394,28 @@ async def test_isolated_agent_output_cannot_disable_direct_exec_watchdog() -> No
 
 
 @pytest.mark.unit
-async def test_isolated_container_start_failure_cleans_up_without_running_agent() -> None:
-    """A detached-container startup failure cannot leave the re-ask behind."""
+async def test_isolated_container_start_timeout_cleans_up_without_running_agent() -> None:
+    """A bounded detached startup cannot leave the re-ask container behind."""
     events: list[str] = []
 
     class _StartFailureRunner(_EventRunner):
-        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        def __init__(self) -> None:
+            super().__init__(events, result=CommandResult(returncode=0, stdout="", stderr=""))
+            self.startup_timeouts: list[float | None] = []
+
+        async def run(
+            self, args: list[str], *, timeout_seconds: float | None = None, **_kwargs: Any
+        ) -> CommandResult:
             self.calls.append(list(args))
             if "--detach" in args:
                 self._events.append("startup")
-                return CommandResult(returncode=1, stdout="", stderr="container failed to start")
+                self.startup_timeouts.append(timeout_seconds)
+                return CommandResult(
+                    returncode=124,
+                    stdout="",
+                    stderr="command timed out after 7s\n",
+                    reason_code=COMMAND_TIMEOUT_REASON,
+                )
             self._events.append("cleanup")
             return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
 
@@ -411,10 +423,14 @@ async def test_isolated_container_start_failure_cleans_up_without_running_agent(
             raise AssertionError("agent exec must not run after container startup failure")
 
     sampler = _IsolatedRecordingSampler(events)
-    runner = _StartFailureRunner(events, result=CommandResult(returncode=0, stdout="", stderr=""))
-    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+    runner = _StartFailureRunner()
+    adapter = CodexAdapter(
+        runner=runner,
+        usage_sampler=sampler,
+        agent_wall_timeout_seconds=7.0,
+    )
 
-    with pytest.raises(AgentRunError):
+    with pytest.raises(AgentRunError) as excinfo:
         await adapter.run(
             compose_project="proj",
             compose_file=_COMPOSE_FILE,
@@ -423,8 +439,10 @@ async def test_isolated_container_start_failure_cleans_up_without_running_agent(
             isolated_worktree_host_path=Path("/worktrees/ws_isolated_start_failure/reask"),
         )
 
+    assert excinfo.value.reason_code == "AGENT_TIMEOUT"
+    assert runner.startup_timeouts == [7.0]
     assert events[:3] == ["start_isolated", "baseline", "startup"]
-    assert events[-2:] == ["cleanup", "finalize:failed"]
+    assert events[-2:] == ["cleanup", "finalize:timeout"]
     assert events[-3].startswith("capture:awf-reask-")
 
 
