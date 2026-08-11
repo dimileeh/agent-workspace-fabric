@@ -50,11 +50,19 @@ def staged_provider_auth_mounts(
             mode="ro",
             target=clarification_auth_target(mount.target, index=index),
         )
-        for index, mount in enumerate(
-            sorted(
-                provider_auth_mounts,
-                key=lambda mount: posixpath.normpath(mount.target).count("/"),
-            )
+        for index, mount in enumerate(_provider_auth_mount_staging_order(provider_auth_mounts))
+    )
+
+
+def _provider_auth_mount_staging_order(
+    provider_auth_mounts: Sequence[AuthMount],
+) -> tuple[AuthMount, ...]:
+    """Order provider mounts so parent directories stage before nested files."""
+
+    return tuple(
+        sorted(
+            provider_auth_mounts,
+            key=lambda mount: posixpath.normpath(mount.target).count("/"),
         )
     )
 
@@ -538,7 +546,9 @@ def external_account_subject_token_file_rewrites(
     staged_mounts = staged_provider_auth_mounts(provider_auth_mounts)
     staged_targets = tuple(
         (source.target, staged.target)
-        for source, staged in zip(provider_auth_mounts, staged_mounts, strict=True)
+        for source, staged in zip(
+            _provider_auth_mount_staging_order(provider_auth_mounts), staged_mounts, strict=True
+        )
     )
     return tuple(
         (path, staged_path)
@@ -605,7 +615,9 @@ def aws_profile_path_rewrites(
     staged_mounts = staged_provider_auth_mounts(provider_auth_mounts)
     staged_targets = tuple(
         (source.target, staged.target)
-        for source, staged in zip(provider_auth_mounts, staged_mounts, strict=True)
+        for source, staged in zip(
+            _provider_auth_mount_staging_order(provider_auth_mounts), staged_mounts, strict=True
+        )
     )
     return tuple(
         (path, staged_path)

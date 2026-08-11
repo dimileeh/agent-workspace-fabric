@@ -749,6 +749,76 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 
 @pytest.mark.unit
+def test_clarification_rewrites_nested_external_account_subject_token_mount(
+    tmp_path: Path,
+) -> None:
+    """Nested external-account mounts use their own staged target after sorting."""
+    google_directory = tmp_path / "google"
+    google_directory.mkdir()
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
+    parent_target = "/run/awf/secrets/google"
+    subject_token_target = f"{parent_target}/subject-token"
+    adc_target = f"{parent_target}/external-account-adc.json"
+    (google_directory / "external-account-adc.json").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    parent_mount = AuthMount(source=str(google_directory), target=parent_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(subject_token), target=subject_token_target, mode="ro"
+    )
+    environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+    )
+
+    assert external_account_subject_token_file_rewrites(
+        (subject_token_mount, parent_mount),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/1"),)
+
+
+@pytest.mark.unit
+def test_clarification_does_not_rewrite_nested_aws_profile_credential_mount(
+    tmp_path: Path,
+) -> None:
+    """Nested AWS profile mounts retain their unchanged agent-home target."""
+    aws_directory = tmp_path / "aws"
+    aws_directory.mkdir()
+    helper = tmp_path / "aws-helper"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    helper_target = "/home/agent/.aws/bin/aws-helper"
+    (aws_directory / "config").write_text(
+        f"[profile awf-bedrock]\ncredential_process = {helper_target} --json\n",
+        encoding="utf-8",
+    )
+    aws_profile = AuthMount(source=str(aws_directory), target="/home/agent/.aws", mode="ro")
+    helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+    )
+
+    assert (
+        aws_profile_path_rewrites(
+            (helper_mount, aws_profile),
+            agent_environment=environment,
+            mirror_target="/host/awf/git/mirrors/repo.git",
+            agent_runtime=AgentRuntime.claude_code,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("agent_runtime", "vertex_environment", "environment_id", "expected_aws_environment"),
     (
