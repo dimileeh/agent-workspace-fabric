@@ -787,8 +787,8 @@ def _notify_human_reason(
 def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     for item_id in (
         [t.thread_id for t in status.unresolved_inline_threads]
-        + [t.thread_id for t in status.outdated_unresolved_inline_threads]
         + [c.comment_id for c in status.unresolved_review_comments]
+        + [t.thread_id for t in status.outdated_unresolved_inline_threads]
     ):
         if (
             state.threads_addressed_ids.get(item_id) == "needs_human"

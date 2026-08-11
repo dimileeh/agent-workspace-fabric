@@ -173,6 +173,48 @@ class TestNotificationAndGraceHelpers:
         )
 
     @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_review_reason_over_outdated_thread(
+        self,
+    ) -> None:
+        """Current review feedback must outrank an outdated thread diagnosis."""
+        current_review = ReviewComment(
+            comment_id="C-current",
+            body_excerpt="a maintainer must approve this approach",
+            author="dimileeh",
+        )
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                current_review.comment_id: "needs_human",
+                _needs_human_reason_state_key(current_review.comment_id): (
+                    "the current review needs a maintainer decision"
+                ),
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(current_review,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                state,
+            )
+            == "the current review needs a maintainer decision"
+        )
+
+    @pytest.mark.unit
     def test_notify_human_reason_keeps_outdated_thread_diagnosis(self) -> None:
         """An outdated human escalation retains its actionable AWF diagnosis."""
         outdated_thread = ReviewThread(
