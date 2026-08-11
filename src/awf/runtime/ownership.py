@@ -124,6 +124,25 @@ def _validated_layout_mirror_for_worktree(
     return mirror_path, linked_git_dir
 
 
+def validated_source_worktree_git_context(
+    worktree_path: Path, workspace_id: str
+) -> tuple[Path, Path]:
+    """Return the trusted mirror and admin directory for a source worktree.
+
+    Unlike ownership repair for an existing primary checkout, a caller about
+    to create another worktree must verify the reciprocal ``gitdir`` entry
+    even when Git assigned the workspace's exact identifier. Otherwise a
+    writable primary `.git` file can be redirected to another repository's
+    linked-worktree metadata before the caller resolves HEAD.
+    """
+    mirror_path, linked_git_dir = _validated_layout_mirror_for_worktree(
+        worktree_path,
+        workspace_id,
+    )
+    _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
+    return mirror_path, linked_git_dir
+
+
 def _repair_agent_runtime_ownership_in_thread(
     worktree_path: Path,
     workspace_id: str,

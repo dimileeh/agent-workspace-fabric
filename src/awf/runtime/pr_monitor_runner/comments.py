@@ -20,10 +20,12 @@ from awf.common.companions import (
     isolated_reask_worktree_liveness_lock_path,
 )
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -38,6 +40,7 @@ from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
+    validated_source_worktree_git_context,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -103,6 +106,8 @@ class _IsolatedReaskWorktree:
 
     source_worktree: Path
     path: Path
+    source_mirror: Path | None = None
+    source_git_dir: Path | None = None
     liveness_lock_fd: int | None = None
     liveness_lock_path: Path | None = None
 
@@ -111,18 +116,72 @@ class _IsolatedReaskWorktreeCleanupFailedError(_MonitorPolicyBlockedError):
     """Raised when an unsuccessfully created re-ask checkout cannot be removed."""
 
 
+def _pinned_linked_worktree_command(
+    worktree_path: Path,
+    source_git_dir: Path,
+    *args: str,
+) -> list[str]:
+    """Build a command that ignores the primary checkout's mutable `.git` file."""
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "--git-dir",
+        str(source_git_dir),
+        "--work-tree",
+        str(worktree_path),
+        *args,
+    ]
+
+
+def _pinned_git_dir_command(git_dir: Path, *args: str) -> list[str]:
+    """Build a command against source Git metadata that validation pinned."""
+    return ["git", "--git-dir", str(git_dir), *args]
+
+
+def _reask_source_mirror_command(
+    worktree_path: Path,
+    source_mirror: Path | None,
+    *args: str,
+) -> list[str]:
+    """Build a source-mirror command without consulting the source `.git` when pinned."""
+    if source_mirror is not None:
+        return _pinned_git_dir_command(source_mirror, *args)
+    return git_worktree_command(worktree_path, *args)
+
+
+async def _rev_parse_pinned_reask_source_head(
+    runner: PullRequestMonitorRunner,
+    source_git_dir: Path,
+) -> str | None:
+    """Resolve a source HEAD through its pinned linked-worktree admin directory."""
+    result = await runner._deps.runner.run(
+        _pinned_git_dir_command(source_git_dir, "rev-parse", "HEAD"),
+        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
+
+
 async def _prepare_reask_primary_worktree(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
+    source_git_dir: Path | None = None,
 ) -> None:
     """Preserve the primary-worktree cleanliness guard before a re-ask starts."""
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
+        command = (
+            _pinned_linked_worktree_command(worktree_path, source_git_dir, *args)
+            if source_git_dir is not None
+            else git_worktree_command(worktree_path, *args)
+        )
         return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args),
+            [*command[:1], "-c", "core.fsmonitor=false", *command[1:]],
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
 
@@ -149,14 +208,20 @@ async def _check_reask_primary_worktree_clean(
     *,
     worktree_path: Path,
     restore_ref: str,
+    source_git_dir: Path | None = None,
 ) -> str | None:
     """Report primary-worktree changes after a re-ask without modifying them."""
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
+        command = (
+            _pinned_linked_worktree_command(worktree_path, source_git_dir, *args)
+            if source_git_dir is not None
+            else git_worktree_command(worktree_path, *args)
+        )
         return await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args),
+            [*command[:1], "-c", "core.fsmonitor=false", *command[1:]],
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         )
 
@@ -168,7 +233,11 @@ async def _check_reask_primary_worktree_clean(
     if not check.clean:
         return check.message or "Primary worktree changed during the NEEDS_HUMAN reason re-ask."
 
-    current_head = await runner._rev_parse_head(worktree_path)
+    current_head = (
+        await _rev_parse_pinned_reask_source_head(runner, source_git_dir)
+        if source_git_dir is not None
+        else await runner._rev_parse_head(worktree_path)
+    )
     if current_head != restore_ref:
         return "Primary worktree HEAD changed during the NEEDS_HUMAN reason re-ask."
     return None
@@ -228,15 +297,23 @@ async def _create_isolated_reask_worktree(
     *,
     worktree_path: Path,
     restore_ref: str,
+    source_mirror: Path | None = None,
+    source_git_dir: Path | None = None,
     on_cleanup_failure_after_cancellation: Callable[[str], Coroutine[Any, Any, None]] | None = None,
 ) -> _IsolatedReaskWorktree | None:
     """Create a temporary tracked-only checkout for a local clarification re-ask."""
+    if (source_mirror is None) != (source_git_dir is None):
+        raise ValueError("re-ask source mirror and admin directory must be provided together")
     if not (worktree_path / ".git").exists():
         # Lightweight test doubles do not have a worktree that can contain side
         # effects. Real AWF worktrees always contain a .git control file.
         return None
 
-    await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
+    await _prepare_reask_primary_worktree(
+        runner,
+        worktree_path=worktree_path,
+        source_git_dir=source_git_dir,
+    )
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
     path = worktree_path.parent / (
@@ -252,6 +329,8 @@ async def _create_isolated_reask_worktree(
     reask_worktree = _IsolatedReaskWorktree(
         source_worktree=worktree_path,
         path=path,
+        source_mirror=source_mirror,
+        source_git_dir=source_git_dir,
         liveness_lock_fd=liveness_lock_fd,
         liveness_lock_path=liveness_lock_path,
     )
@@ -288,8 +367,9 @@ async def _create_isolated_reask_worktree(
 
     try:
         create = await runner._deps.runner.run(
-            git_worktree_command(
+            _reask_source_mirror_command(
                 worktree_path,
+                source_mirror,
                 # Register the linked worktree without populating it. Its
                 # effective configuration can differ from the primary
                 # worktree through includeIf.gitdir rules, so filters must be
@@ -483,8 +563,9 @@ async def _remove_isolated_reask_worktree(
 
     try:
         remove = await runner._deps.runner.run(
-            git_worktree_command(
+            _reask_source_mirror_command(
                 reask_worktree.source_worktree,
+                reask_worktree.source_mirror,
                 "worktree",
                 "remove",
                 "--force",
@@ -898,6 +979,8 @@ async def _enforce_needs_human_reason(
     worktree_path = worktrees_root / workspace_id if isinstance(worktrees_root, Path) else None
     reask_restore_ref: str | None = None
     reask_worktree: _IsolatedReaskWorktree | None = None
+    source_mirror: Path | None = None
+    source_git_dir: Path | None = None
 
     async def _persist_cleanup_failure_after_cancellation(
         cleanup_error: str,
@@ -947,16 +1030,37 @@ async def _enforce_needs_human_reason(
             # before the clarification-only invocation. Cleanup must preserve
             # that repair and discard only clarification side effects.
             if has_git_worktree:
-                reask_restore_ref = await runner._rev_parse_head(
-                    worktree_path,
-                    timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-                )
+                if (worktree_path / ".git").is_file():
+                    try:
+                        source_mirror, source_git_dir = await asyncio.to_thread(
+                            validated_source_worktree_git_context,
+                            worktree_path,
+                            workspace_id,
+                        )
+                    except ValueError as exc:
+                        raise _MonitorPolicyBlockedError(
+                            "Could not validate the source worktree before the NEEDS_HUMAN reason re-ask.",
+                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                        ) from exc
+                    assert source_mirror is not None
+                    assert source_git_dir is not None
+                    reask_restore_ref = await _rev_parse_pinned_reask_source_head(
+                        runner,
+                        source_git_dir,
+                    )
+                else:
+                    reask_restore_ref = await runner._rev_parse_head(
+                        worktree_path,
+                        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                    )
                 if reask_restore_ref is None:
                     raise RuntimeError("could not capture the worktree restore ref")
                 reask_worktree = await _create_isolated_reask_worktree(
                     runner,
                     worktree_path=worktree_path,
                     restore_ref=reask_restore_ref,
+                    source_mirror=source_mirror,
+                    source_git_dir=source_git_dir,
                     on_cleanup_failure_after_cancellation=_persist_cleanup_failure_after_cancellation,
                 )
             elif getattr(runner, "_deps", None) is not None:
@@ -1023,10 +1127,15 @@ async def _enforce_needs_human_reason(
                 message=isolated_cleanup_failure,
             )
             return isolated_cleanup_failure, True
+        primary_check_kwargs: dict[str, Any] = {
+            "worktree_path": worktree_path,
+            "restore_ref": reask_restore_ref,
+        }
+        if reask_worktree is not None and reask_worktree.source_git_dir is not None:
+            primary_check_kwargs["source_git_dir"] = reask_worktree.source_git_dir
         primary_check_failure = await _check_reask_primary_worktree_clean(
             runner,
-            worktree_path=worktree_path,
-            restore_ref=reask_restore_ref,
+            **primary_check_kwargs,
         )
         if primary_check_failure is None:
             return None, False
