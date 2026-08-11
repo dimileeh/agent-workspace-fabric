@@ -91,6 +91,7 @@ _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEAN
 # Git expands include.path before creating the linked worktree. The writable
 # mirror can therefore point an include at a special file that never responds.
 _ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS = 30.0
+_ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 30.0
 _FILTER_DRIVER_CONFIG_KEY_RE = re.compile(
     r"^(filter\.[A-Za-z0-9][A-Za-z0-9._-]*)\.(?:smudge|process)$"
 )
@@ -484,7 +485,8 @@ async def _remove_isolated_reask_worktree(
                 "remove",
                 "--force",
                 str(reask_worktree.path),
-            )
+            ),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS,
         )
         if remove.ok:
             return None

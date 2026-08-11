@@ -20,6 +20,37 @@ from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_removal_is_bounded() -> None:
+    """A hostile Git config cannot make re-ask cleanup wait indefinitely."""
+
+    class _RecordingCommandRunner:
+        """Record the timeout supplied to the worktree-removal command."""
+
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            """Record the command deadline and report successful cleanup."""
+            self.timeouts.append(timeout_seconds)
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    command_runner = _RecordingCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    reask_worktree = comments._IsolatedReaskWorktree(
+        source_worktree=Path("/worktree"),
+        path=Path("/.awf-needs-human-reask-test"),
+    )
+
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+    assert command_runner.timeouts == [comments._ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS]
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_removal_failure_is_reported() -> None:
     """A failed isolated-checkout teardown remains a policy-blocking cleanup failure."""
     command_runner = FakeCommandRunner()
