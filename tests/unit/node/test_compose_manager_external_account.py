@@ -393,6 +393,91 @@ def test_clarification_rewrites_executable_subject_token_path(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operator", (":-", "-", ":=", "=", ":+"))
+def test_clarification_rewrites_defaulted_executable_token_path(
+    manager: ComposeManager,
+    tmp_path: Path,
+    operator: str,
+) -> None:
+    """Parameter-expanded executable paths point at the staged fallback token."""
+    source_root = tmp_path / "clarification-source"
+    source_root.mkdir()
+    helper_target = "/run/awf/secrets/google/external-account-helper"
+    fallback_token_target = "/run/awf/secrets/google/fallback-token"
+    staged_adc = tmp_path / "clarification-auth" / "adc.json"
+    staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
+    staged_fallback_token = tmp_path / "clarification-auth" / "fallback-token"
+    (source_root / "0").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {
+                    "executable": {
+                        "command": (
+                            f"sh -c '{helper_target} --token-file "
+                            f'"${{MY_TOKEN_FILE{operator}{fallback_token_target}}}"\''
+                        )
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source_root / "1").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source_root / "2").write_text("fallback-token", encoding="utf-8")
+    entrypoint = yaml.safe_load(
+        manager.render(
+            _spec(
+                tmp_path,
+                clarification_enabled=True,
+                clarification_agent_environment=(
+                    ("GOOGLE_APPLICATION_CREDENTIALS", str(staged_adc)),
+                ),
+                clarification_auth_mounts=(
+                    AuthMount(source="/host/adc.json", target=str(staged_adc)),
+                    AuthMount(source="/host/helper", target=str(staged_helper)),
+                    AuthMount(
+                        source="/host/fallback-token",
+                        target=str(staged_fallback_token),
+                    ),
+                ),
+                clarification_external_account_subject_token_file_rewrites=(
+                    (helper_target, str(staged_helper)),
+                    (fallback_token_target, str(staged_fallback_token)),
+                ),
+            )
+        ).compose_file.read_text()
+    )["services"]["clarification"]["entrypoint"]
+    script = entrypoint[2].replace("/run/awf/clarification-auth", str(source_root))
+
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GOOGLE_APPLICATION_CREDENTIALS": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_adc),
+            "AWF_CLARIFICATION_AUTH_TARGET_1": str(staged_helper),
+            "AWF_CLARIFICATION_AUTH_TARGET_2": str(staged_fallback_token),
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+                [
+                    [helper_target, str(staged_helper)],
+                    [fallback_token_target, str(staged_fallback_token)],
+                ]
+            ),
+        },
+    )
+
+    executable = json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"][
+        "executable"
+    ]
+    assert executable["command"] == (
+        f"sh -c '{staged_helper} --token-file "
+        f'"${{MY_TOKEN_FILE{operator}{staged_fallback_token}}}"\''
+    )
+
+
+@pytest.mark.unit
 def test_legacy_clarification_entrypoint_rewrites_external_account_executable_paths(
     tmp_path: Path,
 ) -> None:

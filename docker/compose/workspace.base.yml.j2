@@ -148,6 +148,9 @@ services:
             executable_path_pattern = re.compile(
               r"(?<![^\s'\"|&;()<>=])(?:(?P<quote>['\"])(?P<quoted>/[^'\"]+)(?P=quote)|(?P<unquoted>/(?:\\.|[^\s'\"|&;()<>\\])+))(?![^\s'\"|&;()<>])"
             )
+            defaulted_environment_path_pattern = re.compile(
+              r"(?<!\\)(?P<prefix>\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=+]))(?P<path>/[^}]+)(?P<suffix>\})"
+            )
 
             def rewrite_executable_path(match):
               path = match.group("quoted") or match.group("unquoted")
@@ -161,6 +164,9 @@ services:
                 return match.group(0) if rewritten_path == path else shlex.quote(rewritten_path)
               return f"{quote}{rewrite_path(path)}{quote}"
 
+            def rewrite_defaulted_environment_path(match):
+              return f"{match.group('prefix')}{rewrite_path(match.group('path'))}{match.group('suffix')}"
+
             subject_token_file = credential_source.get("file")
             if isinstance(subject_token_file, str):
               credential_source["file"] = rewrite_path(subject_token_file)
@@ -170,6 +176,9 @@ services:
               if isinstance(command, str):
                 executable["command"] = executable_path_pattern.sub(
                   rewrite_executable_path, command
+                )
+                executable["command"] = defaulted_environment_path_pattern.sub(
+                  rewrite_defaulted_environment_path, executable["command"]
                 )
               output_file = executable.get("output_file")
               if isinstance(output_file, str):
