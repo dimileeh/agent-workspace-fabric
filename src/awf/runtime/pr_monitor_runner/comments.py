@@ -188,7 +188,8 @@ async def _checkout_filter_overrides(
             "--name-only",
             "--get-regexp",
             r"^filter\..*\.(smudge|process)$",
-        )
+        ),
+        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
     )
     if configured_filters.returncode == 1:
         return ()

@@ -460,7 +460,7 @@ async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
 
 
 @pytest.mark.unit
-async def test_isolated_reask_worktree_bounds_creation_and_checkout_commands(
+async def test_isolated_reask_worktree_bounds_creation_filter_probe_and_checkout_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -468,10 +468,11 @@ async def test_isolated_reask_worktree_bounds_creation_and_checkout_commands(
     worktree = _init_real_worktree(tmp_path, "ws_reask_creation_timeout")
 
     class _RecordingLocalCommandRunner(_LocalCommandRunner):
-        """Capture the timeout used for the linked-worktree creation command."""
+        """Capture timeouts used while setting up the linked worktree."""
 
         def __init__(self) -> None:
             self.creation_timeouts: list[float | None] = []
+            self.filter_probe_timeouts: list[float | None] = []
             self.checkout_timeouts: list[float | None] = []
 
         async def run(
@@ -483,6 +484,8 @@ async def test_isolated_reask_worktree_bounds_creation_and_checkout_commands(
             """Record the requested timeout and run the real Git command."""
             if "worktree" in args and "add" in args:
                 self.creation_timeouts.append(timeout_seconds)
+            if "config" in args and "--includes" in args:
+                self.filter_probe_timeouts.append(timeout_seconds)
             if "checkout" in args:
                 self.checkout_timeouts.append(timeout_seconds)
             return await super().run(args, timeout_seconds=timeout_seconds)
@@ -503,6 +506,9 @@ async def test_isolated_reask_worktree_bounds_creation_and_checkout_commands(
     )
 
     assert command_runner.creation_timeouts == [
+        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
+    ]
+    assert command_runner.filter_probe_timeouts == [
         comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
     ]
     assert command_runner.checkout_timeouts == [
