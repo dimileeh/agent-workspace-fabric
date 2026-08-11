@@ -346,10 +346,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
-                clarification_enabled = clarification_enabled and all(
-                    companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
-                    for companion in companion_specs
-                )
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
