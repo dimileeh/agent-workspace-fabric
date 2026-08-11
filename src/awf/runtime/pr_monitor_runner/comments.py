@@ -349,6 +349,9 @@ async def _create_isolated_reask_worktree(
                 "core.fsmonitor=false",
                 *checkout_filter_overrides,
                 "checkout",
+                # A re-ask only needs the superproject checkout. Do not
+                # inherit submodule.recurse from the source worktree.
+                "--no-recurse-submodules",
                 "--detach",
                 restore_ref,
             )

@@ -396,6 +396,7 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
     checkout_commands = [args for args in command_runner.commands if "checkout" in args]
     assert len(checkout_commands) == 1
     assert "core.fsmonitor=false" in checkout_commands[0]
+    assert "--no-recurse-submodules" in checkout_commands[0]
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
 
 
