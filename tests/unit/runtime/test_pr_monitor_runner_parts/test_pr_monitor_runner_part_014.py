@@ -214,6 +214,21 @@ class TestCollectDeferItems:
         )
         assert humans == []
 
+    @pytest.mark.unit
+    def test_sync_needs_human_reason_bounds_large_reason_before_persistence(self) -> None:
+        state = MonitorState()
+
+        _sync_needs_human_reason(
+            state,
+            "C-large-reason",
+            VerdictResult(verdict="needs_human", reason="x" * 10_000),
+        )
+
+        assert (
+            state.threads_addressed_ids[_needs_human_reason_state_key("C-large-reason")]
+            == f"{'x' * 499}…"
+        )
+
 
 class TestRunnerConfigShape:
     @pytest.mark.unit

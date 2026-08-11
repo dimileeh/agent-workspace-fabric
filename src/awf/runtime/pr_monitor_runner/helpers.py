@@ -217,6 +217,7 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+_MAX_VERDICT_REASON_LENGTH = 500
 
 
 async def _record_ignored_monitor_terminal_callback(
@@ -373,7 +374,7 @@ def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResu
 
 
 def _sanitize_verdict_reason(reason: str | None) -> str | None:
-    """Redact and normalize a verdict reason, dropping unusable content."""
+    """Redact, bound, and normalize a verdict reason, dropping unusable content."""
     if reason is None:
         return None
     cleaned = redact_secrets(reason).strip()
@@ -383,6 +384,8 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
         return None
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
         return None
+    if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
+        return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
     return cleaned
 
 
