@@ -207,11 +207,21 @@ def _rewrite_scratch_exclude(exclude_path: Path, scratch_paths: tuple[str, ...])
             os.close(exclude_fd)
 
 
+def _path_is_within_root(path: Path, root: Path) -> bool:
+    """Return whether ``path`` resolves beneath ``root`` without trusting its spelling."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 async def apply_agent_scratch_excludes(
     *,
     run_git: GitRunner,
     worktree_path: Path,
     scratch_paths: tuple[str, ...],
+    validated_mirror_path: Path | None = None,
     logger: Any = _log,
 ) -> bool:
     """Add an agent's runtime scratch paths to the worktree's git exclude file.
@@ -221,6 +231,11 @@ async def apply_agent_scratch_excludes(
     no scratch paths is a deliberate no-op, and a failed ``rev-parse`` or an
     unwritable exclude file is logged and degraded gracefully so provisioning
     and validation proceed (the guard then simply behaves as it did before).
+
+    ``validated_mirror_path`` is the previously validated source mirror for a
+    pinned review re-ask. When supplied, Git's current path calculation must
+    remain beneath that mirror; a changed linked-worktree ``commondir`` must
+    not redirect this control-plane write to another workspace's exclude file.
 
     Concurrency: the read-modify-write below is not atomic, and ``info/exclude``
     is shared across every linked worktree of a bare mirror. For *same-agent*
@@ -255,6 +270,16 @@ async def apply_agent_scratch_excludes(
     exclude_path = Path(raw_path)
     if not exclude_path.is_absolute():
         exclude_path = worktree_path / exclude_path
+    if validated_mirror_path is not None and not _path_is_within_root(
+        exclude_path, validated_mirror_path
+    ):
+        logger.warning(
+            "agent_scratch.exclude_path_outside_validated_mirror",
+            worktree_path=str(worktree_path),
+            exclude_path=str(exclude_path),
+            validated_mirror_path=str(validated_mirror_path),
+        )
+        return False
 
     try:
         _rewrite_scratch_exclude(exclude_path, scratch_paths)

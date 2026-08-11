@@ -128,6 +128,7 @@ async def _prepare_reask_primary_worktree(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
+    source_mirror: Path | None = None,
     source_git_dir: Path | None = None,
 ) -> None:
     """Preserve the primary-worktree cleanliness guard before a re-ask starts."""
@@ -150,6 +151,7 @@ async def _prepare_reask_primary_worktree(
         run_git=_run_git,
         worktree_path=worktree_path,
         scratch_paths=getattr(adapter, "runtime_scratch_paths", ()),
+        validated_mirror_path=source_mirror,
     )
     check = await check_validation_worktree_clean(
         run_git=_run_git,
@@ -303,6 +305,7 @@ async def _create_isolated_reask_worktree(
         await _prepare_reask_primary_worktree(
             runner,
             worktree_path=worktree_path,
+            source_mirror=source_mirror,
             source_git_dir=source_git_dir,
         )
     except BaseException:

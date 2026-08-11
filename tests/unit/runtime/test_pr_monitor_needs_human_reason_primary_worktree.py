@@ -18,6 +18,48 @@ from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
 
 
 @pytest.mark.unit
+async def test_prepare_reask_primary_worktree_constrains_scratch_exclude_to_source_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned source mirror bounds the pre-re-ask exclude rewrite."""
+    apply_calls: list[dict[str, object]] = []
+
+    async def _apply_agent_scratch_excludes(**kwargs: object) -> bool:
+        apply_calls.append(kwargs)
+        return True
+
+    async def _check_validation_worktree_clean(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(reason_code=None)
+
+    monkeypatch.setattr(
+        comments,
+        "apply_agent_scratch_excludes",
+        _apply_agent_scratch_excludes,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.check_validation_worktree_clean",
+        _check_validation_worktree_clean,
+    )
+    worktree = tmp_path / "worktree"
+    source_mirror = tmp_path / "source-mirror.git"
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(runtime_scratch_paths=(".claude/worktrees/",))
+        )
+    )
+
+    await comments._prepare_reask_primary_worktree(
+        runner,
+        worktree_path=worktree,
+        source_mirror=source_mirror,
+        source_git_dir=tmp_path / "source-git-dir",
+    )
+
+    assert apply_calls[0]["validated_mirror_path"] == source_mirror
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("reask_raises", (False, True))
 async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails(
     reask_raises: bool,
