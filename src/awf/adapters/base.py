@@ -576,13 +576,17 @@ class AgentAdapter(ABC):
                         _, restore_cancellation_requested = await _await_task_despite_cancellation(
                             restore_task
                         )
-                    except OSError:
+                    except OSError as cleanup_error:
                         raise AgentRunError(
                             agent=self.name,
-                            result=model_service_update,
+                            result=CommandResult(
+                                returncode=1,
+                                stdout="",
+                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
+                            ),
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
-                        ) from None
+                        ) from cleanup_error
                     if cancellation_requested or restore_cancellation_requested:
                         raise asyncio.CancelledError
                     raise AgentRunError(

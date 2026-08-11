@@ -215,6 +215,52 @@ async def test_isolated_reask_surfaces_compose_restore_failure_after_attachment_
 
 
 @pytest.mark.unit
+async def test_isolated_reask_surfaces_compose_restore_failure_after_failed_service_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed update never conceals a failed Compose-file restoration."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+    async def _failed_service_update(*args: Any, **kwargs: Any) -> Any:
+        return kwargs["attachment"], CommandResult(
+            returncode=1, stdout="", stderr="model service update failed"
+        )
+
+    async def _successful_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _fail_restore(*args: Any, **kwargs: Any) -> None:
+        raise OSError("compose storage unavailable")
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_attach_persisted_clarification_model_network",
+        _failed_service_update,
+    )
+    monkeypatch.setattr(
+        adapter_base,
+        "_rollback_persisted_clarification_model_network",
+        _successful_rollback,
+    )
+    monkeypatch.setattr(adapter_base, "_restore_compose_file", _fail_restore)
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+    with pytest.raises(AgentRunError) as exc:
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+    assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+    assert exc.value.result.stderr == "OSError: compose storage unavailable"
+
+
+@pytest.mark.unit
 async def test_isolated_reask_surfaces_compose_restore_failure_during_upgrade_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
