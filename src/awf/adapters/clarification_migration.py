@@ -7,8 +7,12 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
+
+PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS: Final[float] = 30.0
+"""Maximum time for each Docker command in the persisted-network migration."""
 
 
 def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
@@ -79,7 +83,8 @@ async def _attach_persisted_clarification_model_network(
             )
         )
     network_inspect_result = await runner.run(
-        ["docker", "network", "inspect", attachment.network_name]
+        ["docker", "network", "inspect", attachment.network_name],
+        timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
     )
     if not network_inspect_result.ok:
         if not _network_is_absent(network_inspect_result, attachment.network_name):
@@ -99,7 +104,8 @@ async def _attach_persisted_clarification_model_network(
                 "--label",
                 "com.docker.compose.network=clarification_model_net",
                 attachment.network_name,
-            ]
+            ],
+            timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
         )
         if not network_create_result.ok:
             return attachment, network_create_result
@@ -115,7 +121,8 @@ async def _attach_persisted_clarification_model_network(
                 "ps",
                 "-q",
                 service,
-            ]
+            ],
+            timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
         )
         if not container_ids_result.ok:
             return attachment, container_ids_result
@@ -144,7 +151,8 @@ async def _attach_persisted_clarification_model_network(
                     service,
                     attachment.network_name,
                     container_id,
-                ]
+                ],
+                timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
             if network_connect_result.ok:
                 continue
@@ -152,7 +160,8 @@ async def _attach_persisted_clarification_model_network(
                 attachment.connected_container_ids.pop()
                 attachment.reconnecting_endpoints.append((container_id, service))
                 network_disconnect_result = await runner.run(
-                    ["docker", "network", "disconnect", attachment.network_name, container_id]
+                    ["docker", "network", "disconnect", attachment.network_name, container_id],
+                    timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
                 )
                 if not network_disconnect_result.ok and not _network_is_not_connected(
                     network_disconnect_result
@@ -167,7 +176,8 @@ async def _attach_persisted_clarification_model_network(
                         service,
                         attachment.network_name,
                         container_id,
-                    ]
+                    ],
+                    timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
                 )
                 if network_connect_result.ok:
                     attachment.reconnecting_endpoints.pop()
@@ -186,7 +196,8 @@ async def _rollback_persisted_clarification_model_network(
     for container_id in reversed(attachment.connected_container_ids):
         try:
             network_disconnect_result = await runner.run(
-                ["docker", "network", "disconnect", attachment.network_name, container_id]
+                ["docker", "network", "disconnect", attachment.network_name, container_id],
+                timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
@@ -207,7 +218,8 @@ async def _rollback_persisted_clarification_model_network(
                     service,
                     attachment.network_name,
                     container_id,
-                ]
+                ],
+                timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
@@ -219,7 +231,8 @@ async def _rollback_persisted_clarification_model_network(
         return CommandResult(returncode=0, stdout="", stderr="")
     try:
         network_remove_result = await runner.run(
-            ["docker", "network", "rm", attachment.network_name]
+            ["docker", "network", "rm", attachment.network_name],
+            timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         return CommandResult(returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
