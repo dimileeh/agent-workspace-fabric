@@ -153,7 +153,7 @@ async def test_rollback_persisted_model_network_continues_after_cleanup_failure(
 
 @pytest.mark.unit
 async def test_attach_persisted_model_network_returns_failed_network_creation() -> None:
-    """A failed network create is returned so callers can restore the Compose change."""
+    """A failed network create leaves ownership unconfirmed for rollback."""
     runner = FakeCommandRunner()
     runner.queue_result(
         returncode=1,
@@ -169,8 +169,35 @@ async def test_attach_persisted_model_network_returns_failed_network_creation() 
         clarification_model_services=("ollama-sidecar",),
     )
 
-    assert attachment.created_network is True
+    assert attachment.created_network is False
+    assert attachment.pending_network_creation_marker is not None
     assert result.stderr == "network create denied"
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_preserves_concurrent_creator_network() -> None:
+    """A losing create race does not remove the concurrent creator's network."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout="concurrent-attempt\\n")
+    attachment = PersistedClarificationModelNetworkAttachment(
+        network_name=network_name,
+        pending_network_creation_marker="this-attempt",
+    )
+
+    result = await _rollback_persisted_clarification_model_network(runner, attachment=attachment)
+
+    assert result.ok
+    assert [call.args for call in runner.calls] == [
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            '{{ index .Labels "io.awf.clarification-network-creation" }}',
+            network_name,
+        ]
+    ]
 
 
 @pytest.mark.unit

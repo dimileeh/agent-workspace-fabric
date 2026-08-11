@@ -8,11 +8,14 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
+from uuid import uuid4
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
 
 PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS: Final[float] = 30.0
 """Maximum time for each Docker command in the persisted-network migration."""
+
+_NETWORK_CREATION_MARKER_LABEL: Final[str] = "io.awf.clarification-network-creation"
 
 
 def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
@@ -40,6 +43,7 @@ class PersistedClarificationModelNetworkAttachment:
 
     network_name: str
     created_network: bool = False
+    pending_network_creation_marker: str | None = None
     connected_container_ids: list[str] = field(default_factory=list)
     reconnecting_endpoints: list[tuple[str, str]] = field(default_factory=list)
 
@@ -89,10 +93,11 @@ async def _attach_persisted_clarification_model_network(
     if not network_inspect_result.ok:
         if not _network_is_absent(network_inspect_result, attachment.network_name):
             return attachment, network_inspect_result
-        # Record before awaiting: cancellation can arrive after Docker creates
-        # the network but before its subprocess result reaches us, and rollback
-        # must still remove that possible network.
-        attachment.created_network = True
+        # A cancellation can arrive after Docker creates the network but before
+        # its subprocess result reaches us. Keep a per-attempt marker so
+        # rollback can confirm ownership without removing a concurrent
+        # clarification run's network.
+        attachment.pending_network_creation_marker = uuid4().hex
         network_create_result = await runner.run(
             [
                 "docker",
@@ -103,12 +108,16 @@ async def _attach_persisted_clarification_model_network(
                 f"com.docker.compose.project={compose_project}",
                 "--label",
                 "com.docker.compose.network=clarification_model_net",
+                "--label",
+                (f"{_NETWORK_CREATION_MARKER_LABEL}={attachment.pending_network_creation_marker}"),
                 attachment.network_name,
             ],
             timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
         )
         if not network_create_result.ok:
             return attachment, network_create_result
+        attachment.created_network = True
+        attachment.pending_network_creation_marker = None
     for service in clarification_model_services:
         container_ids_result = await runner.run(
             [
@@ -234,8 +243,33 @@ async def _rollback_persisted_clarification_model_network(
             and not _network_is_already_connected(network_connect_result)
         ):
             first_failure = network_connect_result
-    if not attachment.created_network:
+    if not attachment.created_network and attachment.pending_network_creation_marker is None:
         return first_failure or CommandResult(returncode=0, stdout="", stderr="")
+    if not attachment.created_network:
+        try:
+            network_marker_result = await runner.run(
+                [
+                    "docker",
+                    "network",
+                    "inspect",
+                    "--format",
+                    f'{{{{ index .Labels "{_NETWORK_CREATION_MARKER_LABEL}" }}}}',
+                    attachment.network_name,
+                ],
+                timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            network_marker_result = CommandResult(
+                returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+            )
+        if not network_marker_result.ok:
+            if _network_is_absent(network_marker_result, attachment.network_name):
+                return first_failure or CommandResult(
+                    returncode=0, stdout=network_marker_result.stdout, stderr=""
+                )
+            return first_failure or network_marker_result
+        if network_marker_result.stdout.strip() != attachment.pending_network_creation_marker:
+            return first_failure or CommandResult(returncode=0, stdout="", stderr="")
     try:
         network_remove_result = await runner.run(
             ["docker", "network", "rm", attachment.network_name],

@@ -1211,7 +1211,7 @@ class TestIsolatedReaskAdapter:
             "inspect",
             "awf-ws_legacy-clarification-model-net",
         ]
-        assert runner.calls[1].args == [
+        assert runner.calls[1].args[:8] == [
             "docker",
             "network",
             "create",
@@ -1220,8 +1220,12 @@ class TestIsolatedReaskAdapter:
             "com.docker.compose.project=awf_ws_legacy",
             "--label",
             "com.docker.compose.network=clarification_model_net",
-            "awf-ws_legacy-clarification-model-net",
         ]
+        assert runner.calls[1].args[-1] == "awf-ws_legacy-clarification-model-net"
+        assert any(
+            label.startswith("io.awf.clarification-network-creation=")
+            for label in runner.calls[1].args
+        )
         assert runner.calls[2].args == [
             "docker",
             "compose",
@@ -1600,10 +1604,27 @@ class TestIsolatedReaskAdapter:
         class _CancellingCreateRunner(FakeCommandRunner):
             """Cancel immediately after Docker can have created the network."""
 
+            network_creation_marker: str | None = None
+
             async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
                 result = await super().run(args, **kwargs)
                 if args[0:3] == ["docker", "network", "create"]:
+                    self.network_creation_marker = next(
+                        label.removeprefix("io.awf.clarification-network-creation=")
+                        for label in args
+                        if label.startswith("io.awf.clarification-network-creation=")
+                    )
                     raise asyncio.CancelledError
+                if (
+                    args[0:3] == ["docker", "network", "inspect"]
+                    and self.network_creation_marker is not None
+                ):
+                    return CommandResult(
+                        returncode=result.returncode,
+                        stdout=f"{self.network_creation_marker}\n",
+                        stderr=result.stderr,
+                        reason_code=result.reason_code,
+                    )
                 return result
 
         runner = _CancellingCreateRunner()
@@ -1625,7 +1646,8 @@ class TestIsolatedReaskAdapter:
                 isolated_worktree_host_path=tmp_path / "reask",
             )
 
-        assert runner.calls[2].args == [
+        assert runner.calls[2].args[0:3] == ["docker", "network", "inspect"]
+        assert runner.calls[3].args == [
             "docker",
             "network",
             "rm",
