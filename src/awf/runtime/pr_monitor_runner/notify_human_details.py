@@ -50,8 +50,9 @@ def _collect_defer_items(
     dropping it would let the terminal artifact and notification under-report
     the open feedback. Each item carries its ``verdict`` so consumers can tell
     the two apart. Outdated threads are included only when they match one of
-    the decision core's merge-blocking states, and receive a fallback reason
-    because they are otherwise absent from the actionable feedback feeds.
+    the decision core's merge-blocking states. Their merge-state fallback
+    explains why they are included, but is not an agent-provided verdict
+    reason.
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
@@ -78,7 +79,7 @@ def _collect_defer_items(
             }
         )
     for thread in status.outdated_unresolved_inline_threads:
-        if (fallback_reason := _outdated_thread_blocker_reason(state, thread)) is None:
+        if _outdated_thread_blocker_reason(state, thread) is None:
             continue
         is_bot = _is_bot_review_thread(thread)
         bucket = bot_items if is_bot else human_items
@@ -95,8 +96,7 @@ def _collect_defer_items(
                 "verdict": "needs_human",
                 "agent_verdict_reason": state.threads_addressed_ids.get(
                     _needs_human_reason_state_key(thread.thread_id)
-                )
-                or fallback_reason,
+                ),
             }
         )
     for comment in status.unresolved_review_comments:

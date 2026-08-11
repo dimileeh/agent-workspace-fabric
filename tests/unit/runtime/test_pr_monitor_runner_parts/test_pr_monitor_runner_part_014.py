@@ -108,6 +108,7 @@ class TestCollectDeferItems:
 
     @pytest.mark.unit
     def test_blocking_outdated_threads_are_collected_for_human_notification(self) -> None:
+        agent_reason = "a maintainer must choose the retry policy"
         permanent_failure = ReviewThread(
             thread_id="T-outdated-permanent",
             path="src/permanent.py",
@@ -135,6 +136,7 @@ class TestCollectDeferItems:
         state = MonitorState(
             threads_addressed_ids={
                 permanent_failure.thread_id: "needs_human",
+                _needs_human_reason_state_key(permanent_failure.thread_id): agent_reason,
                 _outdated_resolve_requeued_key(requeued.thread_id): "requeued",
                 fresh_feedback.thread_id: "fix_committed",
                 _review_thread_body_state_key(fresh_feedback.thread_id): "stale-body-hash",
@@ -160,11 +162,10 @@ class TestCollectDeferItems:
             fresh_feedback.thread_id,
         ]
         assert all(item["verdict"] == "needs_human" for item in humans)
-        assert [item["agent_verdict_reason"] for item in humans] == [
-            "AWF could not resolve this outdated thread and needs human input",
-            "AWF could not yet resolve this outdated thread and will retry before merging",
-            "new feedback was added to this outdated thread after AWF addressed it",
-        ]
+        # Keep an actual agent reason, but do not mislabel AWF merge-state
+        # fallbacks as agent-provided reasons. The renderer uses its honest
+        # no-reason marker for the latter two items.
+        assert [item["agent_verdict_reason"] for item in humans] == [agent_reason, None, None]
 
     @pytest.mark.unit
     def test_non_deferred_review_comments_are_excluded(self) -> None:
