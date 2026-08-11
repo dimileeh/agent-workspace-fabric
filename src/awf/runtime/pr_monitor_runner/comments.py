@@ -973,8 +973,9 @@ async def _enforce_needs_human_reason(
         ProviderRecoveryFallbackError,
         ProviderRecoveryRetryError,
     ) as exc:
-        # The clarification is advisory. Provider recovery belongs to the
-        # enclosing repair operation, so retain its original human blocker.
+        # The clarification is advisory, but provider recovery belongs to the
+        # enclosing repair operation. Preserve that control flow after cleanup
+        # so the monitor can retry, fall back, or surface authentication failure.
         cleanup_error, _isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_provider_recovery"
         )
@@ -983,7 +984,7 @@ async def _enforce_needs_human_reason(
                 cleanup_error or "Could not remove the NEEDS_HUMAN reason re-ask checkout.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             ) from exc
-        needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
+        raise
     except (
         ComposeExecCleanupError,
         _MonitorAgentServiceRecoveryFailedError,

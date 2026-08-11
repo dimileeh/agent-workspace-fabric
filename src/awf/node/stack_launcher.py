@@ -98,6 +98,9 @@ from awf.node.stack_launcher_compose_helpers import (
 from awf.node.stack_launcher_compose_helpers import (
     effective_compose_up_timeout_seconds as effective_compose_up_timeout_seconds,
 )
+from awf.node.stack_launcher_hosted_auth_helpers import (
+    hosted_google_application_credentials_target as _hosted_google_application_credentials_target,
+)
 from awf.profiles.compose import (
     agent_environment_with_declared_secret_leases,
     agent_environment_with_host_auth,
@@ -1489,24 +1492,3 @@ def _hosted_dynamic_file_auth_mount_targets(
     if google_credentials_target is None:
         return ()
     return (google_credentials_target,)
-
-
-def _hosted_google_application_credentials_target(
-    agent_environment: tuple[tuple[str, str], ...],
-) -> str | None:
-    """Return a safe absolute target for a hosted Google ADC mount."""
-    raw = dict(agent_environment).get(_GOOGLE_APPLICATION_CREDENTIALS)
-    if raw is None:
-        return None
-    if raw in (
-        f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
-        f"${_GOOGLE_APPLICATION_CREDENTIALS}",
-    ):
-        # Hosted render-only cannot resolve executor-local ADC paths from Core.
-        return _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
-    if "$" in raw:
-        return None
-    target = raw
-    if not target.startswith("/"):
-        return None
-    return target

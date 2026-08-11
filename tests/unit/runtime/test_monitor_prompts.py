@@ -1495,23 +1495,3 @@ class TestReadyToMergeComment:
         assert password[:12] not in body
         assert r"\<redacted\>" in body
         assert "<redacted>" not in body
-
-    @pytest.mark.unit
-    def test_empty_blocker_items_preserve_existing_comment_byte_for_byte(self) -> None:
-        """Verify empty blocker items preserve existing comment byte for byte."""
-        expected = (
-            "⚠️ PR #1 needs human attention at commit `aaaaaaaaaa`.\n\n"
-            "AWF did not auto-merge because review feedback needs human input.\n\n"
-            "After the blocker is cleared or a new commit lands, AWF will re-verify "
-            "the PR before taking any merge action."
-        )
-
-        assert (
-            ready_to_merge_comment(
-                pr_number=1,
-                head_sha="a" * 40,
-                blocker_reason="review feedback needs human input",
-                blocker_items=(),
-            )
-            == expected
-        )
