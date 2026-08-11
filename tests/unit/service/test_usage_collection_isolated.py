@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from stat import S_IMODE
@@ -173,3 +174,60 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
     assert snapshot.total_tokens == 3
     assert not capture_dir.exists()
     await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("suffix", ["status", "stdout", "stderr"])
+def test_isolated_sample_rejects_symlinked_capture_files(tmp_path: Path, suffix: str) -> None:
+    """The container cannot redirect a root-side capture read with a symlink."""
+    capture_dir = tmp_path / "capture"
+    capture_dir.mkdir()
+    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "final.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+    )
+    (capture_dir / "final.stderr").write_text("", encoding="utf-8")
+    target = tmp_path / f"{suffix}-target"
+    target.write_text(
+        "0\n" if suffix == "status" else json.dumps({"totals": {"totalTokens": 8}}),
+        encoding="utf-8",
+    )
+    capture_file = capture_dir / f"final.{suffix}"
+    capture_file.unlink()
+    capture_file.symlink_to(target)
+
+    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
+        capture_dir, sample="final"
+    ) == (None, "ccusage_command_failed", None)
+
+
+@pytest.mark.unit
+def test_isolated_sample_rejects_oversized_capture_files(tmp_path: Path) -> None:
+    """Capture content is bounded before it can exhaust the root worker."""
+    capture_dir = tmp_path / "capture"
+    capture_dir.mkdir()
+    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "final.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+    )
+    (capture_dir / "final.stderr").write_text("x" * (1024 * 1024 + 1), encoding="utf-8")
+
+    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
+        capture_dir, sample="final"
+    ) == (None, "ccusage_command_failed", None)
+
+
+@pytest.mark.unit
+def test_isolated_sample_rejects_non_regular_capture_files(tmp_path: Path) -> None:
+    """Special files are rejected without blocking the root worker."""
+    capture_dir = tmp_path / "capture"
+    capture_dir.mkdir()
+    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
+    (capture_dir / "final.stdout").write_text(
+        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+    )
+    os.mkfifo(capture_dir / "final.stderr")
+
+    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
+        capture_dir, sample="final"
+    ) == (None, "ccusage_command_failed", None)

@@ -23,6 +23,7 @@ import contextlib
 import os
 import shlex
 import shutil
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +92,7 @@ DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 # guards against a future pin that might reject a missing ``--config`` target.
 _CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
 _ISOLATED_CCUSAGE_CAPTURE_DIR: Final = "/tmp/awf-ccusage"
+_MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES: Final = 1024 * 1024
 
 
 class _Clock(Protocol):
@@ -839,9 +841,11 @@ def _read_isolated_ccusage_sample(
 ) -> tuple[NormalizedUsage | None, str | None, str | None]:
     """Parse one isolated ccusage sample and normalize its usage payload."""
     try:
-        returncode = int((capture_dir / f"{sample}.status").read_text(encoding="utf-8").strip())
-        stdout = (capture_dir / f"{sample}.stdout").read_text(encoding="utf-8")
-        stderr = (capture_dir / f"{sample}.stderr").read_text(encoding="utf-8")
+        returncode = int(
+            _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.status").strip()
+        )
+        stdout = _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.stdout")
+        stderr = _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.stderr")
     except (OSError, ValueError):
         return None, REASON_COMMAND_FAILED, None
     if returncode == 124:
@@ -852,3 +856,32 @@ def _read_isolated_ccusage_sample(
         return None, failure_reason, None
     usage, reason = normalize_ccusage_json(result.stdout)
     return usage, reason, None if usage is None else usage.model
+
+
+def _read_isolated_ccusage_capture_file(path: Path) -> str:
+    """Read one bounded regular capture file without following a container symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise OSError("isolated ccusage capture is not a regular file")
+        if file_stat.st_size > _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
+            raise OSError("isolated ccusage capture exceeds size limit")
+
+        content = bytearray()
+        while len(content) <= _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
+            chunk = os.read(
+                fd,
+                min(
+                    64 * 1024,
+                    _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES + 1 - len(content),
+                ),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
+            raise OSError("isolated ccusage capture exceeds size limit")
+        return content.decode("utf-8")
+    finally:
+        os.close(fd)
