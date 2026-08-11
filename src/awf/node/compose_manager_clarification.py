@@ -24,18 +24,33 @@ _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
 _PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
 
 
-def _is_managed_persisted_clarification_service(service: object) -> bool:
+def _is_managed_persisted_clarification_service(
+    service: object,
+    *,
+    legacy_agent_image: object = None,
+    legacy_agent_working_dir: object = None,
+) -> bool:
     """Return whether a persisted service has AWF's clarification signature."""
     if not isinstance(service, Mapping):
         return False
     networks = service.get("networks")
-    return (
-        service.get(_PERSISTED_CLARIFICATION_SERVICE_MANAGED) is True
-        and service.get("profiles") == ["awf-clarification"]
+    has_signature = (
+        service.get("profiles") == ["awf-clarification"]
         and isinstance(networks, list)
         and "clarification_egress_net" in networks
         and service.get("command") == ["sh", "-c", "sleep infinity"]
         and service.get("restart") == "no"
+    )
+    if not has_signature:
+        return False
+    if service.get(_PERSISTED_CLARIFICATION_SERVICE_MANAGED) is True:
+        return True
+    return (
+        _PERSISTED_CLARIFICATION_SERVICE_MANAGED not in service
+        and isinstance(legacy_agent_image, str)
+        and service.get("image") == legacy_agent_image
+        and legacy_agent_working_dir == "/workspace"
+        and service.get("working_dir") == legacy_agent_working_dir
     )
 
 

@@ -226,6 +226,41 @@ def test_upgrade_persisted_clarification_service_recognizes_managed_service_sign
 
 
 @pytest.mark.unit
+def test_upgrade_persisted_clarification_service_recognizes_unmarked_legacy_service(
+    tmp_path: Path,
+) -> None:
+    """A pre-marker AWF clarification service remains a no-op."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest", "working_dir": "/workspace"},
+            "clarification": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        is None
+    )
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
 def test_upgrade_persisted_clarification_service_rejects_unmarked_signature_lookalike(
     tmp_path: Path,
 ) -> None:

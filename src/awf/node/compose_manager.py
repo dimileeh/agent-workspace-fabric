@@ -127,7 +127,14 @@ def upgrade_persisted_clarification_service(
     if not isinstance(services, dict):
         raise ValueError("persisted Compose file must contain a services mapping")
     if "clarification" in services:
-        if _is_managed_persisted_clarification_service(services["clarification"]):
+        agent = services.get("agent")
+        agent_image = agent.get("image") if isinstance(agent, Mapping) else None
+        agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
+        if _is_managed_persisted_clarification_service(
+            services["clarification"],
+            legacy_agent_image=agent_image,
+            legacy_agent_working_dir=agent_working_dir,
+        ):
             pending_model_services = _pending_persisted_clarification_model_network_services(
                 document, services
             )
