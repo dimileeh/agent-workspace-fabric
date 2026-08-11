@@ -524,19 +524,33 @@ def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
             target = human_items
         target.append(item)
     display_cap = 8
+    # Preserve one current item before outdated AWF-resolution status consumes
+    # every visible slot. A current changes-requested review or triage item is
+    # more actionable for the human than another retry-status entry.
+    current_item_reservation = min(
+        1,
+        len(blocking_review_items)
+        + len(bot_items)
+        + len(human_escalation_items)
+        + len(human_items),
+    )
+    outdated_display_limit = display_cap - current_item_reservation
     # Preserve an actionable triage excerpt alongside a full set of
-    # changes-requested reviews. Otherwise all eight slots can be consumed
-    # before the human sees why additional feedback needs attention. Triaged
-    # merge blockers are sorted first below, while this reservation preserves
-    # separately rendered escalation feedback.
+    # changes-requested reviews. Triaged merge blockers are sorted first below,
+    # while this reservation preserves separately rendered escalation feedback.
     triaged_item_reservation = min(
-        1, len(outdated_items) + len(bot_items) + len(human_escalation_items) + len(human_items)
+        1, len(bot_items) + len(human_escalation_items) + len(human_items)
     )
     blocking_review_display_limit = display_cap - triaged_item_reservation
     displayed = 0
     lines: list[str] = []
     for label, items, display_limit, prioritize_triage in (
-        ("Outdated feedback awaiting AWF resolution", outdated_items, display_cap, False),
+        (
+            "Outdated feedback awaiting AWF resolution",
+            outdated_items,
+            outdated_display_limit,
+            False,
+        ),
         (
             "Merge-blocking changes-requested reviews",
             blocking_review_items,

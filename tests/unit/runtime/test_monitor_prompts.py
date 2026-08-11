@@ -1356,6 +1356,73 @@ class TestReadyToMergeComment:
         assert "(+1 more)" in body
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("current_item", "current_body"),
+        (
+            (
+                {
+                    "kind": "review",
+                    "id": "R-current",
+                    "author": "current reviewer",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-current",
+                    "body": "Current changes are required.",
+                    "verdict": "changes_requested",
+                    "agent_verdict_reason": None,
+                },
+                "Current changes are required.",
+            ),
+            (
+                {
+                    "kind": "review",
+                    "id": "R-current",
+                    "author": "current reviewer",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-current",
+                    "body": "A current human decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose the intended behavior.",
+                },
+                "A current human decision is required.",
+            ),
+        ),
+    )
+    def test_blocker_items_reserve_a_slot_after_outdated_feedback(
+        self,
+        current_item: dict[str, object],
+        current_body: str,
+    ) -> None:
+        """Keep current feedback visible after eight outdated AWF blockers."""
+        outdated_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T-outdated-{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/outdated_{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T-outdated-{number}",
+                "body": f"outdated feedback {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+                "awf_blocker_reason": "AWF is retrying this outdated thread.",
+            }
+            for number in range(8)
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*outdated_items, current_item),
+        )
+
+        assert sum(f"outdated feedback {number}" in body for number in range(8)) == 7
+        assert current_body in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("verdict", ("needs_human", "defer"))
     def test_blocker_items_reserve_a_slot_for_triaged_merge_blocking_feedback(
         self,
