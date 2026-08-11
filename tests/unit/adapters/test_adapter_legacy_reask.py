@@ -794,6 +794,47 @@ class TestIsolatedReaskAdapter:
         assert grew_source
         assert not destination.exists()
 
+    def test_copy_git_object_directory_rejects_oversized_object_file(self, tmp_path: Path) -> None:
+        """An oversized loose or pack object cannot fill a re-ask snapshot."""
+        source = tmp_path / "objects"
+        object_file = source / "pack" / "pack-too-large.pack"
+        object_file.parent.mkdir(parents=True)
+        object_file.touch()
+        with object_file.open("r+b") as object_stream:
+            object_stream.truncate(
+                base_isolated_reask._MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES + 1
+            )
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+
+        with pytest.raises(OSError, match="exceeds size limit"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
+    def test_copy_git_object_directory_rejects_total_size_overflow(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Several normal-sized objects cannot exceed the snapshot's total budget."""
+        source = tmp_path / "objects"
+        (source / "aa").mkdir(parents=True)
+        (source / "aa" / "first").write_bytes(b"ab")
+        (source / "bb").mkdir()
+        (source / "bb" / "second").write_bytes(b"cd")
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_BYTES",
+            3,
+            raising=False,
+        )
+
+        with pytest.raises(OSError, match="total size limit"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
     def test_isolated_reask_git_metadata_binds_preserve_large_indexes(self, tmp_path: Path) -> None:
         """Large normal and split Git indexes remain usable in the snapshot."""
         _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)

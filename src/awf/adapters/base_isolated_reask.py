@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -18,6 +19,8 @@ from awf.node.git_manager import linked_worktree_git_dir
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
 _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
 _MAX_ISOLATED_REASK_GIT_INDEX_BYTES: Final = 64 * 1024 * 1024
+_MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES: Final = 64 * 1024 * 1024
+_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_BYTES: Final = 256 * 1024 * 1024
 
 
 def _copy_regular_git_metadata_file(
@@ -26,11 +29,11 @@ def _copy_regular_git_metadata_file(
     destination: Path,
     *,
     max_bytes: int = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
-) -> None:
+) -> int:
     """Copy one linked-worktree control file without following a raced symlink."""
     source_dir_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        _copy_regular_git_metadata_file_from_directory_fd(
+        return _copy_regular_git_metadata_file_from_directory_fd(
             source_dir_fd, source_name, destination, max_bytes=max_bytes
         )
     finally:
@@ -43,8 +46,8 @@ def _copy_regular_git_metadata_file_from_directory_fd(
     source_name: str,
     destination: Path,
     *,
-    max_bytes: int | None = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
-) -> None:
+    max_bytes: int = _MAX_ISOLATED_REASK_GIT_METADATA_BYTES,
+) -> int:
     """Copy one regular Git metadata file from an already-open directory."""
     source_fd: int | None = None
     destination_created = False
@@ -58,26 +61,26 @@ def _copy_regular_git_metadata_file_from_directory_fd(
         file_stat = os.fstat(source_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"Git metadata source is not a regular file: {source_name}")
-        if max_bytes is not None and file_stat.st_size > max_bytes:
+        if file_stat.st_size > max_bytes:
             raise OSError(f"Git metadata source exceeds size limit: {source_name}")
         copied_bytes = 0
         with destination.open("xb") as dest_file:
             destination_created = True
             while True:
-                chunk = os.read(
-                    source_fd,
-                    64 * 1024 if max_bytes is None else min(64 * 1024, max_bytes - copied_bytes),
-                )
-                if not chunk:
-                    copy_succeeded = True
-                    return
-                dest_file.write(chunk)
-                copied_bytes += len(chunk)
-                if max_bytes is not None and copied_bytes == max_bytes:
+                if copied_bytes == max_bytes:
                     if os.read(source_fd, 1):
                         raise OSError(f"Git metadata source exceeds size limit: {source_name}")
                     copy_succeeded = True
-                    return
+                    return copied_bytes
+                chunk = os.read(
+                    source_fd,
+                    min(64 * 1024, max_bytes - copied_bytes),
+                )
+                if not chunk:
+                    copy_succeeded = True
+                    return copied_bytes
+                dest_file.write(chunk)
+                copied_bytes += len(chunk)
     finally:
         if destination_created and not copy_succeeded:
             with contextlib.suppress(OSError):
@@ -88,10 +91,18 @@ def _copy_regular_git_metadata_file_from_directory_fd(
 
 
 def _copy_git_object_directory(source: Path, destination: Path) -> None:
-    """Copy Git objects without following links or preserving alternates."""
+    """Copy a bounded Git object snapshot without links or alternates."""
     source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        _copy_git_object_directory_from_fd(source_fd, destination, relative_path=Path())
+        _copy_git_object_directory_from_fd(
+            source_fd,
+            destination,
+            relative_path=Path(),
+            remaining_snapshot_bytes=_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_BYTES,
+        )
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     finally:
         with contextlib.suppress(OSError):
             os.close(source_fd)
@@ -102,7 +113,8 @@ def _copy_git_object_directory_from_fd(
     destination: Path,
     *,
     relative_path: Path,
-) -> None:
+    remaining_snapshot_bytes: int,
+) -> int:
     """Copy regular object-store entries from an already-open directory."""
     destination.mkdir()
     for name in os.listdir(source_fd):
@@ -121,23 +133,33 @@ def _copy_git_object_directory_from_fd(
             try:
                 if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                     raise OSError(f"Git object source is not a directory: {name}")
-                _copy_git_object_directory_from_fd(
+                remaining_snapshot_bytes = _copy_git_object_directory_from_fd(
                     child_fd,
                     destination_entry,
                     relative_path=relative_path / name,
+                    remaining_snapshot_bytes=remaining_snapshot_bytes,
                 )
             finally:
                 with contextlib.suppress(OSError):
                     os.close(child_fd)
         elif stat.S_ISREG(entry_stat.st_mode):
-            _copy_regular_git_metadata_file_from_directory_fd(
+            if entry_stat.st_size > _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES:
+                raise OSError(f"Git object source exceeds size limit: {name}")
+            if entry_stat.st_size > remaining_snapshot_bytes:
+                raise OSError(f"Git object snapshot exceeds total size limit: {name}")
+            copied_bytes = _copy_regular_git_metadata_file_from_directory_fd(
                 source_fd,
                 name,
                 destination_entry,
-                max_bytes=None,
+                max_bytes=min(
+                    _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES,
+                    remaining_snapshot_bytes,
+                ),
             )
+            remaining_snapshot_bytes -= copied_bytes
         else:
             raise OSError(f"Git object source is not a regular file or directory: {name}")
+    return remaining_snapshot_bytes
 
 
 def _write_isolated_reask_source_config(common_path: Path, expected_ref: str) -> None:
