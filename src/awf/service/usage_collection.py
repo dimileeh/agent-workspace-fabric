@@ -20,14 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
-import shlex
-import shutil
-import stat
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Protocol
 
 from awf.adapters.usage import (
     IsolatedUsageSampleContext,
@@ -49,7 +44,6 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID
 from awf.service.usage_store import (
     REASON_COMMAND_FAILED,
     REASON_NO_RECORDS,
@@ -91,8 +85,6 @@ DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 # config), so the isolation holds regardless; the baked empty file additionally
 # guards against a future pin that might reject a missing ``--config`` target.
 _CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
-_ISOLATED_CCUSAGE_CAPTURE_DIR: Final = "/tmp/awf-ccusage"
-_MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES: Final = 1024 * 1024
 
 
 class _Clock(Protocol):
@@ -121,6 +113,26 @@ def _is_missing_binary(result: CommandResult) -> bool:
     # stderr, which would misclassify a present-but-failing binary as
     # REASON_UNAVAILABLE ("ccusage not installed") instead of REASON_COMMAND_FAILED.
     return "command not found" in result.stderr.lower()
+
+
+def _normalize_ccusage_command_result(
+    result: CommandResult,
+    *,
+    timeout_exit_code: bool = False,
+) -> tuple[NormalizedUsage | None, str | None, str | None]:
+    """Classify and normalize a ccusage command result retained by the worker."""
+    if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+        return None, REASON_TIMEOUT, None
+    # ``timeout`` runs inside isolated clarification containers so a ccusage
+    # process cannot outlive the worker's command timeout. GNU timeout reports
+    # its own expiry as 124, without a runner reason code.
+    if timeout_exit_code and result.returncode == 124:
+        return None, REASON_TIMEOUT, None
+    if not result.ok:
+        failure_reason = REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
+        return None, failure_reason, None
+    usage, reason = normalize_ccusage_json(result.stdout)
+    return usage, reason, None if usage is None else usage.model
 
 
 class CcusageCollector(UsageSampler):
@@ -182,25 +194,15 @@ class CcusageCollector(UsageSampler):
         provider: AgentRuntime,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext:
-        """Capture a one-off clarification container's usage before ``--rm`` removes it."""
+        """Capture a one-off clarification container's usage before it is removed."""
 
         source = provider_ccusage_source(provider)
-        capture_unavailable_reason: str | None = None
         prior_snapshot: UsageSnapshot | None = None
         try:
             prior_snapshot = await asyncio.to_thread(
                 read_latest_usage_snapshot,
                 workspace_id,
                 work_dir=self._work_dir,
-            )
-            capture_dir = (
-                await asyncio.to_thread(
-                    _make_isolated_capture_dir,
-                    self._work_dir,
-                    workspace_id=workspace_id,
-                )
-                if source is not None
-                else None
             )
         except asyncio.CancelledError:
             raise
@@ -210,8 +212,6 @@ class CcusageCollector(UsageSampler):
                 workspace_id=workspace_id,
                 exc_info=True,
             )
-            capture_dir = None
-            capture_unavailable_reason = REASON_COMMAND_FAILED
         return _IsolatedCcusageSampleContext(
             collector=self,
             compose_project=compose_project,
@@ -222,8 +222,6 @@ class CcusageCollector(UsageSampler):
             accumulated_usage_at_run_start=snapshot_usage_metrics(prior_snapshot),
             prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
             cli_args=cli_args,
-            capture_dir=capture_dir,
-            capture_unavailable_reason=capture_unavailable_reason,
         )
 
 
@@ -617,15 +615,7 @@ class _CcusageSampleContext(UsageSampleContext):
         )
         if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
             await self._cleanup_timed_out_invocation(invocation)
-            return None, REASON_TIMEOUT, None
-        if not result.ok:
-            failure_reason = (
-                REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
-            )
-            return None, failure_reason, None
-        usage, reason = normalize_ccusage_json(result.stdout)
-        model = usage.model if usage is not None else None
-        return usage, reason, model
+        return _normalize_ccusage_command_result(result)
 
     async def _cleanup_timed_out_invocation(
         self, invocation: TrackedComposeExec | TrackedIsolatedComposeRun
@@ -670,8 +660,6 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         accumulated_usage_at_run_start: NormalizedUsage | None,
         prior_ccusage_source: str | None,
         cli_args: list[str],
-        capture_dir: Path | None,
-        capture_unavailable_reason: str | None,
     ) -> None:
         """Initialize isolated capture state around the inherited usage context."""
         super().__init__(
@@ -689,8 +677,10 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             empty_baseline_is_zero=True,
         )
         self._agent_cli_args = list(cli_args)
-        self._capture_dir = capture_dir
-        self._capture_unavailable_reason = capture_unavailable_reason
+        # These results arrive over the worker's docker/compose client and are
+        # retained only in the control-plane process. The clarification agent
+        # never receives a writable evidence mount it could replace or link.
+        self._capture_results: dict[str, CommandResult] = {}
         self._capture_sample = "baseline"
         self._baseline_captured_before_agent = False
 
@@ -698,17 +688,12 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
     def baseline_cli_args(self) -> list[str] | None:
         """Return the standalone pre-agent baseline capture command."""
 
-        if self._capture_dir is None or self._source is None:
+        if self._source is None:
             return None
-        return [
-            "sh",
-            "-lc",
-            _isolated_ccusage_capture_script(
-                source=str(self._source),
-                timeout_seconds=self._collector._command_timeout_seconds,
-                sample_name="baseline",
-            ),
-        ]
+        return _isolated_ccusage_cli_args(
+            source=str(self._source),
+            timeout_seconds=self._collector._command_timeout_seconds,
+        )
 
     async def capture_baseline_before_agent(self, *, invocation: TrackedIsolatedComposeRun) -> None:
         """Run and import the isolated baseline before the agent watchdog starts."""
@@ -735,6 +720,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
                 exc_info=True,
             )
         else:
+            self._capture_results["baseline"] = result
             if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
                 await self._cleanup_timed_out_invocation(invocation)
         self._capture_sample = "baseline"
@@ -749,139 +735,58 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
-        """Expose the AWF-owned result mount for the disposable container."""
+        """Usage capture does not expose an agent-writable host mount."""
 
-        if self._capture_dir is None:
-            return ()
-        return ((self._capture_dir, _ISOLATED_CCUSAGE_CAPTURE_DIR),)
+        return ()
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:
         """Write a final sample before a timed-out re-ask is force-removed."""
-        if self._capture_dir is None or self._source is None:
+        if self._source is None:
             return
-        await self._collector._runner.run_streaming(
+        result = await self._collector._runner.run_streaming(
             [
                 "docker",
                 "exec",
                 container_name,
-                "sh",
-                "-lc",
-                _isolated_ccusage_capture_script(
+                *_isolated_ccusage_cli_args(
                     source=str(self._source),
                     timeout_seconds=self._collector._command_timeout_seconds,
-                    sample_name="final",
                 ),
             ],
             wall_timeout_seconds=self._collector._command_timeout_seconds,
             idle_timeout_seconds=self._collector._command_timeout_seconds,
         )
+        self._capture_results["final"] = result
 
     async def _finalize_inner(self, status: str) -> None:
-        """Collect the final reading and always remove the capture directory."""
-        try:
-            if self._source is None:
-                await self._safe_sample(phase="final", run_status=status)
-                return
-            if not self._baseline_captured_before_agent:
-                self._capture_sample = "baseline"
-                await self._capture_baseline()
-            self._capture_sample = "final"
+        """Collect the final reading retained by the control plane."""
+        if self._source is None:
             await self._safe_sample(phase="final", run_status=status)
-        finally:
-            if self._capture_dir is not None:
-                await asyncio.to_thread(shutil.rmtree, self._capture_dir, ignore_errors=True)
+            return
+        if not self._baseline_captured_before_agent:
+            self._capture_sample = "baseline"
+            await self._capture_baseline()
+        self._capture_sample = "final"
+        await self._safe_sample(phase="final", run_status=status)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
         """Read the currently selected ccusage sample from the isolated capture."""
-        capture_dir = self._capture_dir
-        if capture_dir is None:
-            return None, self._capture_unavailable_reason or REASON_SOURCE_UNSUPPORTED, None
-        return await asyncio.to_thread(
-            _read_isolated_ccusage_sample,
-            capture_dir,
-            sample=self._capture_sample,
-        )
+        result = self._capture_results.get(self._capture_sample)
+        if result is None:
+            return None, REASON_COMMAND_FAILED, None
+        return _normalize_ccusage_command_result(result, timeout_exit_code=True)
 
 
-def _make_isolated_capture_dir(work_dir: Path, *, workspace_id: str) -> Path:
-    """Create a private ccusage capture under the workspace's reclaimable compose root."""
-    root = work_dir / "compose" / workspace_id / "usage-captures"
-    root.mkdir(parents=True, exist_ok=True)
-    capture_dir = Path(tempfile.mkdtemp(prefix="isolated-", dir=root))
-    # The root worker bind-mounts this directory into the non-root agent-runtime
-    # container. Ownership restricts writes to that identity, while the private
-    # mode prevents other local users from replacing trusted sample files.
-    try:
-        os.chown(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)
-        capture_dir.chmod(0o700)
-    except Exception:
-        shutil.rmtree(capture_dir, ignore_errors=True)
-        raise
-    return capture_dir
-
-
-def _isolated_ccusage_capture_script(
-    *, source: str, timeout_seconds: float, sample_name: str
-) -> str:
-    """Return a command that writes one ccusage reading into the mounted directory."""
-    quoted_source = shlex.quote(source)
-    return f"""
-timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
-  > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.stdout\" \\
-  2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.stderr\"
-ccusage_status=$?
-printf '%s\\n' \"$ccusage_status\" > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/{sample_name}.status\"
-""".strip()
-
-
-def _read_isolated_ccusage_sample(
-    capture_dir: Path,
-    *,
-    sample: str,
-) -> tuple[NormalizedUsage | None, str | None, str | None]:
-    """Parse one isolated ccusage sample and normalize its usage payload."""
-    try:
-        returncode = int(
-            _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.status").strip()
-        )
-        stdout = _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.stdout")
-        stderr = _read_isolated_ccusage_capture_file(capture_dir / f"{sample}.stderr")
-    except (OSError, ValueError):
-        return None, REASON_COMMAND_FAILED, None
-    if returncode == 124:
-        return None, REASON_TIMEOUT, None
-    result = CommandResult(returncode=returncode, stdout=stdout, stderr=stderr)
-    if not result.ok:
-        failure_reason = REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
-        return None, failure_reason, None
-    usage, reason = normalize_ccusage_json(result.stdout)
-    return usage, reason, None if usage is None else usage.model
-
-
-def _read_isolated_ccusage_capture_file(path: Path) -> str:
-    """Read one bounded regular capture file without following a container symlink."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise OSError("isolated ccusage capture is not a regular file")
-        if file_stat.st_size > _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
-            raise OSError("isolated ccusage capture exceeds size limit")
-
-        content = bytearray()
-        while len(content) <= _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
-            chunk = os.read(
-                fd,
-                min(
-                    64 * 1024,
-                    _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES + 1 - len(content),
-                ),
-            )
-            if not chunk:
-                break
-            content.extend(chunk)
-        if len(content) > _MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES:
-            raise OSError("isolated ccusage capture exceeds size limit")
-        return content.decode("utf-8")
-    finally:
-        os.close(fd)
+def _isolated_ccusage_cli_args(*, source: str, timeout_seconds: float) -> list[str]:
+    """Return the bounded ccusage argv used by isolated worker commands."""
+    return [
+        "timeout",
+        f"{timeout_seconds}s",
+        "ccusage",
+        source,
+        "daily",
+        "--json",
+        "--offline",
+        "--config",
+        _CCUSAGE_NEUTRAL_CONFIG_PATH,
+    ]

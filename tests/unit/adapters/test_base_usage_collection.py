@@ -97,8 +97,8 @@ class _IsolatedRecordingContext(_RecordingContext):
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
-        """Return the configured isolated-capture volume bindings."""
-        return ((Path("/tmp/awf-usage-capture"), "/tmp/awf-ccusage"),)
+        """The worker-owned capture path does not require a volume binding."""
+        return ()
 
 
 class _IsolatedRecordingSampler(_RecordingSampler):

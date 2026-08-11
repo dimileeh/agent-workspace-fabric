@@ -627,7 +627,7 @@ class AgentAdapter(ABC):
                 cli_args = isolated_sampler_ctx.cli_args
         # Wrap the agent run with optional usage sampling. Ordinary sampling
         # captures a baseline + periodic samples; isolated clarification sampling
-        # instead prepares an in-container capture before the invocation is built.
+        # instead runs a worker-owned baseline probe before the invocation is built.
         # Either context is finalized in *every* exit path, so the final usage
         # sample is recorded on success, failure/timeout, and cancellation — never
         # masking the agent outcome. _start_usage_sampling stays *inside* the try:
@@ -710,9 +710,10 @@ class AgentAdapter(ABC):
                     extra_volume_binds=(
                         () if isolated_sampler_ctx is None else isolated_sampler_ctx.volume_binds
                     ),
-                    keep_container_running=(
-                        isolated_sampler_ctx is not None and bool(isolated_sampler_ctx.volume_binds)
-                    ),
+                    # Isolated usage is captured through worker-owned docker
+                    # command results, so it needs a running container for the
+                    # final probe but must not receive a writable evidence bind.
+                    keep_container_running=isolated_sampler_ctx is not None,
                 )
             args = invocation.args
             _log.info(

@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from stat import S_IMODE
 
 import pytest
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import build_isolated_tracked_compose_run
 from awf.db.enums import AgentRuntime
-from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID
-from awf.service import usage_collection
-from awf.service.usage_collection import CcusageCollector, _make_isolated_capture_dir
+from awf.service.usage_collection import CcusageCollector
 from awf.service.usage_store import read_latest_usage_snapshot
 
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -42,41 +39,19 @@ class FakeClock:
 
 
 @pytest.mark.unit
-def test_isolated_capture_dir_assigns_private_runtime_ownership(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The root worker creates private captures for the non-root runtime."""
-    ownership_calls: list[tuple[Path, int, int]] = []
+async def test_isolated_capture_has_no_agent_writable_usage_mount(tmp_path: Path) -> None:
+    """Usage evidence stays in the control plane, not the agent container."""
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
 
-    def _record_chown(path: Path, uid: int, gid: int) -> None:
-        ownership_calls.append((path, uid, gid))
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_usage_mount",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
 
-    monkeypatch.setattr(usage_collection.os, "chown", _record_chown)
-    capture_dir = _make_isolated_capture_dir(tmp_path, workspace_id="ws_capture_owner")
-
-    stat = capture_dir.stat()
-    assert ownership_calls == [(capture_dir, AGENT_RUNTIME_UID, AGENT_RUNTIME_GID)]
-    assert S_IMODE(stat.st_mode) == 0o700
-    assert capture_dir.parent == tmp_path / "compose" / "ws_capture_owner" / "usage-captures"
-
-
-@pytest.mark.unit
-def test_isolated_capture_dir_removes_partial_dir_when_ownership_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed ownership handoff does not leak an unusable capture directory."""
-
-    def _fail_chown(_path: Path, _uid: int, _gid: int) -> None:
-        raise PermissionError("ownership denied")
-
-    monkeypatch.setattr(usage_collection.os, "chown", _fail_chown)
-
-    with pytest.raises(PermissionError, match="ownership denied"):
-        _make_isolated_capture_dir(tmp_path, workspace_id="ws_capture_failure")
-
-    assert list((tmp_path / "compose" / "ws_capture_failure" / "usage-captures").iterdir()) == []
+    assert ctx.volume_binds == ()
 
 
 @pytest.mark.unit
@@ -118,20 +93,17 @@ async def test_ccusage_argv_per_provider(
 
 
 @pytest.mark.unit
-async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watchdog(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A clarification re-ask reads its disposable copied auth state, not ``agent``."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+async def test_isolated_capture_uses_worker_command_results_for_usage_delta(tmp_path: Path) -> None:
+    """The baseline and final output are retained outside the agent's mounts."""
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 5}}))
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 8}}))
     collector = CcusageCollector(
         runner=runner,
         work_dir=tmp_path,
         clock=FakeClock(),
         command_timeout_seconds=3.5,
     )
-
     ctx = await collector.start_isolated(
         compose_project="proj",
         compose_file=_COMPOSE_FILE,
@@ -150,21 +122,30 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
         cli_args=["codex", "exec", "-"],
     )
     assert next_ctx.cli_args == ["codex", "exec", "-"]
-    baseline_script = ctx.baseline_cli_args[2]
-    assert ctx.baseline_cli_args[:2] == ["sh", "-lc"]
-    assert "ccusage codex daily --json --offline" in baseline_script
-    assert "timeout 3.5s ccusage codex daily --json --offline" in baseline_script
-    assert "baseline.stdout" in baseline_script
-    assert ctx.volume_binds[0][1] == "/tmp/awf-ccusage"
-    capture_dir = ctx.volume_binds[0][0]
-    assert capture_dir.parent == tmp_path / "compose" / "ws_isolated" / "usage-captures"
-    for sample, total_tokens in (("baseline", 5), ("final", 8)):
-        (capture_dir / f"{sample}.status").write_text("0\n", encoding="utf-8")
-        (capture_dir / f"{sample}.stdout").write_text(
-            json.dumps({"totals": {"totalTokens": total_tokens}}), encoding="utf-8"
-        )
-        (capture_dir / f"{sample}.stderr").write_text("", encoding="utf-8")
+    assert ctx.baseline_cli_args == [
+        "timeout",
+        "3.5s",
+        "ccusage",
+        "codex",
+        "daily",
+        "--json",
+        "--offline",
+        "--config",
+        "/opt/awf/ccusage-neutral.json",
+    ]
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated/reask"),
+        extra_volume_binds=ctx.volume_binds,
+    )
+    assert "/tmp/awf-ccusage" not in baseline_invocation.args
 
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
     await ctx.finalize(status="success")
 
     snapshot = read_latest_usage_snapshot("ws_isolated", work_dir=tmp_path)
@@ -172,62 +153,4 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
     assert snapshot.phase == "final"
     assert snapshot.status == "available"
     assert snapshot.total_tokens == 3
-    assert not capture_dir.exists()
-    await ctx.finalize(status="success")
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("suffix", ["status", "stdout", "stderr"])
-def test_isolated_sample_rejects_symlinked_capture_files(tmp_path: Path, suffix: str) -> None:
-    """The container cannot redirect a root-side capture read with a symlink."""
-    capture_dir = tmp_path / "capture"
-    capture_dir.mkdir()
-    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "final.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
-    )
-    (capture_dir / "final.stderr").write_text("", encoding="utf-8")
-    target = tmp_path / f"{suffix}-target"
-    target.write_text(
-        "0\n" if suffix == "status" else json.dumps({"totals": {"totalTokens": 8}}),
-        encoding="utf-8",
-    )
-    capture_file = capture_dir / f"final.{suffix}"
-    capture_file.unlink()
-    capture_file.symlink_to(target)
-
-    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
-        capture_dir, sample="final"
-    ) == (None, "ccusage_command_failed", None)
-
-
-@pytest.mark.unit
-def test_isolated_sample_rejects_oversized_capture_files(tmp_path: Path) -> None:
-    """Capture content is bounded before it can exhaust the root worker."""
-    capture_dir = tmp_path / "capture"
-    capture_dir.mkdir()
-    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "final.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
-    )
-    (capture_dir / "final.stderr").write_text("x" * (1024 * 1024 + 1), encoding="utf-8")
-
-    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
-        capture_dir, sample="final"
-    ) == (None, "ccusage_command_failed", None)
-
-
-@pytest.mark.unit
-def test_isolated_sample_rejects_non_regular_capture_files(tmp_path: Path) -> None:
-    """Special files are rejected without blocking the root worker."""
-    capture_dir = tmp_path / "capture"
-    capture_dir.mkdir()
-    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "final.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
-    )
-    os.mkfifo(capture_dir / "final.stderr")
-
-    assert usage_collection._read_isolated_ccusage_sample(  # noqa: SLF001
-        capture_dir, sample="final"
-    ) == (None, "ccusage_command_failed", None)
+    assert runner.calls[1].args[:4] == ["docker", "exec", "awf-reask-test", "timeout"]

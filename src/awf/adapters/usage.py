@@ -58,11 +58,11 @@ class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
 
     @property
     def cli_args(self) -> list[str]:
-        """Return the agent command wrapped only with final in-container capture."""
+        """Return the configured agent command."""
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
-        """Return AWF-owned host paths the isolated invocation may write to."""
+        """Return optional additional host paths for the isolated invocation."""
 
 
 @runtime_checkable

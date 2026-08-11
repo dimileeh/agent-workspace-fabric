@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -97,33 +96,3 @@ async def test_isolated_usage_setup_propagates_shutdown_cancellation(
             provider=AgentRuntime.codex,
             cli_args=["codex", "exec"],
         )
-
-
-@pytest.mark.unit
-def test_isolated_usage_capture_rejects_content_that_grows_past_byte_limit(tmp_path: Path) -> None:
-    """A regular capture file that grows after stat cannot exhaust controller memory."""
-    capture_file = tmp_path / "capture.json"
-    capture_file.write_bytes(b"x" * (usage_collection._MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES + 1))  # noqa: SLF001
-
-    with pytest.raises(OSError, match="exceeds size limit"):
-        usage_collection._read_isolated_ccusage_capture_file(capture_file)  # noqa: SLF001
-
-
-@pytest.mark.unit
-def test_isolated_usage_capture_rechecks_size_while_reading_a_raced_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A file that grows after its metadata probe still cannot exceed the capture bound."""
-    capture_file = tmp_path / "capture.json"
-    capture_file.write_bytes(b"x" * (usage_collection._MAX_ISOLATED_CCUSAGE_CAPTURE_BYTES + 1))  # noqa: SLF001
-    real_fstat = usage_collection.os.fstat
-
-    def _stale_size(fd: int) -> SimpleNamespace:
-        file_stat = real_fstat(fd)
-        return SimpleNamespace(st_mode=file_stat.st_mode, st_size=0)
-
-    monkeypatch.setattr(usage_collection.os, "fstat", _stale_size)
-
-    with pytest.raises(OSError, match="exceeds size limit"):
-        usage_collection._read_isolated_ccusage_capture_file(capture_file)  # noqa: SLF001

@@ -108,18 +108,30 @@ def _ccusage_runner(*stdouts: str) -> FakeCommandRunner:
 @pytest.mark.unit
 async def test_isolated_baseline_probe_is_collected_before_agent_run(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The pre-agent probe is bounded separately and anchors the final delta."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
 
     class _ProbeRunner:
         def __init__(self) -> None:
             self.calls: list[tuple[list[str], dict[str, Any]]] = []
+            self._results = iter(
+                [
+                    CommandResult(
+                        returncode=0,
+                        stdout=json.dumps({"totals": {"totalTokens": 5}}),
+                        stderr="",
+                    ),
+                    CommandResult(
+                        returncode=0,
+                        stdout=json.dumps({"totals": {"totalTokens": 8}}),
+                        stderr="",
+                    ),
+                ]
+            )
 
         async def run_streaming(self, args: list[str], **kwargs: Any) -> CommandResult:
             self.calls.append((list(args), kwargs))
-            return CommandResult(returncode=0, stdout="", stderr="")
+            return next(self._results)
 
     runner = _ProbeRunner()
     collector = CcusageCollector(
@@ -135,12 +147,6 @@ async def test_isolated_baseline_probe_is_collected_before_agent_run(
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    capture_dir = ctx.volume_binds[0][0]
-    (capture_dir / "baseline.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "baseline.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 5}}), encoding="utf-8"
-    )
-    (capture_dir / "baseline.stderr").write_text("", encoding="utf-8")
 
     baseline_invocation = build_isolated_tracked_compose_run(
         compose_project="proj",
@@ -160,13 +166,8 @@ async def test_isolated_baseline_probe_is_collected_before_agent_run(
             {"wall_timeout_seconds": 3.5, "idle_timeout_seconds": 3.5},
         )
     ]
-    (capture_dir / "baseline.status").write_text("not-a-status\n", encoding="utf-8")
-    (capture_dir / "final.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "final.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
-    )
-    (capture_dir / "final.stderr").write_text("", encoding="utf-8")
 
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
     await ctx.finalize(status="success")
 
     snapshot = read_latest_usage_snapshot("ws_isolated_pre_agent_baseline", work_dir=tmp_path)
@@ -178,11 +179,9 @@ async def test_isolated_baseline_probe_is_collected_before_agent_run(
 @pytest.mark.parametrize("reason_code", [COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON])
 async def test_isolated_baseline_timeout_removes_its_one_off_container(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     reason_code: str,
 ) -> None:
     """A baseline timeout must not overlap a later clarification invocation."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
 
     class _TimeoutRunner:
         def __init__(self) -> None:
@@ -226,10 +225,8 @@ async def test_isolated_baseline_timeout_removes_its_one_off_container(
 @pytest.mark.unit
 async def test_isolated_baseline_cancellation_removes_its_one_off_container(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation must remove the probe container before propagating."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
 
     class _CancellationRunner:
         def __init__(self) -> None:
@@ -271,10 +268,8 @@ async def test_isolated_baseline_cancellation_removes_its_one_off_container(
 @pytest.mark.unit
 async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fresh clarification container adds its usage after a repair run."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
     write_usage_snapshot(
         UsageSnapshot(
             workspace_id="ws_isolated_empty_baseline",
@@ -289,7 +284,13 @@ async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
         ),
         work_dir=tmp_path,
     )
-    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=json.dumps({}))
+    runner.queue_result(
+        returncode=0,
+        stdout=json.dumps({"totals": {"totalTokens": 50, "totalCost": 0.13}}),
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
     ctx = await collector.start_isolated(
         compose_project="proj",
         compose_file=_COMPOSE_FILE,
@@ -297,15 +298,17 @@ async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    capture_dir = ctx.volume_binds[0][0]
-    for sample, payload in (
-        ("baseline", {}),
-        ("final", {"totals": {"totalTokens": 50, "totalCost": 0.13}}),
-    ):
-        (capture_dir / f"{sample}.status").write_text("0\n", encoding="utf-8")
-        (capture_dir / f"{sample}.stdout").write_text(json.dumps(payload), encoding="utf-8")
-        (capture_dir / f"{sample}.stderr").write_text("", encoding="utf-8")
 
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated_empty_baseline/reask"),
+    )
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-empty-baseline")
     await ctx.finalize(status="success")
 
     snapshot = read_latest_usage_snapshot("ws_isolated_empty_baseline", work_dir=tmp_path)
@@ -320,28 +323,26 @@ async def test_isolated_run_treats_empty_baseline_as_zero_with_prior_usage(
 
 
 @pytest.mark.unit
-async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(tmp_path: Path) -> None:
     """A timeout can import a final reading before the one-off container is removed."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
 
     class _FinalCaptureRunner:
-        def __init__(self, capture_dir: Path) -> None:
-            self.capture_dir = capture_dir
+        def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
         async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
             self.calls.append(list(args))
-            (self.capture_dir / "final.status").write_text("0\n", encoding="utf-8")
-            (self.capture_dir / "final.stdout").write_text(
-                json.dumps({"totals": {"totalTokens": 8}}), encoding="utf-8"
+            return CommandResult(
+                returncode=0,
+                stdout=json.dumps({"totals": {"totalTokens": 8}}),
+                stderr="",
             )
-            (self.capture_dir / "final.stderr").write_text("", encoding="utf-8")
-            return CommandResult(returncode=0, stdout="", stderr="")
 
     bootstrap_runner = FakeCommandRunner()
+    bootstrap_runner.queue_result(
+        returncode=0,
+        stdout=json.dumps({"totals": {"totalTokens": 5}}),
+    )
     collector = CcusageCollector(runner=bootstrap_runner, work_dir=tmp_path, clock=FakeClock())
     ctx = await collector.start_isolated(
         compose_project="proj",
@@ -350,19 +351,22 @@ async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    capture_dir = ctx.volume_binds[0][0]
-    (capture_dir / "baseline.status").write_text("0\n", encoding="utf-8")
-    (capture_dir / "baseline.stdout").write_text(
-        json.dumps({"totals": {"totalTokens": 5}}), encoding="utf-8"
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated_forced_cleanup/reask"),
     )
-    (capture_dir / "baseline.stderr").write_text("", encoding="utf-8")
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
 
-    capture_runner = _FinalCaptureRunner(capture_dir)
+    capture_runner = _FinalCaptureRunner()
     collector._runner = capture_runner  # type: ignore[assignment]  # noqa: SLF001
     await ctx.capture_final_before_cleanup(container_name="awf-reask-test")
 
     assert capture_runner.calls[0][:3] == ["docker", "exec", "awf-reask-test"]
-    assert "ccusage codex daily --json --offline" in capture_runner.calls[0][-1]
+    assert capture_runner.calls[0][3:7] == ["timeout", "20.0s", "ccusage", "codex"]
     await ctx.finalize(status="timeout")
 
     snapshot = read_latest_usage_snapshot("ws_isolated_forced_cleanup", work_dir=tmp_path)
@@ -375,10 +379,9 @@ async def test_isolated_run_captures_final_ccusage_before_forced_cleanup(
 
 @pytest.mark.unit
 async def test_isolated_run_records_missing_capture_as_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """A timed-out re-ask cannot report stale usage when its final capture is absent."""
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
     collector = CcusageCollector(
         runner=FakeCommandRunner(),
         work_dir=tmp_path,
@@ -391,7 +394,6 @@ async def test_isolated_run_records_missing_capture_as_unavailable(
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    capture_dir = ctx.volume_binds[0][0]
 
     await ctx.finalize(status="timeout")
 
@@ -400,53 +402,6 @@ async def test_isolated_run_records_missing_capture_as_unavailable(
     assert snapshot.phase == "final"
     assert snapshot.status == "unavailable"
     assert snapshot.reason == "ccusage_command_failed"
-    assert not capture_dir.exists()
-
-
-@pytest.mark.unit
-async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _fail_capture_setup(_work_dir: Path, *, workspace_id: str) -> Path:
-        raise PermissionError("capture ownership denied")
-
-    monkeypatch.setattr(usage_collection, "_make_isolated_capture_dir", _fail_capture_setup)
-    write_usage_snapshot(
-        UsageSnapshot(
-            workspace_id="ws_capture_setup_failure",
-            provider="codex",
-            ccusage_source="codex",
-            status="available",
-            phase="final",
-            captured_at="2026-05-22T00:00:00+00:00",
-            total_tokens=42,
-        ),
-        work_dir=tmp_path,
-    )
-    runner = FakeCommandRunner()
-    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
-
-    ctx = await collector.start_isolated(
-        compose_project="proj",
-        compose_file=_COMPOSE_FILE,
-        workspace_id="ws_capture_setup_failure",
-        provider=AgentRuntime.codex,
-        cli_args=["codex", "exec", "-"],
-    )
-
-    assert ctx.cli_args == ["codex", "exec", "-"]
-    assert ctx.baseline_cli_args is None
-    assert ctx.volume_binds == ()
-    await ctx.capture_final_before_cleanup(container_name="awf-reask-capture-setup-failure")
-    assert runner.calls == []
-    await ctx.finalize(status="success")
-
-    snapshot = read_latest_usage_snapshot("ws_capture_setup_failure", work_dir=tmp_path)
-    assert snapshot is not None
-    assert snapshot.phase == "final"
-    assert snapshot.status == "available"
-    assert snapshot.reason == "ccusage_command_failed"
-    assert snapshot.total_tokens == 42
 
 
 @pytest.mark.unit
@@ -460,14 +415,15 @@ async def test_isolated_run_preserves_prior_usage_when_capture_setup_fails(
 )
 async def test_isolated_run_preserves_ccusage_failure_reason(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     returncode: int,
     stderr: str,
     expected_reason: str,
 ) -> None:
-    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+    runner = FakeCommandRunner()
+    for _ in range(2):
+        runner.queue_result(returncode=returncode, stdout="", stderr=stderr)
     collector = CcusageCollector(
-        runner=FakeCommandRunner(),
+        runner=runner,
         work_dir=tmp_path,
         clock=FakeClock(),
     )
@@ -478,12 +434,17 @@ async def test_isolated_run_preserves_ccusage_failure_reason(
         provider=AgentRuntime.codex,
         cli_args=["codex", "exec", "-"],
     )
-    capture_dir = ctx.volume_binds[0][0]
-    for sample in ("baseline", "final"):
-        (capture_dir / f"{sample}.status").write_text(f"{returncode}\n", encoding="utf-8")
-        (capture_dir / f"{sample}.stdout").write_text("", encoding="utf-8")
-        (capture_dir / f"{sample}.stderr").write_text(stderr, encoding="utf-8")
 
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path(f"/worktrees/ws_capture_failure_{returncode}/reask"),
+    )
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
+    await ctx.capture_final_before_cleanup(container_name="awf-reask-failure")
     await ctx.finalize(status="failed")
 
     snapshot = read_latest_usage_snapshot(f"ws_capture_failure_{returncode}", work_dir=tmp_path)
