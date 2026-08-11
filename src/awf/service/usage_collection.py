@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
 import shlex
 import shutil
 import tempfile
@@ -91,7 +92,12 @@ DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 # guards against a future pin that might reject a missing ``--config`` target.
 _CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
 _ISOLATED_CCUSAGE_CAPTURE_DIR: Final = "/tmp/awf-ccusage"
-_ISOLATED_AGENT_COMPLETION_MARKER: Final = "\x1eawf-isolated-agent-complete\x1f\n"
+
+
+def _new_isolated_agent_completion_marker() -> str:
+    """Return a per-invocation marker that an agent cannot predict from its prompt."""
+
+    return f"\x1eawf-isolated-agent-complete:{secrets.token_hex(32)}\x1f\n"
 
 
 class _Clock(Protocol):
@@ -692,6 +698,11 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         self._capture_unavailable_reason = capture_unavailable_reason
         self._capture_sample = "baseline"
         self._baseline_captured_before_agent = False
+        self._agent_completion_marker = (
+            _new_isolated_agent_completion_marker()
+            if self._capture_dir is not None and self._source is not None
+            else None
+        )
 
     @property
     def baseline_cli_args(self) -> list[str] | None:
@@ -744,7 +755,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
     def cli_args(self) -> list[str]:
         """Wrap the agent CLI only to capture its final reading before removal."""
 
-        if self._capture_dir is None:
+        if self._capture_dir is None or self._agent_completion_marker is None:
             return list(self._agent_cli_args)
         return [
             "sh",
@@ -752,6 +763,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             _isolated_ccusage_wrapper_script(
                 source=str(self._source),
                 timeout_seconds=self._collector._command_timeout_seconds,
+                completion_marker=self._agent_completion_marker,
             ),
             "awf-isolated-ccusage",
             *self._agent_cli_args,
@@ -761,9 +773,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
     def agent_completion_marker(self) -> str | None:
         """Signal when the wrapped agent command exits before final sampling."""
 
-        if self._capture_dir is None or self._source is None:
-            return None
-        return _ISOLATED_AGENT_COMPLETION_MARKER
+        return self._agent_completion_marker
 
     @property
     def volume_binds(self) -> tuple[tuple[Path, str], ...]:
@@ -838,14 +848,16 @@ def _make_isolated_capture_dir(work_dir: Path, *, workspace_id: str) -> Path:
     return capture_dir
 
 
-def _isolated_ccusage_wrapper_script(*, source: str, timeout_seconds: float) -> str:
+def _isolated_ccusage_wrapper_script(
+    *, source: str, timeout_seconds: float, completion_marker: str
+) -> str:
     """Return the shell wrapper that captures ccusage after the agent exits."""
     quoted_source = shlex.quote(source)
     return f"""
 set +e
 \"$@\"
 agent_status=$?
-printf '%s' {shlex.quote(_ISOLATED_AGENT_COMPLETION_MARKER)}
+printf '%s' {shlex.quote(completion_marker)}
 timeout {timeout_seconds}s ccusage {quoted_source} daily --json --offline --config {_CCUSAGE_NEUTRAL_CONFIG_PATH} \\
   > \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stdout\" \\
   2> \"{_ISOLATED_CCUSAGE_CAPTURE_DIR}/final.stderr\"

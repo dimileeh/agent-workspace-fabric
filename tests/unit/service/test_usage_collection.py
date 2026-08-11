@@ -221,6 +221,16 @@ async def test_isolated_run_prepares_standalone_baseline_probe_before_agent_watc
     assert "final.status" in ctx.cli_args[2]
     assert ctx.agent_completion_marker is not None
     assert ctx.agent_completion_marker in ctx.cli_args[2]
+    assert ctx.agent_completion_marker != "\x1eawf-isolated-agent-complete\x1f\n"
+    next_ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_next",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    assert next_ctx.agent_completion_marker is not None
+    assert next_ctx.agent_completion_marker != ctx.agent_completion_marker
     baseline_script = ctx.baseline_cli_args[2]
     assert ctx.baseline_cli_args[:2] == ["sh", "-lc"]
     assert "ccusage codex daily --json --offline" in baseline_script
