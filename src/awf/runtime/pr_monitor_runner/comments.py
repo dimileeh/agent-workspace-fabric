@@ -227,10 +227,6 @@ async def _create_isolated_reask_worktree(
         return None
 
     await _prepare_reask_primary_worktree(runner, worktree_path=worktree_path)
-    checkout_filter_overrides = await _checkout_filter_overrides(
-        runner,
-        worktree_path=worktree_path,
-    )
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
     path = worktree_path.parent / (
@@ -284,16 +280,14 @@ async def _create_isolated_reask_worktree(
         create = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path,
-                # The primary mirror is writable by the prior agent. Disable
-                # its default hooks directory and every configured checkout
-                # filter while the control plane creates this host-side
-                # clarification checkout.
-                "-c",
-                "core.hooksPath=/dev/null",
-                *checkout_filter_overrides,
+                # Register the linked worktree without populating it. Its
+                # effective configuration can differ from the primary
+                # worktree through includeIf.gitdir rules, so filters must be
+                # discovered after the linked gitdir exists.
                 "worktree",
                 "add",
                 "--detach",
+                "--no-checkout",
                 str(path),
                 restore_ref,
             )
@@ -329,6 +323,69 @@ async def _create_isolated_reask_worktree(
             )
         raise _MonitorPolicyBlockedError(
             "Could not create an isolated worktree before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    try:
+        checkout_filter_overrides = await _checkout_filter_overrides(
+            runner,
+            worktree_path=path,
+        )
+        checkout = await runner._deps.runner.run(
+            git_worktree_command(
+                path,
+                # The primary mirror is writable by the prior agent. Disable
+                # its default hooks directory and every filter effective for
+                # this linked worktree while Git populates the clarification
+                # checkout.
+                "-c",
+                "core.hooksPath=/dev/null",
+                *checkout_filter_overrides,
+                "checkout",
+                "--detach",
+                restore_ref,
+            )
+        )
+    except asyncio.CancelledError:
+        # The linked worktree is registered before its checkout, so cleanup
+        # must cover cancellation during the filter probe or population too.
+        await _cleanup_after_cancellation(
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_checkout_cancellation"
+            )
+        )
+        raise
+    except Exception as exc:
+        cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
+            runner,
+            reask_worktree=reask_worktree,
+            event_name=(
+                "monitor.needs_human_reason_reask_"
+                "isolated_cleanup_failed_after_checkout_setup_failure"
+            ),
+        )
+        if cleanup_error is not None:
+            raise _IsolatedReaskWorktreeCleanupFailedError(
+                cleanup_error,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            ) from exc
+        raise
+    if not checkout.ok:
+        cleanup_error = await _cleanup_isolated_reask_worktree_after_creation_failure(
+            runner,
+            reask_worktree=reask_worktree,
+            event_name=(
+                "monitor.needs_human_reason_reask_isolated_cleanup_failed_after_checkout_failure"
+            ),
+        )
+        if cleanup_error is not None:
+            raise _IsolatedReaskWorktreeCleanupFailedError(
+                cleanup_error,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
+        raise _MonitorPolicyBlockedError(
+            "Could not populate an isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 

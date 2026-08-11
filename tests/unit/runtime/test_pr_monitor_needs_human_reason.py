@@ -370,6 +370,55 @@ async def test_isolated_reask_worktree_disables_primary_checkout_filters(
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_disables_filters_from_linked_worktree_include(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conditional filter for the linked gitdir cannot run while it is populated."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_conditional_filters_disabled")
+    (worktree / ".gitattributes").write_text("filtered.txt filter=poison\n", encoding="utf-8")
+    (worktree / "filtered.txt").write_text("original content\n", encoding="utf-8")
+    _git(worktree, "add", ".gitattributes", "filtered.txt")
+    _git(worktree, "commit", "-qm", "add filtered file")
+    filter_marker = tmp_path / "conditional-smudge-filter-ran"
+    included_config = tmp_path / "linked-worktree-filter.conf"
+    included_config.write_text(
+        '[filter "poison"]\n'
+        f"\tsmudge = touch '{filter_marker}'; cat\n"
+        "\tclean = cat\n"
+        "\trequired = true\n",
+        encoding="utf-8",
+    )
+    _git(
+        worktree,
+        "config",
+        "--add",
+        "includeIf.gitdir:**/worktrees/*isolated_reask_*.path",
+        str(included_config),
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert reask_worktree is not None
+    assert not filter_marker.exists()
+    assert (reask_worktree.path / "filtered.txt").read_text(
+        encoding="utf-8"
+    ) == "original content\n"
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
 async def test_checkout_filter_overrides_fail_closed_when_filter_probe_fails() -> None:
     """An unreadable filter configuration cannot lead to an unsafe checkout."""
     command_runner = FakeCommandRunner()
@@ -391,6 +440,66 @@ async def test_checkout_filter_overrides_reject_unexpected_config_key() -> None:
         _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
     ):
         await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_cleans_up_when_effective_filter_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed linked-worktree filter probe cannot leave an unpopulated checkout."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_linked_filter_probe_failure")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _failed_checkout_filter_overrides(
+        _runner: object, *, worktree_path: Path
+    ) -> tuple[str, ...]:
+        """Simulate an unreadable effective linked-worktree filter configuration."""
+        raise _MonitorPolicyBlockedError("Could not determine checkout filters")
+
+    monkeypatch.setattr(comments, "_checkout_filter_overrides", _failed_checkout_filter_overrides)
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not determine checkout filters"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_blocks_when_filter_probe_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    """A linked-worktree filter-probe cleanup failure remains policy-blocking."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_linked_filter_probe_cleanup_failure")
+
+    class _FailedFilterProbeWithFailedCleanupRunner(_LocalCommandRunner):
+        """Fail the linked-worktree probe after it is registered, then its removal."""
+
+        async def run(self, args: list[str]) -> CommandResult:
+            """Run real setup commands except for the synthetic failure points."""
+            if "worktree" in args and "remove" in args:
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            result = await super().run(args)
+            if "config" in args:
+                return CommandResult(returncode=2, stdout=result.stdout, stderr="config unreadable")
+            return result
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_FailedFilterProbeWithFailedCleanupRunner())
+    )
+
+    with pytest.raises(comments._IsolatedReaskWorktreeCleanupFailedError):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
 
 
 @pytest.mark.unit
@@ -635,7 +744,6 @@ async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
     worktree = _init_real_worktree(tmp_path, "ws_reask_create_failure")
     command_runner = FakeCommandRunner()
     command_runner.queue_result(returncode=0)  # primary-worktree status
-    command_runner.queue_result(returncode=1)  # no configured checkout filters
     command_runner.queue_result(returncode=1, stderr="worktree add failed")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
@@ -646,8 +754,9 @@ async def test_isolated_reask_worktree_creation_failure_blocks_clarification(
             restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    assert "worktree" in command_runner.calls[2].args
-    assert "add" in command_runner.calls[2].args
+    assert "worktree" in command_runner.calls[1].args
+    assert "add" in command_runner.calls[1].args
+    assert "--no-checkout" in command_runner.calls[1].args
 
 
 @pytest.mark.unit
@@ -684,15 +793,17 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
+@pytest.mark.parametrize("failure_stage", ("creation", "population"))
+async def test_needs_human_reason_reask_blocks_when_setup_cleanup_fails(
     tmp_path: Path,
+    failure_stage: str,
 ) -> None:
-    """A failed cleanup after a failed add cannot be treated as advisory setup."""
+    """A failed setup cleanup cannot be treated as an advisory re-ask failure."""
     workspace_id = "ws_reask_create_cleanup_failure"
     worktree = _init_real_worktree(tmp_path, workspace_id)
     audit_events: list[dict[str, object]] = []
 
-    class _NonzeroAfterWorktreeAddWithFailedCleanupRunner(_LocalCommandRunner):
+    class _NonzeroSetupWithFailedCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(self, args: list[str]) -> CommandResult:
@@ -700,11 +811,13 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
             result = await super().run(args)
-            if "worktree" in args and "add" in args:
+            if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
+                failure_stage == "population" and "checkout" in args
+            ):
                 return CommandResult(
                     returncode=1,
                     stdout=result.stdout,
-                    stderr="post-checkout hook failed",
+                    stderr=f"{failure_stage} failed",
                 )
             return result
 
@@ -717,7 +830,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
         audit_events.append(kwargs)
 
     runner = SimpleNamespace(
-        _deps=SimpleNamespace(runner=_NonzeroAfterWorktreeAddWithFailedCleanupRunner()),
+        _deps=SimpleNamespace(runner=_NonzeroSetupWithFailedCleanupRunner()),
         _worktrees_root=tmp_path,
         _rev_parse_head=_rev_parse_head,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
@@ -771,16 +884,18 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_fails(
         RuntimeError("worktree remove failed"),
     ),
 )
-async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
+@pytest.mark.parametrize("failure_stage", ("creation", "population"))
+async def test_needs_human_reason_reask_blocks_when_setup_cleanup_raises(
     tmp_path: Path,
     cleanup_error: Exception,
+    failure_stage: str,
 ) -> None:
-    """A failed-add checkout removal exception cannot become an advisory setup failure."""
+    """A failed setup-removal exception cannot become an advisory re-ask failure."""
     workspace_id = "ws_reask_create_cleanup_exception"
     worktree = _init_real_worktree(tmp_path, workspace_id)
     audit_events: list[dict[str, object]] = []
 
-    class _NonzeroAfterWorktreeAddWithExceptionalCleanupRunner(_LocalCommandRunner):
+    class _NonzeroSetupWithExceptionalCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(self, args: list[str]) -> CommandResult:
@@ -788,11 +903,13 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
             result = await super().run(args)
-            if "worktree" in args and "add" in args:
+            if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
+                failure_stage == "population" and "checkout" in args
+            ):
                 return CommandResult(
                     returncode=1,
                     stdout=result.stdout,
-                    stderr="post-checkout hook failed",
+                    stderr=f"{failure_stage} failed",
                 )
             return result
 
@@ -805,7 +922,7 @@ async def test_needs_human_reason_reask_blocks_when_creation_cleanup_raises(
         audit_events.append(kwargs)
 
     runner = SimpleNamespace(
-        _deps=SimpleNamespace(runner=_NonzeroAfterWorktreeAddWithExceptionalCleanupRunner()),
+        _deps=SimpleNamespace(runner=_NonzeroSetupWithExceptionalCleanupRunner()),
         _worktrees_root=tmp_path,
         _rev_parse_head=_rev_parse_head,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
@@ -859,6 +976,35 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
             return result
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=_CancelAfterWorktreeAddRunner()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_removes_checkout_when_filter_probe_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Cancellation during the linked-worktree filter probe cannot strand the checkout."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_filter_probe_cancelled")
+
+    class _CancelDuringFilterProbeRunner(_LocalCommandRunner):
+        """Cancel after the linked worktree is registered and its config is read."""
+
+        async def run(self, args: list[str]) -> CommandResult:
+            """Run setup until the effective filter configuration is queried."""
+            result = await super().run(args)
+            if "config" in args:
+                raise asyncio.CancelledError
+            return result
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_CancelDuringFilterProbeRunner()))
 
     with pytest.raises(asyncio.CancelledError):
         await comments._create_isolated_reask_worktree(
