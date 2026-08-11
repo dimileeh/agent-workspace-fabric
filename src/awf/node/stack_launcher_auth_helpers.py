@@ -39,7 +39,7 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
     }
 )
 _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
-    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::-|-)(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
 
 
@@ -484,14 +484,22 @@ def _credential_process_references(command: str) -> tuple[tuple[str, ...], froze
 
     with suppress(ValueError):
         arguments = shlex.split(command)
-        paths = _credential_process_path_references(arguments)
-        environment_names = frozenset(
-            environment_name
+        environment_references = tuple(
+            match
             for argument in arguments
             for match in _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE.finditer(argument)
+        )
+        paths = _credential_process_path_references(arguments) + tuple(
+            fallback
+            for match in environment_references
+            if (fallback := match.group("fallback")) and fallback.startswith("/")
+        )
+        environment_names = frozenset(
+            environment_name
+            for match in environment_references
             if (environment_name := match.group("braced") or match.group("plain"))
         )
-        return paths, environment_names
+        return tuple(dict.fromkeys(paths)), environment_names
     return (), frozenset()
 
 
@@ -823,6 +831,9 @@ def legacy_clarification_entrypoint(
                 "        executable_path_pattern = re.compile(",
                 '            r"(?<![^\\s\'\\"|&;()<>=])(?:(?P<quote>[\'\\"])(?P<quoted>/[^\'\\"]+)(?P=quote)|(?P<unquoted>/(?:\\\\.|[^\\s\'\\"|&;()<>\\\\])+))(?![^\\s\'\\"|&;()<>])"',
                 "        )",
+                "        defaulted_environment_path_pattern = re.compile(",
+                '            r"(?<!\\\\)(?P<prefix>\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-|-))(?P<path>/[^}]+)(?P<suffix>\\})"',
+                "        )",
                 "",
                 "        def rewrite_executable_path(match):",
                 '            path = match.group("quoted") or match.group("unquoted")',
@@ -836,6 +847,9 @@ def legacy_clarification_entrypoint(
                 "                return match.group(0) if rewritten_path == path else shlex.quote(rewritten_path)",
                 '            return f"{quote}{rewrite_path(path)}{quote}"',
                 "",
+                "        def rewrite_defaulted_environment_path(match):",
+                "            return f\"{match.group('prefix')}{rewrite_path(match.group('path'))}{match.group('suffix')}\"",
+                "",
                 '        subject_token_file = credential_source.get("file")',
                 "        if isinstance(subject_token_file, str):",
                 '            credential_source["file"] = rewrite_path(subject_token_file)',
@@ -843,10 +857,15 @@ def legacy_clarification_entrypoint(
                 "        if isinstance(executable, dict):",
                 '            command = executable.get("command")',
                 "            if isinstance(command, str):",
-                '                executable["command"] = executable_path_pattern.sub(',
+                "                command = executable_path_pattern.sub(",
                 "                    rewrite_executable_path,",
                 "                    command,",
                 "                )",
+                "                command = defaulted_environment_path_pattern.sub(",
+                "                    rewrite_defaulted_environment_path,",
+                "                    command,",
+                "                )",
+                '                executable["command"] = command',
                 '            output_file = executable.get("output_file")',
                 "            if isinstance(output_file, str):",
                 '                executable["output_file"] = rewrite_path(output_file)',

@@ -1400,6 +1400,77 @@ def test_clarification_retains_credential_process_environment_token_file(tmp_pat
 
 
 @pytest.mark.unit
+def test_clarification_retains_defaulted_credential_process_token_file(
+    tmp_path: Path,
+) -> None:
+    """Defaulted credential-process paths retain the input and fallback mounts."""
+    aws_home = tmp_path / "aws"
+    aws_home.mkdir()
+    helper = tmp_path / "aws-helper"
+    token = tmp_path / "credential-process-token"
+    fallback_token = tmp_path / "credential-process-fallback-token"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    fallback_token.write_text("fallback-token", encoding="utf-8")
+    helper_target = "/run/awf/secrets/aws-helper"
+    token_target = "/run/awf/secrets/credential-process-token"
+    fallback_token_target = "/run/awf/secrets/credential-process-fallback-token"
+    (aws_home / "config").write_text(
+        "[profile awf-bedrock]\n"
+        "credential_process = sh -c "
+        f"'{helper_target} --token-file \"${{MY_TOKEN_FILE:-{fallback_token_target}}}\"'\n",
+        encoding="utf-8",
+    )
+    aws_profile = AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro")
+    helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
+    token_mount = AuthMount(source=str(token), target=token_target, mode="ro")
+    fallback_token_mount = AuthMount(
+        source=str(fallback_token), target=fallback_token_target, mode="ro"
+    )
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("MY_TOKEN_FILE", token_target),
+        ("UNRELATED_SECRET", "must-not-leak"),
+    )
+    mounts = (aws_profile, helper_mount, token_mount, fallback_token_mount)
+
+    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+        environment,
+        auth_mounts=mounts,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "awf-bedrock"),
+        ("MY_TOKEN_FILE", "/home/agent/.awf/clarification-auth/2"),
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro"),
+        AuthMount(
+            source=str(helper),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(token),
+            target="/home/agent/.awf/clarification-auth/2",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(fallback_token),
+            target="/home/agent/.awf/clarification-auth/3",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_stages_chained_bedrock_profile_auth_mounts(tmp_path: Path) -> None:
     """Bedrock profile chains retain source-profile helper and token mounts."""
     aws_home = tmp_path / "aws"
