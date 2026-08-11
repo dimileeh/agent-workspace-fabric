@@ -1282,6 +1282,10 @@ class AgentAdapter(ABC):
         # CLIs from waiting forever for inherited interactive input.
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
 
+        cleanup_isolated_container = (
+            isinstance(invocation, TrackedIsolatedComposeRun)
+            and invocation.startup_args is not None
+        )
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
             try:
@@ -1352,6 +1356,7 @@ class AgentAdapter(ABC):
                     invocation,
                     workspace_id=workspace_id,
                 )
+                cleanup_isolated_container = False
                 raise
             except Exception:
                 if isinstance(invocation, TrackedIsolatedComposeRun):
@@ -1367,27 +1372,24 @@ class AgentAdapter(ABC):
                             invocation,
                             workspace_id=workspace_id,
                         )
+                        cleanup_isolated_container = False
                 raise
         finally:
+            if cleanup_isolated_container:
+                try:
+                    await self._capture_isolated_usage_before_cleanup(
+                        isolated_sampler_ctx,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
+                finally:
+                    await cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
             if sinks is not None:
                 await sinks.close()
-
-        if (
-            isinstance(invocation, TrackedIsolatedComposeRun)
-            and invocation.startup_args is not None
-        ):
-            try:
-                await self._capture_isolated_usage_before_cleanup(
-                    isolated_sampler_ctx,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
-            finally:
-                await cleanup_compose_exec_invocation(
-                    self._runner,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
 
         if not result.ok:
             provider = self.get_provider(model)

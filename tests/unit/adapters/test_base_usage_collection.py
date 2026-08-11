@@ -813,6 +813,60 @@ async def test_isolated_cancellation_captures_usage_before_forced_container_remo
 
 
 @pytest.mark.unit
+async def test_isolated_sink_close_cancellation_removes_detached_container() -> None:
+    """Cancellation during sink close cannot strand the clarification container."""
+    events: list[str] = []
+
+    class _BlockingCloseSinks:
+        def __init__(self) -> None:
+            self.close_started = asyncio.Event()
+
+        async def write_stdout(self, _data: str) -> None:
+            return None
+
+        async def write_stderr(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            events.append("sink_close")
+            self.close_started.set()
+            await asyncio.Event().wait()
+
+    class _LogStore:
+        def __init__(self) -> None:
+            self.sinks = _BlockingCloseSinks()
+
+        async def open_command_streams(self, **_kwargs: Any) -> _BlockingCloseSinks:
+            return self.sinks
+
+    sampler = _IsolatedRecordingSampler(events)
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    log_store = _LogStore()
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler, log_store=log_store)
+
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_sink_close_cancelled",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_sink_close_cancelled/reask"),
+        )
+    )
+    await asyncio.wait_for(log_store.sinks.close_started.wait(), timeout=0.2)
+    run_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    capture_event = next(event for event in events if event.startswith("capture:"))
+    assert events.index(capture_event) < events.index("cleanup")
+    assert events.index("cleanup") < events.index("sink_close")
+    assert events.count("cleanup") == 1
+    assert events[-1] == "finalize:cancelled"
+
+
+@pytest.mark.unit
 async def test_isolated_capture_failure_does_not_mask_timeout_or_container_removal() -> None:
     """Verify isolated capture failure does not mask timeout or container removal."""
     events: list[str] = []
