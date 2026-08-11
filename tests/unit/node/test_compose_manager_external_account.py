@@ -541,13 +541,13 @@ def test_clarification_rewrites_staged_aws_profile_paths(
     source_aws = source_root / "0"
     source_aws.mkdir(parents=True)
     helper_target = "/run/awf/secrets/aws-helper"
-    token_target = "/run/awf/secrets/web-identity-token"
+    token_target = "/run/awf/secrets/subject token"
     staged_aws = tmp_path / "clarification-auth" / "aws"
     staged_helper = tmp_path / "clarification-auth" / "aws-helper"
     staged_token = tmp_path / "clarification-auth" / "web-identity-token"
     (source_aws / "config").write_text(
         "[profile awf-bedrock]\n"
-        f"credential_process = {helper_target} --json\n"
+        f"credential_process = {helper_target} --token-file={token_target.replace(' ', r'\ ')}\n"
         f"web_identity_token_file = {token_target}\n",
         encoding="utf-8",
     )
@@ -600,7 +600,7 @@ def test_clarification_rewrites_staged_aws_profile_paths(
     configuration = configparser.RawConfigParser(interpolation=None)
     configuration.read(staged_aws / "config", encoding="utf-8")
     assert configuration.get("profile awf-bedrock", "credential_process") == (
-        f"{staged_helper} --json"
+        f"{staged_helper} --token-file={staged_token}"
     )
     assert configuration.get("profile awf-bedrock", "web_identity_token_file") == str(staged_token)
 
