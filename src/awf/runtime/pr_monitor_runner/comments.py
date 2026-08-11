@@ -252,6 +252,26 @@ async def _checkout_filter_overrides(
     )
 
 
+def _reject_reask_source_mirror_object_alternates(source_mirror: Path | None) -> None:
+    """Reject a source mirror with object alternates before Git reads it for a re-ask."""
+    if source_mirror is not None and _source_mirror_declares_object_alternates(source_mirror):
+        raise _MonitorPolicyBlockedError(
+            "Source mirror has object alternates before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+
+def _source_mirror_declares_object_alternates(source_mirror: Path) -> bool:
+    alternates_path = source_mirror / "objects" / "info" / "alternates"
+    try:
+        alternates_path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # pragma: no cover - fail closed when the alternates probe is unreadable.
+    return True
+
+
 async def _create_isolated_reask_worktree(
     runner: PullRequestMonitorRunner,
     *,
@@ -274,6 +294,7 @@ async def _create_isolated_reask_worktree(
         _release_pinned_source_git_dir_fd(source_git_dir_fd)
         return None
 
+    _reject_reask_source_mirror_object_alternates(source_mirror)
     try:
         await _prepare_reask_primary_worktree(
             runner,
@@ -394,6 +415,7 @@ async def _create_isolated_reask_worktree(
             runner,
             worktree_path=path,
         )
+        _reject_reask_source_mirror_object_alternates(source_mirror)
         checkout = await runner._deps.runner.run(
             git_worktree_command(
                 path,
@@ -1033,6 +1055,7 @@ async def _enforce_needs_human_reason(
                     source_mirror = source_git_context.mirror_path
                     source_git_dir = source_git_context.linked_git_dir
                     source_git_dir_fd = source_git_context.linked_git_dir_fd
+                    _reject_reask_source_mirror_object_alternates(source_mirror)
                     reask_restore_ref = await _rev_parse_pinned_reask_source_head(
                         runner,
                         source_git_dir,

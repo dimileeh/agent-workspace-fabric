@@ -177,6 +177,129 @@ async def test_reask_rejects_source_git_pointer_to_other_mirror_before_head_or_w
 
 
 @pytest.mark.unit
+async def test_reask_rejects_source_mirror_alternates_before_snapshot_and_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clarification must not resolve a skip-worktree blob from another repository."""
+    workspace_id = "ws_source_alternates"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    foreign = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="foreign",
+        worktree_name=workspace_id,
+        tracked_contents="foreign repository\n",
+        worktrees_root=tmp_path / "foreign-worktrees",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    source_mirror = source_git_dir.parent.parent
+    foreign_git_dir = Path(
+        (foreign / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    foreign_blob = _git(foreign, "rev-parse", "HEAD:tracked.txt").stdout.strip()
+    source_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    forged_tree = subprocess.run(
+        ["git", "--git-dir", str(source_mirror), "mktree", "--missing"],
+        check=True,
+        capture_output=True,
+        input=f"100644 blob {foreign_blob}\ttracked.txt\n",
+        text=True,
+    ).stdout.strip()
+    forged_head = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(source_mirror),
+            "-c",
+            "user.email=awf@example.com",
+            "-c",
+            "user.name=AWF Test",
+            "commit-tree",
+            forged_tree,
+            "-p",
+            source_head,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    alternates_path = source_mirror / "objects" / "info" / "alternates"
+    alternates_path.parent.mkdir(parents=True, exist_ok=True)
+    alternates_path.write_text(f"{foreign_git_dir.parent.parent / 'objects'}\n", encoding="utf-8")
+    _git(source, "update-ref", "HEAD", forged_head)
+    _git(source, "read-tree", forged_head)
+    _git(source, "update-index", "--skip-worktree", "tracked.txt")
+    assert _git(source, "status", "--porcelain").stdout == ""
+
+    reask_invocations: list[dict[str, object]] = []
+    reask_contents: list[str] = []
+    unavailable_reasons: list[str] = []
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask_invocations.append(dict(kwargs))
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        reask_contents.append((reask / "tracked.txt").read_text(encoding="utf-8"))
+        return VerdictResult(verdict="needs_human", reason="select a deployment region")
+
+    async def _unexpected_rev_parse_head(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a linked source must resolve HEAD through its pinned admin directory")
+
+    async def _record_needs_human_reason_missing(_runner: object, **kwargs: object) -> None:
+        unavailable_reasons.append(str(kwargs["reason_code"]))
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_EnvLocalCommandRunner()),
+        _worktrees_root=source.parent,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_unexpected_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_record_needs_human_reason_missing",
+        _record_needs_human_reason_missing,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=tmp_path / "compose.yml",
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert reask_invocations == []
+    assert reask_contents == []
+    assert unavailable_reasons == ["NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"]
+    assert alternates_path.exists()
+    assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_reask_uses_validated_source_git_context_for_head_and_worktree_creation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
