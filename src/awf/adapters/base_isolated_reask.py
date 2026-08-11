@@ -14,6 +14,7 @@ from typing import Final
 
 from awf.adapters.runtime_executor import AgentRuntimeExecResult
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
 _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
@@ -332,12 +333,14 @@ def _isolated_reask_git_metadata_volume_binds(
             expected_source_mirror=expected_source_mirror,
         )
         (snapshot_path / "commondir").write_text(f"{common_git_dir}\n", encoding="utf-8")
+        git_environment = git_env_without_object_lookup_overrides()
         snapshotted_ref = subprocess.run(
             ["git", "--git-dir", str(snapshot_path), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
+            env=git_environment,
         ).stdout.strip()
         if snapshotted_ref != expected_ref:
             raise OSError("linked Git HEAD does not match the requested re-ask ref")
@@ -372,6 +375,7 @@ def _isolated_reask_git_metadata_volume_binds(
             check=True,
             capture_output=True,
             timeout=30,
+            env=git_environment,
         )
         # Retain clone-created core/extensions metadata (notably SHA-256 object
         # format settings), but remove the remote section whose URL may contain

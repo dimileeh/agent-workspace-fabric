@@ -513,6 +513,57 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_clear_object_directory_overrides(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Snapshot Git commands do not inherit external object-store overrides."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        external_objects = tmp_path / "external-objects"
+        external_objects.mkdir()
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(external_objects))
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(external_objects))
+        command_environments: dict[str, dict[str, str]] = {}
+        real_run = base_isolated_reask.subprocess.run
+
+        def _record_snapshot_git_environment(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[:2] == ["git", "clone"]:
+                command_environments["clone"] = kwargs["env"]
+            elif command[1:2] == ["--git-dir"] and command[-2:] == ["rev-parse", "HEAD"]:
+                command_environments["rev-parse"] = kwargs["env"]
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(
+            base_isolated_reask.subprocess,
+            "run",
+            _record_snapshot_git_environment,
+        )
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            for environment in command_environments.values():
+                assert "GIT_OBJECT_DIRECTORY" not in environment
+                assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in environment
+            assert set(command_environments) == {"clone", "rev-parse"}
+            assert not any(external_objects.iterdir())
+            monkeypatch.delenv("GIT_OBJECT_DIRECTORY")
+            monkeypatch.delenv("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            common_path = Path(temporary_metadata.name) / "common-git"
+            assert (common_path / "objects").is_dir()
+            assert (
+                _git(
+                    ["--git-dir", str(common_path), "cat-file", "-e", head_oid], tmp_path
+                ).returncode
+                == 0
+            )
+        finally:
+            temporary_metadata.cleanup()
+
     def test_isolated_reask_git_metadata_binds_snapshot_controls_before_clone(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
