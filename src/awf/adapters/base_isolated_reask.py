@@ -54,13 +54,25 @@ def _isolated_reask_git_metadata_volume_binds(
     refs or objects. Git needs only selected linked control files and the
     snapshot's common Git directory to recognise the worktree.
     """
-    mirror_path = mirror_path_for_worktree(worktree_path)
     linked_git_dir = linked_worktree_git_dir(worktree_path)
-    if mirror_path is None or linked_git_dir is None or not linked_git_dir.is_dir():
+    if linked_git_dir is None:
+        return None, ()
+    try:
+        # Keep the descriptor open through clone: passing it through /proc
+        # avoids following a replacement of this writable admin directory.
+        linked_git_dir_fd = os.open(linked_git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None, ()
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None or not linked_git_dir.is_dir():
+        with contextlib.suppress(OSError):
+            os.close(linked_git_dir_fd)
         return None, ()
     try:
         linked_git_dir.relative_to(mirror_path)
     except ValueError:
+        with contextlib.suppress(OSError):
+            os.close(linked_git_dir_fd)
         return None, ()
     temporary_metadata: tempfile.TemporaryDirectory[str] | None = None
     try:
@@ -82,11 +94,12 @@ def _isolated_reask_git_metadata_volume_binds(
                 "--no-local",
                 "--no-tags",
                 "--single-branch",
-                str(worktree_path),
+                f"/proc/self/fd/{linked_git_dir_fd}",
                 str(common_path),
             ],
             check=True,
             capture_output=True,
+            pass_fds=(linked_git_dir_fd,),
             timeout=30,
         )
         # Retain clone-created core/extensions metadata (notably SHA-256 object
@@ -145,6 +158,9 @@ def _isolated_reask_git_metadata_volume_binds(
         if temporary_metadata is not None:
             temporary_metadata.cleanup()
         return None, ()
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(linked_git_dir_fd)
     return temporary_metadata, (
         (snapshot_path, str(linked_git_dir)),
         (common_path, _ISOLATED_REASK_COMMON_GIT_DIR),

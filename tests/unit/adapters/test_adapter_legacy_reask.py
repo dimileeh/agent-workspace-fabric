@@ -459,6 +459,33 @@ class TestIsolatedReaskAdapter:
             if temporary_metadata is not None:
                 temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_reject_symlinked_linked_git_dir_before_clone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A linked-admin-directory symlink cannot become the clone source."""
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        displaced_git_dir = tmp_path / "displaced-linked-git"
+        replacement_git_dir = tmp_path / "replacement-linked-git"
+        replacement_git_dir.mkdir()
+        linked_git_dir.rename(displaced_git_dir)
+        linked_git_dir.symlink_to(replacement_git_dir, target_is_directory=True)
+        real_run = base_isolated_reask.subprocess.run
+
+        def _fail_if_clone(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[:2] == ["git", "clone"]:
+                raise AssertionError("must reject linked Git directory before cloning")
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _fail_if_clone)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
     def test_copy_regular_git_metadata_file_rejects_fifo(self, tmp_path: Path) -> None:
         """The metadata copy helper never reads a special file."""
         source_dir = tmp_path / "linked-git"
