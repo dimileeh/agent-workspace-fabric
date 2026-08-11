@@ -477,18 +477,42 @@ class AgentAdapter(ABC):
                             details={"services": clarification_model_services},
                         ) from exc
                     raise
-                except Exception:
+                except Exception as attachment_error:
                     if attachment is not None:
-                        with contextlib.suppress(Exception):
-                            await _rollback_persisted_clarification_model_network(
+                        try:
+                            cleanup_result = await _rollback_persisted_clarification_model_network(
                                 self._runner, attachment=attachment
                             )
-                    with contextlib.suppress(OSError):
+                        except Exception as cleanup_error:
+                            cleanup_result = CommandResult(
+                                returncode=1,
+                                stdout="",
+                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
+                            )
+                        if not cleanup_result.ok:
+                            raise AgentRunError(
+                                agent=self.name,
+                                result=cleanup_result,
+                                reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                                details={"services": clarification_model_services},
+                            ) from attachment_error
+                    try:
                         await asyncio.to_thread(
                             _restore_compose_file,
                             compose_file=compose_file,
                             contents=original_compose_file,
                         )
+                    except OSError as cleanup_error:
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=CommandResult(
+                                returncode=1,
+                                stdout="",
+                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
+                            ),
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                            details={"services": clarification_model_services},
+                        ) from cleanup_error
                     raise
                 if not model_service_update.ok:
                     cleanup_result = await _rollback_persisted_clarification_model_network(

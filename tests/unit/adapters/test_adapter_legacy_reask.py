@@ -1126,3 +1126,106 @@ class TestIsolatedReaskAdapter:
             "clarification_model_net",
         ]
         assert all("--force-recreate" not in call.args for call in runner.calls)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("rollback_result", "expected_stderr"),
+        [
+            (
+                CommandResult(returncode=1, stdout="", stderr="network endpoint remains attached"),
+                "network endpoint remains attached",
+            ),
+            (RuntimeError("network rollback crashed"), "RuntimeError: network rollback crashed"),
+        ],
+        ids=["failed-result", "raised-error"],
+    )
+    async def test_isolated_reask_surfaces_cleanup_failure_after_attachment_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        rollback_result: CommandResult | RuntimeError,
+        expected_stderr: str,
+    ) -> None:
+        """Attachment errors never conceal their failed network cleanup."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        async def _raise_attachment_error(*args: Any, **kwargs: Any) -> Any:
+            attachment = kwargs["attachment"]
+            attachment.created_network = True
+            attachment.connected_container_ids.append("stateful-model-container")
+            raise RuntimeError("network attach crashed")
+
+        async def _fail_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+            if isinstance(rollback_result, Exception):
+                raise rollback_result
+            return rollback_result
+
+        monkeypatch.setattr(
+            adapter_base,
+            "_attach_persisted_clarification_model_network",
+            _raise_attachment_error,
+        )
+        monkeypatch.setattr(
+            adapter_base,
+            "_rollback_persisted_clarification_model_network",
+            _fail_rollback,
+        )
+        adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == expected_stderr
+
+    @pytest.mark.unit
+    async def test_isolated_reask_surfaces_compose_restore_failure_after_attachment_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Attachment errors never conceal a failed Compose-file restoration."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+        async def _raise_attachment_error(*args: Any, **kwargs: Any) -> Any:
+            attachment = kwargs["attachment"]
+            attachment.created_network = True
+            attachment.connected_container_ids.append("stateful-model-container")
+            raise RuntimeError("network attach crashed")
+
+        async def _successful_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        def _fail_restore(*args: Any, **kwargs: Any) -> None:
+            raise OSError("compose storage unavailable")
+
+        monkeypatch.setattr(
+            adapter_base,
+            "_attach_persisted_clarification_model_network",
+            _raise_attachment_error,
+        )
+        monkeypatch.setattr(
+            adapter_base,
+            "_rollback_persisted_clarification_model_network",
+            _successful_rollback,
+        )
+        monkeypatch.setattr(adapter_base, "_restore_compose_file", _fail_restore)
+        adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == "OSError: compose storage unavailable"
