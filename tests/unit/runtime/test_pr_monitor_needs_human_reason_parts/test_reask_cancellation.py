@@ -55,7 +55,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
         (reask / "generated.env").write_text("GENERATED=during-reask\n", encoding="utf-8")
         raise asyncio.CancelledError
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -127,7 +127,7 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
         """Return this test scenario’s synthetic monitor-agent verdict."""
         raise asyncio.CancelledError
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -204,7 +204,7 @@ async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_
         (reask / "tracked.py").write_text("x = 2\n", encoding="utf-8")
         raise terminal_error
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -285,7 +285,7 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
             raise _MonitorPolicyBlockedError("terminal re-ask failure")
         raise RuntimeError("ordinary re-ask failure")
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -388,7 +388,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         await release_persistence.wait()
         persisted_states.append(dict(state.threads_addressed_ids))
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -482,7 +482,7 @@ async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_canc
         persisted_errors.append(str(kwargs["cleanup_error"]))
         assert kwargs["needs_human_reason"] is None
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -575,7 +575,7 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
             "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
         )
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -639,7 +639,7 @@ async def test_needs_human_reason_reask_persists_completed_cleanup_failure_befor
         """Return this test scenario’s synthetic monitor-agent verdict."""
         raise asyncio.CancelledError
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return "e" * 40
 

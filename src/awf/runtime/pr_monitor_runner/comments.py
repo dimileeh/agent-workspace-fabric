@@ -53,6 +53,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _owned_paths_for_prompt_or_empty as _owned_paths_for_prompt_or_empty,
 )
+from awf.runtime.pr_monitor_runner.comments_reask_audit import (
+    _record_needs_human_reason_missing,
+)
 from awf.runtime.pr_monitor_runner.comments_source_git import (
     _pinned_linked_worktree_command,
     _reask_source_mirror_command,
@@ -1349,56 +1352,6 @@ async def _enforce_needs_human_reason(
         reason_code=needs_human_reason_code,
     )
     return result
-
-
-async def _record_needs_human_reason_missing(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    pr_number: int,
-    item_id: str,
-    item_kind: str,
-    item_author: str | None,
-    item_path: str | None,
-    item_line: int | None,
-    base_branch: str,
-    remote_branch: str | None,
-    operation_id: str | None,
-    operation_type: str | None,
-    monitor_log: WorkspaceLogSink | None,
-    reason_code: str = _NEEDS_HUMAN_REASON_MISSING,
-) -> None:
-    """Warn and persist the reason-clarification diagnostic."""
-    evidence = {
-        "item_id": redact_audit_text(item_id, limit=200),
-        "item_kind": item_kind,
-        "item_author": redact_audit_text(item_author or "", limit=200),
-        "item_path": redact_audit_text(item_path or "", limit=400),
-        "item_line": item_line,
-    }
-    _log.warning(
-        "monitor.needs_human_reason_missing",
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        reason_code=reason_code,
-        operation_id=operation_id,
-        **evidence,
-    )
-    await runner._record_pr_monitor_audit_event(
-        workspace_id=workspace_id,
-        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
-        action=f"address_{item_kind}",
-        outcome="needs_human",
-        reason_code=reason_code,
-        pr_number=pr_number,
-        status=None,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        monitor_log=monitor_log,
-        evidence=evidence,
-    )
 
 
 def _sync_comment_verdict_dependencies() -> None:

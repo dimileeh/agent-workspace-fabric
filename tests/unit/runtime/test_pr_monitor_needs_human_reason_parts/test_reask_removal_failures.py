@@ -100,7 +100,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
             reason="select the deployment region",
         )
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -193,7 +193,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
             reason="select the deployment region",
         )
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 

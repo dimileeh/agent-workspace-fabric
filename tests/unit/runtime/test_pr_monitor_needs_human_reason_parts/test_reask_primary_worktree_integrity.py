@@ -32,7 +32,7 @@ async def test_needs_human_reason_reask_preserves_post_repair_commit(
             reason="select the deployment region",
         )
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return "b" * 40
 
@@ -116,7 +116,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
             reason="select the deployment region",
         )
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -182,7 +182,7 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
         """Record pr monitor audit event for this test."""
         return
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 

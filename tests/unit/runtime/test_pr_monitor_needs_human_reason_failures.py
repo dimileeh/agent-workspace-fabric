@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
+from awf.runtime.ownership import ValidatedSourceWorktreeGitContext
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -158,15 +160,40 @@ async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_propagates_unexpected_setup_error(tmp_path: Path) -> None:
-    """An unexpected setup bug is not downgraded to unavailable clarification."""
+async def test_needs_human_reason_reask_propagates_unexpected_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected pinned-source error is not downgraded to unavailable clarification."""
     workspace_id = "ws_unexpected_setup_error"
     worktree = tmp_path / workspace_id
     worktree.mkdir()
     (worktree / ".git").write_text("gitdir: unavailable\n", encoding="utf-8")
 
-    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
-        """Return the synthetic primary-worktree revision."""
+    source_mirror = tmp_path / "mirror"
+    source_mirror.mkdir()
+    source_git_dir = tmp_path / "linked-git-dir"
+    source_git_dir.mkdir()
+    source_git_dir_fd = os.open(source_git_dir, os.O_RDONLY | os.O_DIRECTORY)
+
+    def _validated_source_worktree_git_context(
+        _worktree_path: Path, _workspace_id: str
+    ) -> ValidatedSourceWorktreeGitContext:
+        """Provide an already-validated source Git context for this error path."""
+        return ValidatedSourceWorktreeGitContext(
+            mirror_path=source_mirror,
+            linked_git_dir=source_git_dir,
+            linked_git_dir_fd=source_git_dir_fd,
+        )
+
+    async def _rev_parse_pinned_reask_source_head(
+        _runner: object,
+        _source_git_dir: Path,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        """Raise the unexpected source-HEAD defect under test."""
+        del timeout_seconds
         raise ValueError("unexpected rev-parse defect")
 
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
@@ -176,8 +203,17 @@ async def test_needs_human_reason_reask_propagates_unexpected_setup_error(tmp_pa
     runner = SimpleNamespace(
         _deps=SimpleNamespace(runner=_LocalCommandRunner()),
         _worktrees_root=tmp_path,
-        _rev_parse_head=_rev_parse_head,
         _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+    monkeypatch.setattr(
+        comments,
+        "validated_source_worktree_git_context",
+        _validated_source_worktree_git_context,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_rev_parse_pinned_reask_source_head",
+        _rev_parse_pinned_reask_source_head,
     )
     with pytest.raises(ValueError, match="unexpected rev-parse defect"):
         await comments._enforce_needs_human_reason(
