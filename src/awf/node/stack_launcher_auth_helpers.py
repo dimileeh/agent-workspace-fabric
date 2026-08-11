@@ -10,10 +10,12 @@ import os
 import posixpath
 import re
 import shlex
+import stat
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import Final
 
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import AuthMount
@@ -41,6 +43,7 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
 _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
     r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::?[-=+?])(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
+_MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES: Final = 1024 * 1024
 
 
 def staged_provider_auth_mounts(
@@ -78,8 +81,9 @@ def has_codex_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
         if mount.target not in _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.codex]:
             continue
         try:
-            auth = json.loads((Path(mount.source) / "auth.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            content = _read_bounded_clarification_auth_credential(mount.source, "auth.json")
+            auth = json.loads(content) if content is not None else None
+        except json.JSONDecodeError:
             continue
         if _has_codex_auth_credential(auth):
             return True
@@ -118,6 +122,44 @@ def _has_codex_id_token(value: str) -> bool:
         return False
 
 
+def _read_bounded_clarification_auth_credential(directory: str, filename: str) -> str | None:
+    """Read one regular credential file without following a writable path replacement."""
+    directory_fd: int | None = None
+    credential_fd: int | None = None
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        credential_fd = os.open(
+            filename,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+        credential_stat = os.fstat(credential_fd)
+        if (
+            not stat.S_ISREG(credential_stat.st_mode)
+            or credential_stat.st_size > _MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES
+        ):
+            return None
+        content = bytearray()
+        while len(content) <= _MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES:
+            chunk = os.read(
+                credential_fd,
+                min(64 * 1024, _MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES + 1 - len(content)),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > _MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES:
+            return None
+        return bytes(content).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        for fd in (credential_fd, directory_fd):
+            if fd is not None:
+                with suppress(OSError):
+                    os.close(fd)
+
+
 def has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
     """Return whether a staged Claude home supplies its OAuth credential store."""
 
@@ -125,10 +167,9 @@ def has_claude_code_file_auth(source_mounts: Sequence[AuthMount]) -> bool:
         if mount.target != "/home/agent/.claude":
             continue
         try:
-            credentials = json.loads(
-                (Path(mount.source) / ".credentials.json").read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            content = _read_bounded_clarification_auth_credential(mount.source, ".credentials.json")
+            credentials = json.loads(content) if content is not None else None
+        except json.JSONDecodeError:
             continue
         if _has_claude_code_auth_credential(credentials):
             return True
