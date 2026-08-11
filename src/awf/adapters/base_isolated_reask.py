@@ -13,7 +13,7 @@ from typing import Final
 
 from awf.adapters.runtime_executor import AgentRuntimeExecResult
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
-from awf.node.git_manager import linked_worktree_git_dir, mirror_path_for_worktree
+from awf.node.git_manager import linked_worktree_git_dir
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
 _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
@@ -21,16 +21,25 @@ _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
 
 def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destination: Path) -> None:
     """Copy one linked-worktree control file without following a raced symlink."""
-    fds: list[int] = []
+    source_dir_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        source_dir_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        fds.append(source_dir_fd)
+        _copy_regular_git_metadata_file_from_directory_fd(source_dir_fd, source_name, destination)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(source_dir_fd)
+
+
+def _copy_regular_git_metadata_file_from_directory_fd(
+    source_dir_fd: int, source_name: str, destination: Path
+) -> None:
+    """Copy one regular Git metadata file from an already-open directory."""
+    source_fd: int | None = None
+    try:
         source_fd = os.open(
             source_name,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=source_dir_fd,
         )
-        fds.append(source_fd)
         file_stat = os.fstat(source_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"Git metadata source is not a regular file: {source_name}")
@@ -50,9 +59,24 @@ def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destinat
             if os.read(source_fd, 1):
                 raise OSError(f"Git metadata source exceeds size limit: {source_name}")
     finally:
-        for fd in fds:
+        if source_fd is not None:
             with contextlib.suppress(OSError):
-                os.close(fd)
+                os.close(source_fd)
+
+
+def _linked_worktree_common_git_dir(snapshot_path: Path, linked_git_dir: Path) -> Path:
+    """Validate the snapshotted common Git directory for a linked worktree."""
+    commondir = (snapshot_path / "commondir").read_text(encoding="utf-8").strip()
+    if not commondir:
+        raise OSError("linked Git commondir is empty")
+    common_git_dir = Path(commondir)
+    if not common_git_dir.is_absolute():
+        common_git_dir = linked_git_dir / common_git_dir
+    common_git_dir = Path(os.path.normpath(common_git_dir))
+    expected_common_git_dir = Path(os.path.normpath(linked_git_dir.parent.parent))
+    if common_git_dir != expected_common_git_dir:
+        raise OSError("linked Git commondir does not match the linked Git directory")
+    return common_git_dir
 
 
 def _isolated_reask_git_metadata_volume_binds(
@@ -70,21 +94,10 @@ def _isolated_reask_git_metadata_volume_binds(
     if linked_git_dir is None:
         return None, ()
     try:
-        # Keep the descriptor open through clone: passing it through /proc
-        # avoids following a replacement of this writable admin directory.
+        # Snapshot the control files through this descriptor. The linked Git
+        # directory is agent-writable, so Git must not read it during clone.
         linked_git_dir_fd = os.open(linked_git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
-        return None, ()
-    mirror_path = mirror_path_for_worktree(worktree_path)
-    if mirror_path is None or not linked_git_dir.is_dir():
-        with contextlib.suppress(OSError):
-            os.close(linked_git_dir_fd)
-        return None, ()
-    try:
-        linked_git_dir.relative_to(mirror_path)
-    except ValueError:
-        with contextlib.suppress(OSError):
-            os.close(linked_git_dir_fd)
         return None, ()
     temporary_metadata: tempfile.TemporaryDirectory[str] | None = None
     try:
@@ -92,12 +105,20 @@ def _isolated_reask_git_metadata_volume_binds(
         # the host-visible mirror/worktree directories rather than in worker /tmp.
         temporary_metadata = tempfile.TemporaryDirectory[str](
             prefix=f".awf-clarification-git-{worktree_path.name}--",
-            dir=mirror_path.parent.parent,
+            dir=worktree_path.parent.parent,
         )
         temporary_path = Path(temporary_metadata.name)
         snapshot_path = temporary_path / "linked-git"
         snapshot_path.mkdir()
         common_path = temporary_path / "common-git"
+        _copy_regular_git_metadata_file_from_directory_fd(
+            linked_git_dir_fd, "HEAD", snapshot_path / "HEAD"
+        )
+        _copy_regular_git_metadata_file_from_directory_fd(
+            linked_git_dir_fd, "commondir", snapshot_path / "commondir"
+        )
+        common_git_dir = _linked_worktree_common_git_dir(snapshot_path, linked_git_dir)
+        (snapshot_path / "commondir").write_text(f"{common_git_dir}\n", encoding="utf-8")
         subprocess.run(
             [
                 "git",
@@ -106,12 +127,11 @@ def _isolated_reask_git_metadata_volume_binds(
                 "--no-local",
                 "--no-tags",
                 "--single-branch",
-                f"/proc/self/fd/{linked_git_dir_fd}",
+                str(snapshot_path),
                 str(common_path),
             ],
             check=True,
             capture_output=True,
-            pass_fds=(linked_git_dir_fd,),
             timeout=30,
         )
         # Retain clone-created core/extensions metadata (notably SHA-256 object
@@ -130,13 +150,14 @@ def _isolated_reask_git_metadata_volume_binds(
             capture_output=True,
             timeout=30,
         )
-        _copy_regular_git_metadata_file(linked_git_dir, "HEAD", snapshot_path / "HEAD")
         (snapshot_path / "commondir").write_text(
             f"{_ISOLATED_REASK_COMMON_GIT_DIR}\n", encoding="utf-8"
         )
         (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
         try:
-            _copy_regular_git_metadata_file(linked_git_dir, "index", snapshot_path / "index")
+            _copy_regular_git_metadata_file_from_directory_fd(
+                linked_git_dir_fd, "index", snapshot_path / "index"
+            )
         except OSError:
             # The index is optional; a raced link, special file, or missing index
             # cannot discard an otherwise safe metadata snapshot.
@@ -157,8 +178,8 @@ def _isolated_reask_git_metadata_volume_binds(
                 shared_index_relative_path = shared_index_path.relative_to(linked_git_dir)
                 if shared_index_relative_path.parent != Path():
                     raise ValueError("shared index is not directly under the linked Git directory")
-                _copy_regular_git_metadata_file(
-                    linked_git_dir,
+                _copy_regular_git_metadata_file_from_directory_fd(
+                    linked_git_dir_fd,
                     shared_index_relative_path.name,
                     snapshot_path / shared_index_relative_path.name,
                 )

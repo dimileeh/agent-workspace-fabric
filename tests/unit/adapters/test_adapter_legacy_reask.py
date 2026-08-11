@@ -430,24 +430,104 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_snapshot_controls_before_clone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A control-file race cannot replace the bare clone's source repository."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        alternate_origin = tmp_path / "alternate-origin"
+        alternate_origin.mkdir()
+        _git(["init", "-q", "-b", "alternate"], alternate_origin)
+        _git(["config", "user.name", "AWF Test"], alternate_origin)
+        _git(["config", "user.email", "awf@test.local"], alternate_origin)
+        (alternate_origin / "private.txt").write_text("must stay private\n", encoding="utf-8")
+        _git(["add", "private.txt"], alternate_origin)
+        _git(["commit", "-q", "-m", "alternate"], alternate_origin)
+        alternate_oid = _git(["rev-parse", "HEAD"], alternate_origin).stdout.strip()
+        alternate_mirror = tmp_path / "alternate-mirror.git"
+        _git(["clone", "--mirror", str(alternate_origin), str(alternate_mirror)], tmp_path)
+        real_run = base_isolated_reask.subprocess.run
+
+        def _replace_controls_before_clone(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[:2] == ["git", "clone"]:
+                (linked_git_dir / "commondir").write_text(f"{alternate_mirror}\n", encoding="utf-8")
+                (linked_git_dir / "HEAD").write_text(
+                    "ref: refs/heads/alternate\n", encoding="utf-8"
+                )
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _replace_controls_before_clone)
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is not None
+        try:
+            common_path = Path(temporary_metadata.name) / "common-git"
+            assert (
+                _git(["--git-dir", str(common_path), "rev-parse", "HEAD"], tmp_path).stdout.strip()
+                == head_oid
+            )
+            assert (
+                subprocess.run(
+                    ["git", "--git-dir", str(common_path), "cat-file", "-e", alternate_oid],
+                    cwd=tmp_path,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                ).returncode
+                == 1
+            )
+        finally:
+            temporary_metadata.cleanup()
+
+    @pytest.mark.parametrize("commondir", ("", "../"))
+    def test_isolated_reask_git_metadata_binds_rejects_unexpected_commondir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, commondir: str
+    ) -> None:
+        """A malformed common-directory control file prevents Git from cloning."""
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        (linked_git_dir / "commondir").write_text(f"{commondir}\n", encoding="utf-8")
+        real_run = base_isolated_reask.subprocess.run
+
+        def _fail_if_clone(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[:2] == ["git", "clone"]:
+                raise AssertionError("must reject an unexpected commondir before cloning")
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _fail_if_clone)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
     def test_isolated_reask_git_metadata_binds_reject_raced_symlinked_head(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Snapshotting refuses a HEAD symlink installed after the clone completes."""
+        """Snapshotting refuses a HEAD symlink installed after opening its directory."""
         mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         replacement_head = tmp_path / "replacement-head"
         replacement_head.write_text("ref: refs/heads/reask\n", encoding="utf-8")
-        real_run = base_isolated_reask.subprocess.run
+        real_copy = base_isolated_reask._copy_regular_git_metadata_file_from_directory_fd
 
-        def _race_head_to_symlink(command: list[str], *args: Any, **kwargs: Any) -> Any:
-            result = real_run(command, *args, **kwargs)
-            if command[:2] == ["git", "config"]:
+        def _race_head_to_symlink(source_dir_fd: int, source_name: str, destination: Path) -> None:
+            if source_name == "HEAD":
                 (linked_git_dir / "HEAD").unlink()
                 (linked_git_dir / "HEAD").symlink_to(replacement_head)
-            return result
+            real_copy(source_dir_fd, source_name, destination)
 
-        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _race_head_to_symlink)
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_copy_regular_git_metadata_file_from_directory_fd",
+            _race_head_to_symlink,
+        )
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path
