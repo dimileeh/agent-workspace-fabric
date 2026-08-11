@@ -14,7 +14,6 @@ from typing import Final
 
 from awf.adapters.runtime_executor import AgentRuntimeExecResult
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
-from awf.node.git_manager import linked_worktree_git_dir
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
 _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
@@ -94,6 +93,67 @@ def _copy_regular_git_metadata_file_from_directory_fd(
         if source_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(source_fd)
+
+
+def _isolated_reask_linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    """Read a linked-worktree `.git` pointer without following a raced replacement."""
+    try:
+        worktree_fd = os.open(
+            worktree_path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return None
+
+    git_file_fd: int | None = None
+    try:
+        git_file_fd = os.open(
+            ".git",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=worktree_fd,
+        )
+        git_file_stat = os.fstat(git_file_fd)
+        if (
+            not stat.S_ISREG(git_file_stat.st_mode)
+            or git_file_stat.st_size > _MAX_ISOLATED_REASK_GIT_METADATA_BYTES
+        ):
+            return None
+        chunks: list[bytes] = []
+        copied_bytes = 0
+        while copied_bytes < _MAX_ISOLATED_REASK_GIT_METADATA_BYTES:
+            chunk = os.read(
+                git_file_fd,
+                min(64 * 1024, _MAX_ISOLATED_REASK_GIT_METADATA_BYTES - copied_bytes),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            copied_bytes += len(chunk)
+        if copied_bytes == _MAX_ISOLATED_REASK_GIT_METADATA_BYTES and os.read(git_file_fd, 1):
+            return None
+        try:
+            content = b"".join(chunks).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return None
+    except OSError:
+        return None
+    finally:
+        if git_file_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(git_file_fd)
+        with contextlib.suppress(OSError):
+            os.close(worktree_fd)
+
+    prefix = "gitdir: "
+    if not content.startswith(prefix):
+        return None
+    git_dir = Path(content.removeprefix(prefix).strip())
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+    try:
+        return git_dir.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _copy_git_object_directory(source: Path, destination: Path) -> None:
@@ -229,7 +289,7 @@ def _isolated_reask_git_metadata_volume_binds(
     worktrees' refs or objects. Git needs only selected linked control files
     and the snapshot's common Git directory to recognise the worktree.
     """
-    linked_git_dir = linked_worktree_git_dir(worktree_path)
+    linked_git_dir = _isolated_reask_linked_worktree_git_dir(worktree_path)
     if linked_git_dir is None:
         return None, ()
     try:

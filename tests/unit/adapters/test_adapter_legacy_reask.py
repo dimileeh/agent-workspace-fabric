@@ -731,6 +731,65 @@ class TestIsolatedReaskAdapter:
         assert temporary_metadata is None
         assert binds == ()
 
+    def test_isolated_reask_git_metadata_binds_rejects_oversized_worktree_gitfile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A sparse worktree Git pointer cannot trigger a path-based read."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        git_file = worktree_path / ".git"
+        git_file.write_text("gitdir: ", encoding="utf-8")
+        with git_file.open("r+b") as source_file:
+            source_file.truncate(base_isolated_reask._MAX_ISOLATED_REASK_GIT_METADATA_BYTES + 1)
+        original_read_text = Path.read_text
+
+        def _fail_path_based_read(path: Path, *args: object, **kwargs: object) -> str:
+            if path == git_file:
+                raise AssertionError("the worktree Git pointer must not be read by path")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _fail_path_based_read)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
+    def test_isolated_reask_git_metadata_binds_rejects_raced_fifo_worktree_gitfile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Replacing `.git` before its descriptor open cannot block the snapshot."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        git_file = worktree_path / ".git"
+        real_open = base_isolated_reask.os.open
+        replaced_git_file = False
+
+        def _replace_gitfile_before_open(
+            path: os.PathLike[str] | str,
+            flags: int,
+            *args: object,
+            **kwargs: object,
+        ) -> int:
+            nonlocal replaced_git_file
+            if path == ".git" and kwargs.get("dir_fd") is not None:
+                git_file.unlink()
+                os.mkfifo(git_file)
+                replaced_git_file = True
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.os, "open", _replace_gitfile_before_open)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert replaced_git_file
+        assert temporary_metadata is None
+        assert binds == ()
+
     def test_copy_regular_git_metadata_file_rejects_fifo(self, tmp_path: Path) -> None:
         """The metadata copy helper never reads a special file."""
         source_dir = tmp_path / "linked-git"
