@@ -436,21 +436,11 @@ def _external_account_credential_source(
     )
     if "GOOGLE_APPLICATION_CREDENTIALS" not in provider_environment_names or not google_credentials:
         return None
-    adc_mount = next(
-        (
-            mount
-            for mount in auth_mounts
-            if mount.target != mirror_target
-            and (
-                mount.target == google_credentials
-                or path_is_below(google_credentials, mount.target)
-            )
-        ),
-        None,
+    adc_source = _mounted_file_source(
+        auth_mounts,
+        target=google_credentials,
+        mirror_target=mirror_target,
     )
-    if adc_mount is None:
-        return None
-    adc_source = mounted_file_source(adc_mount, google_credentials)
     if adc_source is None:
         return None
     try:

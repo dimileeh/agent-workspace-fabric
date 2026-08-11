@@ -795,6 +795,49 @@ def test_clarification_stages_external_account_adc_subject_token_mount(
 
 
 @pytest.mark.unit
+def test_clarification_selects_most_specific_external_account_adc_mount(tmp_path: Path) -> None:
+    """A nested ADC file mount overrides its declared parent directory mount."""
+    google_directory = tmp_path / "google"
+    google_directory.mkdir()
+    adc_name = "external-account-adc.json"
+    adc_target = f"/run/awf/secrets/google/{adc_name}"
+    subject_token_target = "/run/awf/secrets/google/subject-token"
+    (google_directory / adc_name).write_text(
+        json.dumps({"type": "service_account"}), encoding="utf-8"
+    )
+    explicit_adc = tmp_path / "explicit-external-account-adc.json"
+    explicit_adc.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    subject_token = tmp_path / "subject-token"
+    subject_token.write_text("subject-token", encoding="utf-8")
+    parent_mount = AuthMount(
+        source=str(google_directory), target="/run/awf/secrets/google", mode="ro"
+    )
+    adc_mount = AuthMount(source=str(explicit_adc), target=adc_target, mode="ro")
+    subject_token_mount = AuthMount(
+        source=str(subject_token), target=subject_token_target, mode="ro"
+    )
+    environment = (
+        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+    )
+
+    assert external_account_subject_token_file_rewrites(
+        (parent_mount, adc_mount, subject_token_mount),
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.gemini,
+    ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/2"),)
+
+
+@pytest.mark.unit
 def test_clarification_stages_external_account_subject_token_for_aliased_adc_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
