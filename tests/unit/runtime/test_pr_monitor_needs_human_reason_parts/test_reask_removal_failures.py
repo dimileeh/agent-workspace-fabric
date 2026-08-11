@@ -14,7 +14,7 @@ from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _git,
-    _init_real_worktree,
+    _init_awf_linked_worktree,
     _LocalCommandRunner,
 )
 
@@ -74,13 +74,17 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
 ) -> None:
     """A stranded isolated checkout must stop later review-repair items."""
     workspace_id = "ws_reask_remove_failure"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
 
     class _FailingWorktreeRemoveRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
@@ -89,7 +93,7 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_fai
                     stdout="",
                     stderr="worktree remove failed",
                 )
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -171,18 +175,22 @@ async def test_needs_human_reason_reask_stops_when_isolated_worktree_removal_rai
 ) -> None:
     """An isolated-removal exception must block later review-repair items."""
     workspace_id = "ws_reask_remove_exception"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
 
     class _ExceptionalWorktreeRemoveRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""

@@ -43,7 +43,7 @@ def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _init_real_worktree(tmp_path: Path, workspace_id: str) -> Path:
-    """Create a committed worktree suitable for the real re-ask cleanup path."""
+    """Create a committed worktree suitable for direct re-ask helper coverage."""
     worktree = tmp_path / workspace_id
     worktree.mkdir()
     _git(worktree, "init", "-q")
@@ -56,6 +56,38 @@ def _init_real_worktree(tmp_path: Path, workspace_id: str) -> Path:
     return worktree
 
 
+def _init_awf_linked_worktree(tmp_path: Path, workspace_id: str) -> Path:
+    """Create a valid AWF-shaped linked worktree for monitor entrypoint coverage."""
+    source = tmp_path / f"{workspace_id}-source"
+    source.mkdir()
+    _git(source, "init", "-q")
+    _git(source, "config", "user.email", "awf@example.com")
+    _git(source, "config", "user.name", "AWF Test")
+    (source / ".gitignore").write_text("*.env\n", encoding="utf-8")
+    (source / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    _git(source, "add", ".gitignore", "tracked.py")
+    _git(source, "commit", "-qm", "initial")
+
+    worktree = tmp_path / workspace_id
+    mirror = tmp_path.parent / "mirrors" / f"{tmp_path.name}-{workspace_id}.git"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(source), str(mirror)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
+    return worktree
+
+
 class _LocalCommandRunner:
     """Run the PR monitor's git commands against a temporary real worktree."""
 
@@ -64,9 +96,12 @@ class _LocalCommandRunner:
         args: list[str],
         *,
         timeout_seconds: float | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Run this test double and record the invocation."""
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout_seconds)
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout_seconds, env=env
+        )
         return CommandResult(
             returncode=proc.returncode,
             stdout=proc.stdout,
@@ -480,6 +515,7 @@ async def test_isolated_reask_worktree_bounds_creation_filter_probe_and_checkout
             args: list[str],
             *,
             timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Record the requested timeout and run the real Git command."""
             if "worktree" in args and "add" in args:
@@ -488,7 +524,7 @@ async def test_isolated_reask_worktree_bounds_creation_filter_probe_and_checkout
                 self.filter_probe_timeouts.append(timeout_seconds)
             if "checkout" in args:
                 self.checkout_timeouts.append(timeout_seconds)
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     command_runner = _RecordingLocalCommandRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
@@ -542,13 +578,17 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
             self.primary_status_timeouts: list[float | None] = []
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Record and run a Git command against the temporary worktree."""
             self.commands.append(args)
             if args[args.index("-C") + 1] == str(worktree) and "status" in args:
                 self.primary_status_timeouts.append(timeout_seconds)
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     command_runner = _RecordingLocalCommandRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
@@ -753,12 +793,16 @@ async def test_isolated_reask_worktree_blocks_when_filter_probe_cleanup_fails(
         """Fail the linked-worktree probe after it is registered, then its removal."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run real setup commands except for the synthetic failure points."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "config" in args:
                 return CommandResult(returncode=2, stdout=result.stdout, stderr="config unreadable")
             return result
@@ -895,12 +939,16 @@ async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raise
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "add" in args:
                 raise RuntimeError("worktree add failed")
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     def _record_lock(path: Path) -> tuple[int, Path]:
         """Record lock for this test."""
@@ -1047,10 +1095,14 @@ async def test_isolated_reask_worktree_removes_checkout_after_nonzero_creation_r
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "worktree" in args and "add" in args:
                 return CommandResult(
                     returncode=1,
@@ -1079,19 +1131,23 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_fails(
 ) -> None:
     """A failed setup cleanup cannot be treated as an advisory re-ask failure."""
     workspace_id = "ws_reask_create_cleanup_failure"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     audit_events: list[dict[str, object]] = []
 
     class _NonzeroSetupWithFailedCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
                 failure_stage == "population" and "checkout" in args
             ):
@@ -1173,19 +1229,23 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_raises(
 ) -> None:
     """A failed setup-removal exception cannot become an advisory re-ask failure."""
     workspace_id = "ws_reask_create_cleanup_exception"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     audit_events: list[dict[str, object]] = []
 
     class _NonzeroSetupWithExceptionalCleanupRunner(_LocalCommandRunner):
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 raise cleanup_error
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if (failure_stage == "creation" and "worktree" in args and "add" in args) or (
                 failure_stage == "population" and "checkout" in args
             ):

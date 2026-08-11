@@ -31,7 +31,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _git,
-    _init_real_worktree,
+    _init_awf_linked_worktree,
     _LocalCommandRunner,
 )
 
@@ -42,7 +42,7 @@ async def test_needs_human_reason_reask_cleans_worktree_when_cancelled(
 ) -> None:
     """Cancellation must not leave clarification edits for the next fix-cycle item."""
     workspace_id = "ws_cancelled_reask"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     config = worktree / ".env"
     config.write_text("MODE=original\n", encoding="utf-8")
 
@@ -103,7 +103,7 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
 ) -> None:
     """A second shutdown cancel cannot strand the isolated clarification checkout."""
     workspace_id = "ws_reask_second_cancel"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     cleanup_finished = asyncio.Event()
@@ -112,16 +112,20 @@ async def test_needs_human_reason_reask_cleanup_survives_second_cancellation(
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
-                result = await super().run(args, timeout_seconds=timeout_seconds)
+                result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
                 cleanup_finished.set()
                 return result
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -180,7 +184,7 @@ async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_
 ) -> None:
     """A terminal re-ask error cannot hide an unremoved isolated checkout."""
     workspace_id = "ws_reask_terminal_cleanup_failure"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     terminal_error = _MonitorPolicyBlockedError(
         "terminal re-ask failure",
         reason_code="TERMINAL_REASK_FAILURE",
@@ -190,12 +194,16 @@ async def test_needs_human_reason_reask_promotes_cleanup_failure_after_terminal_
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -254,7 +262,7 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
 ) -> None:
     """Every post-invocation cleanup must finish before cancellation escapes."""
     workspace_id = f"ws_reask_post_invocation_cancel_{outcome}"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     cleanup_finished = asyncio.Event()
@@ -263,16 +271,20 @@ async def test_needs_human_reason_reask_post_invocation_cleanup_survives_cancell
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
-                result = await super().run(args, timeout_seconds=timeout_seconds)
+                result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
                 cleanup_finished.set()
                 return result
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -344,7 +356,7 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
 ) -> None:
     """Cancellation keeps the clarified human reason when cleanup also fails."""
     workspace_id = "ws_reask_post_invocation_cancel_cleanup_failure"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     persistence_started = asyncio.Event()
@@ -356,14 +368,18 @@ async def test_needs_human_reason_reask_persists_failed_post_invocation_cleanup_
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
@@ -456,7 +472,7 @@ async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_canc
 ) -> None:
     """A creation cancellation records its stranded checkout before it escapes."""
     workspace_id = "ws_reask_creation_cancel_cleanup_failure"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     persisted_errors: list[str] = []
     state = MonitorState()
 
@@ -464,12 +480,16 @@ async def test_needs_human_reason_reask_persists_failed_creation_cleanup_on_canc
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
@@ -540,7 +560,7 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
 ) -> None:
     """A cleanup failure cannot make up an agent NEEDS_HUMAN reason."""
     workspace_id = "ws_reask_cancel_cleanup_failure_without_reason"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     persisted_reasons: list[str | None] = []
@@ -550,14 +570,18 @@ async def test_needs_human_reason_reask_does_not_persist_synthetic_reason_after_
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            return await super().run(args, timeout_seconds=timeout_seconds)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""

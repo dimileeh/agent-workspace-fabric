@@ -12,7 +12,7 @@ from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _git,
-    _init_real_worktree,
+    _init_awf_linked_worktree,
     _LocalCommandRunner,
 )
 
@@ -90,7 +90,7 @@ async def test_needs_human_reason_reask_isolates_ignored_files_before_continuing
 ) -> None:
     """A clarification re-ask must not see or alter ignored primary-worktree files."""
     workspace_id = "ws_ignored_reask"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     config = worktree / ".env"
     config.write_text("MODE=original\n", encoding="utf-8")
     dependency = worktree / ".venv" / "dependency.py"
@@ -164,7 +164,7 @@ async def test_needs_human_reason_reask_preserves_primary_changes_made_during_re
 ) -> None:
     """A clarification cleanup cannot reset unrelated primary-worktree changes."""
     workspace_id = "ws_reask_primary_changes"
-    worktree = _init_real_worktree(tmp_path, workspace_id)
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
     primary_output = worktree / "operator-output.txt"
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:

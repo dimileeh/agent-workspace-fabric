@@ -337,6 +337,87 @@ async def test_reask_rejects_source_git_pointer_to_other_mirror_before_head_or_w
 
 
 @pytest.mark.unit
+async def test_reask_rejects_source_git_symlink_to_foreign_git_directory_before_head_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory-style Git entry cannot bypass pinned source-metadata validation."""
+    workspace_id = "ws_source_git_directory_symlink"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    foreign = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="foreign",
+        worktree_name=workspace_id,
+        tracked_contents="foreign repository\n",
+        worktrees_root=tmp_path / "foreign-worktrees",
+    )
+    foreign_git_dir = Path(
+        (foreign / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    (source / ".git").unlink()
+    (source / ".git").symlink_to(foreign_git_dir, target_is_directory=True)
+
+    reask_invocations: list[dict[str, object]] = []
+    unavailable_reasons: list[str] = []
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask_invocations.append(dict(kwargs))
+        pytest.fail("a directory-style source Git entry must not trigger a re-ask")
+
+    async def _unexpected_rev_parse_head(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an existing source Git entry must use validated metadata")
+
+    async def _record_needs_human_reason_missing(_runner: object, **kwargs: object) -> None:
+        unavailable_reasons.append(str(kwargs["reason_code"]))
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_EnvLocalCommandRunner()),
+        _worktrees_root=source.parent,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_unexpected_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_record_needs_human_reason_missing",
+        _record_needs_human_reason_missing,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=tmp_path / "compose.yml",
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert reask_invocations == []
+    assert unavailable_reasons == ["NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"]
+    assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_reask_rejects_source_mirror_alternates_before_snapshot_and_checkout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

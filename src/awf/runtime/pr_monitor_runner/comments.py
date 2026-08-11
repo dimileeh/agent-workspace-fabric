@@ -1043,32 +1043,26 @@ async def _enforce_needs_human_reason(
             # before the clarification-only invocation. Cleanup must preserve
             # that repair and discard only clarification side effects.
             if has_git_worktree:
-                if (worktree_path / ".git").is_file():
-                    try:
-                        source_git_context = await asyncio.to_thread(
-                            validated_source_worktree_git_context,
-                            worktree_path,
-                            workspace_id,
-                        )
-                    except ValueError as exc:
-                        raise _MonitorPolicyBlockedError(
-                            "Could not validate the source worktree before the NEEDS_HUMAN reason re-ask.",
-                            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                        ) from exc
-                    source_mirror = source_git_context.mirror_path
-                    source_git_dir = source_git_context.linked_git_dir
-                    source_git_dir_fd = source_git_context.linked_git_dir_fd
-                    _reject_reask_source_mirror_object_alternates(source_mirror)
-                    reask_restore_ref = await _rev_parse_pinned_reask_source_head(
-                        runner,
-                        source_git_dir,
-                        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-                    )
-                else:
-                    reask_restore_ref = await runner._rev_parse_head(
+                try:
+                    source_git_context = await asyncio.to_thread(
+                        validated_source_worktree_git_context,
                         worktree_path,
-                        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                        workspace_id,
                     )
+                except ValueError as exc:
+                    raise _MonitorPolicyBlockedError(
+                        "Could not validate the source worktree before the NEEDS_HUMAN reason re-ask.",
+                        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    ) from exc
+                source_mirror = source_git_context.mirror_path
+                source_git_dir = source_git_context.linked_git_dir
+                source_git_dir_fd = source_git_context.linked_git_dir_fd
+                _reject_reask_source_mirror_object_alternates(source_mirror)
+                reask_restore_ref = await _rev_parse_pinned_reask_source_head(
+                    runner,
+                    source_git_dir,
+                    timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                )
                 if reask_restore_ref is None:
                     raise RuntimeError("could not capture the worktree restore ref")
                 reask_source_git_dir_fd = source_git_dir_fd
