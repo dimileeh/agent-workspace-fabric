@@ -42,7 +42,7 @@ _AWS_EXTERNAL_ACCOUNT_ENV_NAMES = frozenset(
 def staged_provider_auth_mounts(
     provider_auth_mounts: Sequence[AuthMount],
 ) -> tuple[AuthMount, ...]:
-    """Stage provider auth at destinations writable by the clarification agent."""
+    """Stage provider auth so parent directories copy before nested files."""
 
     return tuple(
         replace(
@@ -50,7 +50,12 @@ def staged_provider_auth_mounts(
             mode="ro",
             target=clarification_auth_target(mount.target, index=index),
         )
-        for index, mount in enumerate(provider_auth_mounts)
+        for index, mount in enumerate(
+            sorted(
+                provider_auth_mounts,
+                key=lambda mount: posixpath.normpath(mount.target).count("/"),
+            )
+        )
     )
 
 

@@ -12,6 +12,40 @@ from awf.node.compose_manager import AuthMount
 
 
 @pytest.mark.unit
+def test_clarification_stages_parent_auth_mount_before_nested_file() -> None:
+    """An explicit profile file remains authoritative after clarification copies."""
+    credentials_file = AuthMount(
+        source="/host/awf/secret-leases/ws_launcher/aws-credentials",
+        target="/home/agent/.aws/credentials",
+        mode="ro",
+    )
+    aws_directory = AuthMount(
+        source="/host/awf/auth/ws_launcher/aws",
+        target="/home/agent/.aws",
+        mode="ro",
+    )
+    mounts = stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (credentials_file, aws_directory),
+        agent_environment=(
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("AWS_PROFILE", "awf-bedrock"),
+            ("AWS_SHARED_CREDENTIALS_FILE", credentials_file.target),
+        ),
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert mounts == (
+        AuthMount(source=aws_directory.source, target=aws_directory.target, mode="ro"),
+        AuthMount(
+            source=credentials_file.source,
+            target=credentials_file.target,
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_inputs_retain_only_selected_adapter_credentials(tmp_path: Path) -> None:
     """Codex clarification cannot read credentials for other coding adapters."""
     mirror = "/host/awf/git/mirrors/repo.git"
