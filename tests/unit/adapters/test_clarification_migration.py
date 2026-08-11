@@ -12,7 +12,7 @@ from awf.adapters.clarification_migration import (
     _attach_persisted_clarification_model_network,
     _rollback_persisted_clarification_model_network,
 )
-from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
 
 
 def _assert_bounded_migration_calls(runner: FakeCommandRunner) -> None:
@@ -194,10 +194,44 @@ async def test_rollback_persisted_model_network_preserves_concurrent_creator_net
             "network",
             "inspect",
             "--format",
-            '{{ index .Labels "io.awf.clarification-network-creation" }}',
+            '{{ with .Labels }}{{ index . "io.awf.clarification-network-creation" }}{{ end }}',
             network_name,
         ]
     ]
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_preserves_unlabeled_network() -> None:
+    """An unlabeled race winner is not a cleanup failure or removal target."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+
+    class _UnlabeledNetworkRunner:
+        async def run(self, args: list[str], **_kwargs: object):  # type: ignore[no-untyped-def]
+            if args[4] == '{{ index .Labels "io.awf.clarification-network-creation" }}':
+                return CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="template: :1:3: executing at <.Labels>: nil data; no entry for key",
+                )
+            assert args == [
+                "docker",
+                "network",
+                "inspect",
+                "--format",
+                '{{ with .Labels }}{{ index . "io.awf.clarification-network-creation" }}{{ end }}',
+                network_name,
+            ]
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    result = await _rollback_persisted_clarification_model_network(
+        _UnlabeledNetworkRunner(),  # type: ignore[arg-type]
+        attachment=PersistedClarificationModelNetworkAttachment(
+            network_name=network_name,
+            pending_network_creation_marker="this-attempt",
+        ),
+    )
+
+    assert result.ok
 
 
 @pytest.mark.unit

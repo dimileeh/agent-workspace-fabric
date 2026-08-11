@@ -16,6 +16,9 @@ PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS: Final[float] = 30.0
 """Maximum time for each Docker command in the persisted-network migration."""
 
 _NETWORK_CREATION_MARKER_LABEL: Final[str] = "io.awf.clarification-network-creation"
+_NETWORK_CREATION_MARKER_FORMAT: Final[str] = (
+    f'{{{{ with .Labels }}}}{{{{ index . "{_NETWORK_CREATION_MARKER_LABEL}" }}}}{{{{ end }}}}'
+)
 
 
 def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
@@ -253,7 +256,7 @@ async def _rollback_persisted_clarification_model_network(
                     "network",
                     "inspect",
                     "--format",
-                    f'{{{{ index .Labels "{_NETWORK_CREATION_MARKER_LABEL}" }}}}',
+                    _NETWORK_CREATION_MARKER_FORMAT,
                     attachment.network_name,
                 ],
                 timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
