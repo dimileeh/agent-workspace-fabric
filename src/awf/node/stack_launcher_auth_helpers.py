@@ -835,7 +835,7 @@ def legacy_clarification_entrypoint(
                 '            r"(?<![^\\s\'\\"|&;()<>=])(?:(?P<quote>[\'\\"])(?P<quoted>/[^\'\\"]+)(?P=quote)|(?P<unquoted>/(?:\\\\.|[^\\s\'\\"|&;()<>\\\\])+))(?![^\\s\'\\"|&;()<>])"',
                 "        )",
                 "        defaulted_environment_path_pattern = re.compile(",
-                '            r"(?<!\\\\)(?P<prefix>\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=]))(?P<path>/[^}]+)(?P<suffix>\\})"',
+                '            r"(?<!\\\\)(?P<prefix>\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=+]))(?P<path>/[^}]+)(?P<suffix>\\})"',
                 "        )",
                 "",
                 "        def rewrite_executable_path(match):",

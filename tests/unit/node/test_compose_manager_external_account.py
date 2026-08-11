@@ -618,7 +618,7 @@ def test_legacy_clarification_entrypoint_rewrites_executable_subject_token_path(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operator", (":-", "-", ":=", "="))
+@pytest.mark.parametrize("operator", (":-", "-", ":=", "=", ":+", "+"))
 def test_legacy_clarification_entrypoint_rewrites_defaulted_executable_token_path(
     tmp_path: Path,
     operator: str,
