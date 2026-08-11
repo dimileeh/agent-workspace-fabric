@@ -205,6 +205,30 @@ def test_validated_source_worktree_git_context_keeps_commondir_fallback(
         os.close(context.linked_git_dir_fd)
 
 
+@pytest.mark.unit
+def test_validated_source_worktree_git_context_keeps_whitespace_commondir_fallback(
+    tmp_path: Path,
+) -> None:
+    """Whitespace-only commondir uses the established mirror fallback."""
+    workspace_id = "ws_whitespace_commondir"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    (source_git_dir / "commondir").write_text(" \t\n", encoding="utf-8")
+
+    context = ownership.validated_source_worktree_git_context(source, workspace_id)
+    try:
+        assert context.mirror_path == source_git_dir.parent.parent
+    finally:
+        os.close(context.linked_git_dir_fd)
+
+
 class _EnvLocalCommandRunner:
     """Run monitor Git commands while accepting its sanitized environment."""
 

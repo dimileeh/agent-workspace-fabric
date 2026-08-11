@@ -127,12 +127,14 @@ def _mirror_path_from_linked_git_dir(
             raw_common_dir = _read_bounded_regular_git_metadata_file_at(
                 linked_git_dir_fd, "commondir", required=False
             )
+            if raw_common_dir is not None:
+                raw_common_dir = raw_common_dir.strip()
         elif commondir.is_file():
             raw_common_dir = commondir.read_text(encoding="utf-8").strip()
         else:
             raw_common_dir = None
         if raw_common_dir:
-            common_dir = Path(raw_common_dir.strip())
+            common_dir = Path(raw_common_dir)
             if not common_dir.is_absolute():
                 common_dir = linked_git_dir / common_dir
             return common_dir.resolve()
