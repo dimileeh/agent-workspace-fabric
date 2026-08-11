@@ -156,21 +156,29 @@ def _snapshot_pinned_source_symbolic_ref(
 def _resolve_pinned_source_head(
     source_mirror: Path,
     *,
-    head_snapshot: str,
-) -> str:
-    """Resolve a captured source ``HEAD`` to one immutable commit ID."""
-    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
-    if snapshot_ref is None:
-        raise ValueError("refusing ownership repair: invalid source Git HEAD snapshot")
+    linked_git_dir_fd: int,
+) -> tuple[str, str]:
+    """Capture a stable source ``HEAD``/ref pair and resolve its commit ID."""
     source_mirror_fd: int | None = None
     try:
         source_mirror_fd = os.open(source_mirror, _PINNED_DIRECTORY_OPEN_FLAGS)
         pinned_source_mirror = Path(f"/proc/{os.getpid()}/fd/{source_mirror_fd}")
+        initial_head_snapshot = _read_bounded_regular_git_metadata_file_at(
+            linked_git_dir_fd, "HEAD"
+        )
+        assert initial_head_snapshot is not None
+        snapshot_ref = _source_head_snapshot_ref(initial_head_snapshot)
+        if snapshot_ref is None:
+            raise ValueError("refusing ownership repair: invalid source Git HEAD snapshot")
         snapshot_commit = (
             _snapshot_pinned_source_symbolic_ref(pinned_source_mirror, snapshot_ref)
             if snapshot_ref.startswith("refs/")
             else snapshot_ref
         )
+        head_snapshot = _read_bounded_regular_git_metadata_file_at(linked_git_dir_fd, "HEAD")
+        assert head_snapshot is not None
+        if head_snapshot != initial_head_snapshot:
+            raise ValueError("refusing ownership repair: source Git HEAD changed while resolving")
         result = subprocess.run(
             [
                 "git",
@@ -198,7 +206,7 @@ def _resolve_pinned_source_head(
             != snapshot_commit
         ):
             raise ValueError("refusing ownership repair: source Git HEAD changed while resolving")
-        return resolved_head
+        return head_snapshot, resolved_head
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("refusing ownership repair: cannot resolve source Git HEAD") from exc
     finally:
@@ -434,11 +442,9 @@ def validated_source_worktree_git_context(
             worktree_path,
             linked_git_dir_fd=linked_git_dir_fd,
         )
-        head_snapshot = _read_bounded_regular_git_metadata_file_at(linked_git_dir_fd, "HEAD")
-        assert head_snapshot is not None
-        resolved_head = _resolve_pinned_source_head(
+        head_snapshot, resolved_head = _resolve_pinned_source_head(
             mirror_path,
-            head_snapshot=head_snapshot,
+            linked_git_dir_fd=linked_git_dir_fd,
         )
     except BaseException:
         os.close(linked_git_dir_fd)

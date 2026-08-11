@@ -231,6 +231,70 @@ def test_validated_source_worktree_git_context_rejects_symbolic_ref_moved_during
 
 
 @pytest.mark.unit
+def test_validated_source_worktree_git_context_rejects_symbolic_ref_moved_after_head_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symbolic ref cannot advance after its HEAD/ref pair is captured."""
+    workspace_id = "ws_symbolic_head_capture_race"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    mirror = source_git_dir.parent.parent
+    source_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    (source / "attacker.txt").write_text("attacker content\n", encoding="utf-8")
+    _git(source, "add", "attacker.txt")
+    _git(source, "commit", "-qm", "attacker")
+    attacker_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    source_ref = f"refs/heads/awf/{workspace_id}"
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "update-ref", source_ref, source_head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (source_git_dir / "HEAD").write_text(f"ref: {source_ref}\n", encoding="utf-8")
+    original_read = ownership._read_bounded_regular_git_metadata_file_at
+    head_reads = 0
+
+    def _move_ref_after_head_capture(
+        directory_fd: int,
+        filename: str,
+        *,
+        required: bool = True,
+    ) -> str | None:
+        nonlocal head_reads
+        content = original_read(directory_fd, filename, required=required)
+        if filename == "HEAD":
+            head_reads += 1
+            if head_reads == 2:
+                subprocess.run(
+                    ["git", "--git-dir", str(mirror), "update-ref", source_ref, attacker_head],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        return content
+
+    monkeypatch.setattr(
+        ownership,
+        "_read_bounded_regular_git_metadata_file_at",
+        _move_ref_after_head_capture,
+    )
+
+    with pytest.raises(ValueError, match="source Git HEAD changed"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+    assert head_reads == 2
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("control_file", [".git", "commondir", "gitdir", "HEAD"])
 def test_validated_source_worktree_git_context_rejects_fifo_control_files(
     tmp_path: Path,
