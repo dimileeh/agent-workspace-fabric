@@ -118,7 +118,9 @@ async def _prepare_reask_primary_worktree(
 
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
-        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+        return await runner._deps.runner.run(
+            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args)
+        )
 
     adapter = getattr(runner._deps, "adapter", None)
     await apply_agent_scratch_excludes(
@@ -149,7 +151,9 @@ async def _check_reask_primary_worktree_clean(
 
     async def _run_git(args: list[str]) -> CommandResult:
         """Run a Git command against the primary worktree."""
-        return await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+        return await runner._deps.runner.run(
+            git_worktree_command(worktree_path, "-c", "core.fsmonitor=false", *args)
+        )
 
     check = await check_validation_worktree_clean(
         run_git=_run_git,

@@ -356,6 +356,13 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
 
     command_runner = _RecordingLocalCommandRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    restore_ref = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the unchanged primary-worktree revision."""
+        return restore_ref
+
+    runner._rev_parse_head = _rev_parse_head
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
         """Avoid changing ownership while exercising the Git invocation."""
@@ -366,11 +373,26 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
     reask_worktree = await comments._create_isolated_reask_worktree(
         runner,
         worktree_path=worktree,
-        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        restore_ref=restore_ref,
     )
 
     assert reask_worktree is not None
+    assert (
+        await comments._check_reask_primary_worktree_clean(
+            runner,
+            worktree_path=worktree,
+            restore_ref=restore_ref,
+        )
+        is None
+    )
     assert not fsmonitor_marker.exists()
+    primary_status_commands = [
+        args
+        for args in command_runner.commands
+        if args[args.index("-C") + 1] == str(worktree) and "status" in args
+    ]
+    assert len(primary_status_commands) == 2
+    assert all("core.fsmonitor=false" in args for args in primary_status_commands)
     checkout_commands = [args for args in command_runner.commands if "checkout" in args]
     assert len(checkout_commands) == 1
     assert "core.fsmonitor=false" in checkout_commands[0]
