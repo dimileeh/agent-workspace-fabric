@@ -1,10 +1,10 @@
 """Usage-sampling protocols shared by the agent adapter and collectors.
 
-This is a leaf module: it depends only on stdlib + ``awf.db.enums`` so the agent
-adapter (``awf.adapters.base``) can accept an optional usage sampler without
-importing any ``awf.service`` code (which would create an import cycle, since the
-service layer imports adapters). The concrete implementation lives in
-``awf.service.usage_collection``.
+This is a leaf module: it depends only on stdlib, ``awf.common``, and
+``awf.db.enums`` so the agent adapter (``awf.adapters.base``) can accept an
+optional usage sampler without importing any ``awf.service`` code (which would
+create an import cycle, since the service layer imports adapters). The concrete
+implementation lives in ``awf.service.usage_collection``.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from awf.common.compose_exec import TrackedIsolatedComposeRun
 from awf.db.enums import AgentRuntime
 
 
@@ -45,7 +46,7 @@ class UsageSampler(Protocol):
 class IsolatedUsageSampleContext(UsageSampleContext, Protocol):
     """Usage capture configuration for a disposable clarification container."""
 
-    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+    async def capture_baseline_before_agent(self, *, invocation: TrackedIsolatedComposeRun) -> None:
         """Capture the baseline before the agent CLI watchdog starts."""
 
     async def capture_final_before_cleanup(self, *, container_name: str) -> None:

@@ -41,8 +41,10 @@ from awf.common.commands import (
 )
 from awf.common.compose_exec import (
     TrackedComposeExec,
+    TrackedIsolatedComposeRun,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
@@ -623,7 +625,9 @@ class _CcusageSampleContext(UsageSampleContext):
         model = usage.model if usage is not None else None
         return usage, reason, model
 
-    async def _cleanup_timed_out_invocation(self, invocation: TrackedComposeExec) -> None:
+    async def _cleanup_timed_out_invocation(
+        self, invocation: TrackedComposeExec | TrackedIsolatedComposeRun
+    ) -> None:
         # On timeout, run_streaming kills the local compose client, but per the
         # build_tracked_compose_exec contract that does not prove the in-container
         # ccusage process tree is gone. Run targeted cleanup for this invocation so
@@ -704,18 +708,23 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
             ),
         ]
 
-    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+    async def capture_baseline_before_agent(self, *, invocation: TrackedIsolatedComposeRun) -> None:
         """Run and import the isolated baseline before the agent watchdog starts."""
 
         if self.baseline_cli_args is None:
             return
         try:
-            await self._collector._runner.run_streaming(
-                invocation_args,
+            result = await self._collector._runner.run_streaming(
+                invocation.args,
                 wall_timeout_seconds=self._collector._command_timeout_seconds,
                 idle_timeout_seconds=self._collector._command_timeout_seconds,
             )
         except asyncio.CancelledError:
+            await cleanup_compose_exec_invocation_after_cancellation(
+                self._collector._runner,
+                invocation,
+                workspace_id=self._workspace_id,
+            )
             raise
         except Exception:
             _log.warning(
@@ -723,6 +732,9 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
                 workspace_id=self._workspace_id,
                 exc_info=True,
             )
+        else:
+            if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+                await self._cleanup_timed_out_invocation(invocation)
         self._capture_sample = "baseline"
         await self._capture_baseline()
         self._baseline_captured_before_agent = True

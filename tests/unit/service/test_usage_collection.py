@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    CommandResult,
+    FakeCommandRunner,
+)
+from awf.common.compose_exec import build_isolated_tracked_compose_run
 from awf.db.enums import AgentRuntime
 from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID
 from awf.service import usage_collection
@@ -276,11 +282,21 @@ async def test_isolated_baseline_probe_is_collected_before_agent_run(
     )
     (capture_dir / "baseline.stderr").write_text("", encoding="utf-8")
 
-    await ctx.capture_baseline_before_agent(invocation_args=["separate-baseline-probe"])
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated_pre_agent_baseline/reask"),
+        extra_volume_binds=ctx.volume_binds,
+    )
+
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
 
     assert runner.calls == [
         (
-            ["separate-baseline-probe"],
+            baseline_invocation.args,
             {"wall_timeout_seconds": 3.5, "idle_timeout_seconds": 3.5},
         )
     ]
@@ -296,6 +312,100 @@ async def test_isolated_baseline_probe_is_collected_before_agent_run(
     snapshot = read_latest_usage_snapshot("ws_isolated_pre_agent_baseline", work_dir=tmp_path)
     assert snapshot is not None
     assert snapshot.total_tokens == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reason_code", [COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON])
+async def test_isolated_baseline_timeout_removes_its_one_off_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason_code: str,
+) -> None:
+    """A baseline timeout must not overlap a later clarification invocation."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+
+    class _TimeoutRunner:
+        def __init__(self) -> None:
+            self.streaming_calls: list[list[str]] = []
+            self.cleanup_calls: list[list[str]] = []
+
+        async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.streaming_calls.append(list(args))
+            return CommandResult(returncode=124, stdout="", stderr="", reason_code=reason_code)
+
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.cleanup_calls.append(list(args))
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = _TimeoutRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_baseline_timeout",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated_baseline_timeout/reask"),
+        extra_volume_binds=ctx.volume_binds,
+    )
+
+    await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
+
+    assert runner.streaming_calls == [baseline_invocation.args]
+    assert runner.cleanup_calls == [baseline_invocation.cleanup_args]
+    await ctx.finalize(status="timeout")
+
+
+@pytest.mark.unit
+async def test_isolated_baseline_cancellation_removes_its_one_off_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must remove the probe container before propagating."""
+    monkeypatch.setattr(usage_collection.os, "chown", lambda _path, _uid, _gid: None)
+
+    class _CancellationRunner:
+        def __init__(self) -> None:
+            self.cleanup_calls: list[list[str]] = []
+
+        async def run_streaming(self, _args: list[str], **_kwargs: Any) -> CommandResult:
+            raise asyncio.CancelledError
+
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.cleanup_calls.append(list(args))
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    runner = _CancellationRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start_isolated(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_isolated_baseline_cancelled",
+        provider=AgentRuntime.codex,
+        cli_args=["codex", "exec", "-"],
+    )
+    baseline_invocation = build_isolated_tracked_compose_run(
+        compose_project="proj",
+        compose_file=_COMPOSE_FILE,
+        cli_args=ctx.baseline_cli_args or [],
+        source="usage",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_isolated_baseline_cancelled/reask"),
+        extra_volume_binds=ctx.volume_binds,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await ctx.capture_baseline_before_agent(invocation=baseline_invocation)
+
+    assert runner.cleanup_calls == [baseline_invocation.cleanup_args]
+    await ctx.finalize(status="cancelled")
 
 
 @pytest.mark.unit

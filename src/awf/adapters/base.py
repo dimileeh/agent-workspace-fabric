@@ -617,7 +617,7 @@ class AgentAdapter(ABC):
                         )
                         await self._capture_isolated_usage_baseline_before_agent(
                             isolated_sampler_ctx,
-                            invocation_args=baseline_invocation.args,
+                            invocation=baseline_invocation,
                             workspace_id=workspace_id,
                         )
                 invocation = build_isolated_tracked_compose_run(
@@ -725,12 +725,12 @@ class AgentAdapter(ABC):
         self,
         sampler_ctx: IsolatedUsageSampleContext,
         *,
-        invocation_args: list[str],
+        invocation: TrackedIsolatedComposeRun,
         workspace_id: str | None,
     ) -> None:
         """Best-effort baseline capture kept outside the agent CLI watchdog."""
         try:
-            await sampler_ctx.capture_baseline_before_agent(invocation_args=invocation_args)
+            await sampler_ctx.capture_baseline_before_agent(invocation=invocation)
         except asyncio.CancelledError:
             raise
         except Exception:

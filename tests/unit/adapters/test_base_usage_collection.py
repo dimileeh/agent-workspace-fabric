@@ -75,9 +75,11 @@ class _IsolatedRecordingContext(_RecordingContext):
         if self._capture_error is not None:
             raise self._capture_error
 
-    async def capture_baseline_before_agent(self, *, invocation_args: list[str]) -> None:
+    async def capture_baseline_before_agent(
+        self, *, invocation: base_module.TrackedIsolatedComposeRun
+    ) -> None:
         """Record the standalone baseline probe before the agent invocation."""
-        assert "capture-baseline" in invocation_args
+        assert "capture-baseline" in invocation.args
         self._events.append("baseline")
         if self._baseline_error is not None:
             raise self._baseline_error
