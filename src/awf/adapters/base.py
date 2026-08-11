@@ -117,6 +117,17 @@ _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
 )
 
 
+async def _await_task_despite_cancellation(task: asyncio.Task[Any]) -> tuple[Any, bool]:
+    """Await a cleanup task to completion, recording intervening cancellation."""
+    cancellation_requested = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancellation_requested = True
+    return task.result(), cancellation_requested
+
+
 # Prepended to every agent prompt. Encodes contract invariants the
 # agent must honour inside an AWF workspace.
 _AWF_PROMPT_PREAMBLE = """\
@@ -489,29 +500,40 @@ class AgentAdapter(ABC):
                         ) from exc
                     raise
                 except Exception as attachment_error:
-                    if attachment is not None:
-                        try:
-                            cleanup_result = await _rollback_persisted_clarification_model_network(
-                                self._runner, attachment=attachment
-                            )
-                        except Exception as cleanup_error:
-                            cleanup_result = CommandResult(
-                                returncode=1,
-                                stdout="",
-                                stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
-                            )
-                        if not cleanup_result.ok:
-                            raise AgentRunError(
-                                agent=self.name,
-                                result=cleanup_result,
-                                reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
-                                details={"services": clarification_model_services},
-                            ) from attachment_error
+                    cleanup_task = asyncio.create_task(
+                        _rollback_persisted_clarification_model_network(
+                            self._runner, attachment=attachment
+                        )
+                    )
                     try:
-                        await asyncio.to_thread(
+                        (
+                            cleanup_result,
+                            cancellation_requested,
+                        ) = await _await_task_despite_cancellation(cleanup_task)
+                    except Exception as cleanup_error:
+                        cleanup_result = CommandResult(
+                            returncode=1,
+                            stdout="",
+                            stderr=f"{type(cleanup_error).__name__}: {cleanup_error}",
+                        )
+                        cancellation_requested = False
+                    if not cleanup_result.ok:
+                        raise AgentRunError(
+                            agent=self.name,
+                            result=cleanup_result,
+                            reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                            details={"services": clarification_model_services},
+                        ) from attachment_error
+                    restore_task = asyncio.create_task(
+                        asyncio.to_thread(
                             _restore_compose_file,
                             compose_file=compose_file,
                             contents=original_compose_file,
+                        )
+                    )
+                    try:
+                        _, restore_cancellation_requested = await _await_task_despite_cancellation(
+                            restore_task
                         )
                     except OSError as cleanup_error:
                         raise AgentRunError(
@@ -524,10 +546,17 @@ class AgentAdapter(ABC):
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         ) from cleanup_error
+                    if cancellation_requested or restore_cancellation_requested:
+                        raise asyncio.CancelledError from None
                     raise
                 if not model_service_update.ok:
-                    cleanup_result = await _rollback_persisted_clarification_model_network(
-                        self._runner, attachment=attachment
+                    cleanup_task = asyncio.create_task(
+                        _rollback_persisted_clarification_model_network(
+                            self._runner, attachment=attachment
+                        )
+                    )
+                    cleanup_result, cancellation_requested = await _await_task_despite_cancellation(
+                        cleanup_task
                     )
                     if not cleanup_result.ok:
                         raise AgentRunError(
@@ -536,11 +565,16 @@ class AgentAdapter(ABC):
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         )
-                    try:
-                        await asyncio.to_thread(
+                    restore_task = asyncio.create_task(
+                        asyncio.to_thread(
                             _restore_compose_file,
                             compose_file=compose_file,
                             contents=original_compose_file,
+                        )
+                    )
+                    try:
+                        _, restore_cancellation_requested = await _await_task_despite_cancellation(
+                            restore_task
                         )
                     except OSError:
                         raise AgentRunError(
@@ -549,6 +583,8 @@ class AgentAdapter(ABC):
                             reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
                             details={"services": clarification_model_services},
                         ) from None
+                    if cancellation_requested or restore_cancellation_requested:
+                        raise asyncio.CancelledError
                     raise AgentRunError(
                         agent=self.name,
                         result=model_service_update,

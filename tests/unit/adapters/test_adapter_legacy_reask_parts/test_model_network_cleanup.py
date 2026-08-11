@@ -261,3 +261,95 @@ async def test_isolated_reask_surfaces_compose_restore_failure_during_upgrade_ca
     assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
     assert exc.value.result.stderr == "OSError: compose storage unavailable"
     assert compose_file.read_bytes() == b"upgraded compose"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("attachment_outcome", "cancellation_stage"),
+    [
+        ("error", "rollback"),
+        ("error", "restore"),
+        ("failed-update", "rollback"),
+        ("failed-update", "restore"),
+    ],
+)
+async def test_isolated_reask_cancellation_waits_for_migration_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attachment_outcome: str,
+    cancellation_stage: str,
+) -> None:
+    """Cancellation waits for migration rollback and Compose restoration."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+    original_compose_file = compose_file.read_bytes()
+    rollback_started = asyncio.Event()
+    allow_rollback = asyncio.Event()
+    rollback_finished = asyncio.Event()
+    restore_started = Event()
+    allow_restore = Event()
+    restore_finished = Event()
+
+    async def _attachment_that_needs_cleanup(*args: Any, **kwargs: Any) -> Any:
+        attachment = kwargs["attachment"]
+        attachment.created_network = True
+        attachment.connected_container_ids.append("stateful-model-container")
+        compose_file.write_bytes(b"partially migrated compose")
+        if attachment_outcome == "error":
+            raise RuntimeError("network attach crashed")
+        return attachment, CommandResult(returncode=1, stdout="", stderr="service update failed")
+
+    async def _blocking_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+        rollback_started.set()
+        if cancellation_stage == "rollback":
+            await allow_rollback.wait()
+        rollback_finished.set()
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _blocking_restore(*args: Any, **kwargs: Any) -> None:
+        restore_started.set()
+        if cancellation_stage == "restore":
+            assert allow_restore.wait(timeout=1)
+        compose_file.write_bytes(kwargs["contents"])
+        restore_finished.set()
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_attach_persisted_clarification_model_network",
+        _attachment_that_needs_cleanup,
+    )
+    monkeypatch.setattr(
+        adapter_base,
+        "_rollback_persisted_clarification_model_network",
+        _blocking_rollback,
+    )
+    monkeypatch.setattr(adapter_base, "_restore_compose_file", _blocking_restore)
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+    )
+
+    if cancellation_stage == "rollback":
+        await asyncio.wait_for(rollback_started.wait(), timeout=0.2)
+    else:
+        await asyncio.wait_for(asyncio.to_thread(restore_started.wait), timeout=0.2)
+    run_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not run_task.done()
+
+    if cancellation_stage == "rollback":
+        allow_rollback.set()
+        await asyncio.wait_for(rollback_finished.wait(), timeout=0.2)
+    else:
+        allow_restore.set()
+        await asyncio.wait_for(asyncio.to_thread(restore_finished.wait), timeout=0.2)
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert compose_file.read_bytes() == original_compose_file
