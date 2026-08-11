@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +20,22 @@ EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
 )
 MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
 
+_PINNED_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+@dataclass(frozen=True)
+class ValidatedSourceWorktreeGitContext:
+    """Validated linked-worktree Git metadata pinned to an open directory."""
+
+    mirror_path: Path
+    linked_git_dir: Path
+    linked_git_dir_fd: int
+
 
 def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
     """Resolve a linked worktree's mirror from an already trusted gitdir read."""
@@ -31,6 +48,8 @@ def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
                 if not common_dir.is_absolute():
                     common_dir = linked_git_dir / common_dir
                 return common_dir.resolve()
+        if str(linked_git_dir).startswith(f"/proc/{os.getpid()}/fd/"):
+            return (linked_git_dir / ".." / "..").resolve()
         return linked_git_dir.parent.parent.resolve()
     except (OSError, RuntimeError) as exc:
         raise ValueError(
@@ -78,6 +97,49 @@ def _validate_linked_git_dir_backref(linked_git_dir: Path, worktree_path: Path) 
         )
 
 
+def _validated_layout_mirror_for_linked_git_dir(
+    linked_git_dir: Path,
+    *,
+    linked_git_dir_name: str,
+    worktree_path: Path,
+    workspace_id: str,
+) -> Path:
+    """Validate a linked-worktree directory and return its trusted mirror.
+
+    Control-plane control over git pointers has been compromised during
+    monitor recoveries; trust only mirrored worktree pointers that stay under
+    the expected ``<worktrees_root>/../mirrors`` hierarchy for this
+    worktree path and match this workspace's metadata entry.
+    """
+    mirror_path = _mirror_path_from_linked_git_dir(linked_git_dir)
+    expected_mirror_root = worktree_path.parent.parent / "mirrors"
+    resolved_expected_root = expected_mirror_root.resolve()
+    resolved_mirror = mirror_path.resolve()
+    if not resolved_mirror.is_relative_to(resolved_expected_root):
+        raise ValueError(
+            "refusing ownership repair: mirror path is outside expected mirrors root "
+            f"for workspace {worktree_path}: {resolved_mirror}"
+        )
+
+    expected_worktree_git_root = (resolved_mirror / "worktrees").resolve()
+    if (linked_git_dir / "..").resolve() != expected_worktree_git_root:
+        raise ValueError(
+            "refusing ownership repair: linked-worktree metadata points to another "
+            f"workspace. expected parent {expected_worktree_git_root}, got {linked_git_dir.parent}"
+        )
+
+    if linked_git_dir_name != workspace_id:
+        linked_git_dir_suffix = linked_git_dir_name.removeprefix(workspace_id)
+        if not linked_git_dir_name.startswith(workspace_id) or not linked_git_dir_suffix.isdigit():
+            raise ValueError(
+                "refusing ownership repair: linked-worktree metadata points to another "
+                f"workspace. expected workspace id {workspace_id}, got {linked_git_dir_name}"
+            )
+        _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
+
+    return mirror_path
+
+
 def _validated_layout_mirror_for_worktree(
     worktree_path: Path, workspace_id: str
 ) -> tuple[Path, Path]:
@@ -94,53 +156,59 @@ def _validated_layout_mirror_for_worktree(
             "refusing ownership repair: cannot read linked-worktree git metadata "
             f"for workspace {worktree_path}"
         )
-
-    mirror_path = _mirror_path_from_linked_git_dir(linked_git_dir)
-    expected_mirror_root = worktree_path.parent.parent / "mirrors"
-    resolved_expected_root = expected_mirror_root.resolve()
-    resolved_mirror = mirror_path.resolve()
-    if not resolved_mirror.is_relative_to(resolved_expected_root):
-        raise ValueError(
-            "refusing ownership repair: mirror path is outside expected mirrors root "
-            f"for workspace {worktree_path}: {resolved_mirror}"
-        )
-
-    expected_worktree_git_root = (resolved_mirror / "worktrees").resolve()
-    if linked_git_dir.parent.resolve() != expected_worktree_git_root:
-        raise ValueError(
-            "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected parent {expected_worktree_git_root}, got {linked_git_dir.parent}"
-        )
-
-    if linked_git_dir.name != workspace_id:
-        linked_git_dir_suffix = linked_git_dir.name.removeprefix(workspace_id)
-        if not linked_git_dir.name.startswith(workspace_id) or not linked_git_dir_suffix.isdigit():
-            raise ValueError(
-                "refusing ownership repair: linked-worktree metadata points to another "
-                f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
-            )
-        _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
-
+    mirror_path = _validated_layout_mirror_for_linked_git_dir(
+        linked_git_dir,
+        linked_git_dir_name=linked_git_dir.name,
+        worktree_path=worktree_path,
+        workspace_id=workspace_id,
+    )
     return mirror_path, linked_git_dir
 
 
 def validated_source_worktree_git_context(
     worktree_path: Path, workspace_id: str
-) -> tuple[Path, Path]:
-    """Return the trusted mirror and admin directory for a source worktree.
+) -> ValidatedSourceWorktreeGitContext:
+    """Return trusted source Git metadata pinned through HEAD resolution.
 
     Unlike ownership repair for an existing primary checkout, a caller about
     to create another worktree must verify the reciprocal ``gitdir`` entry
     even when Git assigned the workspace's exact identifier. Otherwise a
     writable primary `.git` file can be redirected to another repository's
-    linked-worktree metadata before the caller resolves HEAD.
+    linked-worktree metadata before the caller resolves HEAD. The returned
+    procfs directory path names the opened descriptor, so replacing the
+    writable admin-directory path after validation cannot redirect Git.
     """
-    mirror_path, linked_git_dir = _validated_layout_mirror_for_worktree(
-        worktree_path,
-        workspace_id,
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None:
+        raise ValueError(
+            "refusing ownership repair: cannot read linked-worktree git metadata "
+            f"for workspace {worktree_path}"
+        )
+    try:
+        linked_git_dir_fd = os.open(linked_git_dir, _PINNED_DIRECTORY_OPEN_FLAGS)
+    except OSError as exc:
+        raise ValueError(
+            "refusing ownership repair: cannot open linked-worktree git metadata "
+            f"for workspace {worktree_path}"
+        ) from exc
+
+    pinned_linked_git_dir = Path(f"/proc/{os.getpid()}/fd/{linked_git_dir_fd}")
+    try:
+        mirror_path = _validated_layout_mirror_for_linked_git_dir(
+            pinned_linked_git_dir,
+            linked_git_dir_name=linked_git_dir.name,
+            worktree_path=worktree_path,
+            workspace_id=workspace_id,
+        )
+        _validate_linked_git_dir_backref(pinned_linked_git_dir, worktree_path)
+    except BaseException:
+        os.close(linked_git_dir_fd)
+        raise
+    return ValidatedSourceWorktreeGitContext(
+        mirror_path=mirror_path,
+        linked_git_dir=pinned_linked_git_dir,
+        linked_git_dir_fd=linked_git_dir_fd,
     )
-    _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
-    return mirror_path, linked_git_dir
 
 
 def _repair_agent_runtime_ownership_in_thread(

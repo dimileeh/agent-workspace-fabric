@@ -111,6 +111,7 @@ class _IsolatedReaskWorktree:
     path: Path
     source_mirror: Path | None = None
     source_git_dir: Path | None = None
+    source_git_dir_fd: int | None = None
     liveness_lock_fd: int | None = None
     liveness_lock_path: Path | None = None
 
@@ -258,21 +259,30 @@ async def _create_isolated_reask_worktree(
     restore_ref: str,
     source_mirror: Path | None = None,
     source_git_dir: Path | None = None,
+    source_git_dir_fd: int | None = None,
     on_cleanup_failure_after_cancellation: Callable[[str], Coroutine[Any, Any, None]] | None = None,
 ) -> _IsolatedReaskWorktree | None:
     """Create a temporary tracked-only checkout for a local clarification re-ask."""
-    if (source_mirror is None) != (source_git_dir is None):
+    if (source_mirror is None) != (source_git_dir is None) or (source_git_dir is None) != (
+        source_git_dir_fd is None
+    ):
+        _release_pinned_source_git_dir_fd(source_git_dir_fd)
         raise ValueError("re-ask source mirror and admin directory must be provided together")
     if not (worktree_path / ".git").exists():
         # Lightweight test doubles do not have a worktree that can contain side
         # effects. Real AWF worktrees always contain a .git control file.
+        _release_pinned_source_git_dir_fd(source_git_dir_fd)
         return None
 
-    await _prepare_reask_primary_worktree(
-        runner,
-        worktree_path=worktree_path,
-        source_git_dir=source_git_dir,
-    )
+    try:
+        await _prepare_reask_primary_worktree(
+            runner,
+            worktree_path=worktree_path,
+            source_git_dir=source_git_dir,
+        )
+    except BaseException:
+        _release_pinned_source_git_dir_fd(source_git_dir_fd)
+        raise
     # Keep an interrupted checkout outside the primary worktree: otherwise a
     # later repair could stage the nested repository as a gitlink.
     path = worktree_path.parent / (
@@ -281,6 +291,7 @@ async def _create_isolated_reask_worktree(
     try:
         liveness_lock_fd, liveness_lock_path = _acquire_isolated_reask_liveness_lock(path)
     except OSError as exc:
+        _release_pinned_source_git_dir_fd(source_git_dir_fd)
         raise _MonitorPolicyBlockedError(
             "Could not protect the isolated worktree before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -290,6 +301,7 @@ async def _create_isolated_reask_worktree(
         path=path,
         source_mirror=source_mirror,
         source_git_dir=source_git_dir,
+        source_git_dir_fd=source_git_dir_fd,
         liveness_lock_fd=liveness_lock_fd,
         liveness_lock_path=liveness_lock_path,
     )
@@ -344,6 +356,7 @@ async def _create_isolated_reask_worktree(
         )
     except (GitOperationError, OSError, RuntimeError):
         _release_isolated_reask_liveness_lock(reask_worktree)
+        _release_isolated_reask_source_git_dir(reask_worktree)
         raise
     except asyncio.CancelledError:
         # Git may have registered the worktree before cancellation reaches the
@@ -496,20 +509,23 @@ async def _cleanup_isolated_reask_worktree_after_creation_failure(
 ) -> str | None:
     """Remove and report a checkout Git might create before it signals failure."""
     try:
-        cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
-    except (GitOperationError, OSError, RuntimeError) as exc:
-        # The failed creation may already have placed a sibling repository.
-        # Treat an unconfirmed removal just like a
-        # nonzero removal result so callers apply the terminal cleanup policy.
-        cleanup_error = str(exc) or "`git worktree remove` failed during cleanup"
-    if cleanup_error is not None:
-        _log.warning(
-            event_name,
-            worktree_path=str(reask_worktree.source_worktree),
-            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-            message=cleanup_error,
-        )
-    return cleanup_error
+        try:
+            cleanup_error = await _remove_isolated_reask_worktree(runner, reask_worktree)
+        except (GitOperationError, OSError, RuntimeError) as exc:
+            # The failed creation may already have placed a sibling repository.
+            # Treat an unconfirmed removal just like a
+            # nonzero removal result so callers apply the terminal cleanup policy.
+            cleanup_error = str(exc) or "`git worktree remove` failed during cleanup"
+        if cleanup_error is not None:
+            _log.warning(
+                event_name,
+                worktree_path=str(reask_worktree.source_worktree),
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=cleanup_error,
+            )
+        return cleanup_error
+    finally:
+        _release_isolated_reask_source_git_dir(reask_worktree)
 
 
 async def _remove_isolated_reask_worktree(
@@ -537,6 +553,18 @@ async def _remove_isolated_reask_worktree(
         return "`git worktree remove` could not remove the NEEDS_HUMAN reason re-ask checkout"
     finally:
         _release_isolated_reask_liveness_lock(reask_worktree)
+
+
+def _release_pinned_source_git_dir_fd(source_git_dir_fd: int | None) -> None:
+    """Close the descriptor that keeps source Git metadata stable for a re-ask."""
+    if source_git_dir_fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(source_git_dir_fd)
+
+
+def _release_isolated_reask_source_git_dir(reask_worktree: _IsolatedReaskWorktree) -> None:
+    """Release source Git metadata only after primary-worktree checks finish."""
+    _release_pinned_source_git_dir_fd(reask_worktree.source_git_dir_fd)
 
 
 def _acquire_isolated_reask_liveness_lock(path: Path) -> tuple[int, Path]:
@@ -940,6 +968,7 @@ async def _enforce_needs_human_reason(
     reask_worktree: _IsolatedReaskWorktree | None = None
     source_mirror: Path | None = None
     source_git_dir: Path | None = None
+    source_git_dir_fd: int | None = None
 
     async def _persist_cleanup_failure_after_cancellation(
         cleanup_error: str,
@@ -991,7 +1020,7 @@ async def _enforce_needs_human_reason(
             if has_git_worktree:
                 if (worktree_path / ".git").is_file():
                     try:
-                        source_mirror, source_git_dir = await asyncio.to_thread(
+                        source_git_context = await asyncio.to_thread(
                             validated_source_worktree_git_context,
                             worktree_path,
                             workspace_id,
@@ -1001,8 +1030,9 @@ async def _enforce_needs_human_reason(
                             "Could not validate the source worktree before the NEEDS_HUMAN reason re-ask.",
                             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
                         ) from exc
-                    assert source_mirror is not None
-                    assert source_git_dir is not None
+                    source_mirror = source_git_context.mirror_path
+                    source_git_dir = source_git_context.linked_git_dir
+                    source_git_dir_fd = source_git_context.linked_git_dir_fd
                     reask_restore_ref = await _rev_parse_pinned_reask_source_head(
                         runner,
                         source_git_dir,
@@ -1015,12 +1045,15 @@ async def _enforce_needs_human_reason(
                     )
                 if reask_restore_ref is None:
                     raise RuntimeError("could not capture the worktree restore ref")
+                reask_source_git_dir_fd = source_git_dir_fd
+                source_git_dir_fd = None
                 reask_worktree = await _create_isolated_reask_worktree(
                     runner,
                     worktree_path=worktree_path,
                     restore_ref=reask_restore_ref,
                     source_mirror=source_mirror,
                     source_git_dir=source_git_dir,
+                    source_git_dir_fd=reask_source_git_dir_fd,
                     on_cleanup_failure_after_cancellation=_persist_cleanup_failure_after_cancellation,
                 )
             elif getattr(runner, "_deps", None) is not None:
@@ -1063,6 +1096,9 @@ async def _enforce_needs_human_reason(
                 reason_code=_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE,
             )
             return result
+        finally:
+            if reask_worktree is None:
+                _release_pinned_source_git_dir_fd(source_git_dir_fd)
 
     async def _cleanup_reask_worktree() -> tuple[str | None, bool]:
         """Remove the isolated checkout, then verify the primary worktree."""
@@ -1074,38 +1110,45 @@ async def _enforce_needs_human_reason(
             return None, False
 
         try:
-            isolated_cleanup_failure = await _remove_isolated_reask_worktree(runner, reask_worktree)
-        except (GitOperationError, OSError, RuntimeError) as exc:
-            # A command-runner exception leaves the isolated checkout's removal
-            # unconfirmed, so preserve its policy-blocking cleanup phase.
-            isolated_cleanup_failure = str(exc)
-        if isolated_cleanup_failure is not None:
+            try:
+                isolated_cleanup_failure = await _remove_isolated_reask_worktree(
+                    runner,
+                    reask_worktree,
+                )
+            except (GitOperationError, OSError, RuntimeError) as exc:
+                # A command-runner exception leaves the isolated checkout's removal
+                # unconfirmed, so preserve its policy-blocking cleanup phase.
+                isolated_cleanup_failure = str(exc)
+            if isolated_cleanup_failure is not None:
+                _log.warning(
+                    "monitor.needs_human_reason_reask_isolated_cleanup_failed",
+                    workspace_id=workspace_id,
+                    restore_ref=reask_restore_ref,
+                    message=isolated_cleanup_failure,
+                )
+                return isolated_cleanup_failure, True
+            primary_check_kwargs: dict[str, Any] = {
+                "worktree_path": worktree_path,
+                "restore_ref": reask_restore_ref,
+            }
+            if reask_worktree is not None and reask_worktree.source_git_dir is not None:
+                primary_check_kwargs["source_git_dir"] = reask_worktree.source_git_dir
+            primary_check_failure = await _check_reask_primary_worktree_clean(
+                runner,
+                **primary_check_kwargs,
+            )
+            if primary_check_failure is None:
+                return None, False
             _log.warning(
-                "monitor.needs_human_reason_reask_isolated_cleanup_failed",
+                "monitor.needs_human_reason_reask_cleanup_failed",
                 workspace_id=workspace_id,
                 restore_ref=reask_restore_ref,
-                message=isolated_cleanup_failure,
+                message=primary_check_failure[:400],
             )
-            return isolated_cleanup_failure, True
-        primary_check_kwargs: dict[str, Any] = {
-            "worktree_path": worktree_path,
-            "restore_ref": reask_restore_ref,
-        }
-        if reask_worktree is not None and reask_worktree.source_git_dir is not None:
-            primary_check_kwargs["source_git_dir"] = reask_worktree.source_git_dir
-        primary_check_failure = await _check_reask_primary_worktree_clean(
-            runner,
-            **primary_check_kwargs,
-        )
-        if primary_check_failure is None:
-            return None, False
-        _log.warning(
-            "monitor.needs_human_reason_reask_cleanup_failed",
-            workspace_id=workspace_id,
-            restore_ref=reask_restore_ref,
-            message=primary_check_failure[:400],
-        )
-        return primary_check_failure, False
+            return primary_check_failure, False
+        finally:
+            if reask_worktree is not None:
+                _release_isolated_reask_source_git_dir(reask_worktree)
 
     async def _run_reask_cleanup(*, event_name: str) -> tuple[str | None, bool]:
         """Run re-ask cleanup and log any failure under the supplied event."""

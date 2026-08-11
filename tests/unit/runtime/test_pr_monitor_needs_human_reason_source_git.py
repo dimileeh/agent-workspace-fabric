@@ -242,3 +242,143 @@ async def test_reask_uses_validated_source_git_context_for_head_and_worktree_cre
     assert result == VerdictResult(verdict="needs_human", reason="select a deployment region")
     assert reask_contents == ["source repository\n"]
     assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+async def test_reask_pins_validated_source_admin_directory_through_head_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing source admin metadata cannot redirect the clarification revision."""
+    workspace_id = "ws_pinned_admin_directory"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    mirror = source_git_dir.parent.parent
+    foreign_ref = "refs/heads/foreign"
+    foreign_source = tmp_path / "foreign-source"
+    subprocess.run(
+        ["git", "clone", "-q", str(mirror), str(foreign_source)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(foreign_source, "config", "user.email", "awf@example.com")
+    _git(foreign_source, "config", "user.name", "AWF Test")
+    (foreign_source / "tracked.txt").write_text("foreign repository\n", encoding="utf-8")
+    _git(foreign_source, "add", "tracked.txt")
+    _git(foreign_source, "commit", "-qm", "foreign")
+    subprocess.run(
+        ["git", "-C", str(foreign_source), "push", "-q", "origin", f"HEAD:{foreign_ref}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    foreign = source.parent / "foreign"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(mirror),
+            "worktree",
+            "add",
+            "--detach",
+            str(foreign),
+            foreign_ref,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    foreign_git_dir = Path(
+        (foreign / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    reask_contents: list[str] = []
+
+    class _AdminDirectorySwappingRunner(_EnvLocalCommandRunner):
+        """Swap the source admin path exactly before its HEAD command starts."""
+
+        def __init__(self) -> None:
+            self.swapped = False
+            self.pinned_source_git_dir: Path | None = None
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if not self.swapped and args[-2:] == ["rev-parse", "HEAD"]:
+                self.swapped = True
+                self.pinned_source_git_dir = Path(args[2])
+                source_git_dir.rename(source_git_dir.with_name(f"{workspace_id}-original"))
+                source_git_dir.symlink_to(foreign_git_dir, target_is_directory=True)
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        reask_contents.append((reask / "tracked.txt").read_text(encoding="utf-8"))
+        return VerdictResult(verdict="needs_human", reason="select a deployment region")
+
+    async def _unexpected_rev_parse_head(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a linked source must resolve HEAD through its pinned admin directory")
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return
+
+    command_runner = _AdminDirectorySwappingRunner()
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=command_runner),
+        _worktrees_root=source.parent,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_unexpected_rev_parse_head,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=tmp_path / "compose.yml",
+        state=None,
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert command_runner.swapped
+    assert command_runner.pinned_source_git_dir is not None
+    assert str(command_runner.pinned_source_git_dir).startswith("/proc/")
+    assert result == VerdictResult(verdict="needs_human", reason="select a deployment region")
+    assert reask_contents == ["source repository\n"]
+    assert not command_runner.pinned_source_git_dir.exists()
+    assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
