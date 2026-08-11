@@ -76,6 +76,16 @@ def _network_is_not_connected(result: CommandResult) -> bool:
     return "not connected" in detail or "no such endpoint" in detail
 
 
+def _container_id_was_preexisting(
+    container_id: str, preexisting_container_ids: frozenset[str]
+) -> bool:
+    """Return whether a possibly abbreviated Compose ID was already on the network."""
+    return any(
+        preexisting_container_id.startswith(container_id)
+        for preexisting_container_id in preexisting_container_ids
+    )
+
+
 async def _attach_persisted_clarification_model_network(
     runner: AsyncCommandRunner,
     *,
@@ -170,7 +180,9 @@ async def _attach_persisted_clarification_model_network(
             # connects the endpoint but before its subprocess result reaches
             # us. Preserve endpoints that predate this attempt, while still
             # detaching endpoints added by this attempt during rollback.
-            endpoint_preexisted = container_id in preexisting_container_ids
+            endpoint_preexisted = _container_id_was_preexisting(
+                container_id, preexisting_container_ids
+            )
             if endpoint_preexisted:
                 attachment.reconnecting_endpoints.append((container_id, service))
             else:

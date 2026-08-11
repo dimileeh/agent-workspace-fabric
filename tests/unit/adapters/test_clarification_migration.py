@@ -277,6 +277,45 @@ async def test_attach_persisted_model_network_preserves_reconnect_failure() -> N
 
 
 @pytest.mark.unit
+async def test_attach_persisted_model_network_recognizes_short_preexisting_container_id() -> None:
+    """A short Compose ID still identifies the full ID from network inspection."""
+    full_container_id = "a" * 64
+    short_container_id = full_container_id[:12]
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout=f"{full_container_id}\n")
+    runner.queue_result(stdout=f"{short_container_id}\n")
+    runner.queue_result(returncode=1, stderr="network connect denied")
+    runner.queue_result()
+
+    attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert attachment.connected_container_ids == []
+    assert attachment.reconnecting_endpoints == [(short_container_id, "ollama-sidecar")]
+    assert result.stderr == "network connect denied"
+
+    rollback_result = await _rollback_persisted_clarification_model_network(
+        runner, attachment=attachment
+    )
+
+    assert rollback_result.ok
+    assert runner.calls[-1].args == [
+        "docker",
+        "network",
+        "connect",
+        "--alias",
+        "ollama-sidecar",
+        "awf-ws_legacy-clarification-model-net",
+        short_container_id,
+    ]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("attachment", "operation"),
     [
