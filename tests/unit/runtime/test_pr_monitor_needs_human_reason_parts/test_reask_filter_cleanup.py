@@ -140,7 +140,7 @@ async def test_pinned_reask_head_read_returns_the_pinned_revision() -> None:
         await _rev_parse_pinned_reask_source_head(
             runner,
             Path("/worktrees/ws_1/.git/worktrees/reask"),
-            head_snapshot="ref: refs/heads/awf/ws_1\n",
+            head_snapshot=expected_ref,
             timeout_seconds=30.0,
         )
         == expected_ref
@@ -152,7 +152,7 @@ async def test_pinned_reask_head_read_returns_the_pinned_revision() -> None:
         "rev-parse",
         "--verify",
         "--end-of-options",
-        "refs/heads/awf/ws_1^{commit}",
+        f"{expected_ref}^{{commit}}",
     ]
     assert command_runner.timeout_seconds == 30.0
 
@@ -171,7 +171,7 @@ async def test_pinned_reask_head_read_returns_none_for_git_failure() -> None:
         await _rev_parse_pinned_reask_source_head(
             runner,
             Path("/worktrees/ws_1/.git/worktrees/reask"),
-            head_snapshot="ref: refs/heads/awf/ws_1\n",
+            head_snapshot="a" * 40,
             timeout_seconds=30.0,
         )
         is None
@@ -208,7 +208,10 @@ async def test_pinned_reask_head_read_accepts_a_detached_head_snapshot() -> None
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("head_snapshot", ["ref: HEAD\n", "not a commit\n", "z" * 40])
+@pytest.mark.parametrize(
+    "head_snapshot",
+    ["ref: HEAD\n", "ref: refs/heads/awf/ws_1\n", "not a commit\n", "z" * 40],
+)
 async def test_pinned_reask_head_read_rejects_unsafe_head_snapshots(head_snapshot: str) -> None:
     """Malformed snapshots must not cause Git to reopen a mutable HEAD alias."""
 

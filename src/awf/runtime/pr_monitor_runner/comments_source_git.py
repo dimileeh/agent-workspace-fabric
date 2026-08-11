@@ -50,9 +50,9 @@ async def _rev_parse_pinned_reask_source_head(
     head_snapshot: str,
     timeout_seconds: float,
 ) -> str | None:
-    """Resolve a captured source HEAD without reopening mutable ``HEAD`` metadata."""
-    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
-    if snapshot_ref is None:
+    """Verify the commit captured during source Git validation still exists."""
+    snapshot_commit = _source_head_snapshot_commit(head_snapshot)
+    if snapshot_commit is None:
         return None
     result = await runner._deps.runner.run(
         _pinned_git_dir_command(
@@ -60,7 +60,7 @@ async def _rev_parse_pinned_reask_source_head(
             "rev-parse",
             "--verify",
             "--end-of-options",
-            f"{snapshot_ref}^{{commit}}",
+            f"{snapshot_commit}^{{commit}}",
         ),
         timeout_seconds=timeout_seconds,
         env=git_env_without_object_lookup_overrides(),
@@ -87,14 +87,11 @@ async def _read_pinned_reask_source_head(
     return result.stdout.strip() or None
 
 
-def _source_head_snapshot_ref(head_snapshot: str) -> str | None:
-    """Return one safe commit-ish from a regular-file ``HEAD`` snapshot."""
-    snapshot_ref = head_snapshot.strip()
-    if snapshot_ref.startswith("ref: "):
-        symbolic_ref = snapshot_ref.removeprefix("ref: ").strip()
-        return symbolic_ref if symbolic_ref.startswith("refs/") else None
-    if len(snapshot_ref) not in {40, 64}:
+def _source_head_snapshot_commit(head_snapshot: str) -> str | None:
+    """Return one immutable commit ID captured during source validation."""
+    snapshot_commit = head_snapshot.strip()
+    if len(snapshot_commit) not in {40, 64}:
         return None
-    if not all(char in "0123456789abcdefABCDEF" for char in snapshot_ref):
+    if not all(char in "0123456789abcdefABCDEF" for char in snapshot_commit):
         return None
-    return snapshot_ref
+    return snapshot_commit

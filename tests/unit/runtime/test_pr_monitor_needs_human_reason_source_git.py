@@ -88,6 +88,7 @@ def test_validated_source_worktree_git_context_reads_control_files_from_pinned_f
         (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
     )
     expected_head_snapshot = (source_git_dir / "HEAD").read_text(encoding="utf-8")
+    expected_resolved_head = _git(source, "rev-parse", "HEAD").stdout.strip()
     real_read_text = Path.read_text
 
     def _read_text(self: Path, *args: object, **kwargs: object) -> str:
@@ -102,8 +103,76 @@ def test_validated_source_worktree_git_context_reads_control_files_from_pinned_f
         assert context.mirror_path == source_git_dir.parent.parent
         assert str(context.linked_git_dir).startswith("/proc/")
         assert context.head_snapshot == expected_head_snapshot
+        assert context.resolved_head == expected_resolved_head
     finally:
         os.close(context.linked_git_dir_fd)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("head_snapshot", "command_result"),
+    [
+        ("not a commit\n", None),
+        ("ref: refs/heads/missing\n", None),
+        (
+            "ref: refs/heads/main\n",
+            subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="not a commit\n", stderr=""
+            ),
+        ),
+    ],
+)
+def test_validated_source_worktree_git_context_rejects_unresolvable_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_snapshot: str,
+    command_result: subprocess.CompletedProcess[str] | None,
+) -> None:
+    """Validation fails closed when it cannot retain a source commit ID."""
+    workspace_id = "ws_unresolvable_head"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    (source_git_dir / "HEAD").write_text(head_snapshot, encoding="utf-8")
+    if command_result is not None:
+        monkeypatch.setattr(ownership.subprocess, "run", lambda *_args, **_kwargs: command_result)
+
+    with pytest.raises(ValueError, match="source Git HEAD"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolution_error",
+    [OSError("git unavailable"), subprocess.TimeoutExpired(cmd="git", timeout=30.0)],
+)
+def test_validated_source_worktree_git_context_rejects_head_resolution_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolution_error: OSError | subprocess.TimeoutExpired,
+) -> None:
+    """A failed source-Git resolver cannot leave an unpinned clarification ref."""
+    workspace_id = "ws_head_resolution_error"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+
+    def _raise_resolution_error(*_args: object, **_kwargs: object) -> None:
+        raise resolution_error
+
+    monkeypatch.setattr(ownership.subprocess, "run", _raise_resolution_error)
+
+    with pytest.raises(ValueError, match="cannot resolve source Git HEAD"):
+        ownership.validated_source_worktree_git_context(source, workspace_id)
 
 
 @pytest.mark.unit
@@ -611,11 +680,11 @@ async def test_reask_uses_validated_source_git_context_for_head_and_worktree_cre
 
 
 @pytest.mark.unit
-async def test_reask_uses_validated_head_snapshot_when_source_head_changes_transiently(
+async def test_reask_uses_validated_head_commit_when_symbolic_ref_changes_transiently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A restored source HEAD cannot redirect the clarification checkout."""
+    """A restored symbolic source ref cannot redirect the clarification checkout."""
     workspace_id = "ws_head_snapshot"
     source = _init_mirrored_worktree(
         tmp_path,
@@ -627,6 +696,15 @@ async def test_reask_uses_validated_head_snapshot_when_source_head_changes_trans
         (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
     )
     mirror = source_git_dir.parent.parent
+    source_head = _git(source, "rev-parse", "HEAD").stdout.strip()
+    source_ref = f"refs/heads/awf/{workspace_id}"
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "update-ref", source_ref, source_head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (source_git_dir / "HEAD").write_text(f"ref: {source_ref}\n", encoding="utf-8")
     expected_head_snapshot = (source_git_dir / "HEAD").read_text(encoding="utf-8")
     attacker = tmp_path / "attacker"
     subprocess.run(
@@ -651,7 +729,7 @@ async def test_reask_uses_validated_head_snapshot_when_source_head_changes_trans
     reask_contents: list[str] = []
 
     class _HeadMutatingRunner(_EnvLocalCommandRunner):
-        """Replace then restore HEAD while the monitor resolves its revision."""
+        """Move then restore the captured symbolic ref during the re-ask."""
 
         def __init__(self) -> None:
             self.mutated = False
@@ -665,11 +743,21 @@ async def test_reask_uses_validated_head_snapshot_when_source_head_changes_trans
         ) -> CommandResult:
             if not self.mutated and "rev-parse" in args:
                 self.mutated = True
-                (source_git_dir / "HEAD").write_text(f"{attacker_head}\n", encoding="utf-8")
+                subprocess.run(
+                    ["git", "--git-dir", str(mirror), "update-ref", source_ref, attacker_head],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
                 try:
                     return await super().run(args, timeout_seconds=timeout_seconds, env=env)
                 finally:
-                    (source_git_dir / "HEAD").write_text(expected_head_snapshot, encoding="utf-8")
+                    subprocess.run(
+                        ["git", "--git-dir", str(mirror), "update-ref", source_ref, source_head],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
             return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
@@ -719,6 +807,7 @@ async def test_reask_uses_validated_head_snapshot_when_source_head_changes_trans
     assert result == VerdictResult(verdict="needs_human", reason="select a deployment region")
     assert reask_contents == ["source repository\n"]
     assert (source_git_dir / "HEAD").read_text(encoding="utf-8") == expected_head_snapshot
+    assert _git(source, "rev-parse", "HEAD").stdout.strip() == source_head
     assert not list(source.parent.glob(f"{workspace_id}__companion__isolated_reask_*"))
 
 

@@ -185,6 +185,7 @@ async def test_needs_human_reason_reask_propagates_unexpected_setup_error(
             linked_git_dir=source_git_dir,
             linked_git_dir_fd=source_git_dir_fd,
             head_snapshot="ref: refs/heads/main\n",
+            resolved_head="a" * 40,
         )
 
     async def _rev_parse_pinned_reask_source_head(

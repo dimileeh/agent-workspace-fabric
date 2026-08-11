@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
 from awf.node.git_manager import (
+    git_env_without_object_lookup_overrides,
     linked_worktree_git_dir,
     repair_agent_writable_worktree,
 )
@@ -34,16 +36,18 @@ _GIT_METADATA_FILE_OPEN_FLAGS = (
     | getattr(os, "O_NONBLOCK", 0)
 )
 _MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES: Final = 1024 * 1024
+_PINNED_SOURCE_HEAD_RESOLUTION_TIMEOUT_SECONDS: Final = 30.0
 
 
 @dataclass(frozen=True)
 class ValidatedSourceWorktreeGitContext:
-    """Validated linked-worktree Git metadata pinned to an open directory."""
+    """Validated linked-worktree Git metadata pinned to an open directory and commit."""
 
     mirror_path: Path
     linked_git_dir: Path
     linked_git_dir_fd: int
     head_snapshot: str
+    resolved_head: str
 
 
 def _read_bounded_regular_git_metadata_file_at(
@@ -97,6 +101,53 @@ def _read_bounded_regular_git_metadata_file_at(
         raise ValueError(f"refusing ownership repair: cannot read Git metadata {filename}") from exc
     finally:
         os.close(file_fd)
+
+
+def _source_head_snapshot_ref(head_snapshot: str) -> str | None:
+    """Return one safe commit-ish from a regular-file ``HEAD`` snapshot."""
+    snapshot_ref = head_snapshot.strip()
+    if snapshot_ref.startswith("ref: "):
+        symbolic_ref = snapshot_ref.removeprefix("ref: ").strip()
+        return symbolic_ref if symbolic_ref.startswith("refs/") else None
+    if len(snapshot_ref) not in {40, 64}:
+        return None
+    if not all(char in "0123456789abcdefABCDEF" for char in snapshot_ref):
+        return None
+    return snapshot_ref
+
+
+def _resolve_pinned_source_head(
+    source_mirror: Path,
+    *,
+    head_snapshot: str,
+) -> str:
+    """Resolve a captured source ``HEAD`` to one immutable commit ID."""
+    snapshot_ref = _source_head_snapshot_ref(head_snapshot)
+    if snapshot_ref is None:
+        raise ValueError("refusing ownership repair: invalid source Git HEAD snapshot")
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(source_mirror),
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{snapshot_ref}^{{commit}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PINNED_SOURCE_HEAD_RESOLUTION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("refusing ownership repair: cannot resolve source Git HEAD") from exc
+
+    resolved_head = result.stdout.strip()
+    if result.returncode != 0 or _source_head_snapshot_ref(resolved_head) != resolved_head:
+        raise ValueError("refusing ownership repair: cannot resolve source Git HEAD")
+    return resolved_head
 
 
 def _linked_worktree_git_dir_from_contents(worktree_path: Path, content: str) -> Path:
@@ -329,6 +380,10 @@ def validated_source_worktree_git_context(
         )
         head_snapshot = _read_bounded_regular_git_metadata_file_at(linked_git_dir_fd, "HEAD")
         assert head_snapshot is not None
+        resolved_head = _resolve_pinned_source_head(
+            mirror_path,
+            head_snapshot=head_snapshot,
+        )
     except BaseException:
         os.close(linked_git_dir_fd)
         raise
@@ -337,6 +392,7 @@ def validated_source_worktree_git_context(
         linked_git_dir=pinned_linked_git_dir,
         linked_git_dir_fd=linked_git_dir_fd,
         head_snapshot=head_snapshot,
+        resolved_head=resolved_head,
     )
 
 

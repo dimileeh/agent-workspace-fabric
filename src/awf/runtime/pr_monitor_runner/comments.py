@@ -1062,7 +1062,7 @@ async def _enforce_needs_human_reason(
                 reask_restore_ref = await _rev_parse_pinned_reask_source_head(
                     runner,
                     source_git_dir,
-                    head_snapshot=source_git_context.head_snapshot,
+                    head_snapshot=source_git_context.resolved_head,
                     timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
                 )
                 if reask_restore_ref is None:
