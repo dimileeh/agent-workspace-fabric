@@ -1229,3 +1229,50 @@ class TestIsolatedReaskAdapter:
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
         assert exc.value.result.stderr == "OSError: compose storage unavailable"
+
+    @pytest.mark.unit
+    async def test_isolated_reask_surfaces_compose_restore_failure_during_upgrade_cancellation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A cancellation cannot hide a failed pre-attachment Compose restore."""
+        compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+        upgrade_started = Event()
+        release_upgrade = Event()
+
+        def _upgrade_after_cancellation(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+            upgrade_started.set()
+            assert release_upgrade.wait(timeout=1)
+            compose_file.write_bytes(b"upgraded compose")
+            return ()
+
+        def _fail_restore(*args: Any, **kwargs: Any) -> None:
+            raise OSError("compose storage unavailable")
+
+        monkeypatch.setattr(
+            adapter_base,
+            "upgrade_persisted_clarification_service",
+            _upgrade_after_cancellation,
+        )
+        monkeypatch.setattr(adapter_base, "_restore_compose_file", _fail_restore)
+        adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+        run_task = asyncio.create_task(
+            adapter.run(
+                compose_project="awf_ws_legacy",
+                compose_file=compose_file,
+                prompt=_PROMPT,
+                model="ollama/kimi-k2.6:cloud",
+                workspace_id="ws_legacy",
+                isolated_worktree_host_path=tmp_path / "reask",
+            )
+        )
+
+        await asyncio.wait_for(asyncio.to_thread(upgrade_started.wait), timeout=0.2)
+        run_task.cancel()
+        release_upgrade.set()
+
+        with pytest.raises(AgentRunError) as exc:
+            await run_task
+
+        assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+        assert exc.value.result.stderr == "OSError: compose storage unavailable"
+        assert compose_file.read_bytes() == b"upgraded compose"

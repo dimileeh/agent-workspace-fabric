@@ -415,11 +415,21 @@ class AgentAdapter(ABC):
                         await asyncio.shield(upgrade_task)
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     upgrade_task.result()
-                with contextlib.suppress(OSError):
+                try:
                     _restore_compose_file(
                         compose_file=compose_file,
                         contents=original_compose_file,
                     )
+                except OSError as exc:
+                    raise AgentRunError(
+                        agent=self.name,
+                        result=CommandResult(
+                            returncode=1,
+                            stdout="",
+                            stderr=f"{type(exc).__name__}: {exc}",
+                        ),
+                        reason_code="CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
+                    ) from exc
                 raise
             if clarification_model_services:
                 # The profile may keep downloaded models and other runtime
