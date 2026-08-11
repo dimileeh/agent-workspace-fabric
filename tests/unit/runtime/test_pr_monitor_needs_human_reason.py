@@ -417,6 +417,7 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
             "reason": "needs_human_reason_reask_pre_launch",
             "event_name": "monitor.agent_runtime_ownership_repair_failed",
             "linked_worktree_id": reask_worktree.path.name,
+            "repair_shared_git_metadata": False,
         }
     ]
 

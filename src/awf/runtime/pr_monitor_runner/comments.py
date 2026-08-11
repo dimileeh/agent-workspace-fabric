@@ -406,6 +406,7 @@ async def _create_isolated_reask_worktree(
             reason="needs_human_reason_reask_pre_launch",
             event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
             linked_worktree_id=path.name,
+            repair_shared_git_metadata=False,
         )
     except asyncio.CancelledError:
         # Ownership repair runs asynchronously after Git creates the checkout,

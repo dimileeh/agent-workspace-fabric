@@ -953,15 +953,21 @@ def repair_agent_writable_worktree(
     uid: int = AGENT_RUNTIME_UID,
     gid: int = AGENT_RUNTIME_GID,
     linked_git_dir: Path | None = None,
+    *,
+    repair_shared_git_metadata: bool = True,
 ) -> None:
     """Repair linked-worktree Git ownership for the agent-runtime user.
 
     The mirror object DB is intentionally repaired in directories-only mode:
     loose object files and pack files may be immutable through Docker Desktop
     on macOS, while fanout directories must be writable on Linux so the agent
-    can add new objects.
+    can add new objects. Callers that create an isolated worktree while another
+    agent still has shared-mirror access can repair only that worktree.
     """
     if os.geteuid() != 0:
+        return
+    if not repair_shared_git_metadata:
+        _chown_targets((_ChownTarget(worktree_path, recursive=True),), uid, gid)
         return
     mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
     if mirror is None:

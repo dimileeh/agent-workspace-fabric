@@ -128,6 +128,7 @@ def _repair_agent_runtime_ownership_in_thread(
     worktree_path: Path,
     workspace_id: str,
     linked_worktree_id: str | None,
+    repair_shared_git_metadata: bool = True,
 ) -> None:
     """Repair ownership using a linked-worktree identifier when one is supplied."""
     if linked_worktree_id is not None and linked_worktree_id != worktree_path.name:
@@ -139,11 +140,19 @@ def _repair_agent_runtime_ownership_in_thread(
         worktree_path,
         linked_worktree_id or workspace_id,
     )
-    repair_agent_writable_worktree(
-        layout_mirror,
-        worktree_path,
-        linked_git_dir=validated_linked_git_dir,
-    )
+    if repair_shared_git_metadata:
+        repair_agent_writable_worktree(
+            layout_mirror,
+            worktree_path,
+            linked_git_dir=validated_linked_git_dir,
+        )
+    else:
+        repair_agent_writable_worktree(
+            layout_mirror,
+            worktree_path,
+            linked_git_dir=validated_linked_git_dir,
+            repair_shared_git_metadata=False,
+        )
 
 
 class _LoggerProtocol(Protocol):
@@ -171,6 +180,7 @@ async def repair_agent_runtime_ownership(
     event_name: str,
     reason_code: str = AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     linked_worktree_id: str | None = None,
+    repair_shared_git_metadata: bool = True,
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree.
 
@@ -180,12 +190,21 @@ async def repair_agent_runtime_ownership(
     if os.geteuid() != 0:
         return True
     try:
-        await asyncio.to_thread(
-            _repair_agent_runtime_ownership_in_thread,
-            worktree_path,
-            workspace_id,
-            linked_worktree_id,
-        )
+        if repair_shared_git_metadata:
+            await asyncio.to_thread(
+                _repair_agent_runtime_ownership_in_thread,
+                worktree_path,
+                workspace_id,
+                linked_worktree_id,
+            )
+        else:
+            await asyncio.to_thread(
+                _repair_agent_runtime_ownership_in_thread,
+                worktree_path,
+                workspace_id,
+                linked_worktree_id,
+                repair_shared_git_metadata,
+            )
     except Exception:
         logger.exception(
             event_name,

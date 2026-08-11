@@ -176,6 +176,56 @@ async def test_repair_agent_runtime_ownership_accepts_temporary_linked_worktree_
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_can_skip_shared_git_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace" / "worktrees"
+    worktree_path = worktrees_root / f"{workspace_id}__companion__isolated_reask_test"
+    mirror_root = worktrees_root.parent / "mirrors"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir = mirror_root / "repo.git" / "worktrees" / worktree_path.name
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    captured: list[tuple[Path | None, Path, Path | None, bool]] = []
+
+    def _repair_agent_writable_worktree(
+        layout_mirror: Path | None,
+        path: Path,
+        linked_git_dir: Path | None = None,
+        *,
+        repair_shared_git_metadata: bool = True,
+    ) -> None:
+        captured.append((layout_mirror, path, linked_git_dir, repair_shared_git_metadata))
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    ok = await ownership.repair_agent_runtime_ownership(
+        logger=logger,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pytest",
+        event_name="monitor.event",
+        linked_worktree_id=worktree_path.name,
+        repair_shared_git_metadata=False,
+    )
+
+    assert ok
+    assert logger.exception_calls == []
+    assert captured == [(mirror_root / "repo.git", worktree_path, linked_git_dir, False)]
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_rejects_mismatched_temporary_worktree_id(
     tmp_path: Path,
 ) -> None:
