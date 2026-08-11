@@ -166,6 +166,82 @@ async def test_isolated_reask_ref_passes_from_comment_verdict_to_service_recover
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("isolated", (False, True))
+async def test_verdict_repairs_primary_worktree_only_for_nonisolated_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated: bool,
+) -> None:
+    """Only ordinary comment repair runs mutate the primary worktree and mirror."""
+    primary_repairs: list[dict[str, object]] = []
+    mirror_repairs: list[Path] = []
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: NEEDS_HUMAN: reason",
+            stderr="",
+        )
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        primary_repairs.append(dict(kwargs))
+        return True
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> None:
+        mirror_repairs.append(mirror_path)
+
+    workspace_id = "ws_reask"
+    primary_worktree = tmp_path / workspace_id
+    primary_worktree.mkdir()
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        comments,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    invocation_kwargs: dict[str, object] = {}
+    if isolated:
+        invocation_kwargs = {
+            "isolated_worktree_host_path": tmp_path / ".awf-needs-human-reask-test",
+            "isolated_worktree_ref": "a" * 40,
+        }
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="state the reason",
+        commit_message="fix: address thread_1",
+        compose_project="awf_ws_reask",
+        compose_file=tmp_path / "compose.yml",
+        commit_dirty_changes=False,
+        **invocation_kwargs,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="reason")
+    if isolated:
+        assert primary_repairs == []
+        assert mirror_repairs == []
+    else:
+        assert len(primary_repairs) == 1
+        assert primary_repairs[0]["worktree_path"] == primary_worktree
+        assert mirror_repairs == [tmp_path / "mirror.git"]
+
+
+@pytest.mark.unit
 async def test_isolated_reask_agent_error_does_not_restart_persistent_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

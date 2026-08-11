@@ -135,34 +135,36 @@ async def _invoke_cli_for_verdict_result(
         state.hosted_terminal_head_advanced = False
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
-    worktree_path = runner._worktrees_root / workspace_id
-    if not await repair_agent_runtime_ownership(
-        logger=_log,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        reason="monitor_agent_pre_launch",
-        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-    ):
-        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
-            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-        )
-    mirror_path = mirror_path_for_worktree(worktree_path)
-    if mirror_path is not None:
-        try:
-            await repair_mirror_hooks_path(mirror_path)
-        except (GitOperationError, OSError) as exc:
-            repair_details = mirror_hooks_repair_failure_details(
-                exc,
-                repair_stage="before_comment_agent",
-                mirror_path=mirror_path,
+    mirror_path: Path | None = None
+    if isolated_worktree_host_path is None:
+        worktree_path = runner._worktrees_root / workspace_id
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="monitor_agent_pre_launch",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        ):
+            raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
             )
-            _log.warning(
-                "monitor.mirror_hooks_path_repair_failed",
-                workspace_id=workspace_id,
-                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                **repair_details,
-            )
-            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as exc:
+                repair_details = mirror_hooks_repair_failure_details(
+                    exc,
+                    repair_stage="before_comment_agent",
+                    mirror_path=mirror_path,
+                )
+                _log.warning(
+                    "monitor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    **repair_details,
+                )
+                raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
         if isolated_worktree_host_path is not None:
