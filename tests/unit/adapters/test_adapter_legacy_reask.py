@@ -795,6 +795,43 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    def test_isolated_reask_git_metadata_binds_disables_fsmonitor_for_shared_index_lookup(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Shared-index discovery cannot execute an agent-configured fsmonitor hook."""
+        _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        _git(["update-index", "--split-index"], worktree_path)
+        real_run = base_isolated_reask.subprocess.run
+        shared_index_commands: list[list[str]] = []
+
+        def _record_shared_index_lookup(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            if command[-2:] == ["rev-parse", "--shared-index-path"]:
+                shared_index_commands.append(command)
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _record_shared_index_lookup)
+
+        temporary_metadata, _binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            assert shared_index_commands == [
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "rev-parse",
+                    "--shared-index-path",
+                ]
+            ]
+        finally:
+            temporary_metadata.cleanup()
+
     def test_isolated_reask_git_metadata_binds_keep_snapshot_when_shared_index_lookup_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -807,6 +844,8 @@ class TestIsolatedReaskAdapter:
                 "git",
                 "-C",
                 str(worktree_path),
+                "-c",
+                "core.fsmonitor=false",
                 "rev-parse",
                 "--shared-index-path",
             ]:
@@ -845,6 +884,8 @@ class TestIsolatedReaskAdapter:
                 "git",
                 "-C",
                 str(worktree_path),
+                "-c",
+                "core.fsmonitor=false",
                 "rev-parse",
                 "--shared-index-path",
             ]:

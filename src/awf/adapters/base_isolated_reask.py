@@ -195,7 +195,15 @@ def _isolated_reask_git_metadata_volume_binds(
         else:
             try:
                 shared_index_output = subprocess.run(
-                    ["git", "-C", str(worktree_path), "rev-parse", "--shared-index-path"],
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "-c",
+                        "core.fsmonitor=false",
+                        "rev-parse",
+                        "--shared-index-path",
+                    ],
                     check=True,
                     capture_output=True,
                     text=True,
