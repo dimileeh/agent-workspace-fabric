@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,6 +16,31 @@ from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.node.git_manager import linked_worktree_git_dir, mirror_path_for_worktree
 
 _ISOLATED_REASK_COMMON_GIT_DIR = "/awf-clarification-git-common"
+
+
+def _copy_regular_git_metadata_file(source_dir: Path, source_name: str, destination: Path) -> None:
+    """Copy one linked-worktree control file without following a raced symlink."""
+    fds: list[int] = []
+    try:
+        source_dir_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(source_dir_fd)
+        source_fd = os.open(
+            source_name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=source_dir_fd,
+        )
+        fds.append(source_fd)
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            raise OSError(f"Git metadata source is not a regular file: {source_name}")
+        with (
+            os.fdopen(source_fd, "rb", closefd=False) as source_file,
+            destination.open("xb") as dest_file,
+        ):
+            shutil.copyfileobj(source_file, dest_file)
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _isolated_reask_git_metadata_volume_binds(
@@ -78,14 +105,18 @@ def _isolated_reask_git_metadata_volume_binds(
             capture_output=True,
             timeout=30,
         )
-        shutil.copyfile(linked_git_dir / "HEAD", snapshot_path / "HEAD")
+        _copy_regular_git_metadata_file(linked_git_dir, "HEAD", snapshot_path / "HEAD")
         (snapshot_path / "commondir").write_text(
             f"{_ISOLATED_REASK_COMMON_GIT_DIR}\n", encoding="utf-8"
         )
         (snapshot_path / "gitdir").write_text(f"{DEFAULT_AGENT_WORKDIR}/.git\n", encoding="utf-8")
-        source_index = linked_git_dir / "index"
-        if source_index.is_file() and not source_index.is_symlink():
-            shutil.copyfile(source_index, snapshot_path / "index")
+        try:
+            _copy_regular_git_metadata_file(linked_git_dir, "index", snapshot_path / "index")
+        except OSError:
+            # The index is optional; a raced link, special file, or missing index
+            # cannot discard an otherwise safe metadata snapshot.
+            pass
+        else:
             try:
                 shared_index_output = subprocess.run(
                     ["git", "-C", str(worktree_path), "rev-parse", "--shared-index-path"],
@@ -97,10 +128,15 @@ def _isolated_reask_git_metadata_volume_binds(
                 shared_index_path = Path(shared_index_output)
                 if not shared_index_path.is_absolute():
                     shared_index_path = worktree_path / shared_index_path
-                shared_index_path = shared_index_path.resolve()
-                if shared_index_path.is_file() and not shared_index_path.is_symlink():
-                    shared_index_path.relative_to(linked_git_dir)
-                    shutil.copyfile(shared_index_path, snapshot_path / shared_index_path.name)
+                shared_index_path = Path(os.path.normpath(shared_index_path))
+                shared_index_relative_path = shared_index_path.relative_to(linked_git_dir)
+                if shared_index_relative_path.parent != Path():
+                    raise ValueError("shared index is not directly under the linked Git directory")
+                _copy_regular_git_metadata_file(
+                    linked_git_dir,
+                    shared_index_relative_path.name,
+                    snapshot_path / shared_index_relative_path.name,
+                )
             except (OSError, subprocess.SubprocessError, ValueError):
                 # The split-index backing file is optional; retain the regular
                 # index snapshot if it cannot be discovered or copied.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -427,6 +428,49 @@ class TestIsolatedReaskAdapter:
             )
         finally:
             temporary_metadata.cleanup()
+
+    def test_isolated_reask_git_metadata_binds_reject_raced_symlinked_head(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Snapshotting refuses a HEAD symlink installed after the clone completes."""
+        mirror_path, worktree_path, _head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        replacement_head = tmp_path / "replacement-head"
+        replacement_head.write_text("ref: refs/heads/reask\n", encoding="utf-8")
+        real_run = base_isolated_reask.subprocess.run
+
+        def _race_head_to_symlink(command: list[str], *args: Any, **kwargs: Any) -> Any:
+            result = real_run(command, *args, **kwargs)
+            if command[:2] == ["git", "config"]:
+                (linked_git_dir / "HEAD").unlink()
+                (linked_git_dir / "HEAD").symlink_to(replacement_head)
+            return result
+
+        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _race_head_to_symlink)
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path
+        )
+
+        try:
+            assert temporary_metadata is None
+            assert binds == ()
+        finally:
+            if temporary_metadata is not None:
+                temporary_metadata.cleanup()
+
+    def test_copy_regular_git_metadata_file_rejects_fifo(self, tmp_path: Path) -> None:
+        """The metadata copy helper never reads a special file."""
+        source_dir = tmp_path / "linked-git"
+        source_dir.mkdir()
+        os.mkfifo(source_dir / "HEAD")
+        destination = tmp_path / "snapshot" / "HEAD"
+        destination.parent.mkdir()
+
+        with pytest.raises(OSError, match="not a regular file"):
+            base_isolated_reask._copy_regular_git_metadata_file(source_dir, "HEAD", destination)
+
+        assert not destination.exists()
 
     def test_isolated_reask_git_metadata_binds_copy_split_index_backing_file(
         self, tmp_path: Path
