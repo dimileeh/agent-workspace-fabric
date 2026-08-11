@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
@@ -99,3 +100,50 @@ def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details
     assert _sanitize_verdict_reason(reason) == (
         "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
     )
+
+
+@pytest.mark.unit
+async def test_isolated_reask_git_lifecycle_ignores_object_lookup_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-ask checkout Git commands must not inherit an agent object store."""
+    worktree = tmp_path / "ws_reask_object_env"
+    (worktree / ".git").mkdir(parents=True)
+    command_runner = FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    monkeypatch.setenv("REASK_TEST_PRESERVED", "preserved")
+
+    async def _prepare_primary_worktree(_runner: object, **_kwargs: object) -> None:
+        """Keep this regression focused on the isolated checkout lifecycle."""
+        return
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid unrelated ownership work while inspecting Git environments."""
+        return True
+
+    monkeypatch.setattr(comments, "_prepare_reask_primary_worktree", _prepare_primary_worktree)
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref="a" * 40,
+    )
+
+    assert reask_worktree is not None
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+    assert len(command_runner.calls) == 4
+    assert "worktree" in command_runner.calls[0].args
+    assert "add" in command_runner.calls[0].args
+    assert "config" in command_runner.calls[1].args
+    assert "checkout" in command_runner.calls[2].args
+    assert "worktree" in command_runner.calls[3].args
+    assert "remove" in command_runner.calls[3].args
+    assert all(call.env is not None for call in command_runner.calls)
+    for call in command_runner.calls:
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+        assert call.env["REASK_TEST_PRESERVED"] == "preserved"

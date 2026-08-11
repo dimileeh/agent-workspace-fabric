@@ -24,6 +24,7 @@ from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -225,6 +226,7 @@ async def _checkout_filter_overrides(
             r"^filter\..*\.(smudge|process)$",
         ),
         timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+        env=git_env_without_object_lookup_overrides(),
     )
     if configured_filters.returncode == 1:
         return ()
@@ -381,6 +383,7 @@ async def _create_isolated_reask_worktree(
                 restore_ref,
             ),
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
         )
     except (GitOperationError, OSError, RuntimeError):
         _release_isolated_reask_liveness_lock(reask_worktree)
@@ -444,6 +447,7 @@ async def _create_isolated_reask_worktree(
                 restore_ref,
             ),
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
         )
     except asyncio.CancelledError:
         # The linked worktree is registered before its checkout, so cleanup
@@ -576,6 +580,7 @@ async def _remove_isolated_reask_worktree(
                 str(reask_worktree.path),
             ),
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
         )
         if remove.ok:
             return None
