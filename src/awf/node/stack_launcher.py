@@ -386,9 +386,7 @@ def _clarification_agent_environment(
     return tuple(
         (
             name,
-            _clarification_staged_auth_value(
-                _clarification_expanded_provider_path_value(name, value), staged_targets
-            ),
+            _clarification_staged_provider_path_value(name, value, staged_targets),
         )
         for name, value in agent_environment
         if name in clarification_environment_names
@@ -402,10 +400,31 @@ def _clarification_expanded_provider_path_value(name: str, value: str) -> str:
     if name in (
         _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
         | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
-        | frozenset({"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"})
+        | frozenset(
+            {
+                "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+                _AWS_WEB_IDENTITY_TOKEN_FILE,
+                _GOOGLE_APPLICATION_CREDENTIALS,
+            }
+        )
     ):
         return compose_expand_value(value, environ=os.environ)
     return value
+
+
+def _clarification_staged_provider_path_value(
+    name: str, value: str, staged_targets: Sequence[tuple[str, str]]
+) -> str:
+    """Rewrite an expanded provider path without substituting an unmounted credential."""
+
+    expanded_value = _clarification_expanded_provider_path_value(name, value)
+    staged_value = _clarification_staged_auth_value(expanded_value, staged_targets)
+    if (
+        name in {_AWS_WEB_IDENTITY_TOKEN_FILE, _GOOGLE_APPLICATION_CREDENTIALS}
+        and staged_value == expanded_value
+    ):
+        return value
+    return staged_value
 
 
 def _is_clarification_git_auth_environment(name: str) -> bool:

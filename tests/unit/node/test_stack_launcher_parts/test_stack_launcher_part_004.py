@@ -1266,6 +1266,70 @@ def test_claude_bedrock_clarification_honors_defaulted_web_identity_token_overri
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_runtime", "alias_name", "credential_name", "environment"),
+    (
+        (
+            AgentRuntime.gemini,
+            "AWF_TEST_ADC_PATH",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            (
+                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+            ),
+        ),
+        (
+            AgentRuntime.claude_code,
+            "AWF_TEST_AWS_TOKEN_PATH",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            (
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+                ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/awf-bedrock"),
+            ),
+        ),
+    ),
+)
+def test_clarification_stages_credential_mount_for_aliased_provider_path(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_runtime: AgentRuntime,
+    alias_name: str,
+    credential_name: str,
+    environment: tuple[tuple[str, str], ...],
+) -> None:
+    """Credential paths aliased through Compose select their declared mounts."""
+    credentials = AuthMount(
+        source=f"/host/awf/secret-leases/ws_launcher/{credential_name.lower()}",
+        target=f"/run/awf/secrets/{credential_name.lower()}",
+        mode="ro",
+    )
+    monkeypatch.setenv(alias_name, credentials.target)
+    environment += ((credential_name, f"${{{alias_name}:-/run/awf/secrets/fallback}}"),)
+    mirror_target = "/host/awf/git/mirrors/repo.git"
+
+    assert (
+        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
+            environment,
+            auth_mounts=(credentials,),
+            mirror_target=mirror_target,
+            agent_runtime=agent_runtime,
+        )
+        == environment[:-1] + ((credential_name, "/home/agent/.awf/clarification-auth/0"),)
+    )
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        (credentials,),
+        agent_environment=environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+    ) == (
+        AuthMount(
+            source=credentials.source,
+            target="/home/agent/.awf/clarification-auth/0",
+            mode="ro",
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_claude_bedrock_clarification_resolves_bare_web_identity_token_placeholder() -> None:
     """Bedrock clarification stages an unambiguous dynamic token mount."""
     web_identity_token = AuthMount(
