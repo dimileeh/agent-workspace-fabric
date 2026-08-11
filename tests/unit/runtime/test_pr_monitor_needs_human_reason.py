@@ -1102,7 +1102,7 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_fails(
                 )
             return result
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
@@ -1196,7 +1196,7 @@ async def test_needs_human_reason_reask_blocks_when_setup_cleanup_raises(
                 )
             return result
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 

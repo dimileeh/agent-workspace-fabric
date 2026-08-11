@@ -947,7 +947,10 @@ async def _enforce_needs_human_reason(
             # before the clarification-only invocation. Cleanup must preserve
             # that repair and discard only clarification side effects.
             if has_git_worktree:
-                reask_restore_ref = await runner._rev_parse_head(worktree_path)
+                reask_restore_ref = await runner._rev_parse_head(
+                    worktree_path,
+                    timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                )
                 if reask_restore_ref is None:
                     raise RuntimeError("could not capture the worktree restore ref")
                 reask_worktree = await _create_isolated_reask_worktree(

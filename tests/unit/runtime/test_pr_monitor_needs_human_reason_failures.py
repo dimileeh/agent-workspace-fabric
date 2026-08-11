@@ -165,7 +165,7 @@ async def test_needs_human_reason_reask_propagates_unexpected_setup_error(tmp_pa
     worktree.mkdir()
     (worktree / ".git").write_text("gitdir: unavailable\n", encoding="utf-8")
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
         """Return the synthetic primary-worktree revision."""
         raise ValueError("unexpected rev-parse defect")
 
@@ -221,7 +221,9 @@ async def test_needs_human_reason_reask_requires_a_restore_ref(tmp_path: Path) -
         invoked = True
         return VerdictResult(verdict="needs_human", reason="select a region")
 
-    async def _rev_parse_head(_worktree_path: Path) -> None:
+    async def _rev_parse_head(
+        _worktree_path: Path, *, timeout_seconds: float | None = None
+    ) -> None:
         """Return the synthetic primary-worktree revision."""
         return
 

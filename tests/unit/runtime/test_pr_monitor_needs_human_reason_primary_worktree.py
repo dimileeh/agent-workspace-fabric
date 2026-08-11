@@ -100,6 +100,7 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
     """A clean primary worktree with a new HEAD still fails closed without reset."""
     workspace_id = "ws_reask_primary_commit"
     worktree = _init_real_worktree(tmp_path, workspace_id)
+    head_timeouts: list[float | None] = []
 
     async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         reask = kwargs["isolated_worktree_host_path"]
@@ -115,7 +116,8 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
     async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
         return None
 
-    async def _rev_parse_head(_worktree_path: Path) -> str:
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
+        head_timeouts.append(timeout_seconds)
         return _git(worktree, "rev-parse", "HEAD").stdout.strip()
 
     runner = SimpleNamespace(
@@ -152,6 +154,7 @@ async def test_needs_human_reason_reask_preserves_primary_commit_made_during_rea
         )
 
     assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert head_timeouts[0] == comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
     assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
     assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
     assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))

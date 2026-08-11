@@ -350,6 +350,33 @@ async def test_rev_parse_head_strips_git_object_lookup_env(
 
 
 @pytest.mark.unit
+async def test_rev_parse_head_forwards_requested_timeout(tmp_path: Path) -> None:
+    """A caller can bound a HEAD lookup before running an isolated re-ask."""
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.timeout_seconds: float | None = None
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self.timeout_seconds = timeout_seconds
+            return CommandResult(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
+
+    command_runner = _FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    result = await remote_ops._rev_parse_head(runner, tmp_path, timeout_seconds=30.0)
+
+    assert result == "a" * 40
+    assert command_runner.timeout_seconds == 30.0
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> None:
     """Monitor push-repair and workflow-scope outcomes map to their specific buckets."""
     assert (
