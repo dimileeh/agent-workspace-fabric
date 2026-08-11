@@ -299,14 +299,25 @@ def test_clarification_rewrites_staged_external_account_executable_paths(
 
 
 @pytest.mark.unit
-def test_clarification_rewrites_quoted_executable_subject_token_path(
-    manager: ComposeManager, tmp_path: Path
+@pytest.mark.parametrize(
+    ("command_suffix", "expected_command_suffix"),
+    (
+        ('--subject-token="{subject_token}"', '--subject-token="{staged_subject_token}"'),
+        ("--subject-token={escaped_subject_token}", "--subject-token={staged_subject_token}"),
+    ),
+)
+def test_clarification_rewrites_executable_subject_token_path(
+    manager: ComposeManager,
+    tmp_path: Path,
+    command_suffix: str,
+    expected_command_suffix: str,
 ) -> None:
-    """Quoted executable credential paths retain whitespace while being staged."""
+    """Executable credential paths retain whitespace while being staged."""
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     helper_target = "/run/awf/secrets/google/external-account-helper"
     subject_token_target = "/run/awf/secrets/google/subject token"
+    escaped_subject_token = subject_token_target.replace(" ", r"\ ")
     staged_adc = tmp_path / "clarification-auth" / "adc.json"
     staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
     staged_subject_token = tmp_path / "clarification-auth" / "subject-token"
@@ -316,7 +327,11 @@ def test_clarification_rewrites_quoted_executable_subject_token_path(
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f'{helper_target} --subject-token="{subject_token_target}"',
+                        "command": f"{helper_target} "
+                        + command_suffix.format(
+                            subject_token=subject_token_target,
+                            escaped_subject_token=escaped_subject_token,
+                        ),
                     }
                 },
             }
@@ -371,7 +386,10 @@ def test_clarification_rewrites_quoted_executable_subject_token_path(
     executable = json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"][
         "executable"
     ]
-    assert executable["command"] == (f'{staged_helper} --subject-token="{staged_subject_token}"')
+    assert executable["command"] == (
+        f"{staged_helper} "
+        + expected_command_suffix.format(staged_subject_token=staged_subject_token)
+    )
 
 
 @pytest.mark.unit
@@ -442,14 +460,24 @@ def test_legacy_clarification_entrypoint_rewrites_external_account_executable_pa
 
 
 @pytest.mark.unit
-def test_legacy_clarification_entrypoint_rewrites_quoted_executable_subject_token_path(
+@pytest.mark.parametrize(
+    ("command_suffix", "expected_command_suffix"),
+    (
+        ('--subject-token="{subject_token}"', '--subject-token="{staged_subject_token}"'),
+        ("--subject-token={escaped_subject_token}", "--subject-token={staged_subject_token}"),
+    ),
+)
+def test_legacy_clarification_entrypoint_rewrites_executable_subject_token_path(
     tmp_path: Path,
+    command_suffix: str,
+    expected_command_suffix: str,
 ) -> None:
-    """Quoted executable credential paths retain whitespace while being staged."""
+    """Executable credential paths retain whitespace while being staged."""
     source_root = tmp_path / "clarification-source"
     source_root.mkdir()
     helper_target = "/run/awf/secrets/google/external-account-helper"
     subject_token_target = "/run/awf/secrets/google/subject token"
+    escaped_subject_token = subject_token_target.replace(" ", r"\ ")
     staged_adc = tmp_path / "clarification-auth" / "adc.json"
     staged_helper = tmp_path / "clarification-auth" / "external-account-helper"
     staged_subject_token = tmp_path / "clarification-auth" / "subject-token"
@@ -459,7 +487,11 @@ def test_legacy_clarification_entrypoint_rewrites_quoted_executable_subject_toke
                 "type": "external_account",
                 "credential_source": {
                     "executable": {
-                        "command": f'{helper_target} --subject-token="{subject_token_target}"',
+                        "command": f"{helper_target} "
+                        + command_suffix.format(
+                            subject_token=subject_token_target,
+                            escaped_subject_token=escaped_subject_token,
+                        ),
                     }
                 },
             }
@@ -494,7 +526,10 @@ def test_legacy_clarification_entrypoint_rewrites_quoted_executable_subject_toke
     executable = json.loads(staged_adc.read_text(encoding="utf-8"))["credential_source"][
         "executable"
     ]
-    assert executable["command"] == (f'{staged_helper} --subject-token="{staged_subject_token}"')
+    assert executable["command"] == (
+        f"{staged_helper} "
+        + expected_command_suffix.format(staged_subject_token=staged_subject_token)
+    )
 
 
 @pytest.mark.unit
