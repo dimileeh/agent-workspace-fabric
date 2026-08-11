@@ -6,6 +6,7 @@ import base64
 import binascii
 import configparser
 import json
+import os
 import posixpath
 import shlex
 from collections.abc import Sequence
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import AuthMount
+from awf.service.environment import compose_expand_value
 
 _AGENT_HOME = "/home/agent"
 _CLARIFICATION_AUTH_STAGING_ROOT = "/home/agent/.awf/clarification-auth"
@@ -194,7 +196,10 @@ def aws_profile_credential_paths(
 ) -> tuple[str, ...]:
     """Return declared paths referenced by the active AWS profile files."""
 
-    profile_name = dict(agent_environment).get("AWS_PROFILE") or "default"
+    profile_name = compose_expand_value(
+        dict(agent_environment).get("AWS_PROFILE") or "default",
+        environ=os.environ,
+    )
     references: list[str] = []
     configurations: list[configparser.RawConfigParser] = []
     for profile_file in _aws_profile_file_targets(provider_mount_targets):

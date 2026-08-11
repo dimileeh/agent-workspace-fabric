@@ -908,6 +908,67 @@ def test_clarification_stages_transitive_bedrock_profile_auth_mounts(tmp_path: P
 
 
 @pytest.mark.unit
+def test_clarification_expands_bedrock_profile_before_staging_auth_mounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interpolated AWS profile retains its transitive credential mounts."""
+    aws_home = tmp_path / "aws"
+    aws_home.mkdir()
+    helper = tmp_path / "aws-helper"
+    token = tmp_path / "web-identity-token"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    helper_target = "/run/awf/secrets/aws-helper"
+    token_target = "/run/awf/secrets/web-identity-token"
+    (aws_home / "config").write_text(
+        "[profile awf-bedrock]\n"
+        "source_profile = awf-source\n"
+        "[profile awf-source]\n"
+        f"credential_process = {helper_target} --json\n"
+        f"web_identity_token_file = {token_target}\n",
+        encoding="utf-8",
+    )
+    aws_profile = AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro")
+    helper_mount = AuthMount(source=str(helper), target=helper_target, mode="ro")
+    token_mount = AuthMount(source=str(token), target=token_target, mode="ro")
+    environment = (
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_PROFILE", "${AWS_PROFILE:-fallback-profile}"),
+    )
+    mounts = (aws_profile, helper_mount, token_mount)
+    monkeypatch.setenv("AWS_PROFILE", "awf-bedrock")
+
+    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        AuthMount(source=str(aws_home), target="/home/agent/.aws", mode="ro"),
+        AuthMount(
+            source=str(helper),
+            target="/home/agent/.awf/clarification-auth/1",
+            mode="ro",
+        ),
+        AuthMount(
+            source=str(token),
+            target="/home/agent/.awf/clarification-auth/2",
+            mode="ro",
+        ),
+    )
+    assert aws_profile_path_rewrites(
+        mounts,
+        agent_environment=environment,
+        mirror_target="/host/awf/git/mirrors/repo.git",
+        agent_runtime=AgentRuntime.claude_code,
+    ) == (
+        (helper_target, "/home/agent/.awf/clarification-auth/1"),
+        (token_target, "/home/agent/.awf/clarification-auth/2"),
+    )
+
+
+@pytest.mark.unit
 def test_clarification_stages_credential_process_option_value_mount(tmp_path: Path) -> None:
     """An absolute credential-process option value is staged and rewritten."""
     aws_home = tmp_path / "aws"
