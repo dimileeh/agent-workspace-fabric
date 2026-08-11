@@ -300,6 +300,34 @@ async def test_isolated_reask_worktree_is_sibling_and_excludes_ignored_dependenc
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_disables_primary_post_checkout_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-ask checkout cannot execute a hook the previous agent left in the mirror."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_hooks_disabled")
+    post_checkout = worktree / ".git" / "hooks" / "post-checkout"
+    post_checkout.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    post_checkout.chmod(0o755)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert reask_worktree is not None
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_is_removed_when_ownership_repair_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -228,6 +228,11 @@ async def _create_isolated_reask_worktree(
         create = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path,
+                # The primary mirror is writable by the prior agent. Disable
+                # its default hooks directory while the control plane creates
+                # this host-side clarification checkout.
+                "-c",
+                "core.hooksPath=/dev/null",
                 "worktree",
                 "add",
                 "--detach",
