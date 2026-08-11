@@ -835,6 +835,49 @@ class TestIsolatedReaskAdapter:
 
         assert not destination.exists()
 
+    def test_copy_git_object_directory_rejects_entry_overflow(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Zero-byte objects cannot exhaust snapshot inodes without using bytes."""
+        source = tmp_path / "objects"
+        pack_dir = source / "pack"
+        pack_dir.mkdir(parents=True)
+        (pack_dir / "empty-one.pack").touch()
+        (pack_dir / "empty-two.pack").touch()
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_ENTRIES",
+            2,
+            raising=False,
+        )
+
+        with pytest.raises(OSError, match="entry limit"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
+    def test_copy_git_object_directory_rejects_excessive_directory_depth(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Nested directories cannot prolong a re-ask object snapshot indefinitely."""
+        source = tmp_path / "objects"
+        (source / "first" / "second").mkdir(parents=True)
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_MAX_ISOLATED_REASK_GIT_OBJECT_DIRECTORY_DEPTH",
+            1,
+            raising=False,
+        )
+
+        with pytest.raises(OSError, match="directory depth limit"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
     def test_isolated_reask_git_metadata_binds_preserve_large_indexes(self, tmp_path: Path) -> None:
         """Large normal and split Git indexes remain usable in the snapshot."""
         _mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)

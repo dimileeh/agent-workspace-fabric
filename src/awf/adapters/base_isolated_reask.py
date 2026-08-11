@@ -21,6 +21,12 @@ _MAX_ISOLATED_REASK_GIT_METADATA_BYTES: Final = 1024 * 1024
 _MAX_ISOLATED_REASK_GIT_INDEX_BYTES: Final = 64 * 1024 * 1024
 _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES: Final = 64 * 1024 * 1024
 _MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_BYTES: Final = 256 * 1024 * 1024
+# A normal Git object store has at most two directory levels below ``objects``
+# (fan-out directory then loose object). These bounds retain room for Git
+# extensions while preventing an agent-writable mirror from making an isolated
+# re-ask consume unbounded inodes or worker time with empty entries.
+_MAX_ISOLATED_REASK_GIT_OBJECT_DIRECTORY_DEPTH: Final = 4
+_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_ENTRIES: Final = 10_000
 
 
 def _copy_regular_git_metadata_file(
@@ -99,6 +105,7 @@ def _copy_git_object_directory(source: Path, destination: Path) -> None:
             destination,
             relative_path=Path(),
             remaining_snapshot_bytes=_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_BYTES,
+            remaining_snapshot_entries=_MAX_ISOLATED_REASK_GIT_OBJECT_SNAPSHOT_ENTRIES,
         )
     except BaseException:
         shutil.rmtree(destination, ignore_errors=True)
@@ -114,52 +121,66 @@ def _copy_git_object_directory_from_fd(
     *,
     relative_path: Path,
     remaining_snapshot_bytes: int,
-) -> int:
+    remaining_snapshot_entries: int,
+) -> tuple[int, int]:
     """Copy regular object-store entries from an already-open directory."""
     destination.mkdir()
-    for name in os.listdir(source_fd):
-        # A source-mirror alternates file is precisely the untrusted object
-        # lookup this snapshot is intended to prevent.
-        if relative_path == Path("info") and name == "alternates":
-            continue
-        entry_stat = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
-        destination_entry = destination / name
-        if stat.S_ISDIR(entry_stat.st_mode):
-            child_fd = os.open(
-                name,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=source_fd,
-            )
-            try:
-                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                    raise OSError(f"Git object source is not a directory: {name}")
-                remaining_snapshot_bytes = _copy_git_object_directory_from_fd(
-                    child_fd,
-                    destination_entry,
-                    relative_path=relative_path / name,
-                    remaining_snapshot_bytes=remaining_snapshot_bytes,
+    # ``scandir`` streams names instead of constructing an unbounded list. It
+    # owns and closes its descriptor, so scan a duplicate of the caller-owned
+    # descriptor used below for secure ``openat``-style operations.
+    with os.scandir(os.dup(source_fd)) as entries:
+        for entry in entries:
+            name = entry.name
+            remaining_snapshot_entries -= 1
+            if remaining_snapshot_entries < 0:
+                raise OSError(f"Git object snapshot exceeds entry limit: {name}")
+            # A source-mirror alternates file is precisely the untrusted object
+            # lookup this snapshot is intended to prevent.
+            if relative_path == Path("info") and name == "alternates":
+                continue
+            entry_stat = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            destination_entry = destination / name
+            if stat.S_ISDIR(entry_stat.st_mode):
+                if len(relative_path.parts) >= _MAX_ISOLATED_REASK_GIT_OBJECT_DIRECTORY_DEPTH:
+                    raise OSError(f"Git object snapshot exceeds directory depth limit: {name}")
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=source_fd,
                 )
-            finally:
-                with contextlib.suppress(OSError):
-                    os.close(child_fd)
-        elif stat.S_ISREG(entry_stat.st_mode):
-            if entry_stat.st_size > _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES:
-                raise OSError(f"Git object source exceeds size limit: {name}")
-            if entry_stat.st_size > remaining_snapshot_bytes:
-                raise OSError(f"Git object snapshot exceeds total size limit: {name}")
-            copied_bytes = _copy_regular_git_metadata_file_from_directory_fd(
-                source_fd,
-                name,
-                destination_entry,
-                max_bytes=min(
-                    _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES,
-                    remaining_snapshot_bytes,
-                ),
-            )
-            remaining_snapshot_bytes -= copied_bytes
-        else:
-            raise OSError(f"Git object source is not a regular file or directory: {name}")
-    return remaining_snapshot_bytes
+                try:
+                    if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                        raise OSError(f"Git object source is not a directory: {name}")
+                    remaining_snapshot_bytes, remaining_snapshot_entries = (
+                        _copy_git_object_directory_from_fd(
+                            child_fd,
+                            destination_entry,
+                            relative_path=relative_path / name,
+                            remaining_snapshot_bytes=remaining_snapshot_bytes,
+                            remaining_snapshot_entries=remaining_snapshot_entries,
+                        )
+                    )
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.close(child_fd)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                if entry_stat.st_size > _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES:
+                    raise OSError(f"Git object source exceeds size limit: {name}")
+                if entry_stat.st_size > remaining_snapshot_bytes:
+                    raise OSError(f"Git object snapshot exceeds total size limit: {name}")
+                copied_bytes = _copy_regular_git_metadata_file_from_directory_fd(
+                    source_fd,
+                    name,
+                    destination_entry,
+                    max_bytes=min(
+                        _MAX_ISOLATED_REASK_GIT_OBJECT_FILE_BYTES,
+                        remaining_snapshot_bytes,
+                    ),
+                )
+                remaining_snapshot_bytes -= copied_bytes
+            else:
+                raise OSError(f"Git object source is not a regular file or directory: {name}")
+    return remaining_snapshot_bytes, remaining_snapshot_entries
 
 
 def _write_isolated_reask_source_config(common_path: Path, expected_ref: str) -> None:
