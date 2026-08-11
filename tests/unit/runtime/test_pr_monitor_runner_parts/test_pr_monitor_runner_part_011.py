@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
@@ -102,6 +103,40 @@ class TestNotificationAndGraceHelpers:
             == "the outdated thread could not be resolved"
         )
         assert _notify_human_reason(_status(), MonitorState()) is None
+
+    @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_human_escalation_over_bot_retry(self) -> None:
+        """A human escalation must not be hidden by a bot retry fallback."""
+        human_review = ReviewComment(
+            comment_id="C-human",
+            body_excerpt="a maintainer needs to decide this",
+            author="human",
+        )
+        bot_outdated_thread = ReviewThread(
+            thread_id="T-bot-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="retry resolving this thread",
+            author="cursor[bot]",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                human_review.comment_id: "needs_human",
+                _outdated_resolve_requeued_key(bot_outdated_thread.thread_id): "requeued",
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(human_review,)),
+                    outdated_unresolved_inline_threads=(bot_outdated_thread,),
+                ),
+                state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
 
     @pytest.mark.unit
     def test_initial_review_grace_state_converts_between_wall_and_monotonic_time(self) -> None:
