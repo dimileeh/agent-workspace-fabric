@@ -746,16 +746,16 @@ def _notify_human_reason(
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
     bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
-    # A current human escalation must outrank any outdated-thread diagnosis,
-    # even if it has no agent-provided reason. Keep the detailed diagnosis for
-    # outdated-only cases ahead of the generic fallback below.
+    # A current escalation must outrank any outdated-thread diagnosis, even if
+    # it is bot-authored and has no agent-provided reason. Keep the detailed
+    # diagnosis for outdated-only cases ahead of the generic fallback below.
     current_item_ids = {
         *(thread.thread_id for thread in status.unresolved_inline_threads),
         *(comment.comment_id for comment in status.unresolved_review_comments),
     }
     if any(
         item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
-        for item in human_items
+        for item in bot_items + human_items
     ):
         return "human review feedback needs human input and remains unresolved"
     if reason := _first_needs_human_reason(status, state, include_outdated=True):

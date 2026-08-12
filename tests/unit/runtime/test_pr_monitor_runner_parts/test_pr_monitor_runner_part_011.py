@@ -188,6 +188,47 @@ class TestNotificationAndGraceHelpers:
         )
 
     @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_bot_escalation_over_outdated_reason(
+        self,
+    ) -> None:
+        """A current bot escalation must not be hidden by stale human feedback."""
+        bot_thread = ReviewThread(
+            thread_id="T-bot-current",
+            path="src/current.py",
+            line=1,
+            body_excerpt="a maintainer needs to decide this",
+            author="cursor[bot]",
+        )
+        outdated_thread = ReviewThread(
+            thread_id="T-human-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                bot_thread.thread_id: "needs_human",
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(inline=(bot_thread,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+
+    @pytest.mark.unit
     def test_notify_human_reason_prioritizes_current_review_reason_over_outdated_thread(
         self,
     ) -> None:
