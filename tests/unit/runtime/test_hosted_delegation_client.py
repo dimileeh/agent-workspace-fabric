@@ -96,6 +96,14 @@ def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
 
 
 @pytest.mark.unit
+def test_agent_payload_serializes_read_only_clarification_contract() -> None:
+    """Hosted reason clarification tells the executor to prohibit repository writes."""
+    payload = _agent_start_payload(_agent_request(read_only=True))
+
+    assert payload["read_only"] is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("log_source", "prompt"),
     [

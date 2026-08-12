@@ -95,6 +95,7 @@ async def _run_monitor_agent_with_service_recovery(
     isolated_worktree_host_path: Path | None = None,
     isolated_worktree_ref: str | None = None,
     isolated_worktree_source_mirror: Path | None = None,
+    read_only: bool = False,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
@@ -137,6 +138,8 @@ async def _run_monitor_agent_with_service_recovery(
                 }
                 if git_preparation is not None:
                     hosted_run_kwargs["git_preparation"] = git_preparation
+                if read_only:
+                    hosted_run_kwargs["read_only"] = True
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
                 local_run_kwargs: dict[str, Any] = {
@@ -159,7 +162,7 @@ async def _run_monitor_agent_with_service_recovery(
                     )
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
-            if isolated_worktree_host_path is not None:
+            if isolated_worktree_host_path is not None or read_only:
                 # A clarification re-ask gets exactly one isolated invocation;
                 # never restart the persistent service and re-run it.
                 raise
@@ -213,9 +216,9 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
-            if isolated_worktree_host_path is not None:
-                # The isolated clarification container must not trigger a
-                # persistent-agent recovery retry after cleanup failure.
+            if isolated_worktree_host_path is not None or read_only:
+                # A clarification run must not trigger a persistent-agent
+                # recovery retry after cleanup failure.
                 raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
@@ -238,7 +241,7 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        if self._deps.adapter.is_hosted:
+        if self._deps.adapter.is_hosted and not read_only:
             if not result.terminal_head_sha:
                 raise AgentRunError(
                     agent=self._deps.adapter.name,

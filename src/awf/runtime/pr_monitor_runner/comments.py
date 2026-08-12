@@ -974,31 +974,15 @@ async def _enforce_needs_human_reason(
         return result
 
     adapter = getattr(getattr(runner, "_deps", None), "adapter", None)
-    if bool(getattr(adapter, "is_hosted", False)):
-        # Hosted execution has remote PR credentials and no read-only run
-        # contract. It can advance the head before it reports a terminal SHA,
-        # which local cleanup cannot reverse. Preserve the blocking verdict
-        # and record the missing reason instead of issuing a reason-only re-ask.
-        await _record_needs_human_reason_missing(
-            runner,
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            item_id=item_id,
-            item_kind=item_kind,
-            item_author=item_author,
-            item_path=item_path,
-            item_line=item_line,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            monitor_log=monitor_log,
-            reason_code=_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE,
-        )
-        return result
-
+    hosted_read_only = bool(getattr(adapter, "is_hosted", False))
     worktrees_root = getattr(runner, "_worktrees_root", None)
-    worktree_path = worktrees_root / workspace_id if isinstance(worktrees_root, Path) else None
+    worktree_path = (
+        None
+        if hosted_read_only
+        else worktrees_root / workspace_id
+        if isinstance(worktrees_root, Path)
+        else None
+    )
     reask_restore_ref: str | None = None
     reask_worktree: _IsolatedReaskWorktree | None = None
     source_mirror: Path | None = None
@@ -1262,6 +1246,7 @@ async def _enforce_needs_human_reason(
             isolated_worktree_source_mirror=(
                 reask_worktree.source_mirror if reask_worktree is not None else None
             ),
+            read_only=hosted_read_only,
         )
     except (
         ProviderRecoveryAuthError,
@@ -1417,6 +1402,7 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_host_path: Path | None = None,
     isolated_worktree_ref: str | None = None,
     isolated_worktree_source_mirror: Path | None = None,
+    read_only: bool = False,
 ) -> VerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -1434,6 +1420,7 @@ async def _invoke_cli_for_verdict_result(
         isolated_worktree_host_path=isolated_worktree_host_path,
         isolated_worktree_ref=isolated_worktree_ref,
         isolated_worktree_source_mirror=isolated_worktree_source_mirror,
+        read_only=read_only,
     )
 
 

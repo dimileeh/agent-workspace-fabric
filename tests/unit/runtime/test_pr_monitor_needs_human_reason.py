@@ -336,6 +336,139 @@ async def test_isolated_reask_agent_error_does_not_restart_persistent_service(
 
 
 @pytest.mark.unit
+async def test_read_only_hosted_reask_does_not_retry_or_sync_the_pr_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hosted clarification error is advisory and cannot trigger a PR-head sync."""
+    calls: list[dict[str, object]] = []
+
+    class _Adapter:
+        """Test double used by the surrounding scenario."""
+
+        is_hosted = True
+        name = AgentRuntime.codex
+
+        async def run(self, **kwargs: object) -> AgentRunResult:
+            """Record the host contract then return a failed clarification."""
+            calls.append(dict(kwargs))
+            raise AgentRunError(
+                agent=AgentRuntime.codex,
+                result=CommandResult(returncode=1, stdout="", stderr="timed out"),
+                reason_code="AGENT_TIMEOUT",
+                details={"terminal_head_sha": "b" * 40},
+            )
+
+    async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
+        """Provide the trusted hosted PR identity for this test."""
+        return SimpleNamespace(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            pr_url="https://github.com/dimileeh/aira-web/pull/1",
+            pr_number=1,
+            branch_base="main",
+            remote_push_branch="awf/ws_reask",
+            owned_paths=[],
+            monitor_last_commit_sha="a" * 40,
+            task_policy={},
+        )
+
+    async def _unexpected_sync(**_kwargs: object) -> str:
+        """Fail if a read-only run is treated as a normal hosted repair."""
+        raise AssertionError("read-only clarification must not sync a terminal PR head")
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _unexpected_sync,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(adapter=_Adapter()),
+        _load_workspace=_load_workspace,
+        _worktrees_root=tmp_path,
+    )
+
+    with pytest.raises(AgentRunError, match="timed out"):
+        await agent_service_recovery._run_monitor_agent_with_service_recovery(
+            runner,
+            workspace_id="ws_reask",
+            compose_project="awf_ws_reask",
+            compose_file=tmp_path / "compose.yml",
+            prompt="state the reason",
+            log_source="recovery",
+            read_only=True,
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["read_only"] is True
+    assert calls[0]["worktree_path"] == tmp_path / "ws_reask"
+
+
+@pytest.mark.unit
+async def test_read_only_hosted_reask_accepts_a_reason_without_terminal_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A safe hosted clarification never needs the normal repair-head proof."""
+    calls: list[dict[str, object]] = []
+
+    class _Adapter:
+        """Test double used by the surrounding scenario."""
+
+        is_hosted = True
+        name = AgentRuntime.codex
+
+        async def run(self, **kwargs: object) -> AgentRunResult:
+            """Return a reason-only answer with no PR head advancement."""
+            calls.append(dict(kwargs))
+            return AgentRunResult(
+                returncode=0,
+                stdout="AWF-VERDICT: NEEDS_HUMAN: select the deployment region",
+                stderr="",
+            )
+
+    async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
+        """Provide the trusted hosted PR identity for this test."""
+        return SimpleNamespace(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            pr_url="https://github.com/dimileeh/aira-web/pull/1",
+            pr_number=1,
+            branch_base="main",
+            remote_push_branch="awf/ws_reask",
+            owned_paths=[],
+            monitor_last_commit_sha="a" * 40,
+            task_policy={},
+        )
+
+    async def _unexpected_sync(**_kwargs: object) -> str:
+        """Fail if a read-only run is treated as a normal hosted repair."""
+        raise AssertionError("read-only clarification must not sync a terminal PR head")
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _unexpected_sync,
+    )
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(adapter=_Adapter()),
+        _load_workspace=_load_workspace,
+        _worktrees_root=tmp_path,
+    )
+
+    result = await agent_service_recovery._run_monitor_agent_with_service_recovery(
+        runner,
+        workspace_id="ws_reask",
+        compose_project="awf_ws_reask",
+        compose_file=tmp_path / "compose.yml",
+        prompt="state the reason",
+        log_source="recovery",
+        read_only=True,
+    )
+
+    assert result.stdout.endswith("select the deployment region")
+    assert calls[0]["read_only"] is True
+
+
+@pytest.mark.unit
 async def test_isolated_reask_cleanup_error_does_not_restart_persistent_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

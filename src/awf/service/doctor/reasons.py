@@ -135,9 +135,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
         "Read the unresolved review item and make the decision, then remonitor the workspace.",
         (
-            "AWF did not make the usual clarification follow-up because hosted execution "
-            "cannot guarantee a read-only agent run or the local worktree could not be "
-            "prepared as an isolated checkout."
+            "AWF could not complete the read-only clarification follow-up because the "
+            "hosted executor rejected or failed the isolated run, or the local worktree "
+            "could not be prepared as an isolated checkout."
         ),
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),

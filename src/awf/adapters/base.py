@@ -314,6 +314,7 @@ class AgentAdapter(ABC):
         isolated_worktree_host_path: Path | None = None,
         isolated_worktree_ref: str | None = None,
         isolated_worktree_source_mirror: Path | None = None,
+        read_only: bool = False,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -351,7 +352,10 @@ class AgentAdapter(ABC):
                 git_preparation=git_preparation,
                 profile=profile,
                 worktree_path=worktree_path,
+                read_only=read_only,
             )
+        if read_only:
+            raise ValueError("read-only agent invocations require a hosted runtime executor")
         if isolated_worktree_host_path is not None and compose_file.exists():
             # Existing PR monitors deliberately reuse their persisted Compose
             # definition. Upgrade that file just before the isolated re-ask so
@@ -817,6 +821,7 @@ class AgentAdapter(ABC):
         git_preparation: AgentRuntimeGitPreparation | None,
         profile: WorkspaceProfile | None,
         worktree_path: Path | None = None,
+        read_only: bool = False,
     ) -> AgentRunResult:
         """Delegate agent CLI execution to the injected runtime executor.
 
@@ -991,6 +996,7 @@ class AgentAdapter(ABC):
             owned_paths=_hosted_identity_str_tuple(hosted_pr_identity, "owned_paths"),
             expected_head_sha=_hosted_identity_str(hosted_pr_identity, "expected_head_sha"),
             git_preparation=git_preparation,
+            read_only=read_only,
             on_stdout=on_stdout_cb,
             on_stderr=on_stderr_cb,
         )

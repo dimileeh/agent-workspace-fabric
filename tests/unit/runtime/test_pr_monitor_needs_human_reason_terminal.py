@@ -148,19 +148,18 @@ async def test_needs_human_reason_reask_reraises_terminal_repair_errors(
 
 
 @pytest.mark.unit
-async def test_needs_human_reason_reask_records_clarification_unavailable_for_hosted_adapter(
+async def test_needs_human_reason_reask_uses_read_only_hosted_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hosted re-asks remain skipped and report why no re-ask was attempted."""
-    invoked = False
+    """Hosted clarification gets one read-only reason-only invocation."""
+    invocation: dict[str, object] = {}
     cleanup_called = False
     audit_events: list[dict[str, object]] = []
 
-    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
         """Return this test scenario’s synthetic monitor-agent verdict."""
-        nonlocal invoked
-        invoked = True
+        invocation.update(kwargs)
         return VerdictResult(
             verdict="needs_human",
             reason="select the deployment region",
@@ -211,10 +210,64 @@ async def test_needs_human_reason_reask_records_clarification_unavailable_for_ho
         monitor_log=None,
     )
 
-    assert result == VerdictResult(verdict="needs_human")
-    assert invoked is False
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert invocation["read_only"] is True
+    assert invocation["commit_dirty_changes"] is False
+    assert invocation["isolated_worktree_host_path"] is None
     assert cleanup_called is False
-    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
+    assert audit_events == []
+
+
+@pytest.mark.unit
+async def test_read_only_verdict_invocation_reaches_monitor_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verdict bridge forwards the hosted immutable-checkout requirement."""
+    calls: list[dict[str, object]] = []
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        """Keep this test on the monitor-agent invocation path."""
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**kwargs: object) -> AgentRunResult:
+        """Record the read-only monitor invocation and return its reason."""
+        calls.append(dict(kwargs))
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: NEEDS_HUMAN: select the deployment region",
+            stderr="",
+        )
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid filesystem ownership setup in this focused bridge test."""
+        return True
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        comments,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _path: None)
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_reask",
+        prompt="state the reason",
+        commit_message="fix: address thread_1",
+        compose_project="awf_ws_reask",
+        compose_file=tmp_path / "compose.yml",
+        commit_dirty_changes=False,
+        read_only=True,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert calls[0]["read_only"] is True
 
 
 @pytest.mark.unit
