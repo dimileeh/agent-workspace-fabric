@@ -755,9 +755,14 @@ def _notify_human_reason(
     }
     if any(
         item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
-        for item in bot_items + human_items
+        for item in human_items
     ):
         return "human review feedback needs human input and remains unresolved"
+    if any(
+        item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
+        for item in bot_items
+    ):
+        return "review feedback needs human input and remains unresolved on GitHub"
     if reason := _first_needs_human_reason(status, state, include_outdated=True):
         return reason
     for item in human_items:

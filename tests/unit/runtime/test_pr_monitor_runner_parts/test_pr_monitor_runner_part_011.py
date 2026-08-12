@@ -225,7 +225,7 @@ class TestNotificationAndGraceHelpers:
                 ),
                 state,
             )
-            == "human review feedback needs human input and remains unresolved"
+            == "review feedback needs human input and remains unresolved on GitHub"
         )
 
     @pytest.mark.unit
