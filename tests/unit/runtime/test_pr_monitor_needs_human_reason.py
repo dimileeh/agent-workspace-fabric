@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -791,6 +792,103 @@ async def test_isolated_reask_worktree_disables_primary_checkout_filters(
     _git(worktree, "add", ".gitattributes", "filtered.txt")
     _git(worktree, "commit", "-qm", "add filtered file")
     filter_marker = tmp_path / "smudge-filter-ran"
+    _git(
+        worktree,
+        "config",
+        "filter.poison.smudge",
+        f"touch '{filter_marker}'; cat",
+    )
+    _git(worktree, "config", "filter.poison.clean", "cat")
+    _git(worktree, "config", "filter.poison.required", "true")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+    )
+
+    assert reask_worktree is not None
+    assert not filter_marker.exists()
+    assert (reask_worktree.path / "filtered.txt").read_text(
+        encoding="utf-8"
+    ) == "original content\n"
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_disables_filters_from_mutable_info_attributes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mirror-owned attributes file cannot enable a checkout filter."""
+    workspace_id = "ws_reask_info_attributes_filters_disabled"
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
+    (worktree / "filtered.txt").write_text("original content\n", encoding="utf-8")
+    _git(worktree, "add", "filtered.txt")
+    _git(worktree, "commit", "-qm", "add filtered file")
+    filter_marker = tmp_path / "info-attributes-smudge-filter-ran"
+    source_git_dir = Path(
+        (worktree / ".git").read_text(encoding="utf-8").removeprefix("gitdir: ").strip()
+    )
+    source_mirror = source_git_dir.parent.parent
+    (source_mirror / "info" / "attributes").write_text(
+        "filtered.txt filter=poison\n",
+        encoding="utf-8",
+    )
+    _git(
+        worktree,
+        "config",
+        "filter.poison.smudge",
+        f"touch '{filter_marker}'; cat",
+    )
+    _git(worktree, "config", "filter.poison.clean", "cat")
+    _git(worktree, "config", "filter.poison.required", "true")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        source_mirror=source_mirror,
+        source_git_dir=source_git_dir,
+        source_git_dir_fd=os.open(source_git_dir, os.O_RDONLY),
+    )
+
+    assert reask_worktree is not None
+    assert not filter_marker.exists()
+    assert (reask_worktree.path / "filtered.txt").read_text(
+        encoding="utf-8"
+    ) == "original content\n"
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_ignores_configured_attributes_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured global attributes file cannot enable a checkout filter."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_global_attributes_filters_disabled")
+    (worktree / "filtered.txt").write_text("original content\n", encoding="utf-8")
+    _git(worktree, "add", "filtered.txt")
+    _git(worktree, "commit", "-qm", "add filtered file")
+    filter_marker = tmp_path / "global-attributes-smudge-filter-ran"
+    attributes_file = tmp_path / "global-attributes"
+    attributes_file.write_text("filtered.txt filter=poison\n", encoding="utf-8")
+    _git(worktree, "config", "core.attributesFile", str(attributes_file))
     _git(
         worktree,
         "config",

@@ -7,6 +7,7 @@ import contextlib
 import fcntl
 import os
 import re
+import stat
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -101,6 +102,9 @@ _ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS = 30.0
 _ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 30.0
 _FILTER_DRIVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FILTER_ATTRIBUTE_DRIVER_RE = re.compile(r"(?<!\S)filter=([^\s]+)")
+_MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES = 1024 * 1024
+_SAFE_INFO_ATTRIBUTES_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_SAFE_INFO_ATTRIBUTES_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 @dataclass(frozen=True)
@@ -254,18 +258,92 @@ async def _checkout_filter_overrides(
                 "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             )
-        for line in attributes.stdout.splitlines():
-            stripped_line = line.lstrip()
-            if stripped_line.startswith("#"):
-                continue
-            for driver_name in _FILTER_ATTRIBUTE_DRIVER_RE.findall(stripped_line):
-                if _FILTER_DRIVER_NAME_RE.fullmatch(driver_name) is None:
-                    raise _MonitorPolicyBlockedError(
-                        "Could not safely disable checkout filters before the NEEDS_HUMAN reason re-ask.",
-                        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
-                    )
-                driver_names.add(driver_name)
+        driver_names.update(_checkout_filter_driver_names(attributes.stdout))
 
+    return _checkout_filter_driver_overrides(driver_names)
+
+
+def _checkout_info_attributes_filter_overrides(
+    *,
+    source_mirror: Path | None,
+    source_worktree_path: Path,
+) -> tuple[str, ...]:
+    """Return overrides for drivers named by the mutable Git info attributes file."""
+    git_metadata_path = source_mirror or source_worktree_path / ".git"
+    attributes = _read_checkout_info_attributes(git_metadata_path)
+    return _checkout_filter_driver_overrides(_checkout_filter_driver_names(attributes))
+
+
+def _read_checkout_info_attributes(git_metadata_path: Path) -> str:
+    """Read mutable ``info/attributes`` without following links or special files."""
+    try:
+        info_fd = os.open(
+            git_metadata_path / "info",
+            _SAFE_INFO_ATTRIBUTES_DIRECTORY_OPEN_FLAGS,
+        )
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise _MonitorPolicyBlockedError(
+            "Could not safely read checkout info attributes before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
+
+    try:
+        try:
+            attributes_fd = os.open(
+                "attributes",
+                _SAFE_INFO_ATTRIBUTES_OPEN_FLAGS,
+                dir_fd=info_fd,
+            )
+        except FileNotFoundError:
+            return ""
+    except OSError as exc:
+        raise _MonitorPolicyBlockedError(
+            "Could not safely read checkout info attributes before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
+    finally:
+        os.close(info_fd)
+
+    try:
+        attributes_stat = os.fstat(attributes_fd)
+        if not stat.S_ISREG(attributes_stat.st_mode):
+            raise OSError("Git info attributes is not a regular file")
+        if attributes_stat.st_size > _MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES:
+            raise OSError("Git info attributes exceeds size limit")
+        attributes_bytes = os.read(attributes_fd, _MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES + 1)
+        if len(attributes_bytes) > _MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES:
+            raise OSError("Git info attributes exceeds size limit")
+        return attributes_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _MonitorPolicyBlockedError(
+            "Could not safely read checkout info attributes before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
+    finally:
+        os.close(attributes_fd)
+
+
+def _checkout_filter_driver_names(attributes: str) -> set[str]:
+    """Extract and validate filter driver names from one attributes file."""
+    driver_names: set[str] = set()
+    for line in attributes.splitlines():
+        stripped_line = line.lstrip()
+        if stripped_line.startswith("#"):
+            continue
+        for driver_name in _FILTER_ATTRIBUTE_DRIVER_RE.findall(stripped_line):
+            if _FILTER_DRIVER_NAME_RE.fullmatch(driver_name) is None:
+                raise _MonitorPolicyBlockedError(
+                    "Could not safely disable checkout filters before the NEEDS_HUMAN reason re-ask.",
+                    reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                )
+            driver_names.add(driver_name)
+    return driver_names
+
+
+def _checkout_filter_driver_overrides(driver_names: set[str]) -> tuple[str, ...]:
+    """Render command-line overrides that keep filter drivers from executing."""
     return tuple(
         option
         for driver_name in sorted(driver_names)
@@ -446,6 +524,10 @@ async def _create_isolated_reask_worktree(
             restore_ref=restore_ref,
             source_mirror=source_mirror,
         )
+        info_attributes_filter_overrides = _checkout_info_attributes_filter_overrides(
+            source_mirror=source_mirror,
+            source_worktree_path=worktree_path,
+        )
         _reject_reask_source_mirror_object_alternates(source_mirror)
         checkout_env = git_env_without_object_lookup_overrides()
         # A writable primary mirror can declare a promisor remote. Disable
@@ -464,9 +546,12 @@ async def _create_isolated_reask_worktree(
                 "core.hooksPath=/dev/null",
                 "-c",
                 "core.fsmonitor=false",
-                # The source mirror is mutable, so derive filter names from
-                # the immutable restore ref instead of its configuration.
+                # Ignore mutable global attributes and disable filters from
+                # both pinned tracked and mirror-owned info attributes.
+                "-c",
+                "core.attributesFile=/dev/null",
                 *checkout_filter_overrides,
+                *info_attributes_filter_overrides,
                 "checkout",
                 # A re-ask only needs the superproject checkout. Do not
                 # inherit submodule.recurse from the source worktree.

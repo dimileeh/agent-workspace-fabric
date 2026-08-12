@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -135,6 +136,74 @@ async def test_checkout_filter_overrides_accepts_no_tracked_filters() -> None:
         )
         == ()
     )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_rejects_symlinked_attributes(
+    tmp_path: Path,
+) -> None:
+    """A mutable attributes symlink cannot redirect the checkout guard's read."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    target = tmp_path / "outside-attributes"
+    target.write_text("*.txt filter=poison\n", encoding="utf-8")
+    (git_dir / "info" / "attributes").symlink_to(target)
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
+        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_rejects_special_attributes(
+    tmp_path: Path,
+) -> None:
+    """A mutable attributes FIFO cannot block or direct the checkout guard."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    os.mkfifo(git_dir / "info" / "attributes")
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
+        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_rejects_oversized_attributes(
+    tmp_path: Path,
+) -> None:
+    """A mutable attributes file cannot exhaust memory before checkout."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    (git_dir / "info" / "attributes").write_bytes(
+        b"#" * (comments._MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES + 1)  # noqa: SLF001
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
+        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_rejects_non_utf8_attributes(
+    tmp_path: Path,
+) -> None:
+    """An undecodable mutable attributes file fails closed before checkout."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    (git_dir / "info" / "attributes").write_bytes(b"*.txt filter=poison\xff\n")
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
+        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
 
 
 @pytest.mark.unit
