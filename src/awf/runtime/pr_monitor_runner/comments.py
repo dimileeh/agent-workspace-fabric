@@ -99,9 +99,8 @@ _CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED = "CLARIFICATION_MODEL_NETWORK_CLEAN
 # mirror can therefore point an include at a special file that never responds.
 _ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS = 30.0
 _ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 30.0
-_FILTER_DRIVER_CONFIG_KEY_RE = re.compile(
-    r"^(filter\.[A-Za-z0-9][A-Za-z0-9._-]*)\.(?:smudge|process)$"
-)
+_FILTER_DRIVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_FILTER_ATTRIBUTE_DRIVER_RE = re.compile(r"(?<!\S)filter=([^\s]+)")
 
 
 @dataclass(frozen=True)
@@ -210,48 +209,71 @@ async def _checkout_filter_overrides(
     runner: PullRequestMonitorRunner,
     *,
     worktree_path: Path,
+    restore_ref: str,
+    source_mirror: Path | None,
 ) -> tuple[str, ...]:
-    """Return Git options that prevent configured checkout filters from running."""
-    configured_filters = await runner._deps.runner.run(
-        git_worktree_command(
+    """Return overrides for every driver named by pinned tracked attributes."""
+    attribute_paths = await runner._deps.runner.run(
+        _reask_source_mirror_command(
             worktree_path,
-            "config",
-            "--includes",
+            source_mirror,
+            "ls-tree",
+            "--full-tree",
+            "-r",
+            "-z",
             "--name-only",
-            "--get-regexp",
-            r"^filter\..*\.(smudge|process)$",
+            restore_ref,
         ),
         timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
         env=git_env_without_object_lookup_overrides(),
     )
-    if configured_filters.returncode == 1:
-        return ()
-    if not configured_filters.ok:
+    if not attribute_paths.ok:
         raise _MonitorPolicyBlockedError(
-            "Could not determine checkout filters before the NEEDS_HUMAN reason re-ask.",
+            "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
-    driver_prefixes: set[str] = set()
-    for config_key in configured_filters.stdout.splitlines():
-        match = _FILTER_DRIVER_CONFIG_KEY_RE.fullmatch(config_key)
-        if match is None:
+    driver_names: set[str] = set()
+    for attribute_path in attribute_paths.stdout.split("\0"):
+        if not (attribute_path == ".gitattributes" or attribute_path.endswith("/.gitattributes")):
+            continue
+        attributes = await runner._deps.runner.run(
+            _reask_source_mirror_command(
+                worktree_path,
+                source_mirror,
+                "show",
+                f"{restore_ref}:{attribute_path}",
+            ),
+            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if not attributes.ok:
             raise _MonitorPolicyBlockedError(
-                "Could not safely disable checkout filters before the NEEDS_HUMAN reason re-ask.",
+                "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
                 reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             )
-        driver_prefixes.add(match.group(1))
+        for line in attributes.stdout.splitlines():
+            stripped_line = line.lstrip()
+            if stripped_line.startswith("#"):
+                continue
+            for driver_name in _FILTER_ATTRIBUTE_DRIVER_RE.findall(stripped_line):
+                if _FILTER_DRIVER_NAME_RE.fullmatch(driver_name) is None:
+                    raise _MonitorPolicyBlockedError(
+                        "Could not safely disable checkout filters before the NEEDS_HUMAN reason re-ask.",
+                        reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                    )
+                driver_names.add(driver_name)
 
     return tuple(
         option
-        for driver_prefix in sorted(driver_prefixes)
+        for driver_name in sorted(driver_names)
         for option in (
             "-c",
-            f"{driver_prefix}.smudge=",
+            f"filter.{driver_name}.smudge=",
             "-c",
-            f"{driver_prefix}.process=",
+            f"filter.{driver_name}.process=",
             "-c",
-            f"{driver_prefix}.required=false",
+            f"filter.{driver_name}.required=false",
         )
     )
 
@@ -367,10 +389,9 @@ async def _create_isolated_reask_worktree(
             _reask_source_mirror_command(
                 worktree_path,
                 source_mirror,
-                # Register the linked worktree without populating it. Its
-                # effective configuration can differ from the primary
-                # worktree through includeIf.gitdir rules, so filters must be
-                # discovered after the linked gitdir exists.
+                # Register the linked worktree without populating it. The
+                # pinned tree is then used to identify every driver that
+                # checkout must disable.
                 "worktree",
                 "add",
                 "--detach",
@@ -420,6 +441,8 @@ async def _create_isolated_reask_worktree(
         checkout_filter_overrides = await _checkout_filter_overrides(
             runner,
             worktree_path=path,
+            restore_ref=restore_ref,
+            source_mirror=source_mirror,
         )
         _reject_reask_source_mirror_object_alternates(source_mirror)
         checkout_env = git_env_without_object_lookup_overrides()
@@ -431,14 +454,16 @@ async def _create_isolated_reask_worktree(
             git_worktree_command(
                 path,
                 # The primary mirror is writable by the prior agent. Disable
-                # its default hooks directory and every filter effective for
-                # this linked worktree while Git populates the clarification
-                # checkout. Disable the configured filesystem monitor too:
+                # its default hooks directory and every filter named by the
+                # pinned tracked attributes while Git populates the
+                # clarification checkout. Disable the configured filesystem monitor too:
                 # a string-valued core.fsmonitor is an executable hook path.
                 "-c",
                 "core.hooksPath=/dev/null",
                 "-c",
                 "core.fsmonitor=false",
+                # The source mirror is mutable, so derive filter names from
+                # the immutable restore ref instead of its configuration.
                 *checkout_filter_overrides,
                 "checkout",
                 # A re-ask only needs the superproject checkout. Do not
@@ -452,7 +477,7 @@ async def _create_isolated_reask_worktree(
         )
     except asyncio.CancelledError:
         # The linked worktree is registered before its checkout, so cleanup
-        # must cover cancellation during the filter probe or population too.
+        # must cover cancellation during filter metadata discovery or population too.
         await _cleanup_after_cancellation(
             event_name=(
                 "monitor.needs_human_reason_reask_"

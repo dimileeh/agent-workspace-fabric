@@ -17,27 +17,55 @@ from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 
 
 @pytest.mark.unit
-async def test_checkout_filter_overrides_fail_closed_when_filter_probe_fails() -> None:
-    """An unreadable filter configuration cannot lead to an unsafe checkout."""
+async def test_checkout_filter_overrides_fail_closed_when_metadata_lookup_fails() -> None:
+    """Unreadable tracked metadata cannot lead to an unsafe checkout."""
     command_runner = FakeCommandRunner()
-    command_runner.queue_result(returncode=2, stderr="config unreadable")
+    command_runner.queue_result(returncode=2, stderr="tree unreadable")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
-    with pytest.raises(_MonitorPolicyBlockedError, match="Could not determine checkout filters"):
-        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
 
 
 @pytest.mark.unit
-async def test_checkout_filter_overrides_reject_unexpected_config_key() -> None:
-    """A malformed filter key cannot be passed into the host Git command."""
+async def test_checkout_filter_overrides_fail_closed_when_attribute_blob_read_fails() -> None:
+    """An unreadable pinned attributes blob cannot lead to an unsafe checkout."""
     command_runner = FakeCommandRunner()
-    command_runner.queue_result(returncode=0, stdout="filter.poison/unsafe.smudge\n")
+    command_runner.queue_result(returncode=0, stdout=".gitattributes\0")
+    command_runner.queue_result(returncode=2, stderr="attributes unreadable")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_reject_unexpected_attribute_driver() -> None:
+    """A malformed attribute driver cannot be passed into the host Git command."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(returncode=0, stdout=".gitattributes\0")
+    command_runner.queue_result(returncode=0, stdout="*.txt filter=poison/unsafe\n")
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     with pytest.raises(
         _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
     ):
-        await comments._checkout_filter_overrides(runner, worktree_path=Path("/worktree"))
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
 
 
 @pytest.mark.unit
@@ -45,18 +73,32 @@ async def test_checkout_filter_overrides_disable_every_detected_filter_driver() 
     """An isolated checkout disables both smudge and process filters for each driver."""
 
     class _FilterRunner:
-        async def run(self, _args: list[str], **_kwargs: object) -> CommandResult:
-            return CommandResult(
-                returncode=0,
-                stdout="filter.lfs.smudge\nfilter.lfs.process\nfilter.custom.process\n",
-                stderr="",
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+            self.results = iter(
+                (
+                    CommandResult(
+                        returncode=0,
+                        stdout=".gitattributes\0nested/.gitattributes\0",
+                        stderr="",
+                    ),
+                    CommandResult(returncode=0, stdout="*.bin filter=lfs\n", stderr=""),
+                    CommandResult(returncode=0, stdout="*.txt filter=custom\n", stderr=""),
+                )
             )
 
-    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_FilterRunner()))
+        async def run(self, _args: list[str], **_kwargs: object) -> CommandResult:
+            self.commands.append(_args)
+            return next(self.results)
+
+    command_runner = _FilterRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     assert await comments._checkout_filter_overrides(  # noqa: SLF001
         runner,
         worktree_path=Path("/worktree"),
+        restore_ref="a" * 40,
+        source_mirror=Path("/trusted/mirror.git"),
     ) == (
         "-c",
         "filter.custom.smudge=",
@@ -71,15 +113,16 @@ async def test_checkout_filter_overrides_disable_every_detected_filter_driver() 
         "-c",
         "filter.lfs.required=false",
     )
+    assert command_runner.commands[0][:3] == ["git", "--git-dir", "/trusted/mirror.git"]
 
 
 @pytest.mark.unit
-async def test_checkout_filter_overrides_accepts_no_configured_filters() -> None:
-    """A worktree without checkout filters can be populated without extra Git options."""
+async def test_checkout_filter_overrides_accepts_no_tracked_filters() -> None:
+    """A worktree without tracked checkout filters needs no extra Git options."""
 
     class _NoFiltersRunner:
         async def run(self, _args: list[str], **_kwargs: object) -> CommandResult:
-            return CommandResult(returncode=1, stdout="", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
 
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=_NoFiltersRunner()))
 
@@ -87,6 +130,8 @@ async def test_checkout_filter_overrides_accepts_no_configured_filters() -> None
         await comments._checkout_filter_overrides(  # noqa: SLF001
             runner,
             worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
         )
         == ()
     )
