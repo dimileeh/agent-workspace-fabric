@@ -758,6 +758,8 @@ def _notify_human_reason(
         for item in human_items
     ):
         return "human review feedback needs human input and remains unresolved"
+    if reason := _first_needs_human_reason(status, state, include_outdated=True):
+        return reason
     for item in human_items:
         awf_blocker_reason = item.get("awf_blocker_reason")
         if isinstance(awf_blocker_reason, str) and awf_blocker_reason:
@@ -784,12 +786,16 @@ def _notify_human_reason(
     return None
 
 
-def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | None:
-    for item_id in (
-        [t.thread_id for t in status.unresolved_inline_threads]
-        + [c.comment_id for c in status.unresolved_review_comments]
-        + [t.thread_id for t in status.outdated_unresolved_inline_threads]
-    ):
+def _first_needs_human_reason(
+    status: PRStatus, state: MonitorState, *, include_outdated: bool = False
+) -> str | None:
+    """Return a stored reason, prioritizing current feedback over outdated threads."""
+    item_ids = [t.thread_id for t in status.unresolved_inline_threads] + [
+        c.comment_id for c in status.unresolved_review_comments
+    ]
+    if include_outdated:
+        item_ids += [t.thread_id for t in status.outdated_unresolved_inline_threads]
+    for item_id in item_ids:
         if (
             state.threads_addressed_ids.get(item_id) == "needs_human"
             and (reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id)))

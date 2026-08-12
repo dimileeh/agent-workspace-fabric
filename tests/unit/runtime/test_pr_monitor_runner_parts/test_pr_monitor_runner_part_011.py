@@ -97,6 +97,21 @@ class TestNotificationAndGraceHelpers:
         )
         assert (
             _notify_human_reason(
+                replace(
+                    _status(reviews=(deferred_review,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                MonitorState(
+                    threads_addressed_ids={
+                        **reasonless_escalation_state.threads_addressed_ids,
+                        **outdated_state.threads_addressed_ids,
+                    }
+                ),
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
                 replace(_status(), outdated_unresolved_inline_threads=(outdated_thread,)),
                 outdated_state,
             )
