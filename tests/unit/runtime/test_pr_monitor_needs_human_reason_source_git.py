@@ -68,6 +68,8 @@ def _init_mirrored_worktree(
         capture_output=True,
         text=True,
     )
+    _git(worktree, "config", "user.email", "awf@example.com")
+    _git(worktree, "config", "user.name", "AWF Test")
     return worktree
 
 
