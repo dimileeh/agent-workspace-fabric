@@ -7,6 +7,8 @@ compose YAML is syntactically valid and contains all the expected wiring.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -481,14 +483,122 @@ class TestRender:
         assert "/home/agent/.codex" not in "\n".join(clarification["volumes"])
         assert clarification["entrypoint"][:2] == ["sh", "-ec"]
         assert "clarification_auth_target_0=" not in clarification["entrypoint"][2]
-        assert (
-            'cp -a /run/awf/clarification-auth/0/. "$AWF_CLARIFICATION_AUTH_TARGET_0/"'
-            in (clarification["entrypoint"][2])
-        )
+        assert 'credential_files="auth.json"' in clarification["entrypoint"][2]
+        assert "for credential_file in $credential_files; do" in clarification["entrypoint"][2]
         assert clarification["entrypoint"][-1] == "--"
         assert parsed["networks"]["clarification_egress_net"] == {
             "name": "awf-ws_test123-clarification-egress-net"
         }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("provider_target", "credential_file", "untrusted_paths"),
+        (
+            pytest.param(
+                "/home/agent/.codex",
+                "auth.json",
+                ("config.toml", "rules/untrusted.md"),
+                id="codex",
+            ),
+            pytest.param(
+                "/home/agent/.claude",
+                ".credentials.json",
+                ("settings.json", "hooks/untrusted.sh"),
+                id="claude",
+            ),
+        ),
+    )
+    def test_clarification_copies_only_auth_not_runtime_configuration(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        provider_target: str,
+        credential_file: str,
+        untrusted_paths: tuple[str, ...],
+    ) -> None:
+        """Clarification excludes state the preceding agent can configure."""
+        provider_auth = tmp_path / "auth" / provider_target.removeprefix("/home/agent/")
+        provider_auth.mkdir(parents=True)
+        (provider_auth / credential_file).write_text('{"token": "test"}\n', encoding="utf-8")
+        for untrusted_path in untrusted_paths:
+            path = provider_auth / untrusted_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("untrusted runtime configuration\n", encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(provider_auth),
+                            target=provider_target,
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_home = tmp_path / "clarification-home" / provider_target.rsplit("/", 1)[-1]
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(provider_auth))
+            .replace(provider_target, str(clarification_home))
+        )
+        environment = os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_home)}
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=environment,
+        )
+
+        assert (clarification_home / credential_file).read_text(
+            encoding="utf-8"
+        ) == '{"token": "test"}\n'
+        assert all(
+            not (clarification_home / untrusted_path).exists() for untrusted_path in untrusted_paths
+        )
+
+    @pytest.mark.unit
+    def test_clarification_omits_claude_legacy_configuration_file(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification does not inherit Claude's MCP and hook configuration file."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text('{"mcpServers": {"untrusted": {}}}\n', encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert not clarification_configuration.exists()
 
     @pytest.mark.unit
     def test_clarification_reaches_only_selected_profile_model_service(

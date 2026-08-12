@@ -119,9 +119,30 @@ services:
         {% for m in clarification_auth_mounts %}mkdir -p "$(dirname "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}")"
         if [ -d /run/awf/clarification-auth/{{ loop.index0 }} ]; then
           mkdir -p "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
-          cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
+          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
+            /home/agent/.codex) credential_files="auth.json" ;;
+            /home/agent/.claude) credential_files=".credentials.json" ;;
+            /home/agent/.config/gcloud) credential_files="application_default_credentials.json" ;;
+            /home/agent/.gemini) credential_files="oauth_creds.json" ;;
+            /home/agent/.config/opencode) credential_files="auth.json" ;;
+            /home/agent/.grok) credential_files="auth.json" ;;
+            /home/agent/.ollama) credential_files="id_ed25519 id_ed25519.pub" ;;
+            /home/agent/.aws) credential_files="credentials" ;;
+            *)
+              cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
+              credential_files=""
+              ;;
+          esac
+          for credential_file in $credential_files; do
+            if [ -f "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ] && [ ! -L "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ]; then
+              cp -a "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/$credential_file"
+            fi
+          done
         else
-          cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
+          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
+            /home/agent/.claude.json) ;;
+            *) cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" ;;
+          esac
         fi
         {% endfor %}{% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}chmod u+w "$GOOGLE_APPLICATION_CREDENTIALS"
         python - <<'PY'
