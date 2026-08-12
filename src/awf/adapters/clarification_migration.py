@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -74,6 +75,15 @@ def _network_is_not_connected(result: CommandResult) -> bool:
     """Return whether an idempotent disconnect found no endpoint to remove."""
     detail = f"{result.stdout}\n{result.stderr}".lower()
     return "not connected" in detail or "no such endpoint" in detail
+
+
+def _container_network_aliases_format(network_name: str) -> str:
+    """Return Docker's template for aliases assigned on one selected network."""
+    return (
+        f"{{{{ with index .NetworkSettings.Networks {json.dumps(network_name)} }}}}"
+        r'{{ range .Aliases }}{{ printf "%s\n" . }}{{ end }}'
+        r"{{ end }}"
+    )
 
 
 def _container_id_was_preexisting(
@@ -205,6 +215,21 @@ async def _attach_persisted_clarification_model_network(
                 if not endpoint_preexisted:
                     attachment.connected_container_ids.pop()
                     attachment.reconnecting_endpoints.append((container_id, service))
+                alias_inspect_result = await runner.run(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        _container_network_aliases_format(attachment.network_name),
+                        container_id,
+                    ],
+                    timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
+                )
+                if not alias_inspect_result.ok:
+                    return attachment, alias_inspect_result
+                if service in alias_inspect_result.stdout.splitlines():
+                    attachment.reconnecting_endpoints.pop()
+                    continue
                 network_disconnect_result = await runner.run(
                     ["docker", "network", "disconnect", attachment.network_name, container_id],
                     timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,

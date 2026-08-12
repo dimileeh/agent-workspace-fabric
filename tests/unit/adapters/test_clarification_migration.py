@@ -82,6 +82,7 @@ async def test_attach_persisted_model_network_bounds_alias_reconciliation_comman
     )
     runner.queue_result()
     runner.queue_result()
+    runner.queue_result()
 
     _attachment, result = await _attach_persisted_clarification_model_network(
         runner,
@@ -92,6 +93,48 @@ async def test_attach_persisted_model_network_bounds_alias_reconciliation_comman
     )
 
     assert result.ok
+    _assert_bounded_migration_calls(runner)
+
+
+@pytest.mark.unit
+async def test_attach_persisted_model_network_preserves_existing_aliased_endpoint() -> None:
+    """An overlapping re-ask must not detach a sidecar that already has its alias."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    container_id = "stateful-model-container"
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout=f"{container_id}\n")
+    runner.queue_result(stdout=f"{container_id}\n")
+    runner.queue_result(returncode=1, stderr="endpoint already connected")
+    runner.queue_result(stdout="ollama-sidecar\n")
+
+    attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert result.ok
+    assert attachment.reconnecting_endpoints == []
+    assert [call.args[:3] for call in runner.calls] == [
+        ["docker", "network", "inspect"],
+        ["docker", "compose", "-p"],
+        ["docker", "network", "connect"],
+        ["docker", "inspect", "--format"],
+    ]
+    assert runner.calls[-1].args == [
+        "docker",
+        "inspect",
+        "--format",
+        (
+            f'{{{{ with index .NetworkSettings.Networks "{network_name}" }}}}'
+            r'{{ range .Aliases }}{{ printf "%s\n" . }}{{ end }}'
+            r"{{ end }}"
+        ),
+        container_id,
+    ]
+    assert not any(call.args[2] == "disconnect" for call in runner.calls if len(call.args) > 2)
     _assert_bounded_migration_calls(runner)
 
 
@@ -262,6 +305,7 @@ async def test_attach_persisted_model_network_preserves_reconnect_failure() -> N
         returncode=1,
         stderr="endpoint with name stateful-model-container already exists in network",
     )
+    runner.queue_result()
     runner.queue_result(returncode=1, stderr="network disconnect denied")
 
     attachment, result = await _attach_persisted_clarification_model_network(
@@ -274,6 +318,29 @@ async def test_attach_persisted_model_network_preserves_reconnect_failure() -> N
 
     assert attachment.reconnecting_endpoints == [("stateful-model-container", "ollama-sidecar")]
     assert result.stderr == "network disconnect denied"
+
+
+@pytest.mark.unit
+async def test_attach_persisted_model_network_preserves_endpoint_when_alias_inspection_fails() -> (
+    None
+):
+    """A failed alias check must not trigger a disruptive repair attempt."""
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout="stateful-model-container\n")
+    runner.queue_result(stdout="stateful-model-container\n")
+    runner.queue_result(returncode=1, stderr="endpoint already connected")
+    runner.queue_result(returncode=1, stderr="container inspect denied")
+
+    _attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert result.stderr == "container inspect denied"
+    assert not any(call.args[2] == "disconnect" for call in runner.calls if len(call.args) > 2)
 
 
 @pytest.mark.unit
