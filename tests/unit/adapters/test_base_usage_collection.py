@@ -18,6 +18,7 @@ from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.runtime_executor import AgentRuntimeExecRequest, AgentRuntimeExecResult
 from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, COMMAND_TIMEOUT_REASON, CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -533,6 +534,69 @@ async def test_isolated_container_start_timeout_cleans_up_without_running_agent(
     assert events[:3] == ["start_isolated", "baseline", "startup"]
     assert events[-2:] == ["cleanup", "finalize:timeout"]
     assert events[-3].startswith("capture:awf-reask-")
+
+
+@pytest.mark.unit
+async def test_isolated_cleanup_failure_closes_log_streams() -> None:
+    """A failed detached-container cleanup must still finalize command logs."""
+
+    class _CleanupFailureRunner(_EventRunner):
+        async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+            self.calls.append(list(args))
+            if "--detach" in args:
+                self._events.append("startup")
+                return CommandResult(returncode=0, stdout="started", stderr="")
+            self._events.append("cleanup")
+            return CommandResult(returncode=1, stdout="", stderr="container still alive")
+
+    class _Sinks:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def write_stdout(self, _data: str) -> None:
+            return None
+
+        async def write_stderr(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _LogStore:
+        def __init__(self) -> None:
+            self.sinks = _Sinks()
+
+        async def open_command_streams(self, **_kwargs: Any) -> _Sinks:
+            return self.sinks
+
+    events: list[str] = []
+    log_store = _LogStore()
+    runner = _CleanupFailureRunner(
+        events,
+        result=CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="command wall timeout",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        ),
+    )
+    adapter = CodexAdapter(
+        runner=runner,
+        usage_sampler=_IsolatedRecordingSampler(events),
+        log_store=log_store,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="container still alive"):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_isolated_cleanup_failure",
+            isolated_worktree_host_path=Path("/worktrees/ws_isolated_cleanup_failure/reask"),
+        )
+
+    assert events[-2:] == ["cleanup", "finalize:failed"]
+    assert log_store.sinks.closed is True
 
 
 @pytest.mark.unit

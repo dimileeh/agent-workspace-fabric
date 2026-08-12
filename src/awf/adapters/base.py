@@ -1381,29 +1381,31 @@ class AgentAdapter(ABC):
                         cleanup_isolated_container = False
                 raise
         finally:
-            if cleanup_isolated_container:
-                try:
-                    await self._capture_isolated_usage_before_cleanup(
-                        isolated_sampler_ctx,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
-                finally:
+            try:
+                if cleanup_isolated_container:
                     try:
-                        await cleanup_compose_exec_invocation(
-                            self._runner,
+                        await self._capture_isolated_usage_before_cleanup(
+                            isolated_sampler_ctx,
                             invocation,
                             workspace_id=workspace_id,
                         )
-                    except asyncio.CancelledError:
-                        await cleanup_compose_exec_invocation_after_cancellation(
-                            self._runner,
-                            invocation,
-                            workspace_id=workspace_id,
-                        )
-                        raise
-            if sinks is not None:
-                await sinks.close()
+                    finally:
+                        try:
+                            await cleanup_compose_exec_invocation(
+                                self._runner,
+                                invocation,
+                                workspace_id=workspace_id,
+                            )
+                        except asyncio.CancelledError:
+                            await cleanup_compose_exec_invocation_after_cancellation(
+                                self._runner,
+                                invocation,
+                                workspace_id=workspace_id,
+                            )
+                            raise
+            finally:
+                if sinks is not None:
+                    await sinks.close()
 
         if not result.ok:
             provider = self.get_provider(model)
