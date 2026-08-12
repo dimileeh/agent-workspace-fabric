@@ -11,6 +11,7 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.comments_checkout import _isolated_reask_checkout_git_dir
 from awf.runtime.pr_monitor_runner.helpers import _sanitize_verdict_reason
 
 
@@ -100,6 +101,38 @@ def test_sanitize_verdict_reason_preserves_meaningful_text_with_redacted_details
     assert _sanitize_verdict_reason(reason) == (
         "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("restore_ref", "expected_config"),
+    (
+        (
+            "a" * 40,
+            "[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n",
+        ),
+        (
+            "a" * 64,
+            "[core]\nrepositoryformatversion = 1\nfilemode = true\nbare = false\n"
+            "[extensions]\nobjectformat = sha256\n",
+        ),
+    ),
+)
+def test_isolated_reask_checkout_git_dir_declares_restore_object_format(
+    tmp_path: Path,
+    restore_ref: str,
+    expected_config: str,
+) -> None:
+    """The temporary checkout must support the pinned Git object format."""
+    source_worktree = tmp_path / "source"
+    (source_worktree / ".git" / "objects").mkdir(parents=True)
+
+    with _isolated_reask_checkout_git_dir(
+        source_mirror=None,
+        source_worktree_path=source_worktree,
+        restore_ref=restore_ref,
+    ) as checkout_git_dir:
+        assert (checkout_git_dir / "config").read_text(encoding="utf-8") == expected_config
 
 
 @pytest.mark.unit

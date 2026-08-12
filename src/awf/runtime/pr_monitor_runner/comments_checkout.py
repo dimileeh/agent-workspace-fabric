@@ -216,8 +216,14 @@ def _isolated_reask_checkout_git_dir(
             (git_dir / "info").mkdir()
             (git_dir / "objects").symlink_to(source_git_metadata_path / "objects")
             (git_dir / "HEAD").write_text(f"{restore_ref}\n", encoding="utf-8")
+            config = "[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n"
+            if len(restore_ref) == 64:
+                config = (
+                    "[core]\nrepositoryformatversion = 1\nfilemode = true\nbare = false\n"
+                    "[extensions]\nobjectformat = sha256\n"
+                )
             (git_dir / "config").write_text(
-                "[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n",
+                config,
                 encoding="utf-8",
             )
             yield git_dir
