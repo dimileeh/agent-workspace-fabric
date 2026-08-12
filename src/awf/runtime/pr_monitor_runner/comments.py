@@ -422,6 +422,11 @@ async def _create_isolated_reask_worktree(
             worktree_path=path,
         )
         _reject_reask_source_mirror_object_alternates(source_mirror)
+        checkout_env = git_env_without_object_lookup_overrides()
+        # A writable primary mirror can declare a promisor remote. Disable
+        # lazy fetches so a missing object cannot run agent-controlled remote
+        # or protocol configuration while this checkout is populated.
+        checkout_env["GIT_NO_LAZY_FETCH"] = "1"
         checkout = await runner._deps.runner.run(
             git_worktree_command(
                 path,
@@ -443,7 +448,7 @@ async def _create_isolated_reask_worktree(
                 restore_ref,
             ),
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-            env=git_env_without_object_lookup_overrides(),
+            env=checkout_env,
         )
     except asyncio.CancelledError:
         # The linked worktree is registered before its checkout, so cleanup

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,78 @@ def test_validated_source_worktree_git_context_reads_control_files_from_pinned_f
         assert context.resolved_head == expected_resolved_head
     finally:
         os.close(context.linked_git_dir_fd)
+
+
+@pytest.mark.unit
+async def test_isolated_reask_checkout_disables_agent_promisor_lazy_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing blob must not make checkout run a promisor remote from mirror config."""
+    workspace_id = "ws_reask_untrusted_promisor"
+    source = _init_mirrored_worktree(
+        tmp_path,
+        repository_name="source",
+        worktree_name=workspace_id,
+        tracked_contents="source repository\n",
+    )
+    source_git_dir = Path(
+        (source / ".git").read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+    )
+    mirror = source_git_dir.parent.parent
+    blob = _git(source, "rev-parse", "HEAD:tracked.txt").stdout.strip()
+    blob_path = mirror / "objects" / blob[:2] / blob[2:]
+    assert blob_path.is_file()
+    sentinel = tmp_path / "promisor-remote-ran"
+    _git(source, "config", "extensions.partialClone", "attacker")
+    _git(source, "config", "remote.attacker.promisor", "true")
+    _git(source, "config", "remote.attacker.url", f"ext::touch {sentinel}")
+    _git(source, "config", "protocol.ext.allow", "always")
+    blob_path.unlink()
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")
+
+    class _LocalCommandRunner:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            proc = subprocess.run(
+                args, capture_output=True, text=True, timeout=timeout_seconds, env=env
+            )
+            return CommandResult(
+                returncode=proc.returncode,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+            )
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Keep the regression focused on Git checkout behavior."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    context = ownership.validated_source_worktree_git_context(source, workspace_id)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    reask_worktree = None
+    try:
+        reask_worktree = await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=source,
+            restore_ref=context.resolved_head,
+            source_mirror=context.mirror_path,
+            source_git_dir=context.linked_git_dir,
+            source_git_dir_fd=context.linked_git_dir_fd,
+        )
+    finally:
+        if reask_worktree is not None:
+            await comments._remove_isolated_reask_worktree(runner, reask_worktree)
+        with suppress(OSError):
+            os.close(context.linked_git_dir_fd)
+
+    assert not sentinel.exists()
 
 
 @pytest.mark.unit
