@@ -407,6 +407,7 @@ async def test_non_mutating_verdict_invocation_skips_commit_after_agent_error(
 @pytest.mark.parametrize(
     "reason_code",
     (
+        "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED",
         "CLARIFICATION_MODEL_SERVICE_RECOVERY_FAILED",
         "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED",
     ),
