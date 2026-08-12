@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.runtime.pr_monitor_runner import comment_verdict, comments
+from awf.runtime.pr_monitor_runner import comment_verdict, comments, comments_checkout
 from awf.runtime.pr_monitor_runner.comments_source_git import (
     _reask_source_mirror_command,
     _rev_parse_pinned_reask_source_head,
@@ -25,7 +25,7 @@ async def test_checkout_filter_overrides_fail_closed_when_metadata_lookup_fails(
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -42,7 +42,7 @@ async def test_checkout_filter_overrides_fail_closed_when_attribute_blob_read_fa
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -61,7 +61,7 @@ async def test_checkout_filter_overrides_reject_unexpected_attribute_driver() ->
     with pytest.raises(
         _MonitorPolicyBlockedError, match="Could not safely disable checkout filters"
     ):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -95,7 +95,7 @@ async def test_checkout_filter_overrides_disable_every_detected_filter_driver() 
     command_runner = _FilterRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
-    assert await comments._checkout_filter_overrides(  # noqa: SLF001
+    assert await comments_checkout._checkout_filter_overrides(  # noqa: SLF001
         runner,
         worktree_path=Path("/worktree"),
         restore_ref="a" * 40,
@@ -128,7 +128,7 @@ async def test_checkout_filter_overrides_accepts_no_tracked_filters() -> None:
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=_NoFiltersRunner()))
 
     assert (
-        await comments._checkout_filter_overrides(  # noqa: SLF001
+        await comments_checkout._checkout_filter_overrides(  # noqa: SLF001
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -148,7 +148,7 @@ async def test_checkout_filter_overrides_rejects_excessive_tracked_attribute_fil
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -166,7 +166,7 @@ async def test_checkout_filter_overrides_rejects_excessive_tree_output() -> None
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -213,9 +213,9 @@ async def test_checkout_filter_overrides_uses_one_deadline_for_tree_and_attribut
     clock = _Clock()
     command_runner = _AdvancingRunner(clock)
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
-    monkeypatch.setattr(comments, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(comments_checkout, "time", SimpleNamespace(monotonic=clock.monotonic))
 
-    assert await comments._checkout_filter_overrides(
+    assert await comments_checkout._checkout_filter_overrides(
         runner,
         worktree_path=Path("/worktree"),
         restore_ref="a" * 40,
@@ -262,10 +262,10 @@ async def test_checkout_filter_overrides_rejects_tree_probe_that_exhausts_deadli
     clock = _Clock()
     command_runner = _DeadlineRunner(clock)
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
-    monkeypatch.setattr(comments, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(comments_checkout, "time", SimpleNamespace(monotonic=clock.monotonic))
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -305,13 +305,13 @@ async def test_checkout_filter_overrides_does_not_start_attribute_read_after_dea
     command_runner = _TreeRunner()
     runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
     monkeypatch.setattr(
-        comments,
+        comments_checkout,
         "time",
         SimpleNamespace(monotonic=_Clock().monotonic),
     )
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
-        await comments._checkout_filter_overrides(
+        await comments_checkout._checkout_filter_overrides(
             runner,
             worktree_path=Path("/worktree"),
             restore_ref="a" * 40,
@@ -333,7 +333,7 @@ def test_checkout_info_attributes_filter_overrides_rejects_symlinked_attributes(
     (git_dir / "info" / "attributes").symlink_to(target)
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
-        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
             source_mirror=git_dir,
             source_worktree_path=tmp_path / "worktree",
         )
@@ -349,7 +349,7 @@ def test_checkout_info_attributes_filter_overrides_rejects_special_attributes(
     os.mkfifo(git_dir / "info" / "attributes")
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
-        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
             source_mirror=git_dir,
             source_worktree_path=tmp_path / "worktree",
         )
@@ -363,11 +363,11 @@ def test_checkout_info_attributes_filter_overrides_rejects_oversized_attributes(
     git_dir = tmp_path / "mirror.git"
     (git_dir / "info").mkdir(parents=True)
     (git_dir / "info" / "attributes").write_bytes(
-        b"#" * (comments._MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES + 1)  # noqa: SLF001
+        b"#" * (comments_checkout._MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES + 1)  # noqa: SLF001
     )
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
-        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
             source_mirror=git_dir,
             source_worktree_path=tmp_path / "worktree",
         )
@@ -383,7 +383,7 @@ def test_checkout_info_attributes_filter_overrides_rejects_non_utf8_attributes(
     (git_dir / "info" / "attributes").write_bytes(b"*.txt filter=poison\xff\n")
 
     with pytest.raises(_MonitorPolicyBlockedError, match="Could not safely read checkout info"):
-        comments._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
             source_mirror=git_dir,
             source_worktree_path=tmp_path / "worktree",
         )

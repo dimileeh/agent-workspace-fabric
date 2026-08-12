@@ -135,13 +135,16 @@ async def test_isolated_reask_git_lifecycle_ignores_object_lookup_overrides(
 
     assert reask_worktree is not None
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
-    assert len(command_runner.calls) == 4
+    assert len(command_runner.calls) == 5
     assert "worktree" in command_runner.calls[0].args
     assert "add" in command_runner.calls[0].args
-    assert "config" in command_runner.calls[1].args
+    assert "ls-tree" in command_runner.calls[1].args
     assert "checkout" in command_runner.calls[2].args
-    assert "worktree" in command_runner.calls[3].args
-    assert "remove" in command_runner.calls[3].args
+    assert "read-tree" in command_runner.calls[3].args
+    assert "--reset" in command_runner.calls[3].args
+    assert "--no-sparse-checkout" in command_runner.calls[3].args
+    assert "worktree" in command_runner.calls[4].args
+    assert "remove" in command_runner.calls[4].args
     assert all(call.env is not None for call in command_runner.calls)
     for call in command_runner.calls:
         assert "GIT_OBJECT_DIRECTORY" not in call.env
