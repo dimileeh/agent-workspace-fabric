@@ -97,7 +97,6 @@ from awf.runtime.logs import CommandLogSinks, LogStore
 __all__ = ("AgentRunError", "AgentRunResult", "_REGISTRY", "get_adapter", "register_adapter")
 _log = get_logger(__name__)
 
-
 DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 """Default maximum wall-clock duration for a single agent CLI run."""
 
