@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor_runner.comments_source_git import (
     _rev_parse_pinned_reask_source_head,
 )
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
 
 @pytest.mark.unit
@@ -387,6 +388,102 @@ def test_checkout_info_attributes_filter_overrides_rejects_non_utf8_attributes(
             source_mirror=git_dir,
             source_worktree_path=tmp_path / "worktree",
         )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_fails_closed_when_info_directory_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unreadable mutable attributes directory cannot permit an unsafe checkout."""
+
+    def _deny_open(*_args: object, **_kwargs: object) -> int:
+        raise PermissionError("info directory is unreadable")
+
+    monkeypatch.setattr(comments_checkout.os, "open", _deny_open)
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=tmp_path / "mirror.git",
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+    assert raised.value.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_fails_closed_when_attributes_open_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An attributes file that becomes unreadable cannot weaken the checkout guard."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    original_open = comments_checkout.os.open
+
+    def _deny_attributes_open(path: object, *args: object, **kwargs: object) -> int:
+        if path == "attributes":
+            raise PermissionError("attributes file is unreadable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(comments_checkout.os, "open", _deny_attributes_open)
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+    assert raised.value.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_rejects_file_that_grows_after_stat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A mutable attributes file that grows during its read remains fail-closed."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+    (git_dir / "info" / "attributes").write_text("*.txt filter=lfs\n", encoding="utf-8")
+
+    def _oversized_read(_fd: int, count: int) -> bytes:
+        return b"#" * count
+
+    monkeypatch.setattr(comments_checkout.os, "read", _oversized_read)
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+
+    assert raised.value.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+
+
+@pytest.mark.unit
+def test_isolated_reask_checkout_git_dir_fails_closed_when_setup_cannot_link_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A checkout isolation setup failure must block the reason re-ask."""
+
+    def _fail_symlink_to(self: Path, _target: Path, **_kwargs: object) -> None:
+        raise OSError("objects cannot be linked")
+
+    monkeypatch.setattr(Path, "symlink_to", _fail_symlink_to)
+
+    with (
+        pytest.raises(_MonitorPolicyBlockedError) as raised,
+        comments_checkout._isolated_reask_checkout_git_dir(  # noqa: SLF001
+            source_mirror=tmp_path / "mirror.git",
+            source_worktree_path=tmp_path / "worktree",
+            restore_ref="a" * 40,
+        ),
+    ):
+        pytest.fail("checkout isolation setup should have failed")
+
+    assert raised.value.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
 
 
 @pytest.mark.unit
