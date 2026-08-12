@@ -221,6 +221,54 @@ class TestRender:
         )
 
     @pytest.mark.unit
+    def test_clarification_copies_aws_credentials_and_config(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """AWS staging keeps profile/role-chain definitions alongside the keys.
+
+        ``~/.aws/config`` carries profile definitions (``source_profile`` role
+        chains, ``credential_process``) that the staged-auth rewrite machinery
+        expects to find; copying only ``credentials`` strands those setups.
+        """
+        provider_auth = tmp_path / "auth" / ".aws"
+        provider_auth.mkdir(parents=True)
+        (provider_auth / "credentials").write_text("[default]\n", encoding="utf-8")
+        (provider_auth / "config").write_text("[profile role-chain]\n", encoding="utf-8")
+        (provider_auth / "cli" / "cache").mkdir(parents=True)
+        (provider_auth / "cli" / "cache" / "session.json").write_text("{}\n", encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(provider_auth),
+                            target="/home/agent/.aws",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_home = tmp_path / "clarification-home" / ".aws"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(provider_auth))
+            .replace("/home/agent/.aws", str(clarification_home))
+        )
+        environment = os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_home)}
+
+        subprocess.run(["sh", "-ec", entrypoint, "--", "true"], check=True, env=environment)
+
+        assert (clarification_home / "credentials").read_text(encoding="utf-8") == "[default]\n"
+        assert (clarification_home / "config").read_text(
+            encoding="utf-8"
+        ) == "[profile role-chain]\n"
+        assert not (clarification_home / "cli").exists()
+
+    @pytest.mark.unit
     def test_clarification_omits_claude_legacy_configuration_file(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
