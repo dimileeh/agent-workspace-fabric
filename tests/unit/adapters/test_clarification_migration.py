@@ -10,6 +10,7 @@ from awf.adapters.clarification_migration import (
     PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
     PersistedClarificationModelNetworkAttachment,
     _attach_persisted_clarification_model_network,
+    _RepairedClarificationModelNetworkEndpoint,
     _rollback_persisted_clarification_model_network,
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON, CommandResult, FakeCommandRunner
@@ -135,6 +136,53 @@ async def test_attach_persisted_model_network_preserves_existing_aliased_endpoin
         container_id,
     ]
     assert not any(call.args[2] == "disconnect" for call in runner.calls if len(call.args) > 2)
+    _assert_bounded_migration_calls(runner)
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_restores_repaired_endpoint_aliases() -> None:
+    """A failed migration restores aliases displaced by endpoint repair."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    container_id = "stateful-model-container"
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout=f"{container_id}\n")
+    runner.queue_result(stdout=f"{container_id}\n")
+    runner.queue_result(returncode=1, stderr="endpoint already connected")
+    runner.queue_result(stdout="legacy-primary\nlegacy-secondary\n")
+    runner.queue_result()
+    runner.queue_result()
+
+    attachment, result = await _attach_persisted_clarification_model_network(
+        runner,
+        compose_project="awf_ws_legacy",
+        compose_file=Path("/workspaces/ws_legacy/compose.yml"),
+        workspace_id="ws_legacy",
+        clarification_model_services=("ollama-sidecar",),
+    )
+
+    assert result.ok
+    runner.queue_result()
+    runner.queue_result()
+
+    rollback_result = await _rollback_persisted_clarification_model_network(
+        runner, attachment=attachment
+    )
+
+    assert rollback_result.ok
+    assert [call.args for call in runner.calls[-2:]] == [
+        ["docker", "network", "disconnect", network_name, container_id],
+        [
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "legacy-primary",
+            "--alias",
+            "legacy-secondary",
+            network_name,
+            container_id,
+        ],
+    ]
     _assert_bounded_migration_calls(runner)
 
 
@@ -316,7 +364,11 @@ async def test_attach_persisted_model_network_preserves_reconnect_failure() -> N
         clarification_model_services=("ollama-sidecar",),
     )
 
-    assert attachment.reconnecting_endpoints == [("stateful-model-container", "ollama-sidecar")]
+    assert attachment.reconnecting_endpoints == []
+    assert [
+        (endpoint.container_id, endpoint.aliases, endpoint.needs_disconnect)
+        for endpoint in attachment.repaired_endpoints
+    ] == [("stateful-model-container", (), False)]
     assert result.stderr == "network disconnect denied"
 
 
@@ -410,6 +462,33 @@ async def test_attach_persisted_model_network_recognizes_short_preexisting_conta
             "rm",
             id="remove-network",
         ),
+        pytest.param(
+            PersistedClarificationModelNetworkAttachment(
+                network_name="awf-ws_legacy-clarification-model-net",
+                repaired_endpoints=[
+                    _RepairedClarificationModelNetworkEndpoint(
+                        container_id="model-container",
+                        aliases=("legacy-alias",),
+                        needs_disconnect=True,
+                    )
+                ],
+            ),
+            "disconnect",
+            id="restore-disconnect",
+        ),
+        pytest.param(
+            PersistedClarificationModelNetworkAttachment(
+                network_name="awf-ws_legacy-clarification-model-net",
+                repaired_endpoints=[
+                    _RepairedClarificationModelNetworkEndpoint(
+                        container_id="model-container",
+                        aliases=("legacy-alias",),
+                    )
+                ],
+            ),
+            "connect",
+            id="restore-connect",
+        ),
     ],
 )
 async def test_rollback_persisted_model_network_reports_runner_exceptions(
@@ -420,8 +499,9 @@ async def test_rollback_persisted_model_network_reports_runner_exceptions(
 
     class _RaisingRunner:
         async def run(self, args: list[str], **_kwargs: object):  # type: ignore[no-untyped-def]
-            assert operation in args
-            raise RuntimeError(f"{operation} failed")
+            if operation in args:
+                raise RuntimeError(f"{operation} failed")
+            return CommandResult(returncode=0, stdout="", stderr="")
 
     result = await _rollback_persisted_clarification_model_network(
         _RaisingRunner(),  # type: ignore[arg-type]

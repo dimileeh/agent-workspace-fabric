@@ -130,14 +130,15 @@ class TestLegacyClarificationModelNetworkLifecycle:
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]
-        assert runner.calls[7].args == [
+        assert runner.calls[7].args[:3] == ["docker", "inspect", "--format"]
+        assert runner.calls[8].args == [
             "docker",
             "network",
             "disconnect",
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]
-        assert runner.calls[8].args == [
+        assert runner.calls[9].args == [
             "docker",
             "network",
             "connect",
@@ -167,12 +168,11 @@ class TestLegacyClarificationModelNetworkLifecycle:
             returncode=1,
             stderr="endpoint with name stateful-model-container already exists in network",
         )
+        runner.queue_result(stdout="legacy-ollama-alias\n")
         runner.queue_result()
         runner.queue_result(returncode=1, stderr="could not attach service alias")
-        runner.queue_result(
-            returncode=1,
-            stderr="endpoint with name stateful-model-container already exists in network",
-        )
+        runner.queue_result()
+        runner.queue_result()
         adapter = OpenCodeAdapter(runner=runner)
 
         with pytest.raises(AgentRunError) as exc:
@@ -186,14 +186,15 @@ class TestLegacyClarificationModelNetworkLifecycle:
             )
 
         assert exc.value.reason_code == "CLARIFICATION_MODEL_SERVICE_UPDATE_FAILED"
-        assert runner.calls[3].args == [
+        assert runner.calls[3].args[:3] == ["docker", "inspect", "--format"]
+        assert runner.calls[4].args == [
             "docker",
             "network",
             "disconnect",
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]
-        assert runner.calls[4].args == [
+        assert runner.calls[5].args == [
             "docker",
             "network",
             "connect",
@@ -202,7 +203,16 @@ class TestLegacyClarificationModelNetworkLifecycle:
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]
-        assert runner.calls[5].args == runner.calls[4].args
+        assert runner.calls[6].args == runner.calls[4].args
+        assert runner.calls[7].args == [
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "legacy-ollama-alias",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
+        ]
         assert all("run" not in call.args for call in runner.calls)
         assert compose_file.read_bytes() == original_compose_file
 
@@ -229,7 +239,7 @@ class TestLegacyClarificationModelNetworkLifecycle:
             returncode=1,
             stderr="endpoint with name stateful-model-container already exists in network",
         )
-        runner.queue_result()
+        runner.queue_result(stdout="legacy-ollama-alias\n")
         runner.queue_result()
         adapter = OpenCodeAdapter(runner=runner)
 
@@ -246,9 +256,16 @@ class TestLegacyClarificationModelNetworkLifecycle:
         assert runner.calls[4].args == [
             "docker",
             "network",
+            "disconnect",
+            "awf-ws_legacy-clarification-model-net",
+            "stateful-model-container",
+        ]
+        assert runner.calls[5].args == [
+            "docker",
+            "network",
             "connect",
             "--alias",
-            "ollama-sidecar",
+            "legacy-ollama-alias",
             "awf-ws_legacy-clarification-model-net",
             "stateful-model-container",
         ]

@@ -45,6 +45,15 @@ def _restore_compose_file(*, compose_file: Path, contents: bytes) -> None:
 
 
 @dataclass
+class _RepairedClarificationModelNetworkEndpoint:
+    """Original aliases and replacement progress for one repaired endpoint."""
+
+    container_id: str
+    aliases: tuple[str, ...]
+    needs_disconnect: bool = False
+
+
+@dataclass
 class PersistedClarificationModelNetworkAttachment:
     """Runtime network state added while upgrading a legacy clarification run."""
 
@@ -53,6 +62,9 @@ class PersistedClarificationModelNetworkAttachment:
     pending_network_creation_marker: str | None = None
     connected_container_ids: list[str] = field(default_factory=list)
     reconnecting_endpoints: list[tuple[str, str]] = field(default_factory=list)
+    repaired_endpoints: list[_RepairedClarificationModelNetworkEndpoint] = field(
+        default_factory=list
+    )
 
 
 def _clarification_model_network_name(*, compose_project: str, workspace_id: str | None) -> str:
@@ -227,9 +239,17 @@ async def _attach_persisted_clarification_model_network(
                 )
                 if not alias_inspect_result.ok:
                     return attachment, alias_inspect_result
-                if service in alias_inspect_result.stdout.splitlines():
+                aliases = tuple(
+                    alias for alias in alias_inspect_result.stdout.splitlines() if alias
+                )
+                if service in aliases:
                     attachment.reconnecting_endpoints.pop()
                     continue
+                attachment.reconnecting_endpoints.pop()
+                repaired_endpoint = _RepairedClarificationModelNetworkEndpoint(
+                    container_id=container_id, aliases=aliases
+                )
+                attachment.repaired_endpoints.append(repaired_endpoint)
                 network_disconnect_result = await runner.run(
                     ["docker", "network", "disconnect", attachment.network_name, container_id],
                     timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
@@ -238,6 +258,7 @@ async def _attach_persisted_clarification_model_network(
                     network_disconnect_result
                 ):
                     return attachment, network_disconnect_result
+                repaired_endpoint.needs_disconnect = True
                 network_connect_result = await runner.run(
                     [
                         "docker",
@@ -251,7 +272,6 @@ async def _attach_persisted_clarification_model_network(
                     timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
                 )
                 if network_connect_result.ok:
-                    attachment.reconnecting_endpoints.pop()
                     continue
                 return attachment, network_connect_result
             return attachment, network_connect_result
@@ -292,6 +312,55 @@ async def _rollback_persisted_clarification_model_network(
                     service,
                     attachment.network_name,
                     container_id,
+                ],
+                timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            network_connect_result = CommandResult(
+                returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+            )
+        if (
+            first_failure is None
+            and not network_connect_result.ok
+            and not _network_is_already_connected(network_connect_result)
+        ):
+            first_failure = network_connect_result
+    for repaired_endpoint in reversed(attachment.repaired_endpoints):
+        if repaired_endpoint.needs_disconnect:
+            try:
+                network_disconnect_result = await runner.run(
+                    [
+                        "docker",
+                        "network",
+                        "disconnect",
+                        attachment.network_name,
+                        repaired_endpoint.container_id,
+                    ],
+                    timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                network_disconnect_result = CommandResult(
+                    returncode=1, stdout="", stderr=f"{type(exc).__name__}: {exc}"
+                )
+            if first_failure is None and (
+                not network_disconnect_result.ok
+                and not _network_is_absent(network_disconnect_result, attachment.network_name)
+                and not _network_is_not_connected(network_disconnect_result)
+            ):
+                first_failure = network_disconnect_result
+        try:
+            network_connect_result = await runner.run(
+                [
+                    "docker",
+                    "network",
+                    "connect",
+                    *[
+                        argument
+                        for alias in repaired_endpoint.aliases
+                        for argument in ("--alias", alias)
+                    ],
+                    attachment.network_name,
+                    repaired_endpoint.container_id,
                 ],
                 timeout_seconds=PERSISTED_CLARIFICATION_MODEL_NETWORK_TIMEOUT_SECONDS,
             )
