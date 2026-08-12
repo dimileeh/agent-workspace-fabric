@@ -176,6 +176,7 @@ async def test_isolated_reask_git_lifecycle_ignores_object_lookup_overrides(
     assert "read-tree" in command_runner.calls[3].args
     assert "--reset" in command_runner.calls[3].args
     assert "--no-sparse-checkout" in command_runner.calls[3].args
+    assert "core.fsmonitor=false" in command_runner.calls[3].args
     assert "worktree" in command_runner.calls[4].args
     assert "remove" in command_runner.calls[4].args
     assert all(call.env is not None for call in command_runner.calls)

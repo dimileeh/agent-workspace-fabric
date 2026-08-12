@@ -415,13 +415,18 @@ async def _create_isolated_reask_worktree(
             )
         if checkout.ok:
             checkout = await runner._deps.runner.run(
-                git_worktree_command(
-                    path,
-                    "read-tree",
-                    "--reset",
-                    "--no-sparse-checkout",
-                    restore_ref,
-                ),
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    *git_worktree_command(
+                        path,
+                        "read-tree",
+                        "--reset",
+                        "--no-sparse-checkout",
+                        restore_ref,
+                    )[1:],
+                ],
                 timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
                 env=git_env_without_object_lookup_overrides(),
             )
