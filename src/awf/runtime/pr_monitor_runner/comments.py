@@ -140,6 +140,7 @@ async def _prepare_reask_primary_worktree(
         return await runner._deps.runner.run(
             [*command[:1], "-c", "core.fsmonitor=false", *command[1:]],
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
         )
 
     adapter = getattr(runner._deps, "adapter", None)
@@ -181,6 +182,7 @@ async def _check_reask_primary_worktree_clean(
         return await runner._deps.runner.run(
             [*command[:1], "-c", "core.fsmonitor=false", *command[1:]],
             timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+            env=git_env_without_object_lookup_overrides(),
         )
 
     check = await check_validation_worktree_clean(

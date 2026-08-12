@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
@@ -78,6 +79,63 @@ async def test_prepare_reask_primary_worktree_constrains_scratch_exclude_to_sour
     )
 
     assert apply_calls[0]["validated_mirror_path"] == source_mirror
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_sanitizes_primary_status_object_lookup_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary cleanliness checks ignore inherited Git object-directory overrides."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_object_directory")
+    restore_ref = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "ignored.env").mkdir()
+    object_directory = tmp_path / "empty-object-directory"
+    object_directory.mkdir()
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(object_directory))
+
+    class _RecordingLocalCommandRunner(_LocalCommandRunner):
+        """Record environments used by the primary-worktree status calls."""
+
+        def __init__(self) -> None:
+            self.primary_status_environments: list[dict[str, str] | None] = []
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if args[args.index("-C") + 1] == str(worktree) and "status" in args:
+                self.primary_status_environments.append(None if env is None else dict(env))
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    command_runner = _RecordingLocalCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return restore_ref
+
+    runner._rev_parse_head = _rev_parse_head
+
+    await comments._prepare_reask_primary_worktree(
+        runner,
+        worktree_path=worktree,
+    )
+    assert (
+        await comments._check_reask_primary_worktree_clean(
+            runner,
+            worktree_path=worktree,
+            restore_ref=restore_ref,
+        )
+        is None
+    )
+    assert len(command_runner.primary_status_environments) == 2
+    assert all(
+        environment is not None and "GIT_OBJECT_DIRECTORY" not in environment
+        for environment in command_runner.primary_status_environments
+    )
 
 
 @pytest.mark.unit
