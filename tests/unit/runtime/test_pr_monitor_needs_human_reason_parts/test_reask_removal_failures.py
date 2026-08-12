@@ -28,15 +28,18 @@ async def test_isolated_reask_worktree_removal_is_bounded() -> None:
 
         def __init__(self) -> None:
             self.timeouts: list[float | None] = []
+            self.environments: list[dict[str, str] | None] = []
 
         async def run(
             self,
             _args: list[str],
             *,
             timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Record the command deadline and report successful cleanup."""
             self.timeouts.append(timeout_seconds)
+            self.environments.append(env)
             return CommandResult(returncode=0, stdout="", stderr="")
 
     command_runner = _RecordingCommandRunner()
@@ -48,6 +51,7 @@ async def test_isolated_reask_worktree_removal_is_bounded() -> None:
 
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
     assert command_runner.timeouts == [comments._ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS]
+    assert command_runner.environments[0] is not None
 
 
 @pytest.mark.unit

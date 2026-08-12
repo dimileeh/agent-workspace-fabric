@@ -13,8 +13,29 @@ from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _git,
     _init_awf_linked_worktree,
+    _init_real_worktree,
     _LocalCommandRunner,
 )
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_preserves_empty_primary_worktree_dir(
+    tmp_path: Path,
+) -> None:
+    """A cleanliness preflight must not delete unrelated empty directories."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_empty_primary")
+    empty_output_dir = worktree / "operator-output"
+    empty_output_dir.mkdir()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not prepare an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert empty_output_dir.exists()
 
 
 @pytest.mark.unit

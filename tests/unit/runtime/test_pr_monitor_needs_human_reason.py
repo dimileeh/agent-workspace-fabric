@@ -887,26 +887,6 @@ async def test_isolated_reask_worktree_preserves_dirty_primary_worktree(tmp_path
 
 
 @pytest.mark.unit
-async def test_isolated_reask_worktree_preserves_empty_primary_worktree_dir(
-    tmp_path: Path,
-) -> None:
-    """A cleanliness preflight must not delete unrelated empty directories."""
-    worktree = _init_real_worktree(tmp_path, "ws_reask_empty_primary")
-    empty_output_dir = worktree / "operator-output"
-    empty_output_dir.mkdir()
-    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
-
-    with pytest.raises(_MonitorPolicyBlockedError, match="Could not prepare an isolated worktree"):
-        await comments._create_isolated_reask_worktree(
-            runner,
-            worktree_path=worktree,
-            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
-        )
-
-    assert empty_output_dir.exists()
-
-
-@pytest.mark.unit
 async def test_isolated_reask_worktree_releases_liveness_lock_when_git_add_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1293,10 +1273,14 @@ async def test_isolated_reask_worktree_removes_checkout_when_creation_is_cancell
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
@@ -1324,10 +1308,14 @@ async def test_isolated_reask_worktree_removes_checkout_when_filter_probe_is_can
         """Cancel after the linked worktree is registered and its config is read."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run setup until the effective filter configuration is queried."""
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "config" in args:
                 raise asyncio.CancelledError
             return result
@@ -1403,16 +1391,20 @@ async def test_isolated_reask_worktree_creation_cleanup_survives_second_cancella
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 cleanup_started.set()
                 await release_cleanup.wait()
-                result = await super().run(args, timeout_seconds=timeout_seconds)
+                result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
                 cleanup_finished.set()
                 return result
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
@@ -1451,12 +1443,16 @@ async def test_isolated_reask_worktree_reports_cleanup_failure_when_creation_is_
         """Test double used by the surrounding scenario."""
 
         async def run(
-            self, args: list[str], *, timeout_seconds: float | None = None
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
         ) -> CommandResult:
             """Run this test double and record the invocation."""
             if "worktree" in args and "remove" in args:
                 return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
-            result = await super().run(args, timeout_seconds=timeout_seconds)
+            result = await super().run(args, timeout_seconds=timeout_seconds, env=env)
             if "worktree" in args and "add" in args:
                 raise asyncio.CancelledError
             return result
