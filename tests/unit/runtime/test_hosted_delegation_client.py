@@ -347,6 +347,47 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
 
 
 @pytest.mark.unit
+async def test_read_only_agent_delegation_accepts_success_without_terminal_head_sha() -> None:
+    """Immutable clarification runs cannot advance the PR head."""
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            assert json.loads(request.content)["read_only"] is True
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "returncode": 0,
+                    "stdout": "NEEDS_HUMAN: select a region",
+                    "stderr": "",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/operations/op_1/cancel":
+            return httpx.Response(202, json={"state": "cancelled"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request(read_only=True)
+        )
+
+    assert result.returncode == 0
+    assert result.stdout == "NEEDS_HUMAN: select a region"
+    assert result.terminal_head_sha is None
+
+
+@pytest.mark.unit
 async def test_agent_delegation_posts_profile_and_rendered_stack_metadata(
     tmp_path: Path,
 ) -> None:
