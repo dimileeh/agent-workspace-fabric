@@ -323,6 +323,37 @@ async def test_checkout_filter_overrides_does_not_start_attribute_read_after_dea
 
 
 @pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_allows_absent_info_directory(
+    tmp_path: Path,
+) -> None:
+    """A repository without mutable Git attributes needs no filter overrides."""
+    assert (
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=tmp_path / "mirror.git",
+            source_worktree_path=tmp_path / "worktree",
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_checkout_info_attributes_filter_overrides_allows_absent_attributes_file(
+    tmp_path: Path,
+) -> None:
+    """An empty Git info directory does not require filter overrides."""
+    git_dir = tmp_path / "mirror.git"
+    (git_dir / "info").mkdir(parents=True)
+
+    assert (
+        comments_checkout._checkout_info_attributes_filter_overrides(  # noqa: SLF001
+            source_mirror=git_dir,
+            source_worktree_path=tmp_path / "worktree",
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 def test_checkout_info_attributes_filter_overrides_rejects_symlinked_attributes(
     tmp_path: Path,
 ) -> None:
