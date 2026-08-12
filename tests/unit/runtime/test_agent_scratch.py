@@ -209,6 +209,49 @@ async def test_empty_scratch_paths_is_noop(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_scratch_directory_opening_creates_relative_paths_and_rejects_parent_escape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scratch exclusion metadata stays beneath its selected relative directory."""
+    monkeypatch.chdir(tmp_path)
+    directory_fd = agent_scratch._open_scratch_directory(Path("metadata/info"))  # noqa: SLF001
+    try:
+        assert (tmp_path / "metadata" / "info").is_dir()
+    finally:
+        os.close(directory_fd)
+
+    with pytest.raises(OSError, match="unsafe Git scratch exclude directory path"):
+        agent_scratch._open_scratch_directory(Path("metadata/../outside"))  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_scratch_exclude_rewrite_fails_when_no_bytes_are_written(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A short write cannot be mistaken for a complete managed exclusion block."""
+    exclude = tmp_path / "info" / "exclude"
+    exclude.parent.mkdir()
+    exclude.write_text("", encoding="utf-8")
+    monkeypatch.setattr(agent_scratch.os, "write", lambda _fd, _data: 0)
+
+    with pytest.raises(OSError, match="could not write Git scratch exclude"):
+        agent_scratch._rewrite_scratch_exclude(exclude, _SCRATCH)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_extract_managed_patterns_ignores_blank_lines_inside_block() -> None:
+    """Blank lines do not become accidental Git exclusion patterns."""
+    assert (
+        agent_scratch._extract_managed_patterns(  # noqa: SLF001
+            f"{AWF_SCRATCH_BLOCK_START}\n\n{AWF_SCRATCH_BLOCK_END}\n"
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 async def test_rev_parse_failure_is_handled_gracefully(tmp_path: Path) -> None:
     """A failed rev-parse returns False and writes nothing."""
     worktree = tmp_path / "worktree"

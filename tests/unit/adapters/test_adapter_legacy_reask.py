@@ -1235,6 +1235,196 @@ class TestIsolatedReaskAdapter:
             index_path.write_bytes(malformed_index)
             assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
 
+    def test_copy_regular_git_metadata_file_rejects_data_that_arrives_after_limit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A metadata file that grows while copied cannot exceed its byte cap."""
+        source_dir = tmp_path / "linked-git"
+        source_dir.mkdir()
+        (source_dir / "HEAD").write_bytes(b"abc")
+        destination = tmp_path / "snapshot" / "HEAD"
+        destination.parent.mkdir()
+        real_read = base_isolated_reask.os.read
+
+        def _read_with_late_byte(fd: int, size: int) -> bytes:
+            if size == 1:
+                return b"x"
+            return real_read(fd, size)
+
+        monkeypatch.setattr(base_isolated_reask.os, "read", _read_with_late_byte)
+
+        with pytest.raises(OSError, match="exceeds size limit"):
+            base_isolated_reask._copy_regular_git_metadata_file(
+                source_dir,
+                "HEAD",
+                destination,
+                max_bytes=3,
+            )
+
+        assert not destination.exists()
+
+    def test_copy_regular_git_metadata_file_accepts_exact_byte_limit(self, tmp_path: Path) -> None:
+        """A control file exactly at the limit remains usable by the snapshot."""
+        source_dir = tmp_path / "linked-git"
+        source_dir.mkdir()
+        (source_dir / "HEAD").write_bytes(b"abc")
+        destination = tmp_path / "snapshot" / "HEAD"
+        destination.parent.mkdir()
+
+        assert (
+            base_isolated_reask._copy_regular_git_metadata_file(
+                source_dir,
+                "HEAD",
+                destination,
+                max_bytes=3,
+            )
+            == 3
+        )
+        assert destination.read_bytes() == b"abc"
+
+    def test_isolated_reask_rejects_gitfile_that_changes_after_size_check(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A raced linked-worktree pointer is ignored instead of being trusted."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        (worktree_path / ".git").write_bytes(b"abcd")
+        real_fstat = base_isolated_reask.os.fstat
+        monkeypatch.setattr(base_isolated_reask, "_MAX_ISOLATED_REASK_GIT_METADATA_BYTES", 3)
+
+        def _stale_size(fd: int) -> os.stat_result:
+            file_stat = real_fstat(fd)
+            if stat.S_ISREG(file_stat.st_mode):
+                values = list(file_stat)
+                values[stat.ST_SIZE] = 3
+                return os.stat_result(values)
+            return file_stat
+
+        monkeypatch.setattr(base_isolated_reask.os, "fstat", _stale_size)
+
+        assert base_isolated_reask._isolated_reask_linked_worktree_git_dir(worktree_path) is None
+
+    @pytest.mark.parametrize("gitfile", (b"not-a-gitdir", b"\xff"))
+    def test_isolated_reask_rejects_invalid_linked_worktree_pointer(
+        self, tmp_path: Path, gitfile: bytes
+    ) -> None:
+        """Malformed or non-UTF-8 pointers cannot redirect clarification Git access."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        (worktree_path / ".git").write_bytes(gitfile)
+
+        assert base_isolated_reask._isolated_reask_linked_worktree_git_dir(worktree_path) is None
+
+    def test_isolated_reask_ignores_missing_linked_worktree_pointer(self, tmp_path: Path) -> None:
+        """A worktree without its control file cannot produce a Git metadata bind."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        assert base_isolated_reask._isolated_reask_linked_worktree_git_dir(worktree_path) is None
+
+    def test_isolated_reask_rejects_special_object_store_entries(self, tmp_path: Path) -> None:
+        """A special file in the object store cannot be copied into the snapshot."""
+        source = tmp_path / "objects"
+        source.mkdir()
+        os.mkfifo(source / "agent-controlled")
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+
+        with pytest.raises(OSError, match="not a regular file or directory"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
+    def test_split_index_parser_handles_version_four_path_encoding(self, tmp_path: Path) -> None:
+        """A version-four index without a link extension selects no shared index."""
+        index_path = tmp_path / "index"
+        entry = bytearray(62)
+        entry[60:62] = b"\x40\x00"
+        index_path.write_bytes(
+            b"DIRC"
+            + (4).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + bytes(entry)
+            + b"\x00\x00\x00path\x00"
+            + b"\x00" * 20
+        )
+
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+
+    def test_split_index_parser_rejects_truncated_version_four_path(self, tmp_path: Path) -> None:
+        """A truncated version-four path cannot make the parser overrun the checksum."""
+        index_path = tmp_path / "index"
+        index_path.write_bytes(
+            b"DIRC"
+            + (4).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\x00" * 62
+            + b"\x00"
+            + b"\x00" * 20
+        )
+
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+
+    def test_split_index_parser_rejects_unaligned_version_two_entry(self, tmp_path: Path) -> None:
+        """A malformed version-two entry cannot advance past the index checksum."""
+        index_path = tmp_path / "index"
+        index_path.write_bytes(
+            b"DIRC"
+            + (2).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\x00" * 62
+            + b"xx\x00"
+            + b"\x00" * 20
+        )
+
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+
+    def test_split_index_parser_accepts_multibyte_version_four_prefix(self, tmp_path: Path) -> None:
+        """Version-four path prefixes may span bytes without selecting an index link."""
+        index_path = tmp_path / "index"
+        index_path.write_bytes(
+            b"DIRC"
+            + (4).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\x00" * 62
+            + b"\x80\x00path\x00"
+            + b"\x00" * 20
+        )
+
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+
+    def test_isolated_reask_source_config_rejects_unknown_object_hash_length(
+        self, tmp_path: Path
+    ) -> None:
+        """Snapshots accept only Git's supported SHA-1 and SHA-256 references."""
+        with pytest.raises(OSError, match="supported Git object format"):
+            base_isolated_reask._write_isolated_reask_source_config(tmp_path, "a" * 41)
+
+    def test_copy_git_object_directory_rejects_directory_replaced_after_scan(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A raced object directory cannot be treated as a trusted child directory."""
+        source = tmp_path / "objects"
+        (source / "pack").mkdir(parents=True)
+        destination = tmp_path / "snapshot" / "objects"
+        destination.parent.mkdir()
+        real_fstat = base_isolated_reask.os.fstat
+
+        def _replace_child_stat(fd: int) -> os.stat_result:
+            file_stat = real_fstat(fd)
+            if stat.S_ISDIR(file_stat.st_mode):
+                values = list(file_stat)
+                values[stat.ST_MODE] = stat.S_IFREG | 0o600
+                return os.stat_result(values)
+            return file_stat
+
+        monkeypatch.setattr(base_isolated_reask.os, "fstat", _replace_child_stat)
+
+        with pytest.raises(OSError, match="not a directory"):
+            base_isolated_reask._copy_git_object_directory(source, destination)
+
+        assert not destination.exists()
+
     def test_isolated_reask_git_metadata_binds_avoids_git_config_for_shared_index_lookup(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1260,6 +1450,43 @@ class TestIsolatedReaskAdapter:
         assert temporary_metadata is not None
         try:
             assert shared_index_commands == []
+        finally:
+            temporary_metadata.cleanup()
+
+    def test_isolated_reask_git_metadata_binds_continue_without_an_index(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An optional index copy failure cannot discard safe re-ask metadata."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        real_copy = base_isolated_reask._copy_regular_git_metadata_file_from_directory_fd
+
+        def _fail_index_copy(
+            source_dir_fd: int,
+            source_name: str,
+            destination: Path,
+            **kwargs: object,
+        ) -> int:
+            if source_name == "index":
+                raise OSError("index changed during snapshot")
+            return real_copy(source_dir_fd, source_name, destination, **kwargs)
+
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_copy_regular_git_metadata_file_from_directory_fd",
+            _fail_index_copy,
+        )
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
+        )
+
+        assert temporary_metadata is not None
+        try:
+            snapshot_path = Path(temporary_metadata.name) / "linked-git"
+            assert not (snapshot_path / "index").exists()
+            assert binds
         finally:
             temporary_metadata.cleanup()
 
@@ -1310,6 +1537,55 @@ class TestIsolatedReaskAdapter:
 
         assert temporary_metadata is None
         assert binds == ()
+
+    def test_isolated_reask_git_metadata_binds_skip_snapshot_when_tempdir_creation_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A local metadata snapshot is never replaced with a shared-mirror bind."""
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+
+        class _TemporaryDirectoryFailure:
+            @classmethod
+            def __class_getitem__(cls, _item: object) -> type[_TemporaryDirectoryFailure]:
+                return cls
+
+            def __new__(cls, *_args: object, **_kwargs: object) -> _TemporaryDirectoryFailure:
+                raise OSError("temporary metadata directory unavailable")
+
+        monkeypatch.setattr(
+            base_isolated_reask.tempfile,
+            "TemporaryDirectory",
+            _TemporaryDirectoryFailure,
+        )
+
+        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
+            worktree_path,
+            expected_ref=head_oid,
+            expected_source_mirror=mirror_path,
+        )
+
+        assert temporary_metadata is None
+        assert binds == ()
+
+    def test_linked_worktree_common_git_dir_preserves_absolute_commondir(
+        self, tmp_path: Path
+    ) -> None:
+        """A valid absolute commondir does not acquire the linked-directory prefix."""
+        snapshot_path = tmp_path / "snapshot"
+        snapshot_path.mkdir()
+        expected_source_mirror = tmp_path / "mirror"
+        (snapshot_path / "commondir").write_text(f"{expected_source_mirror}\n", encoding="utf-8")
+        linked_git_dir = tmp_path / "worktrees" / "reask"
+        linked_git_dir.mkdir(parents=True)
+
+        assert (
+            base_isolated_reask._linked_worktree_common_git_dir(  # noqa: SLF001
+                snapshot_path,
+                linked_git_dir,
+                expected_source_mirror=expected_source_mirror,
+            )
+            == expected_source_mirror
+        )
 
     @pytest.mark.unit
     async def test_isolated_reask_upgrade_keeps_selected_opencode_provider_credentials(

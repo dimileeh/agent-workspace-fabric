@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1226,3 +1227,202 @@ async def test_repair_agent_runtime_ownership_blocks_numeric_worktree_without_wo
     assert called is False
     assert len(logger.exception_calls) == 1
     assert logger.exception_calls[0][0] == "monitor.event"
+
+
+@pytest.mark.unit
+def test_bounded_git_metadata_reader_rejects_missing_invalid_and_growing_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership repair fails closed for unsafe linked-worktree metadata."""
+    directory = tmp_path / "gitdir"
+    directory.mkdir()
+    directory_fd = ownership.os.open(directory, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            ownership._read_bounded_regular_git_metadata_file_at(
+                directory_fd,
+                "missing",
+                required=False,
+            )
+            is None
+        )
+        with pytest.raises(ValueError, match="missing Git metadata"):
+            ownership._read_bounded_regular_git_metadata_file_at(directory_fd, "missing")
+    finally:
+        ownership.os.close(directory_fd)
+
+    (directory / "HEAD").write_bytes(b"\xff")
+    directory_fd = ownership.os.open(directory, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    try:
+        with pytest.raises(ValueError, match="not valid UTF-8"):
+            ownership._read_bounded_regular_git_metadata_file_at(directory_fd, "HEAD")
+    finally:
+        ownership.os.close(directory_fd)
+
+    (directory / "HEAD").write_bytes(b"abcd")
+    real_fstat = ownership.os.fstat
+    monkeypatch.setattr(ownership, "_MAX_SOURCE_WORKTREE_GIT_METADATA_BYTES", 3)
+
+    def _stale_size(fd: int) -> object:
+        file_stat = real_fstat(fd)
+        values = list(file_stat)
+        values[ownership.stat.ST_SIZE] = 3
+        return ownership.os.stat_result(values)
+
+    monkeypatch.setattr(ownership.os, "fstat", _stale_size)
+    directory_fd = ownership.os.open(directory, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    try:
+        with pytest.raises(ValueError, match="exceeds size limit"):
+            ownership._read_bounded_regular_git_metadata_file_at(directory_fd, "HEAD")
+    finally:
+        ownership.os.close(directory_fd)
+
+
+@pytest.mark.unit
+def test_ownership_metadata_parsers_reject_untrusted_reference_forms(tmp_path: Path) -> None:
+    """Only safe ref names and Git pointers reach ownership repair commands."""
+    assert ownership._source_head_snapshot_ref("z" * 40) is None
+    assert ownership._source_head_snapshot_ref("ref: outside/refs") is None
+
+    with pytest.raises(ValueError, match="lacks a gitdir pointer"):
+        ownership._linked_worktree_git_dir_from_contents(tmp_path, "not-a-gitdir")
+
+
+@pytest.mark.unit
+def test_ownership_metadata_reader_reports_read_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A raced metadata read stops ownership repair before it can trust the path."""
+    metadata_dir = tmp_path / "gitdir"
+    metadata_dir.mkdir()
+    (metadata_dir / "HEAD").write_text("a" * 40, encoding="utf-8")
+    directory_fd = ownership.os.open(metadata_dir, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+
+    def _unreadable(_fd: int, _size: int) -> bytes:
+        raise OSError("metadata read unavailable")
+
+    monkeypatch.setattr(ownership.os, "read", _unreadable)
+    try:
+        with pytest.raises(ValueError, match="cannot read Git metadata HEAD"):
+            ownership._read_bounded_regular_git_metadata_file_at(directory_fd, "HEAD")
+    finally:
+        ownership.os.close(directory_fd)
+
+
+@pytest.mark.unit
+def test_ownership_ref_snapshot_rejects_resolution_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A source-ref lookup failure cannot resolve an agent-writable HEAD pointer."""
+
+    def _unavailable(*_args: object, **_kwargs: object) -> object:
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(ownership.subprocess, "run", _unavailable)
+
+    with pytest.raises(ValueError, match="cannot resolve source Git HEAD"):
+        ownership._snapshot_pinned_source_symbolic_ref(tmp_path, "refs/heads/main")
+
+
+@pytest.mark.unit
+def test_ownership_head_resolution_detects_pointer_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership repair refuses a source whose HEAD changes during resolution."""
+    linked_git_dir = tmp_path / "linked-git"
+    linked_git_dir.mkdir()
+    linked_git_dir_fd = ownership.os.open(linked_git_dir, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    snapshots = iter(["a" * 40, "b" * 40])
+    monkeypatch.setattr(
+        ownership,
+        "_read_bounded_regular_git_metadata_file_at",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    try:
+        with pytest.raises(ValueError, match="HEAD changed while resolving"):
+            ownership._resolve_pinned_source_head(
+                tmp_path,
+                linked_git_dir_fd=linked_git_dir_fd,
+            )
+    finally:
+        ownership.os.close(linked_git_dir_fd)
+
+
+@pytest.mark.unit
+def test_ownership_head_resolution_rejects_unverified_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed commit verification cannot become the repair target."""
+    linked_git_dir = tmp_path / "linked-git"
+    linked_git_dir.mkdir()
+    linked_git_dir_fd = ownership.os.open(linked_git_dir, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    monkeypatch.setattr(
+        ownership,
+        "_read_bounded_regular_git_metadata_file_at",
+        lambda *_args, **_kwargs: "a" * 40,
+    )
+    monkeypatch.setattr(
+        ownership.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    try:
+        with pytest.raises(ValueError, match="cannot resolve source Git HEAD"):
+            ownership._resolve_pinned_source_head(
+                tmp_path,
+                linked_git_dir_fd=linked_git_dir_fd,
+            )
+    finally:
+        ownership.os.close(linked_git_dir_fd)
+
+
+@pytest.mark.unit
+def test_ownership_rejects_unresolvable_gitdir_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worktree pointer that cannot be resolved is not used for repair."""
+
+    def _unresolvable(_self: Path, *args: object, **kwargs: object) -> Path:
+        del args, kwargs
+        raise OSError("path resolution unavailable")
+
+    monkeypatch.setattr(Path, "resolve", _unresolvable)
+
+    with pytest.raises(ValueError, match="cannot resolve source workspace Git metadata"):
+        ownership._linked_worktree_git_dir_from_contents(tmp_path, "gitdir: linked-git")
+
+
+@pytest.mark.unit
+def test_ownership_validates_numeric_linked_worktree_backref_through_open_fd(
+    tmp_path: Path,
+) -> None:
+    """A suffixed linked-worktree entry must point back to the claimed workspace."""
+    workspace_id = "ws"
+    worktree_path = tmp_path / "workspace" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: ignored\n", encoding="utf-8")
+    mirror = tmp_path / "workspace" / "mirrors" / "repo.git"
+    linked_git_dir = mirror / "worktrees" / f"{workspace_id}1"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    linked_git_dir_fd = ownership.os.open(linked_git_dir, ownership._PINNED_DIRECTORY_OPEN_FLAGS)
+    try:
+        assert (
+            ownership._validated_layout_mirror_for_linked_git_dir(
+                linked_git_dir,
+                linked_git_dir_name=linked_git_dir.name,
+                worktree_path=worktree_path,
+                workspace_id=workspace_id,
+                linked_git_dir_fd=linked_git_dir_fd,
+            )
+            == mirror
+        )
+    finally:
+        ownership.os.close(linked_git_dir_fd)
+
+
+@pytest.mark.unit
+def test_ownership_rejects_unopenable_source_worktree(tmp_path: Path) -> None:
+    """Source Git context cannot be created after the workspace directory disappears."""
+    with pytest.raises(ValueError, match="cannot open source workspace Git metadata"):
+        ownership.validated_source_worktree_git_context(tmp_path / "missing", "ws")

@@ -472,8 +472,20 @@ async def test_isolated_run_preserves_unsupported_source_reason(
         cli_args=["codex", "exec", "-"],
     )
 
+    assert ctx.baseline_cli_args is None
     assert ctx.cli_args == ["codex", "exec", "-"]
     assert ctx.volume_binds == ()
+    await ctx.capture_baseline_before_agent(
+        invocation=build_isolated_tracked_compose_run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            cli_args=["placeholder"],
+            source="usage",
+            label="codex",
+            worktree_host_path=Path("/worktrees/ws_isolated_unsupported/reask"),
+        )
+    )
+    await ctx.capture_final_before_cleanup(container_name="awf-unsupported")
     await ctx.finalize(status="success")
 
     snapshot = read_latest_usage_snapshot("ws_isolated_unsupported", work_dir=tmp_path)

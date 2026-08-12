@@ -176,6 +176,26 @@ class TestCollectDeferItems:
         ]
 
     @pytest.mark.unit
+    def test_outdated_thread_without_blocking_state_is_omitted_from_notification(self) -> None:
+        """An obsolete thread without a pending condition does not notify a human."""
+        obsolete_thread = ReviewThread(
+            thread_id="T-outdated-obsolete",
+            path="src/obsolete.py",
+            line=9,
+            body_excerpt="already resolved",
+            author="dimileeh",
+            is_outdated=True,
+        )
+
+        bots, humans = _collect_defer_items(
+            replace(_status(), outdated_unresolved_inline_threads=(obsolete_thread,)),
+            MonitorState(),
+        )
+
+        assert bots == []
+        assert humans == []
+
+    @pytest.mark.unit
     def test_non_deferred_review_comments_are_excluded(self) -> None:
         c = ReviewComment(
             comment_id="C2",

@@ -13,6 +13,7 @@ from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorHeadObjectMissingError,
@@ -483,3 +484,111 @@ async def test_needs_human_reason_reask_does_not_commit_dirty_changes(
             "restore_ref": "b" * 40,
         }
     ]
+
+
+@pytest.mark.unit
+async def test_provider_recovery_cleanup_failure_blocks_the_follow_up(tmp_path: Path) -> None:
+    """A provider retry cannot hide a failed cleanup of the reason-only re-ask."""
+    workspace_id = "ws_provider_cleanup"
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        raise ProviderRecoveryRetryError()
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "a" * 40
+
+    async def _check_reask_primary_worktree_clean(_runner: object, **_kwargs: object) -> None:
+        raise OSError("primary worktree inspection unavailable")
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
+    )
+    try:
+        with pytest.raises(
+            _MonitorPolicyBlockedError, match="primary worktree inspection unavailable"
+        ):
+            await comments._enforce_needs_human_reason(
+                runner,
+                result=VerdictResult(verdict="needs_human"),
+                original_prompt="state the reason",
+                workspace_id=workspace_id,
+                pr_number=1,
+                item_id="thread_1",
+                item_kind="thread",
+                item_author=None,
+                item_path=None,
+                item_line=None,
+                commit_message="fix: address thread_1",
+                compose_project="project",
+                compose_file=Path("compose.yml"),
+                state=None,
+                task_tag=None,
+                operation_start_head="a" * 40,
+                base_branch="main",
+                remote_branch=f"awf/{workspace_id}",
+                operation_id=None,
+                operation_type=None,
+                monitor_log=None,
+            )
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.unit
+async def test_isolated_reask_rejects_partial_source_git_context(tmp_path: Path) -> None:
+    """Clarification setup never mixes a mirror path with unpinned Git metadata."""
+    with pytest.raises(ValueError, match="source mirror and admin directory"):
+        await comments._create_isolated_reask_worktree(
+            SimpleNamespace(),
+            worktree_path=tmp_path / "worktree",
+            restore_ref="a" * 40,
+            source_mirror=tmp_path / "mirror.git",
+        )
+
+
+@pytest.mark.unit
+async def test_isolated_reask_removes_checkout_after_population_failure(tmp_path: Path) -> None:
+    """A checkout failure cannot leave a clarification worktree behind."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_population_failure")
+
+    class _PopulationFailureRunner(_LocalCommandRunner):
+        async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            result = await super().run(args)
+            if "checkout" in args:
+                return CommandResult(returncode=1, stdout=result.stdout, stderr="checkout failed")
+            return result
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_PopulationFailureRunner()))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not populate an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+def test_reask_alternates_probe_fails_closed_when_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unreadable alternates marker is treated as unsafe before Git can read it."""
+
+    def _unreadable(_self: Path, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OSError("alternates probe unavailable")
+
+    monkeypatch.setattr(Path, "stat", _unreadable)
+
+    assert comments._source_mirror_declares_object_alternates(tmp_path) is True
