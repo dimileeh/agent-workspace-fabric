@@ -139,6 +139,189 @@ async def test_checkout_filter_overrides_accepts_no_tracked_filters() -> None:
 
 
 @pytest.mark.unit
+async def test_checkout_filter_overrides_rejects_excessive_tracked_attribute_files() -> None:
+    """A tree with too many attributes files cannot start unbounded Git probes."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(
+        stdout="\0".join(f"directory_{index}/.gitattributes" for index in range(129))
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
+
+    assert len(command_runner.calls) == 1
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_rejects_excessive_tree_output() -> None:
+    """A large tree listing is rejected before it can drive any attribute reads."""
+    command_runner = FakeCommandRunner()
+    command_runner.queue_result(stdout="x" * (1024 * 1024 + 1))
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
+
+    assert len(command_runner.calls) == 1
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_uses_one_deadline_for_tree_and_attribute_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every attributes read spends from the same discovery budget as the tree probe."""
+
+    class _Clock:
+        now = 100.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    class _AdvancingRunner:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+            self.timeouts: list[float | None] = []
+            self.results = iter(
+                (
+                    CommandResult(returncode=0, stdout=".gitattributes\0", stderr=""),
+                    CommandResult(returncode=0, stdout="*.txt filter=custom\n", stderr=""),
+                )
+            )
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            **_kwargs: object,
+        ) -> CommandResult:
+            self.timeouts.append(timeout_seconds)
+            self.clock.now += 10.0
+            return next(self.results)
+
+    clock = _Clock()
+    command_runner = _AdvancingRunner(clock)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    monkeypatch.setattr(comments, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    assert await comments._checkout_filter_overrides(
+        runner,
+        worktree_path=Path("/worktree"),
+        restore_ref="a" * 40,
+        source_mirror=None,
+    ) == (
+        "-c",
+        "filter.custom.smudge=",
+        "-c",
+        "filter.custom.process=",
+        "-c",
+        "filter.custom.required=false",
+    )
+    assert command_runner.timeouts == [30.0, 20.0]
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_rejects_tree_probe_that_exhausts_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree probe that reaches the shared deadline cannot permit a checkout."""
+
+    class _Clock:
+        now = 100.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    class _DeadlineRunner:
+        def __init__(self, clock: _Clock) -> None:
+            self.clock = clock
+            self.timeouts: list[float | None] = []
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            **_kwargs: object,
+        ) -> CommandResult:
+            self.timeouts.append(timeout_seconds)
+            self.clock.now += 30.0
+            return CommandResult(returncode=0, stdout=".gitattributes\0", stderr="")
+
+    clock = _Clock()
+    command_runner = _DeadlineRunner(clock)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    monkeypatch.setattr(comments, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
+
+    assert command_runner.timeouts == [30.0]
+
+
+@pytest.mark.unit
+async def test_checkout_filter_overrides_does_not_start_attribute_read_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delay after tree discovery cannot begin a fresh per-file timeout."""
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.values = iter((100.0, 100.0, 129.0, 130.0))
+
+        def monotonic(self) -> float:
+            return next(self.values)
+
+    class _TreeRunner:
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            **_kwargs: object,
+        ) -> CommandResult:
+            self.timeouts.append(timeout_seconds)
+            return CommandResult(returncode=0, stdout=".gitattributes\0", stderr="")
+
+    command_runner = _TreeRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+    monkeypatch.setattr(
+        comments,
+        "time",
+        SimpleNamespace(monotonic=_Clock().monotonic),
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not read tracked checkout filters"):
+        await comments._checkout_filter_overrides(
+            runner,
+            worktree_path=Path("/worktree"),
+            restore_ref="a" * 40,
+            source_mirror=None,
+        )
+
+    assert command_runner.timeouts == [30.0]
+
+
+@pytest.mark.unit
 def test_checkout_info_attributes_filter_overrides_rejects_symlinked_attributes(
     tmp_path: Path,
 ) -> None:

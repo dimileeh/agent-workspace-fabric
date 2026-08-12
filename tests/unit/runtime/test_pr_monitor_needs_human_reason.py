@@ -681,9 +681,12 @@ async def test_isolated_reask_worktree_bounds_creation_metadata_lookup_and_check
     assert command_runner.creation_timeouts == [
         comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
     ]
-    assert command_runner.filter_metadata_timeouts == [
-        comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
-    ]
+    assert len(command_runner.filter_metadata_timeouts) == 1
+    assert (
+        0
+        < command_runner.filter_metadata_timeouts[0]
+        <= (comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS)
+    )
     assert command_runner.checkout_timeouts == [
         comments._ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
     ]

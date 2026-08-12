@@ -8,6 +8,7 @@ import fcntl
 import os
 import re
 import stat
+import time
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -103,6 +104,8 @@ _ISOLATED_REASK_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 30.0
 _FILTER_DRIVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FILTER_ATTRIBUTE_DRIVER_RE = re.compile(r"(?<!\S)filter=([^\s]+)")
 _MAX_CHECKOUT_INFO_ATTRIBUTES_BYTES = 1024 * 1024
+_MAX_CHECKOUT_FILTER_TREE_OUTPUT_BYTES = 1024 * 1024
+_MAX_CHECKOUT_FILTER_ATTRIBUTE_FILES = 128
 _SAFE_INFO_ATTRIBUTES_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _SAFE_INFO_ATTRIBUTES_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -219,7 +222,29 @@ async def _checkout_filter_overrides(
     source_mirror: Path | None,
 ) -> tuple[str, ...]:
     """Return overrides for every driver named by pinned tracked attributes."""
-    attribute_paths = await runner._deps.runner.run(
+    deadline = time.monotonic() + _ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS
+
+    async def _run_filter_discovery_command(command: list[str]) -> CommandResult:
+        """Run one discovery command within the shared setup deadline."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _MonitorPolicyBlockedError(
+                "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
+        result = await runner._deps.runner.run(
+            command,
+            timeout_seconds=remaining,
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if not result.ok or time.monotonic() >= deadline:
+            raise _MonitorPolicyBlockedError(
+                "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            )
+        return result
+
+    attribute_paths = await _run_filter_discovery_command(
         _reask_source_mirror_command(
             worktree_path,
             source_mirror,
@@ -229,35 +254,35 @@ async def _checkout_filter_overrides(
             "-z",
             "--name-only",
             restore_ref,
-        ),
-        timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-        env=git_env_without_object_lookup_overrides(),
+        )
     )
-    if not attribute_paths.ok:
+    if len(attribute_paths.stdout.encode("utf-8")) > _MAX_CHECKOUT_FILTER_TREE_OUTPUT_BYTES:
+        raise _MonitorPolicyBlockedError(
+            "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        )
+
+    tracked_attribute_paths = tuple(
+        attribute_path
+        for attribute_path in attribute_paths.stdout.split("\0")
+        if attribute_path == ".gitattributes" or attribute_path.endswith("/.gitattributes")
+    )
+    if len(tracked_attribute_paths) > _MAX_CHECKOUT_FILTER_ATTRIBUTE_FILES:
         raise _MonitorPolicyBlockedError(
             "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
             reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
         )
 
     driver_names: set[str] = set()
-    for attribute_path in attribute_paths.stdout.split("\0"):
-        if not (attribute_path == ".gitattributes" or attribute_path.endswith("/.gitattributes")):
-            continue
-        attributes = await runner._deps.runner.run(
+    for attribute_path in tracked_attribute_paths:
+        attributes = await _run_filter_discovery_command(
             _reask_source_mirror_command(
                 worktree_path,
                 source_mirror,
                 "show",
                 f"{restore_ref}:{attribute_path}",
-            ),
-            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-            env=git_env_without_object_lookup_overrides(),
-        )
-        if not attributes.ok:
-            raise _MonitorPolicyBlockedError(
-                "Could not read tracked checkout filters before the NEEDS_HUMAN reason re-ask.",
-                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
             )
+        )
         driver_names.update(_checkout_filter_driver_names(attributes.stdout))
 
     return _checkout_filter_driver_overrides(driver_names)
