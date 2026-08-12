@@ -726,7 +726,7 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
         ) -> CommandResult:
             """Record and run a Git command against the temporary worktree."""
             self.commands.append(args)
-            if args[args.index("-C") + 1] == str(worktree) and "status" in args:
+            if "-C" in args and args[args.index("-C") + 1] == str(worktree) and "status" in args:
                 self.primary_status_timeouts.append(timeout_seconds)
             return await super().run(args, timeout_seconds=timeout_seconds, env=env)
 
@@ -765,7 +765,7 @@ async def test_isolated_reask_worktree_disables_primary_fsmonitor(
     primary_status_commands = [
         args
         for args in command_runner.commands
-        if args[args.index("-C") + 1] == str(worktree) and "status" in args
+        if "-C" in args and args[args.index("-C") + 1] == str(worktree) and "status" in args
     ]
     assert len(primary_status_commands) == 2
     assert all("core.fsmonitor=false" in args for args in primary_status_commands)
@@ -875,6 +875,74 @@ async def test_isolated_reask_worktree_disables_filters_from_mutable_info_attrib
     assert (reask_worktree.path / "filtered.txt").read_text(
         encoding="utf-8"
     ) == "original content\n"
+    assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_disables_preconfigured_filter_added_to_info_attributes_after_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late mutable attributes write cannot activate a configured filter."""
+    workspace_id = "ws_reask_info_attributes_filter_toctou"
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
+    (worktree / "filtered.txt").write_text("original content\n", encoding="utf-8")
+    _git(worktree, "add", "filtered.txt")
+    _git(worktree, "commit", "-qm", "add filtered file")
+    filter_marker = tmp_path / "late-info-attributes-smudge-filter-ran"
+    source_git_dir = Path(
+        (worktree / ".git").read_text(encoding="utf-8").removeprefix("gitdir: ").strip()
+    )
+    source_mirror = source_git_dir.parent.parent
+    info_attributes_path = source_mirror / "info" / "attributes"
+    _git(
+        worktree,
+        "config",
+        "filter.poison.smudge",
+        f"touch '{filter_marker}'; cat",
+    )
+    _git(worktree, "config", "filter.poison.clean", "cat")
+    _git(worktree, "config", "filter.poison.required", "true")
+
+    class _InfoAttributesMutationRunner(_LocalCommandRunner):
+        """Add the configured filter immediately before checkout starts."""
+
+        attributes_mutated = False
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            """Mutate the source attributes after all metadata discovery completes."""
+            if "checkout" in args and not self.attributes_mutated:
+                self.attributes_mutated = True
+                info_attributes_path.write_text("filtered.txt filter=poison\n", encoding="utf-8")
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    command_runner = _InfoAttributesMutationRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        """Avoid changing ownership while exercising the Git invocation."""
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+
+    reask_worktree = await comments._create_isolated_reask_worktree(
+        runner,
+        worktree_path=worktree,
+        restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        source_mirror=source_mirror,
+        source_git_dir=source_git_dir,
+        source_git_dir_fd=os.open(source_git_dir, os.O_RDONLY),
+    )
+
+    assert reask_worktree is not None
+    assert command_runner.attributes_mutated
+    assert not filter_marker.exists()
     assert await comments._remove_isolated_reask_worktree(runner, reask_worktree) is None
 
 

@@ -8,8 +8,9 @@ import fcntl
 import os
 import re
 import stat
+import tempfile
 import time
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -383,6 +384,34 @@ def _checkout_filter_driver_overrides(driver_names: set[str]) -> tuple[str, ...]
     )
 
 
+@contextlib.contextmanager
+def _isolated_reask_checkout_git_dir(
+    *,
+    source_mirror: Path | None,
+    source_worktree_path: Path,
+    restore_ref: str,
+) -> Iterator[Path]:
+    """Build an ephemeral Git directory that cannot inherit mutable checkout settings."""
+    source_git_metadata_path = source_mirror or source_worktree_path / ".git"
+    try:
+        with tempfile.TemporaryDirectory(prefix="awf-isolated-reask-checkout-") as temporary_dir:
+            git_dir = Path(temporary_dir)
+            (git_dir / "refs").mkdir()
+            (git_dir / "info").mkdir()
+            (git_dir / "objects").symlink_to(source_git_metadata_path / "objects")
+            (git_dir / "HEAD").write_text(f"{restore_ref}\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                "[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n",
+                encoding="utf-8",
+            )
+            yield git_dir
+    except OSError as exc:
+        raise _MonitorPolicyBlockedError(
+            "Could not isolate Git checkout settings before the NEEDS_HUMAN reason re-ask.",
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+        ) from exc
+
+
 def _reject_reask_source_mirror_object_alternates(source_mirror: Path | None) -> None:
     """Reject a source mirror with object alternates before Git reads it for a re-ask."""
     if source_mirror is not None and _source_mirror_declares_object_alternates(source_mirror):
@@ -549,44 +578,57 @@ async def _create_isolated_reask_worktree(
             restore_ref=restore_ref,
             source_mirror=source_mirror,
         )
-        info_attributes_filter_overrides = _checkout_info_attributes_filter_overrides(
-            source_mirror=source_mirror,
-            source_worktree_path=worktree_path,
-        )
         _reject_reask_source_mirror_object_alternates(source_mirror)
         checkout_env = git_env_without_object_lookup_overrides()
         # A writable primary mirror can declare a promisor remote. Disable
         # lazy fetches so a missing object cannot run agent-controlled remote
         # or protocol configuration while this checkout is populated.
         checkout_env["GIT_NO_LAZY_FETCH"] = "1"
-        checkout = await runner._deps.runner.run(
-            git_worktree_command(
-                path,
-                # The primary mirror is writable by the prior agent. Disable
-                # its default hooks directory and every filter named by the
-                # pinned tracked attributes while Git populates the
-                # clarification checkout. Disable the configured filesystem monitor too:
-                # a string-valued core.fsmonitor is an executable hook path.
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                # Ignore mutable global attributes and disable filters from
-                # both pinned tracked and mirror-owned info attributes.
-                "-c",
-                "core.attributesFile=/dev/null",
-                *checkout_filter_overrides,
-                *info_attributes_filter_overrides,
-                "checkout",
-                # A re-ask only needs the superproject checkout. Do not
-                # inherit submodule.recurse from the source worktree.
-                "--no-recurse-submodules",
-                "--detach",
-                restore_ref,
-            ),
-            timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
-            env=checkout_env,
-        )
+        checkout_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        checkout_env["GIT_CONFIG_NOSYSTEM"] = "1"
+        checkout_env["GIT_ATTR_NOSYSTEM"] = "1"
+        with _isolated_reask_checkout_git_dir(
+            source_mirror=source_mirror,
+            source_worktree_path=worktree_path,
+            restore_ref=restore_ref,
+        ) as checkout_git_dir:
+            checkout = await runner._deps.runner.run(
+                [
+                    "git",
+                    f"--git-dir={checkout_git_dir}",
+                    f"--work-tree={path}",
+                    # The primary mirror is writable by the prior agent. Use
+                    # an isolated Git directory and disable remaining hooks
+                    # and filters while it populates the clarification checkout.
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    *checkout_filter_overrides,
+                    "checkout",
+                    # A re-ask only needs the superproject checkout. Do not
+                    # inherit submodule.recurse from the source worktree.
+                    "--no-recurse-submodules",
+                    "--detach",
+                    restore_ref,
+                ],
+                timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                env=checkout_env,
+            )
+        if checkout.ok:
+            checkout = await runner._deps.runner.run(
+                git_worktree_command(
+                    path,
+                    "read-tree",
+                    "--reset",
+                    "--no-sparse-checkout",
+                    restore_ref,
+                ),
+                timeout_seconds=_ISOLATED_REASK_WORKTREE_CREATION_TIMEOUT_SECONDS,
+                env=git_env_without_object_lookup_overrides(),
+            )
     except asyncio.CancelledError:
         # The linked worktree is registered before its checkout, so cleanup
         # must cover cancellation during filter metadata discovery or population too.
