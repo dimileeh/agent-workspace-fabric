@@ -364,3 +364,341 @@ def test_persisted_clarification_skips_unusable_model_service_definitions() -> N
         == ()
     )
     assert services["missing-awf-network"] == {"networks": ["other_net"]}
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_preserves_stack_and_filters_git_access(
+    tmp_path: Path,
+) -> None:
+    """Legacy stacks gain only the isolated clarification service."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_legacy",
+                    "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                    "OPENAI_BASE_URL": str(tmp_path / "mirror.git"),
+                    "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                    "GIT_ASKPASS": "/run/awf/secrets/bb-askpass.sh",
+                    "CLAUDE_CODE_USE_BEDROCK": "1",
+                    "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/run/awf/adc.json",
+                },
+                "volumes": [
+                    f"{tmp_path / 'worktree'}:/workspace",
+                    f"{tmp_path / 'mirror.git'}:{tmp_path / 'mirror.git'}:rw",
+                    f"{tmp_path / 'codex'}:/home/agent/.codex:rw",
+                    f"{tmp_path / 'gh'}:/home/agent/.config/gh:ro",
+                    f"{tmp_path / 'gcloud'}:/home/agent/.config/gcloud:ro",
+                    f"{tmp_path / 'adc.json'}:/run/awf/adc.json:ro",
+                ],
+                "extra_hosts": ["host.docker.internal:host-gateway"],
+                "networks": ["awf_net"],
+                "deploy": {"resources": {"limits": {"cpus": "4", "memory": "8g"}}},
+            },
+        },
+        "volumes": {},
+        "networks": {"awf_net": {"name": "awf-ws_legacy-net", "internal": True}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    assert upgraded["services"]["agent"] == original["services"]["agent"]
+    assert upgraded["services"]["postgres"] == original["services"]["postgres"]
+    assert clarification["x-awf-persisted-clarification-service-managed"] is True
+    assert clarification["profiles"] == ["awf-clarification"]
+    assert clarification["networks"] == ["clarification_egress_net"]
+    assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    assert clarification["deploy"] == original["services"]["agent"]["deploy"]
+    assert clarification["environment"] == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": str(tmp_path / "mirror.git"),
+        "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.codex",
+    }
+    assert clarification["volumes"] == [
+        f"{tmp_path / 'codex'}:/run/awf/clarification-auth/0:ro",
+    ]
+    assert str(tmp_path / "worktree") not in "\n".join(clarification["volumes"])
+    assert str(tmp_path / "mirror.git") not in "\n".join(clarification["volumes"])
+    assert str(tmp_path / "gh") not in "\n".join(clarification["volumes"])
+    assert "GITHUB_TOKEN" not in clarification["environment"]
+    assert "GIT_ASKPASS" not in clarification["environment"]
+    assert "CLAUDE_CODE_USE_BEDROCK" not in clarification["environment"]
+    assert "AWS_SECRET_ACCESS_KEY" not in clarification["environment"]
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in clarification["environment"]
+    assert upgraded["networks"]["clarification_egress_net"] == {
+        "name": "awf-ws_legacy-clarification-egress-net",
+        "internal": True,
+    }
+    assert not upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.codex,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "legacy_service",
+    [
+        pytest.param(
+            {
+                "image": "example/legacy-clarification:latest",
+                "environment": {"LEGACY_SERVICE_DATA": "preserve-me"},
+                "networks": ["awf_net"],
+            },
+            id="profile-service",
+        ),
+        pytest.param("not-a-service", id="invalid-service"),
+    ],
+)
+def test_upgrade_persisted_clarification_service_rejects_legacy_service_name_collision(
+    tmp_path: Path,
+    legacy_service: object,
+) -> None:
+    """A legacy profile service cannot be mistaken for AWF's managed agent."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": legacy_service,
+        },
+        "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicts with the managed clarification service"):
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_recognizes_managed_service_signature(
+    tmp_path: Path,
+) -> None:
+    """A previously rendered managed clarification service remains a no-op."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": {
+                "image": "awf-agent-runtime:latest",
+                "x-awf-persisted-clarification-service-managed": True,
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        is None
+    )
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_recognizes_unmarked_legacy_service(
+    tmp_path: Path,
+) -> None:
+    """A pre-marker AWF clarification service remains a no-op."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest", "working_dir": "/workspace"},
+            "clarification": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+        is None
+    )
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_rejects_unmarked_signature_lookalike(
+    tmp_path: Path,
+) -> None:
+    """A profile service cannot opt into managed behavior through shared fields."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {"image": "awf-agent-runtime:latest"},
+            "clarification": {
+                "image": "profile-owned:latest",
+                "environment": {"PROFILE_SECRET": "preserve-me"},
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["clarification_egress_net"],
+                "profiles": ["awf-clarification"],
+                "command": ["sh", "-c", "sleep infinity"],
+                "restart": "no",
+            },
+        },
+        "networks": {
+            "clarification_egress_net": {"name": "awf-ws_legacy-clarification-egress-net"}
+        },
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicts with the managed clarification service"):
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.codex,
+        )
+
+    assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_keeps_opencode_model_credentials(
+    tmp_path: Path,
+) -> None:
+    """Legacy OpenCode upgrades retain credentials for the selected provider."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.opencode,
+            agent_model="openai/gpt-5.3-codex",
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["environment"] == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+    }
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_routes_to_selected_model_service(
+    tmp_path: Path,
+) -> None:
+    """Legacy clarification can reach only its configured model sidecar."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "ollama-sidecar": {
+                        "image": "ollama/ollama:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "postgres": {"image": "postgres:16-alpine", "networks": ["awf_net"]},
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    ) == ("ollama-sidecar",)
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["clarification"]["networks"] == [
+        "clarification_egress_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["ollama-sidecar"]["networks"] == [
+        "awf_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["postgres"]["networks"] == ["awf_net"]
+    assert upgraded["networks"]["clarification_model_net"] == {
+        "name": "awf-ws_legacy-clarification-model-net",
+        "internal": True,
+    }
+    assert upgraded["x-awf-persisted-clarification-model-network-reconciled"] is False
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    ) == ("ollama-sidecar",)
+    mark_persisted_clarification_model_network_reconciled(compose_file=compose_file)
+    mark_persisted_clarification_model_network_reconciled(compose_file=compose_file)
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_legacy",
+            agent_runtime=AgentRuntime.opencode,
+            agent_model="ollama/kimi-k2.6:cloud",
+        )
+        is None
+    )
