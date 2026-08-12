@@ -31,6 +31,7 @@ from awf.common.github_transient import (
     GitHubErrorDisposition,
     github_error_disposition,
 )
+from awf.common.redaction import redact_secrets
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -82,7 +83,6 @@ from awf.runtime.pr_monitor import (
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
     _is_bot_author,
-    _is_bot_review_thread,
     _needs_comment_attention,
     _review_thread_body_hash,
     _review_thread_body_state_key,
@@ -115,6 +115,12 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
+)
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _collect_defer_items as _collect_defer_items_impl,
+)
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _needs_human_reason_state_key,
 )
 from awf.runtime.pr_monitor_runner.path_helpers import (
     _changed_paths_from_name_only_z as _changed_paths_from_name_only_z,
@@ -166,6 +172,14 @@ from awf.runtime.pr_monitor_runner.target_reconcile import (
 )
 from awf.runtime.pr_monitor_runner.types import BaseFetchError
 
+
+def _collect_defer_items(
+    status: PRStatus, state: MonitorState
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Compatibility delegate for deferred-review consumers."""
+    return _collect_defer_items_impl(status, state)
+
+
 _datetime_iso = _reviewer_settle._datetime_iso
 _non_check_reviewer_activity_settle_decision = (
     _reviewer_settle._non_check_reviewer_activity_settle_decision
@@ -197,7 +211,13 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
     re.IGNORECASE,
 )
+_VERDICT_REASON_REDACTION_ONLY = re.compile(
+    rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
+    rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
+    re.IGNORECASE,
+)
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+_MAX_VERDICT_REASON_LENGTH = 500
 
 
 async def _record_ignored_monitor_terminal_callback(
@@ -354,14 +374,24 @@ def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResu
 
 
 def _sanitize_verdict_reason(reason: str | None) -> str | None:
+    """Redact, bound, and normalize a verdict reason, dropping unusable content."""
     if reason is None:
         return None
-    cleaned = reason.strip()
+    cleaned = redact_secrets(reason).strip()
     if not cleaned:
+        return None
+    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
         return None
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
         return None
+    if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
+        return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
     return cleaned
+
+
+def _needs_human_reason_missing(result: VerdictResult) -> bool:
+    """Return whether a blocking needs-human result lacks a usable reason."""
+    return result.verdict == "needs_human" and _sanitize_verdict_reason(result.reason) is None
 
 
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
@@ -383,18 +413,16 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
-def _needs_human_reason_state_key(item_id: str) -> str:
-    return f"__needs_human_reason__:{item_id}"
-
-
 def _sync_needs_human_reason(
     state: MonitorState,
     item_id: str,
     result: VerdictResult,
 ) -> None:
-    """Persist or clear the agent's needs-human reason for a review item."""
+    """Persist or clear the agent's blocking-verdict reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
-    if result.verdict == "needs_human" and (reason := _sanitize_verdict_reason(result.reason)):
+    if result.verdict in {"defer", "needs_human"} and (
+        reason := _sanitize_verdict_reason(result.reason)
+    ):
         state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
@@ -655,13 +683,99 @@ def _awaiting_required_checks_grace(
     return (now_ts - first_seen < grace_seconds, False)
 
 
-def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
-    if status.blocking_reviews:
-        return "a merge-blocking changes-requested review remains unresolved"
+def _notify_human_blocker_items(
+    status: PRStatus, state: MonitorState
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Return every feedback item that currently requires human attention.
+
+    Effective changes-requested reviews are merge blockers independently of
+    their triage verdict and can have an empty body, so they may not appear in
+    ``unresolved_review_comments`` at all. Include them in the rendered
+    notification and its digest. When a triaged review is also an effective
+    blocker, retain its single item, agent verdict, and reason while marking
+    its independent merge-blocking state for rendering.
+
+    Advisory bot review-level deferrals do not block merge and belong only in
+    the terminal defer artifact, not a human-attention notification. A bot
+    review promoted to ``changes_requested`` remains a notification blocker.
+    """
+    bot_items, human_items = _collect_defer_items(status, state)
+    items_by_id = {str(item["id"]): item for item in bot_items + human_items}
+    for review in status.blocking_reviews:
+        if existing_item := items_by_id.get(review.comment_id):
+            existing_item["is_merge_blocking"] = True
+            continue
+        is_bot = _is_bot_author(review.author)
+        bucket = bot_items if is_bot else human_items
+        item: dict[str, object] = {
+            "kind": "review",
+            "id": review.comment_id,
+            "author": review.author,
+            "is_bot": is_bot,
+            "path": None,
+            "line": None,
+            "url": review.url,
+            "body": review.body_excerpt,
+            "verdict": "changes_requested",
+            "agent_verdict_reason": None,
+            "is_merge_blocking": True,
+        }
+        bucket.append(item)
+        items_by_id[review.comment_id] = item
+    bot_items = [
+        item
+        for item in bot_items
+        if (
+            item["kind"] != "review"
+            or item.get("verdict") != "defer"
+            or item.get("is_merge_blocking") is True
+        )
+    ]
+    return bot_items, human_items
+
+
+def _notify_human_reason(
+    status: PRStatus,
+    state: MonitorState,
+    *,
+    blocker_items: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None,
+) -> str | None:
+    """Summarize the highest-priority unresolved human blocker."""
     if reason := _first_needs_human_reason(status, state):
         return reason
-    bot_items, human_deferred = _collect_defer_items(status, state)
-    if human_deferred:
+    if status.blocking_reviews:
+        return "a merge-blocking changes-requested review remains unresolved"
+    bot_items, human_items = blocker_items or _notify_human_blocker_items(status, state)
+    # A current escalation must outrank any outdated-thread diagnosis, even if
+    # it is bot-authored and has no agent-provided reason. Keep the detailed
+    # diagnosis for outdated-only cases ahead of the generic fallback below.
+    current_item_ids = {
+        *(thread.thread_id for thread in status.unresolved_inline_threads),
+        *(comment.comment_id for comment in status.unresolved_review_comments),
+    }
+    if any(
+        item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
+        for item in human_items
+    ):
+        return "human review feedback needs human input and remains unresolved"
+    if any(
+        item.get("verdict") == "needs_human" and item.get("id") in current_item_ids
+        for item in bot_items
+    ):
+        return "review feedback needs human input and remains unresolved on GitHub"
+    if reason := _first_needs_human_reason(status, state, include_outdated=True):
+        return reason
+    for item in human_items:
+        awf_blocker_reason = item.get("awf_blocker_reason")
+        if isinstance(awf_blocker_reason, str) and awf_blocker_reason:
+            return awf_blocker_reason
+    if any(item.get("verdict") == "needs_human" for item in human_items):
+        return "human review feedback needs human input and remains unresolved"
+    for item in bot_items:
+        awf_blocker_reason = item.get("awf_blocker_reason")
+        if isinstance(awf_blocker_reason, str) and awf_blocker_reason:
+            return awf_blocker_reason
+    if human_items:
         return "human review feedback was deferred by the agent and remains unresolved"
     # #305: a bot inline thread (``defer``/``needs_human``) or a bot
     # ``needs_human`` comment also blocks the merge in ``pr_monitor.decide``
@@ -677,10 +791,16 @@ def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     return None
 
 
-def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | None:
-    for item_id in [t.thread_id for t in status.unresolved_inline_threads] + [
+def _first_needs_human_reason(
+    status: PRStatus, state: MonitorState, *, include_outdated: bool = False
+) -> str | None:
+    """Return a stored reason, prioritizing current feedback over outdated threads."""
+    item_ids = [t.thread_id for t in status.unresolved_inline_threads] + [
         c.comment_id for c in status.unresolved_review_comments
-    ]:
+    ]
+    if include_outdated:
+        item_ids += [t.thread_id for t in status.outdated_unresolved_inline_threads]
+    for item_id in item_ids:
         if (
             state.threads_addressed_ids.get(item_id) == "needs_human"
             and (reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id)))
@@ -987,9 +1107,13 @@ def _base_fetch_retry_wait_seconds(
     )
 
 
-def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
+def _notification_key(
+    *, head_sha: str, blocker_reason: str | None, items_digest: str | None = None
+) -> str:
+    """Build a stable notification deduplication key."""
     reason = blocker_reason or "ready-to-merge"
-    return f"__awf_notify__:{head_sha}:{reason}"
+    key = f"__awf_notify__:{head_sha}:{reason}"
+    return f"{key}:{items_digest}" if items_digest else key
 
 
 def _protected_block_violations_digest(violations: Sequence[QualityGateViolation]) -> str:
@@ -1269,66 +1393,6 @@ def _initial_review_grace_wait_seconds(
         return 0.0
 
     return min(poll_interval_seconds, remaining_seconds)
-
-
-def _collect_defer_items(
-    status: PRStatus, state: MonitorState
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Collect deferred / needs-human threads/comments, partitioned by author.
-
-    Returns ``(bot_items, human_items)``. Items whose author classifies
-    as a bot per ``pr_monitor._is_bot_author`` go into the first list;
-    the rest (including unknown-author items, which the merge gate
-    treats as human for safety) go into the second — the artifact
-    mirrors that classification so orchestrators see the same picture.
-
-    Both ``defer`` and ``needs_human`` verdicts are collected (#305): a
-    ``needs_human`` item blocks the merge just as a ``defer`` one does, so
-    dropping it would let the terminal artifact and notification under-report
-    the open feedback. Each item carries its ``verdict`` so consumers can tell
-    the two apart.
-    """
-    bot_items: list[dict[str, object]] = []
-    human_items: list[dict[str, object]] = []
-    for t in status.unresolved_inline_threads:
-        verdict = state.threads_addressed_ids.get(t.thread_id)
-        if verdict not in {"defer", "needs_human"}:
-            continue
-        bucket = bot_items if _is_bot_review_thread(t) else human_items
-        bucket.append(
-            {
-                "kind": "thread",
-                "id": t.thread_id,
-                "author": t.author,
-                "path": t.path,
-                "line": t.line,
-                "body": t.body_excerpt,
-                "verdict": verdict,
-                "agent_verdict_reason": state.threads_addressed_ids.get(
-                    _needs_human_reason_state_key(t.thread_id)
-                ),
-            }
-        )
-    for c in status.unresolved_review_comments:
-        verdict = state.threads_addressed_ids.get(c.comment_id)
-        if verdict not in {"defer", "needs_human"}:
-            continue
-        bucket = bot_items if _is_bot_author(c.author) else human_items
-        bucket.append(
-            {
-                "kind": "review",
-                "id": c.comment_id,
-                "author": c.author,
-                "path": None,
-                "line": None,
-                "body": c.body_excerpt,
-                "verdict": verdict,
-                "agent_verdict_reason": state.threads_addressed_ids.get(
-                    _needs_human_reason_state_key(c.comment_id)
-                ),
-            }
-        )
-    return bot_items, human_items
 
 
 def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int:

@@ -124,6 +124,24 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
     ),
+    "NEEDS_HUMAN_REASON_MISSING": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        "The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.",
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
+    ),
+    "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        (
+            "AWF could not complete the read-only clarification follow-up because the "
+            "hosted executor rejected or failed the isolated run, or the local worktree "
+            "could not be prepared as an isolated checkout."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),
+    ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF could not run release-PR sync because the release-PR sync path "

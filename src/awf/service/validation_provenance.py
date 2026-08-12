@@ -474,7 +474,7 @@ def _resolved_profile(workspace: Workspace) -> WorkspaceProfile | None:
     if not isinstance(workspace.resolved_profile, dict):
         return None
     try:
-        return WorkspaceProfile.model_validate(workspace.resolved_profile)
+        return WorkspaceProfile.model_validate_persisted(workspace.resolved_profile)
     except ValueError:
         return None
 

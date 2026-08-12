@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import posixpath
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
 
-from awf.common.git_auth import apply_bitbucket_agent_git_auth
+from awf.adapters.opencode import opencode_provider_for_model
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
+from awf.db.enums import AgentRuntime
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_images import CompanionImageBuilder
 from awf.node.companion_services import (
     MaterializedCompanionService,
-    WorkspaceCompanionSpec,
+    _hosted_companion_service_from_materialized,
     companion_env_secret_stack_metadata,
     companion_service_from_materialized,
     validate_companion_service_graph,
@@ -31,13 +33,77 @@ from awf.node.compose_manager import (
 )
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
-from awf.node.secret_mounts import (
-    SECRET_LEASE_PROVIDER_UNSUPPORTED,
-    SECRET_LEASE_SOURCE_INVALID,
-    SECRET_LEASE_TARGET_KIND_MISMATCH,
-    SECRET_LEASE_TARGET_MISMATCH,
-    LocalSecretLeaseResolution,
-    SecretLeaseResolutionError,
+from awf.node.secret_mounts import LocalSecretLeaseResolution
+from awf.node.stack_launcher_auth_helpers import (
+    _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    _provider_auth_mount_staging_order as _clarification_provider_auth_mount_staging_order,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    aws_external_account_environment_names as _clarification_aws_external_account_environment_names,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_credential_environment_names as _clarification_aws_profile_credential_environment_names,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_credential_mounts as _clarification_aws_profile_credential_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    aws_profile_path_rewrites as _clarification_aws_profile_path_rewrites,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    clarification_auth_target as _helper_clarification_auth_target,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    external_account_credential_source_environment_names as _clarification_external_account_credential_source_environment_names,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    external_account_subject_token_file_rewrites as _clarification_external_account_subject_token_file_rewrites,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    external_account_subject_token_mounts as _clarification_external_account_subject_token_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    has_claude_code_file_auth as _clarification_has_claude_code_file_auth,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    has_codex_file_auth as _clarification_has_codex_file_auth,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    path_is_below as _clarification_path_is_below,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    provider_auth_mounts as _selected_provider_auth_mounts,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    staged_auth_value as _clarification_staged_auth_value,
+)
+from awf.node.stack_launcher_auth_helpers import (
+    staged_provider_auth_mounts as _clarification_staged_provider_auth_mounts,
+)
+from awf.node.stack_launcher_compose_helpers import (
+    WorkspaceServiceExecutionError as WorkspaceServiceExecutionError,
+)
+from awf.node.stack_launcher_compose_helpers import (
+    _companion_compose_up_timeout_seconds as _companion_compose_up_timeout_seconds,
+)
+from awf.node.stack_launcher_compose_helpers import (
+    _compose_up_reports_missing_image as _compose_up_reports_missing_image,
+)
+from awf.node.stack_launcher_compose_helpers import (
+    _missing_prebuilt_companion_image_retry_spec,
+    _prebuilt_companion_image_count,
+    _raise_workspace_service_error_if_docker_unavailable,
+)
+from awf.node.stack_launcher_compose_helpers import (
+    effective_compose_up_timeout_seconds as effective_compose_up_timeout_seconds,
+)
+from awf.node.stack_launcher_hosted_secret_helpers import (
+    _append_hosted_auth_placeholder_mounts,
+    _hosted_dynamic_file_auth_mount_targets,
+    _hosted_secret_lease_placeholder_resolution,
+    _stack_secret_metadata,
 )
 from awf.profiles.compose import (
     agent_environment_with_declared_secret_leases,
@@ -45,24 +111,9 @@ from awf.profiles.compose import (
     profile_agent_environment,
     profile_services,
 )
-from awf.profiles.compose_env import hosted_env_secret_alias_placeholder
-from awf.profiles.models import ProfileSecret, WorkspaceProfile
+from awf.profiles.models import WorkspaceProfile
+from awf.service.environment import compose_expand_value
 
-_HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
-_HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
-_HOSTED_RENDER_SECRET_PROVIDERS = (
-    _HOSTED_RENDER_ENV_SECRET_PROVIDERS | _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS
-)
-_HOSTED_RENDER_ENV_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_HOSTED_GITHUB_ENV_SOURCE_NAME = "AWF_GITHUB_TOKEN"
-_HOSTED_GITHUB_ENV_TARGET_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
-_HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES = {
-    "BITBUCKET_API_TOKEN": "BITBUCKET_API_TOKEN",
-    "BITBUCKET_EMAIL": "BITBUCKET_EMAIL",
-}
-_HOSTED_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
-_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
-_HOSTED_COMPANION_SOURCE_SCHEMA = "hosted_companion_source.v1"
 _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.claude",
     "/home/agent/.claude.json",
@@ -77,9 +128,881 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.ssh",
 )
 _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
-_HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET = (
+_GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
     "/home/agent/.config/gcloud/application_default_credentials.json"
 )
+_GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE = re.compile(
+    r"^\$\{GOOGLE_APPLICATION_CREDENTIALS(?::-|-)(?P<target>/[^$}]+)\}$"
+)
+_AWS_WEB_IDENTITY_TOKEN_FILE = "AWS_WEB_IDENTITY_TOKEN_FILE"
+_AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE = re.compile(
+    r"^\$\{AWS_WEB_IDENTITY_TOKEN_FILE(?::-|-)(?P<target>/[^$}]+)\}$"
+)
+_GCLOUD_AUTH_MOUNT_TARGET = "/home/agent/.config/gcloud"
+_CLARIFICATION_GIT_AUTH_MOUNT_TARGETS = frozenset(
+    {
+        "/home/agent/.config/gh",
+        "/home/agent/.gitconfig",
+        "/home/agent/.ssh",
+        "/run/awf/secrets/bb-askpass.sh",
+    }
+)
+_CLARIFICATION_GIT_AUTH_ENV_PREFIXES = ("GIT_", "GH_", "GITHUB_", "BITBUCKET_")
+_CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+    }
+)
+_CLARIFICATION_PROVIDER_PROXY_ENV_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+_CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES = (
+    _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES | _CLARIFICATION_PROVIDER_PROXY_ENV_NAMES
+)
+_CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
+        "CODEX_API_KEY",
+        "CODEX_AUTH_TOKEN",
+    }
+)
+_CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
+)
+_CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    }
+)
+_CLARIFICATION_GEMINI_ENV_NAMES: dict[str, frozenset[str]] = {
+    "api_key": frozenset(
+        {
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_AUTH_MECHANISM",
+            "GOOGLE_API_KEY",
+        }
+    ),
+    "google_cloud": frozenset(
+        {
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+        }
+    ),
+    "access_token": frozenset(
+        {
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        }
+    ),
+    "file": frozenset(),
+}
+_CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS: dict[str, frozenset[str]] = {
+    "api_key": frozenset(),
+    "google_cloud": frozenset({"/home/agent/.config/gcloud"}),
+    "access_token": frozenset(),
+    "file": frozenset({"/home/agent/.gemini"}),
+}
+_CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
+    AgentRuntime.codex: frozenset(
+        {
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_ORGANIZATION",
+            "OPENAI_PROJECT",
+            "OPENAI_PROJECT_ID",
+        }
+    )
+    | _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES,
+    AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
+    AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
+    AgentRuntime.gemini: frozenset(),
+    AgentRuntime.opencode: frozenset(
+        {
+            "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        }
+    ),
+    AgentRuntime.grok: frozenset({"XAI_API_KEY"}),
+}
+_CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES: dict[str, frozenset[str]] = {
+    "ollama": frozenset(
+        {
+            "AWF_OPENCODE_OLLAMA_BASE_URL",
+            "OLLAMA_HOST",
+            "OLLAMA_API_KEY",
+        }
+    ),
+    "openai": frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL"}),
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}),
+    "gemini": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "xai": frozenset({"XAI_API_KEY"}),
+}
+_CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES: dict[str, frozenset[str]] = {
+    "openai": frozenset({"OPENAI_API_KEY"}),
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}),
+    "gemini": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "google": frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY"}),
+    "xai": frozenset({"XAI_API_KEY"}),
+}
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES = frozenset(
+    {"AWS_REGION", "AWS_DEFAULT_REGION"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES = frozenset(
+    {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES = frozenset(
+    {"AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+)
+_CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES = frozenset(
+    {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES = frozenset(
+    {"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_CONTAINER_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    }
+)
+_CLARIFICATION_CLAUDE_CODE_BEDROCK_CONTAINER_CREDENTIAL_URI_ENV_NAMES = frozenset(
+    {"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"}
+)
+_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES = frozenset(
+    {
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+    }
+)
+
+
+def _clarification_agent_environment(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+    prefer_file_auth: bool = True,
+) -> tuple[tuple[str, str], ...]:
+    """Keep model-provider settings and rewrite staged file references.
+
+    Persisted legacy stacks retain direct provider credentials as a fallback:
+    their existing file-auth mount cannot be re-resolved before clarification
+    starts. Freshly rendered stacks prefer the staged file-auth source.
+    """
+
+    agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    credential_process_environment_names = _clarification_credential_process_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    source_mounts = _clarification_provider_auth_mounts(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    staged_mounts = _clarification_staged_provider_auth_mounts(source_mounts)
+    staged_targets = tuple(
+        (source.target, staged.target)
+        for source, staged in zip(
+            _clarification_provider_auth_mount_staging_order(source_mounts),
+            staged_mounts,
+            strict=True,
+        )
+        if source.target != staged.target
+    )
+    clarification_environment_names = (
+        provider_environment_names | credential_process_environment_names
+    )
+    if agent_runtime is AgentRuntime.gemini or (
+        agent_runtime is AgentRuntime.claude_code
+        and _GOOGLE_APPLICATION_CREDENTIALS in provider_environment_names
+    ):
+        clarification_environment_names |= _clarification_aws_external_account_environment_names(
+            auth_mounts,
+            agent_environment=agent_environment,
+            provider_environment_names=provider_environment_names,
+            mirror_target=mirror_target,
+        )
+    if (
+        prefer_file_auth
+        and agent_runtime is AgentRuntime.codex
+        and _clarification_has_codex_file_auth(source_mounts)
+    ):
+        # Match Codex readiness: an isolated file-auth mount is preferred to
+        # static environment credentials, while non-secret endpoint settings
+        # remain available to the clarification re-ask.
+        clarification_environment_names -= _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES
+    if (
+        prefer_file_auth
+        and agent_runtime is AgentRuntime.claude_code
+        and _clarification_has_claude_code_file_auth(source_mounts)
+    ):
+        # Match Claude readiness: an isolated file-auth mount is preferred to
+        # static environment credentials, while non-secret endpoint settings
+        # remain available to the clarification re-ask.
+        clarification_environment_names -= _CLARIFICATION_CLAUDE_CODE_CREDENTIAL_ENV_NAMES
+
+    return tuple(
+        (
+            name,
+            _clarification_staged_provider_path_value(
+                name,
+                value,
+                staged_targets,
+                credential_process_environment_names=credential_process_environment_names,
+            ),
+        )
+        for name, value in agent_environment
+        if name in clarification_environment_names
+        and not _is_clarification_git_auth_environment(name)
+    )
+
+
+def _clarification_expanded_provider_path_value(name: str, value: str) -> str:
+    """Resolve Compose expressions in provider file-path settings."""
+
+    if name in (
+        _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
+        | _CLARIFICATION_PROVIDER_TRUST_STORE_ENV_NAMES
+        | frozenset(
+            {
+                "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+                _AWS_WEB_IDENTITY_TOKEN_FILE,
+                _GOOGLE_APPLICATION_CREDENTIALS,
+            }
+        )
+    ):
+        return compose_expand_value(value, environ=os.environ)
+    return value
+
+
+def _clarification_staged_provider_path_value(
+    name: str,
+    value: str,
+    staged_targets: Sequence[tuple[str, str]],
+    *,
+    credential_process_environment_names: frozenset[str] = frozenset(),
+) -> str:
+    """Rewrite an expanded provider path without substituting an unmounted credential."""
+
+    expanded_value = (
+        compose_expand_value(value, environ=os.environ)
+        if name in credential_process_environment_names
+        else _clarification_expanded_provider_path_value(name, value)
+    )
+    staged_value = _clarification_staged_auth_value(expanded_value, staged_targets)
+    if (
+        name in {_AWS_WEB_IDENTITY_TOKEN_FILE, _GOOGLE_APPLICATION_CREDENTIALS}
+        and staged_value == expanded_value
+    ):
+        return value
+    return staged_value
+
+
+def _is_clarification_git_auth_environment(name: str) -> bool:
+    """Return whether an environment variable grants Git authentication."""
+    normalized = name.upper()
+    return normalized == "SSH_AUTH_SOCK" or normalized.startswith(
+        _CLARIFICATION_GIT_AUTH_ENV_PREFIXES
+    )
+
+
+def _clarification_model_provider_environment_names(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+) -> frozenset[str]:
+    """Return selected runtime env names available to a clarification re-ask.
+
+    Claude Code's Bedrock and Vertex toggles select their own credentials and
+    settings rather than adding to direct Anthropic authentication. Gemini
+    similarly selects one API-key, Google Cloud, access-token, or CLI-file
+    source. All selected providers retain declared TLS trust stores. Keep every
+    other runtime's settings out of clarification.
+    """
+
+    environment_values = dict(agent_environment)
+    if agent_runtime is AgentRuntime.claude_code:
+        return (
+            _clarification_claude_code_environment_names(environment_values)
+            | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
+        )
+    if agent_runtime is AgentRuntime.gemini:
+        return (
+            _CLARIFICATION_GEMINI_ENV_NAMES[_clarification_gemini_auth_source(environment_values)]
+            | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
+        )
+
+    provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
+    if agent_runtime is AgentRuntime.opencode:
+        provider_names.update(
+            _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(
+                opencode_provider_for_model(agent_model),
+                frozenset(),
+            )
+        )
+    return frozenset(provider_names | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES)
+
+
+def _clarification_claude_code_environment_names(
+    environment_values: dict[str, str],
+) -> frozenset[str]:
+    """Return direct Claude auth or each explicitly enabled managed backend."""
+
+    backend_names = set()
+    if _clarification_claude_code_backend_enabled(
+        environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+    ):
+        backend_names.add("CLAUDE_CODE_USE_BEDROCK")
+        backend_names.update(
+            _clarification_claude_code_bedrock_environment_names(environment_values)
+        )
+    if _clarification_claude_code_backend_enabled(
+        environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+    ):
+        backend_names.add("CLAUDE_CODE_USE_VERTEX")
+        backend_names.update(_CLARIFICATION_CLAUDE_CODE_VERTEX_ENV_NAMES)
+    return frozenset(backend_names) or _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+
+
+def _clarification_claude_code_backend_enabled(
+    environment_values: dict[str, str],
+    *,
+    backend_name: str,
+) -> bool:
+    """Return whether Compose resolves a Claude managed-backend toggle to ``1``."""
+
+    return compose_expand_value(environment_values.get(backend_name, ""), environ=os.environ) == "1"
+
+
+def _clarification_claude_code_bedrock_environment_names(
+    environment_values: dict[str, str],
+) -> frozenset[str]:
+    """Return Bedrock settings plus its first usable credential source."""
+
+    environment_values = {
+        name: compose_expand_value(value, environ=os.environ)
+        for name, value in environment_values.items()
+    }
+    if environment_values.get("AWS_BEARER_TOKEN_BEDROCK"):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES
+    elif all(
+        environment_values.get(name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES
+    elif all(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+    elif any(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_CONTAINER_CREDENTIAL_URI_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_CONTAINER_CREDENTIAL_ENV_NAMES
+    elif any(
+        environment_values.get(name)
+        for name in _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
+    ):
+        credential_names = _CLARIFICATION_CLAUDE_CODE_BEDROCK_PROFILE_ENV_NAMES
+    else:
+        credential_names = frozenset()
+    return _CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES | credential_names
+
+
+def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str:
+    """Return the single Gemini credential source selected for clarification."""
+
+    mechanism = compose_expand_value(
+        environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", ""), environ=os.environ
+    ).lower()
+    if mechanism in {"api", "api-key", "api_key"}:
+        return "api_key"
+    if compose_expand_value(
+        environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN", ""), environ=os.environ
+    ):
+        return "access_token"
+    if any(
+        compose_expand_value(environment_values.get(name, ""), environ=os.environ).lower()
+        in {"1", "true", "yes"}
+        for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
+    ):
+        return "google_cloud"
+    if any(
+        compose_expand_value(environment_values.get(name, ""), environ=os.environ)
+        for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    ):
+        return "api_key"
+    if compose_expand_value(
+        environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS, ""), environ=os.environ
+    ):
+        return "google_cloud"
+    return "file"
+
+
+def _google_credentials_are_within_gcloud_auth_mount(google_credentials: str) -> bool:
+    """Return whether a normalized Google credential path is below gcloud auth."""
+
+    return _clarification_path_is_below(google_credentials, _GCLOUD_AUTH_MOUNT_TARGET)
+
+
+def _clarification_auth_mounts(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+) -> tuple[AuthMount, ...]:
+    """Return read-only provider sources staged at destinations writable by ``agent``."""
+
+    agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    provider_auth_mounts = _clarification_provider_auth_mounts(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    return _clarification_staged_provider_auth_mounts(provider_auth_mounts)
+
+
+def _clarification_resolve_google_credentials_placeholder(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    agent_runtime: AgentRuntime,
+) -> tuple[tuple[str, str], ...]:
+    """Replace a self-referential ADC Compose value with its concrete target."""
+
+    environment_values = dict(agent_environment)
+    if agent_runtime is not AgentRuntime.gemini and (
+        agent_runtime is not AgentRuntime.claude_code
+        or not _clarification_claude_code_backend_enabled(
+            environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+        )
+    ):
+        return agent_environment
+    google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+    if google_credentials in (
+        f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
+        f"${_GOOGLE_APPLICATION_CREDENTIALS}",
+    ):
+        worker_google_credentials = compose_expand_value(google_credentials, environ=os.environ)
+        matching_target = next(
+            (
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.target == worker_google_credentials
+                and mount.target.startswith("/")
+            ),
+            None,
+        )
+        if matching_target is not None:
+            google_credentials = matching_target
+        elif worker_google_credentials:
+            return agent_environment
+        else:
+            dynamic_targets = tuple(
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.source == mount.target
+                and mount.target.startswith("/")
+            )
+            if len(dynamic_targets) != 1:
+                return agent_environment
+            google_credentials = dynamic_targets[0]
+    elif _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE.fullmatch(google_credentials or ""):
+        google_credentials = compose_expand_value(google_credentials or "", environ=os.environ)
+    else:
+        return agent_environment
+    return tuple(
+        (name, google_credentials if name == _GOOGLE_APPLICATION_CREDENTIALS else value)
+        for name, value in agent_environment
+    )
+
+
+def _clarification_resolve_aws_web_identity_token_file_placeholder(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    auth_mounts: Sequence[AuthMount],
+    agent_runtime: AgentRuntime,
+) -> tuple[tuple[str, str], ...]:
+    """Replace Bedrock web identity Compose values with their concrete targets."""
+
+    environment_values = dict(agent_environment)
+    if (
+        agent_runtime is not AgentRuntime.claude_code
+        or not _clarification_claude_code_backend_enabled(
+            environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+        )
+    ):
+        return agent_environment
+    token_file = environment_values.get(_AWS_WEB_IDENTITY_TOKEN_FILE)
+    if token_file in (
+        f"${{{_AWS_WEB_IDENTITY_TOKEN_FILE}}}",
+        f"${_AWS_WEB_IDENTITY_TOKEN_FILE}",
+    ):
+        worker_token_file = compose_expand_value(token_file, environ=os.environ)
+        matching_target = next(
+            (
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.target == worker_token_file
+                and mount.target.startswith("/")
+            ),
+            None,
+        )
+        if matching_target is not None:
+            token_file = matching_target
+        else:
+            dynamic_targets = tuple(
+                mount.target
+                for mount in auth_mounts
+                if mount.mode == "ro"
+                and mount.source == mount.target
+                and mount.target.startswith("/")
+            )
+            if len(dynamic_targets) != 1:
+                return agent_environment
+            token_file = dynamic_targets[0]
+    elif _AWS_WEB_IDENTITY_TOKEN_FILE_DEFAULTED_TARGET_RE.fullmatch(token_file or ""):
+        token_file = compose_expand_value(token_file or "", environ=os.environ)
+    else:
+        return agent_environment
+    return tuple(
+        (name, token_file if name == _AWS_WEB_IDENTITY_TOKEN_FILE else value)
+        for name, value in agent_environment
+    )
+
+
+def _clarification_provider_auth_mounts(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+    provider_environment_names: frozenset[str] | None = None,
+) -> tuple[AuthMount, ...]:
+    """Return model-provider authentication mounts available to clarification."""
+
+    provider_environment_names = (
+        provider_environment_names
+        or _clarification_model_provider_environment_names(
+            agent_environment,
+            agent_runtime=agent_runtime,
+            agent_model=agent_model,
+        )
+    )
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    aws_profile_mount_targets = _clarification_aws_profile_mount_targets(
+        agent_environment,
+        provider_mount_targets=provider_mount_targets,
+    )
+    credential_process_environment_names = _clarification_credential_process_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    return _selected_provider_auth_mounts(
+        auth_mounts,
+        provider_mount_targets=provider_mount_targets,
+        external_account_subject_token_mounts=_clarification_external_account_subject_token_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=mirror_target,
+            provider_environment_names=provider_environment_names,
+            allowed_credential_process_environment_names=credential_process_environment_names,
+        ),
+        aws_profile_credential_mounts=_clarification_aws_profile_credential_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            provider_mount_targets=aws_profile_mount_targets,
+            mirror_target=mirror_target,
+            allowed_credential_process_environment_names=credential_process_environment_names,
+        ),
+        mirror_target=mirror_target,
+    )
+
+
+def _clarification_credential_process_environment_names(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None,
+    provider_environment_names: frozenset[str],
+) -> frozenset[str]:
+    """Return non-Git inputs referenced by selected credential helper commands."""
+
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    names = _clarification_aws_profile_credential_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_mount_targets=_clarification_aws_profile_mount_targets(
+            agent_environment,
+            provider_mount_targets=provider_mount_targets,
+        ),
+        mirror_target=mirror_target,
+    ) | _clarification_external_account_credential_source_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        provider_environment_names=provider_environment_names,
+        mirror_target=mirror_target,
+    )
+    return frozenset(name for name in names if not _is_clarification_git_auth_environment(name))
+
+
+def _clarification_aws_profile_mount_targets(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    provider_mount_targets: frozenset[str],
+) -> frozenset[str]:
+    """Return selected AWS profile-file mount targets, if any."""
+
+    explicit_profile_files = {
+        _clarification_expanded_provider_path_value(name, value)
+        for name, value in agent_environment
+        if name in _CLARIFICATION_AWS_PROFILE_FILE_ENV_NAMES
+    }
+    return frozenset(
+        target
+        for target in provider_mount_targets
+        if target == "/home/agent/.aws" or target in explicit_profile_files
+    )
+
+
+def _clarification_model_provider_auth_mount_targets(
+    agent_environment: tuple[tuple[str, str], ...],
+    *,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+    provider_environment_names: frozenset[str] | None = None,
+) -> frozenset[str]:
+    """Return known and environment-referenced model-provider mount targets."""
+
+    names = provider_environment_names or _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
+    if (
+        agent_runtime is AgentRuntime.claude_code
+        and _clarification_claude_code_environment_names(dict(agent_environment))
+        != _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES
+    ):
+        environment_values = dict(agent_environment)
+        # Stage only the active managed-backend auth stores. Vertex uses the
+        # standard gcloud ADC directory only when no explicit credential path
+        # is configured. Bedrock profile auth uses the standard AWS directory
+        # unless an explicit config or credentials file lies outside the
+        # mounted directory.
+        runtime_auth_mount_targets = (
+            frozenset({_GCLOUD_AUTH_MOUNT_TARGET})
+            if _clarification_claude_code_backend_enabled(
+                environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
+            )
+            and (
+                not environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+                or _google_credentials_are_within_gcloud_auth_mount(
+                    environment_values[_GOOGLE_APPLICATION_CREDENTIALS]
+                )
+            )
+            else frozenset()
+        )
+        aws_config_file = compose_expand_value(
+            environment_values.get("AWS_CONFIG_FILE", ""), environ=os.environ
+        )
+        normalized_aws_config_file = posixpath.normpath(aws_config_file)
+        aws_config_file_uses_default_directory = (
+            not aws_config_file or normalized_aws_config_file.startswith("/home/agent/.aws/")
+        )
+        aws_config_file_escapes_default_directory = (
+            aws_config_file.startswith("/home/agent/.aws/")
+            and not aws_config_file_uses_default_directory
+        )
+        aws_shared_credentials_file = compose_expand_value(
+            environment_values.get("AWS_SHARED_CREDENTIALS_FILE", ""), environ=os.environ
+        )
+        normalized_aws_shared_credentials_file = posixpath.normpath(aws_shared_credentials_file)
+        aws_shared_credentials_file_uses_default_directory = (
+            not aws_shared_credentials_file
+            or normalized_aws_shared_credentials_file.startswith("/home/agent/.aws/")
+        )
+        aws_shared_credentials_file_escapes_default_directory = (
+            aws_shared_credentials_file.startswith("/home/agent/.aws/")
+            and not aws_shared_credentials_file_uses_default_directory
+        )
+        bedrock_credential_names = _clarification_claude_code_bedrock_environment_names(
+            environment_values
+        )
+        if (
+            _clarification_claude_code_backend_enabled(
+                environment_values, backend_name="CLAUDE_CODE_USE_BEDROCK"
+            )
+            # The AWS SDK uses the default profile from ~/.aws when no
+            # higher-precedence Bedrock credential source is configured. A
+            # clean explicit override for one profile file still requires its
+            # complementary default file.
+            and not (
+                bedrock_credential_names
+                & (
+                    _CLARIFICATION_CLAUDE_CODE_BEDROCK_BEARER_TOKEN_ENV_NAMES
+                    | _CLARIFICATION_CLAUDE_CODE_BEDROCK_STATIC_CREDENTIAL_ENV_NAMES
+                    | _CLARIFICATION_CLAUDE_CODE_BEDROCK_WEB_IDENTITY_ENV_NAMES
+                    | _CLARIFICATION_CLAUDE_CODE_BEDROCK_CONTAINER_CREDENTIAL_ENV_NAMES
+                )
+            )
+            and (
+                aws_shared_credentials_file_uses_default_directory
+                or aws_config_file_uses_default_directory
+            )
+            and not (
+                aws_config_file_escapes_default_directory
+                or aws_shared_credentials_file_escapes_default_directory
+            )
+        ):
+            runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
+    if agent_runtime is AgentRuntime.gemini:
+        environment_values = dict(agent_environment)
+        gemini_auth_source = _clarification_gemini_auth_source(environment_values)
+        runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[gemini_auth_source]
+        google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
+        if (
+            gemini_auth_source == "google_cloud"
+            and google_credentials
+            and google_credentials != _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
+            and not _google_credentials_are_within_gcloud_auth_mount(google_credentials)
+        ):
+            # An explicit service-account file takes precedence over ADC.
+            runtime_auth_mount_targets = frozenset()
+    if agent_runtime is AgentRuntime.grok and any(
+        name == "XAI_API_KEY" and compose_expand_value(value, environ=os.environ)
+        for name, value in agent_environment
+    ):
+        # Grok's headless launcher selects an API key before cached-token auth,
+        # so do not expose an inactive token store to clarification.
+        runtime_auth_mount_targets = frozenset()
+    if agent_runtime is AgentRuntime.opencode:
+        provider = opencode_provider_for_model(agent_model)
+        if provider == "ollama":
+            runtime_auth_mount_targets = frozenset({"/home/agent/.ollama"})
+        elif not any(
+            name in _CLARIFICATION_OPENCODE_PROVIDER_CREDENTIAL_ENV_NAMES.get(provider, frozenset())
+            and compose_expand_value(value, environ=os.environ)
+            for name, value in agent_environment
+        ):
+            # Provider readiness permits OpenCode's file auth when no matching
+            # provider environment key is present. Stage that fallback only for
+            # the selected model, so a direct provider key does not expose the
+            # multi-provider OpenCode store to clarification.
+            runtime_auth_mount_targets = frozenset({"/home/agent/.config/opencode"})
+    return (
+        runtime_auth_mount_targets
+        | frozenset(
+            _clarification_expanded_provider_path_value(name, value)
+            for name, value in agent_environment
+            if name in names
+        )
+    ) - _CLARIFICATION_GIT_AUTH_MOUNT_TARGETS
+
+
+def _clarification_auth_target(target: str, *, index: int) -> str:
+    """Keep agent-home targets and stage other paths under the agent home."""
+
+    return _helper_clarification_auth_target(target, index=index)
 
 
 @dataclass(frozen=True)
@@ -89,7 +1012,11 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
+    agent_runtime: AgentRuntime = AgentRuntime.codex
+    agent_model: str | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
+    clarification_enabled: bool = True
+    """Whether to add AWF's managed clarification service to the rendered stack."""
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
     """Optional callback invoked when the first compose-up attempt starts."""
@@ -118,12 +1045,6 @@ class WorkspaceSecretLeaseResolver(Protocol):
     ) -> LocalSecretLeaseResolution:
         """Resolve local secret lease mounts and environment for one workspace."""
         ...
-
-
-class WorkspaceServiceExecutionError(Exception):
-    """Raised when profile-declared workspace services fail to start."""
-
-    pass
 
 
 class ComposeStackLauncher:
@@ -304,10 +1225,9 @@ class ComposeStackLauncher:
                 profile_services=services,
                 companions=request.companions,
                 docker_mode=profile.docker.mode,
+                clarification_enabled=request.clarification_enabled,
             )
-        # Resolve the effective compose-up budget before pre-building companions so
-        # the cache pre-build shares the same subprocess cap the inline `docker
-        # compose up` build uses (see _build_companion_services).
+        # Give pre-builds and inline builds the same effective compose-up budget.
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=request.companions,
@@ -346,6 +1266,29 @@ class ComposeStackLauncher:
                 auth_mounts,
                 _hosted_dynamic_file_auth_mount_targets(agent_environment),
             )
+        clarification_auth_mounts = _clarification_auth_mounts(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=str(layout.mirror_path),
+            agent_runtime=request.agent_runtime,
+            agent_model=request.agent_model,
+        )
+        clarification_external_account_subject_token_file_rewrites = (
+            _clarification_external_account_subject_token_file_rewrites(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=str(layout.mirror_path),
+                agent_runtime=request.agent_runtime,
+                agent_model=request.agent_model,
+            )
+        )
+        clarification_aws_profile_path_rewrites = _clarification_aws_profile_path_rewrites(
+            auth_mounts,
+            agent_environment=agent_environment,
+            mirror_target=str(layout.mirror_path),
+            agent_runtime=request.agent_runtime,
+            agent_model=request.agent_model,
+        )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -356,6 +1299,19 @@ class ComposeStackLauncher:
             services=services,
             companions=companions,
             auth_mounts=tuple(auth_mounts),
+            clarification_enabled=request.clarification_enabled,
+            clarification_agent_environment=_clarification_agent_environment(
+                agent_environment,
+                auth_mounts=auth_mounts,
+                mirror_target=str(layout.mirror_path),
+                agent_runtime=request.agent_runtime,
+                agent_model=request.agent_model,
+            ),
+            clarification_auth_mounts=clarification_auth_mounts,
+            clarification_external_account_subject_token_file_rewrites=(
+                clarification_external_account_subject_token_file_rewrites
+            ),
+            clarification_aws_profile_path_rewrites=clarification_aws_profile_path_rewrites,
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,
@@ -434,424 +1390,3 @@ class ComposeStackLauncher:
         if companions == spec.companions:
             return spec
         return replace(spec, companions=companions)
-
-
-def _prebuilt_companion_image_count(spec: WorkspaceComposeSpec) -> int:
-    """Return the number of companions still pinned to pre-built image tags."""
-    return sum(1 for companion in spec.companions if companion.image is not None)
-
-
-def _raise_workspace_service_error_if_docker_unavailable(
-    exc: ComposeOperationError,
-    *,
-    spec: WorkspaceComposeSpec,
-) -> None:
-    """Map Docker availability failures to the workspace service error shape."""
-    if exc.reason_code != "DOCKER_UNAVAILABLE":
-        return
-    required_services = [s.name for s in spec.services if s.required]
-    if spec.docker_mode == "dind":
-        required_services.append("docker")
-    msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
-    if required_services:
-        msg = f"{msg} and required services: {required_services}"
-    detail = exc.stderr.strip() or exc.stdout.strip()
-    if detail:
-        msg = f"{msg}: {detail}"
-    raise WorkspaceServiceExecutionError(msg) from exc
-
-
-def _missing_prebuilt_companion_image_retry_spec(
-    spec: WorkspaceComposeSpec,
-    exc: ComposeOperationError,
-) -> WorkspaceComposeSpec | None:
-    """Clear missing pre-built companion images after a compose-up race."""
-    missing_images = frozenset(
-        companion.image
-        for companion in spec.companions
-        if companion.image is not None and _compose_up_reports_missing_image(exc, companion.image)
-    )
-    if not missing_images:
-        return None
-    companions = tuple(
-        replace(companion, image=None) if companion.image in missing_images else companion
-        for companion in spec.companions
-    )
-    return replace(spec, companions=companions)
-
-
-def _compose_up_reports_missing_image(exc: ComposeOperationError, image: str) -> bool:
-    """Return whether Compose reported that a specific local image tag is absent."""
-    detail = f"{exc.stderr}\n{exc.stdout}"
-    image_ref = _compose_image_ref_regex(image)
-    image_ref_before_colon = _compose_image_ref_before_colon_regex(image)
-    patterns = (
-        rf"no such image:\s*{image_ref}",
-        rf"{image_ref_before_colon}\s*:\s*no such image",
-        rf"pull access denied for\s+{image_ref}",
-        rf"(?:repository\s+)?{image_ref}\s+does not exist",
-    )
-    return any(re.search(pattern, detail, flags=re.IGNORECASE) for pattern in patterns)
-
-
-def _compose_image_ref_regex(image: str) -> str:
-    """Return a regex fragment matching an exact Compose image reference."""
-    image_ref_chars = r"A-Za-z0-9_.:/-"
-    escaped_image = re.escape(image)
-    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?![{image_ref_chars}])"
-
-
-def _compose_image_ref_before_colon_regex(image: str) -> str:
-    """Return an exact image reference fragment followed by a colon separator."""
-    image_ref_chars = r"A-Za-z0-9_.:/-"
-    escaped_image = re.escape(image)
-    return rf"(?<![{image_ref_chars}])['\"]?{escaped_image}['\"]?(?=\s*:)"
-
-
-def _stack_secret_metadata(
-    *,
-    secret_lease_resolution: LocalSecretLeaseResolution | None,
-    companion_secret_metadata: dict[str, object],
-) -> dict[str, object]:
-    """Merge profile secret lease metadata with companion env secret metadata."""
-    metadata: dict[str, object] = {}
-    if secret_lease_resolution is not None:
-        metadata.update(dict(secret_lease_resolution.metadata))
-    metadata.update(companion_secret_metadata)
-    return metadata
-
-
-def _hosted_companion_service_from_materialized(
-    companion: MaterializedCompanionService,
-) -> CompanionService:
-    """Render companion env-secret placeholders without consulting local env."""
-    if companion.spec.environment_secrets:
-        placeholder_env = {
-            secret.value_from: hosted_env_secret_alias_placeholder(secret.value_from)
-            for secret in companion.spec.environment_secrets
-        }
-        service = companion_service_from_materialized(companion, host_env=placeholder_env)
-        source_placeholders = {
-            secret.target: f"${{{secret.value_from}}}"
-            for secret in companion.spec.environment_secrets
-        }
-        service = replace(
-            service,
-            environment=tuple(
-                (target, source_placeholders.get(target, value))
-                for target, value in service.environment
-            ),
-        )
-    else:
-        service = companion_service_from_materialized(companion)
-    return replace(
-        service,
-        source_metadata=_hosted_companion_source_metadata(companion),
-    )
-
-
-def _hosted_companion_source_metadata(companion: MaterializedCompanionService) -> dict[str, object]:
-    """Return portable, secret-free source metadata for a hosted companion."""
-    spec = companion.spec
-    metadata: dict[str, object] = {
-        "schema": _HOSTED_COMPANION_SOURCE_SCHEMA,
-        "name": spec.name,
-        "repo_url": _hosted_companion_repo_url(spec.repo_url),
-        "base_branch": spec.base_branch,
-        "commit_sha": companion.commit_sha,
-        "build_context": spec.build_context,
-        "dockerfile": spec.dockerfile,
-    }
-    if spec.env_file is not None:
-        metadata["env_file"] = spec.env_file
-    if spec.volumes:
-        metadata["volumes"] = tuple(
-            {"source": source, "target": target} for source, target in spec.volumes
-        )
-    return metadata
-
-
-def _hosted_companion_repo_url(repo_url: str) -> str:
-    """Strip URL credentials before persisting portable hosted companion source metadata."""
-    try:
-        parsed = urlsplit(repo_url)
-    except ValueError:
-        return repo_url
-    authority = parsed.netloc
-    if not parsed.scheme or "@" not in authority:
-        if parsed.query or parsed.fragment:
-            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
-        return repo_url
-    userinfo, _, authority = authority.rpartition("@")
-    if parsed.scheme.lower() in {"ssh", "git+ssh"}:
-        username, password_separator, _ = userinfo.partition(":")
-        if not password_separator:
-            if parsed.query or parsed.fragment:
-                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-            return repo_url
-        if username:
-            authority = f"{username}@{authority}"
-    return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
-
-
-def _hosted_secret_lease_placeholder_resolution(
-    profile: WorkspaceProfile,
-) -> LocalSecretLeaseResolution | None:
-    """Return secret-free lease names/targets for hosted render-only stacks."""
-    if not profile.secrets:
-        return None
-
-    env: dict[str, str] = {}
-    lease_env_count = 0
-    providers: list[str] = []
-    targets: list[str] = []
-    mounts: list[AuthMount] = []
-    satisfied_legacy_targets: set[str] = set()
-    satisfied_legacy_providers: set[str] = set()
-    profile_presets_git_askpass = "GIT_ASKPASS" in profile.runtime.environment
-    bitbucket_git_token_rendered = False
-    mount_count = 0
-    skipped_unresolved_count = 0
-
-    for secret in profile.secrets:
-        provider = _hosted_secret_provider(secret.provider)
-        if provider is None:
-            skipped_unresolved_count += 1
-            continue
-        if provider not in _HOSTED_RENDER_SECRET_PROVIDERS:
-            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
-                secret,
-                provider=provider,
-                reason_code=SECRET_LEASE_PROVIDER_UNSUPPORTED,
-            )
-            continue
-        if provider in _HOSTED_RENDER_ENV_SECRET_PROVIDERS:
-            if secret.kind != "env":
-                skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
-                    secret,
-                    provider=provider,
-                    reason_code=SECRET_LEASE_TARGET_KIND_MISMATCH,
-                )
-                continue
-            pairs = _hosted_env_secret_alias_pairs(secret, provider=provider)
-            if pairs is None:
-                skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
-                    secret,
-                    provider=provider,
-                    reason_code=_hosted_env_secret_unrenderable_reason(provider),
-                )
-                continue
-            for target, source_name in pairs:
-                injected = target not in env
-                if injected:
-                    env[target] = hosted_env_secret_alias_placeholder(source_name)
-                    lease_env_count += 1
-                    if provider == "bitbucket" and target == "BITBUCKET_API_TOKEN":
-                        bitbucket_git_token_rendered = True
-                _append_unique_hosted_secret_value(targets, target)
-            _append_unique_hosted_secret_value(providers, provider)
-            if provider == "github":
-                satisfied_legacy_providers.add(provider)
-            continue
-        if secret.kind != "mount":
-            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
-                secret,
-                provider=provider,
-                reason_code=SECRET_LEASE_TARGET_KIND_MISMATCH,
-            )
-            continue
-        if not secret.target.startswith("/"):
-            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
-                secret,
-                provider=provider,
-                reason_code=SECRET_LEASE_TARGET_MISMATCH,
-            )
-            continue
-        if provider in _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS:
-            mount_count += 1
-            _append_unique_hosted_secret_value(providers, provider)
-            _append_unique_hosted_secret_value(targets, secret.target)
-            _append_hosted_auth_placeholder_mounts(mounts, (secret.target,))
-            satisfied_legacy_targets.add(secret.target)
-            continue
-
-    if (
-        bitbucket_git_token_rendered
-        and "GIT_ASKPASS" not in env
-        and not profile_presets_git_askpass
-        and not any(mount.target == _HOSTED_BITBUCKET_ASKPASS_TARGET for mount in mounts)
-    ):
-        mount_count += 1
-        _append_hosted_auth_placeholder_mounts(mounts, (_HOSTED_BITBUCKET_ASKPASS_TARGET,))
-        apply_bitbucket_agent_git_auth(env, askpass_path=_HOSTED_BITBUCKET_ASKPASS_TARGET)
-
-    if not env and mount_count == 0 and not skipped_unresolved_count:
-        return None
-
-    metadata: dict[str, object] = {
-        "schema": "secret_lease_mount_metadata.v1",
-        "mount_plan": "profile_declared_secret_leases",
-        "env_count": lease_env_count,
-        "mount_count": mount_count,
-        "providers": providers,
-        "targets": targets,
-    }
-    if len(env) != lease_env_count:
-        metadata["total_env_count"] = len(env)
-    if skipped_unresolved_count:
-        metadata["skipped_unresolved_count"] = skipped_unresolved_count
-    return LocalSecretLeaseResolution(
-        environment=tuple(env.items()),
-        mounts=tuple(mounts),
-        metadata=metadata,
-        satisfied_legacy_targets=frozenset(satisfied_legacy_targets),
-        satisfied_legacy_providers=frozenset(satisfied_legacy_providers),
-    )
-
-
-def _skip_or_raise_unrenderable_hosted_secret(
-    secret: ProfileSecret,
-    *,
-    provider: str,
-    reason_code: str,
-) -> int:
-    if secret.required:
-        raise SecretLeaseResolutionError(
-            reason_code=reason_code,
-            secret_name=secret.name,
-            provider=provider,
-            target=secret.target,
-            kind=secret.kind,
-        )
-    return 1
-
-
-def _hosted_env_secret_unrenderable_reason(provider: str) -> str:
-    if provider == "env":
-        return SECRET_LEASE_SOURCE_INVALID
-    return SECRET_LEASE_TARGET_MISMATCH
-
-
-def _hosted_secret_provider(provider: str | None) -> str | None:
-    if provider is None:
-        return None
-    normalized = provider.strip().lower()
-    return normalized or None
-
-
-def _hosted_env_secret_alias_pairs(
-    secret: ProfileSecret,
-    *,
-    provider: str,
-) -> tuple[tuple[str, str], ...] | None:
-    """Return hosted target/source aliases matching local provider lease rules."""
-    if provider == "env":
-        source_name = _hosted_env_secret_source_name(secret.ref)
-        if source_name is None:
-            return None
-        return ((secret.target, source_name),)
-    if provider == "github":
-        if secret.target not in _HOSTED_GITHUB_ENV_TARGET_NAMES:
-            return None
-        return tuple(
-            (target, _HOSTED_GITHUB_ENV_SOURCE_NAME) for target in _HOSTED_GITHUB_ENV_TARGET_NAMES
-        )
-    if provider == "bitbucket":
-        source_name = _HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES.get(secret.target)
-        if source_name is None:
-            return None
-        return ((secret.target, source_name),)
-    return None
-
-
-def _hosted_env_secret_source_name(ref: str | None) -> str | None:
-    raw = (ref or "").strip()
-    if raw.startswith("env/"):
-        raw = raw[len("env/") :]
-    candidate = raw
-    if not _HOSTED_RENDER_ENV_REF_RE.fullmatch(candidate):
-        return None
-    return candidate
-
-
-def _append_unique_hosted_secret_value(items: list[str], value: str) -> None:
-    if value not in items:
-        items.append(value)
-
-
-def _append_hosted_auth_placeholder_mounts(
-    mounts: list[AuthMount],
-    targets: Sequence[str],
-    *,
-    suppressed_targets: frozenset[str] = frozenset(),
-) -> None:
-    seen = {mount.target for mount in mounts}
-    for target in targets:
-        if target in seen or target in suppressed_targets or not target.startswith("/"):
-            continue
-        mounts.append(
-            AuthMount(
-                source=_hosted_auth_placeholder_source(target),
-                target=target,
-                mode="ro",
-            )
-        )
-        seen.add(target)
-
-
-def _hosted_auth_placeholder_source(target: str) -> str:
-    name = target.strip("/").replace("/", "__") or "root"
-    return f"{_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT}/{name}"
-
-
-def _hosted_dynamic_file_auth_mount_targets(
-    agent_environment: tuple[tuple[str, str], ...],
-) -> tuple[str, ...]:
-    google_credentials_target = _hosted_google_application_credentials_target(agent_environment)
-    if google_credentials_target is None:
-        return ()
-    return (google_credentials_target,)
-
-
-def _hosted_google_application_credentials_target(
-    agent_environment: tuple[tuple[str, str], ...],
-) -> str | None:
-    raw = dict(agent_environment).get(_GOOGLE_APPLICATION_CREDENTIALS)
-    if raw is None:
-        return None
-    if raw in (
-        f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
-        f"${_GOOGLE_APPLICATION_CREDENTIALS}",
-    ):
-        # Hosted render-only cannot resolve executor-local ADC paths from Core.
-        return _HOSTED_GOOGLE_APPLICATION_CREDENTIALS_TARGET
-    if "$" in raw:
-        return None
-    target = raw
-    if not target.startswith("/"):
-        return None
-    return target
-
-
-def effective_compose_up_timeout_seconds(
-    *,
-    profile: WorkspaceProfile,
-    companions: tuple[MaterializedCompanionService | WorkspaceCompanionSpec, ...],
-) -> int:
-    """Return the longest compose-up wait timeout requested for this stack."""
-    timeouts = [profile.docker.startup_timeout_seconds]
-    timeouts.extend(
-        timeout
-        for companion in companions
-        if (timeout := _companion_compose_up_timeout_seconds(companion)) is not None
-    )
-    return max(timeouts)
-
-
-def _companion_compose_up_timeout_seconds(
-    companion: MaterializedCompanionService | WorkspaceCompanionSpec,
-) -> int | None:
-    """Return a companion timeout from either materialized or parsed specs."""
-    if isinstance(companion, MaterializedCompanionService):
-        return companion.spec.compose_up_timeout_seconds
-    return companion.compose_up_timeout_seconds

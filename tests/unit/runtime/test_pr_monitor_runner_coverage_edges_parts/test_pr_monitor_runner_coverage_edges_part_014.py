@@ -33,8 +33,11 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
 from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
+    _notification_key,
+    _notify_human_blocker_items,
     _review_comment_body_state_key,
 )
+from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _protected_history_directive_reblock_key,
 )
@@ -1219,9 +1222,74 @@ async def test_post_human_notification_sanitizes_placeholder_reason_before_posti
     body = str(gh.posts[0]["body"])
     assert "<what you need>" not in body
     assert generic_reason in body
-    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{generic_reason}"] == (
-        "notified"
+    bot_items, human_items = _notify_human_blocker_items(status, state)
+    assert state.threads_addressed_ids[
+        _notification_key(
+            head_sha=status.head_sha,
+            blocker_reason=generic_reason,
+            items_digest=_notification_items_digest(bot_items + human_items),
+        )
+    ] == ("notified")
+
+
+@pytest.mark.unit
+async def test_post_human_notification_redacts_needs_human_reason_before_posting_and_deduping(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
+    secret = "legacyNeedsHumanSecret987"
+    raw_reason = f"A maintainer must decide whether to rotate GITHUB_TOKEN={secret}."
+    redacted_reason = r"A maintainer must decide whether to rotate GITHUB_TOKEN=\<redacted\>"
+    dedupe_reason = "A maintainer must decide whether to rotate GITHUB_TOKEN=<redacted>"
+    thread = ReviewThread(
+        thread_id="T_secret",
+        path="apps/api/checkout_policy.py",
+        line=102,
+        body_excerpt="policy tradeoff still needs a decision",
+        author="cursor[bot]",
+    )
+    status = _status_for_helpers(threads=(thread,))
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_secret": "needs_human",
+            _needs_human_reason_state_key("T_secret"): raw_reason,
+        }
+    )
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert len(gh.posts) == 1
+    assert secret not in str(gh.posts[0]["body"])
+    assert redacted_reason in str(gh.posts[0]["body"])
+    assert "GITHUB_TOKEN=<redacted>" not in str(gh.posts[0]["body"])
+    notification_keys = [
+        key
+        for key, value in state.threads_addressed_ids.items()
+        if key.startswith(f"__awf_notify__:{status.head_sha}:") and value == "notified"
+    ]
+    assert len(notification_keys) == 1
+    assert dedupe_reason in notification_keys[0]
+    assert secret not in notification_keys[0]
 
 
 @pytest.mark.unit

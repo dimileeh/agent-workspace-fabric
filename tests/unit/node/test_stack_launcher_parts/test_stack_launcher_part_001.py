@@ -370,6 +370,15 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "rw"
+    assert spec.clarification_enabled is True
+    assert ("DATABASE_URL", "postgresql://awf@postgres/awf") not in (
+        spec.clarification_agent_environment
+    )
+    assert not any(
+        name.startswith(("GIT_", "GH_", "GITHUB_", "BITBUCKET_"))
+        for name, _value in spec.clarification_agent_environment
+    )
+    assert spec.clarification_auth_mounts == ()
 
 
 @pytest.mark.unit
@@ -1010,6 +1019,7 @@ async def test_compose_stack_launcher_resolves_profile_services_in_thread(
             "profile_services": compose.specs[0].services,
             "companions": (),
             "docker_mode": profile.docker.mode,
+            "clarification_enabled": True,
         },
     )
     # No companions in this profile, so no per-companion build runs off-thread.

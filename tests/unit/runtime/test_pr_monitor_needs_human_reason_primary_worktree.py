@@ -1,0 +1,274 @@
+"""Primary-worktree cleanup coverage for NEEDS_HUMAN clarification re-asks."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from awf.common.commands import CommandResult
+from awf.runtime.pr_monitor_runner import comments
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
+    _git,
+    _init_awf_linked_worktree,
+    _init_real_worktree,
+    _LocalCommandRunner,
+)
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_preserves_empty_primary_worktree_dir(
+    tmp_path: Path,
+) -> None:
+    """A cleanliness preflight must not delete unrelated empty directories."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_empty_primary")
+    empty_output_dir = worktree / "operator-output"
+    empty_output_dir.mkdir()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    with pytest.raises(_MonitorPolicyBlockedError, match="Could not prepare an isolated worktree"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert empty_output_dir.exists()
+
+
+@pytest.mark.unit
+async def test_prepare_reask_primary_worktree_constrains_scratch_exclude_to_source_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned source mirror bounds the pre-re-ask exclude rewrite."""
+    apply_calls: list[dict[str, object]] = []
+
+    async def _apply_agent_scratch_excludes(**kwargs: object) -> bool:
+        apply_calls.append(kwargs)
+        return True
+
+    async def _check_validation_worktree_clean(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(reason_code=None)
+
+    monkeypatch.setattr(
+        comments,
+        "apply_agent_scratch_excludes",
+        _apply_agent_scratch_excludes,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.check_validation_worktree_clean",
+        _check_validation_worktree_clean,
+    )
+    worktree = tmp_path / "worktree"
+    source_mirror = tmp_path / "source-mirror.git"
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(
+            adapter=SimpleNamespace(runtime_scratch_paths=(".claude/worktrees/",))
+        )
+    )
+
+    await comments._prepare_reask_primary_worktree(
+        runner,
+        worktree_path=worktree,
+        source_mirror=source_mirror,
+        source_git_dir=tmp_path / "source-git-dir",
+    )
+
+    assert apply_calls[0]["validated_mirror_path"] == source_mirror
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_sanitizes_primary_status_object_lookup_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary cleanliness checks ignore inherited Git object-directory overrides."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_object_directory")
+    restore_ref = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    (worktree / "ignored.env").mkdir()
+    object_directory = tmp_path / "empty-object-directory"
+    object_directory.mkdir()
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(object_directory))
+
+    class _RecordingLocalCommandRunner(_LocalCommandRunner):
+        """Record environments used by the primary-worktree status calls."""
+
+        def __init__(self) -> None:
+            self.primary_status_environments: list[dict[str, str] | None] = []
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            if args[args.index("-C") + 1] == str(worktree) and "status" in args:
+                self.primary_status_environments.append(None if env is None else dict(env))
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    command_runner = _RecordingLocalCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return restore_ref
+
+    runner._rev_parse_head = _rev_parse_head
+
+    await comments._prepare_reask_primary_worktree(
+        runner,
+        worktree_path=worktree,
+    )
+    assert (
+        await comments._check_reask_primary_worktree_clean(
+            runner,
+            worktree_path=worktree,
+            restore_ref=restore_ref,
+        )
+        is None
+    )
+    assert len(command_runner.primary_status_environments) == 2
+    assert all(
+        environment is not None and "GIT_OBJECT_DIRECTORY" not in environment
+        for environment in command_runner.primary_status_environments
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reask_raises", (False, True))
+async def test_needs_human_reason_reask_blocks_when_primary_worktree_check_fails(
+    reask_raises: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed primary-worktree check must stop the fix cycle."""
+    cleanup_calls: list[dict[str, object]] = []
+    audit_events: list[dict[str, object]] = []
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        if reask_raises:
+            raise RuntimeError("re-ask failed")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _check_reask_primary_worktree_clean(_runner: object, **kwargs: object) -> str:
+        cleanup_calls.append(kwargs)
+        return "could not inspect primary worktree"
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "c" * 40
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        audit_events.append(kwargs)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+    monkeypatch.setattr(
+        comments,
+        "_check_reask_primary_worktree_clean",
+        _check_reask_primary_worktree_clean,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id="ws_1",
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head="a" * 40,
+            base_branch="main",
+            remote_branch="awf/ws_1",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert audit_events == []
+    assert cleanup_calls == [
+        {
+            "worktree_path": tmp_path / "ws_1",
+            "restore_ref": "c" * 40,
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_preserves_primary_commit_made_during_reask(
+    tmp_path: Path,
+) -> None:
+    """A clean primary worktree with a new HEAD still fails closed without reset."""
+    workspace_id = "ws_reask_primary_commit"
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask = kwargs["isolated_worktree_host_path"]
+        assert isinstance(reask, Path)
+        (worktree / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        _git(worktree, "add", "tracked.py")
+        _git(worktree, "commit", "-qm", "independent primary change")
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _record_pr_monitor_audit_event(**_kwargs: object) -> None:
+        return None
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as raised:
+        await comments._enforce_needs_human_reason(
+            runner,
+            result=VerdictResult(verdict="needs_human"),
+            original_prompt="original review task",
+            workspace_id=workspace_id,
+            pr_number=1,
+            item_id="thread_1",
+            item_kind="thread",
+            item_author=None,
+            item_path=None,
+            item_line=None,
+            commit_message="fix: address thread_1",
+            compose_project="project",
+            compose_file=Path("compose.yml"),
+            state=None,
+            task_tag=None,
+            operation_start_head=None,
+            base_branch="main",
+            remote_branch=f"awf/{workspace_id}",
+            operation_id=None,
+            operation_type=None,
+            monitor_log=None,
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "independent primary change"
+    assert (worktree / "tracked.py").read_text(encoding="utf-8") == "x = 2\n"
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))

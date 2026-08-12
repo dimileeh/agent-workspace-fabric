@@ -305,21 +305,18 @@ async def test_manual_ready_handoff_persists_fallback_attention_reason(
 
 
 @pytest.mark.unit
-async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_thread(
+async def test_blocking_outdated_thread_gets_human_notification(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """A reasonless ``NotifyHuman`` that is NOT ready keeps the generic reason (#659).
+    """An outdated ``needs_human`` thread must not produce a ready handoff.
 
-    An outdated inline thread downgraded to ``needs_human`` still blocks the merge
-    (``decide`` gate 7) so ``decide()`` returns a message-less ``NotifyHuman()``,
-    but ``_notify_human_reason`` returns ``None`` (it consults the non-outdated
-    feeds only) and this is not a manual-ready handoff. The fallback must keep the
-    safe generic wait reason here rather than falsely advertising "ready to merge"
-    — the console reason must not over-claim readiness for a still-blocked PR.
+    The decision core blocks the merge at gate 7. Its notification must include
+    an actionable human reason and rendered blocker rather than the green
+    manual-merge template.
     """
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     runner = make_runner(
@@ -372,7 +369,16 @@ async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_
     assert terminal is False
     _, reason, ws_status = await _read_attention(factory, ws_id)
     assert ws_status == WorkspaceStatus.monitoring_pr.value
-    assert reason == "PR monitor is waiting for human attention."
+    assert reason == "AWF could not resolve this outdated thread and needs human input"
+    comment_calls = _calls(cmd, _is_pr_comment)
+    assert len(comment_calls) == 1
+    body = comment_calls[0][comment_calls[0].index("--body") + 1]
+    assert "needs human attention" in body
+    assert "src/app.py:10" in body
+    assert "Outdated feedback awaiting AWF resolution (1):" in body
+    assert "-> AWF status: AWF could not resolve this outdated thread" in body
+    assert "no reason given by agent" not in body
+    assert "All 5 AWF gates are green" not in body
 
 
 @pytest.mark.unit

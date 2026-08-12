@@ -17,6 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,9 @@ from typing import Any, Final, Protocol, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentDefaults
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
@@ -35,8 +39,8 @@ from awf.common.auto_merge import (
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.common.workspace_policy import pr_adoption_is_hosted
-from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
+from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
+from awf.db.enums import AgentRuntime, EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -66,7 +70,7 @@ from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, WorkspaceProfile
 from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
@@ -165,6 +169,9 @@ class ProvisionerConfig:
     service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
     """How many companion log lines to capture on a service-startup failure (must be > 0)."""
 
+    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
+    """Resolved agent defaults shared with the executor's runtime configuration."""
+
     def __post_init__(self) -> None:
         """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
 
@@ -201,6 +208,20 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+
+    def _effective_agent_model(self, workspace: Workspace) -> str | None:
+        """Resolve the stack model with the executor's default-selection rules."""
+        agent = AgentRuntime(workspace.agent)
+        defaults = self._config.agent_defaults.get(agent)
+        task_policy = workspace.task_policy
+        raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
+        effort = raw_effort.strip() if isinstance(raw_effort, str) else None
+        return selected_runtime_model_for_defaults(
+            agent=agent,
+            explicit_model=agent_model_from_task_policy(task_policy),
+            default_model=defaults.model if defaults is not None else None,
+            effort=effort or (defaults.effort if defaults is not None else None),
+        )
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -305,7 +326,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 )
                 profile = profile_resolution.profile
             else:
-                profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+                profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
             resolved_profile_dict = (
                 profile_resolution.profile.model_dump(mode="json", by_alias=True)
                 if profile_resolution is not None
@@ -315,12 +336,20 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
             hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
+            effective_agent_model = self._effective_agent_model(ws)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+            clarification_enabled = all(
+                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
+            ) and all(
+                companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
+                for companion in companion_specs
+            )
+            if self._stack_launcher is not None:
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
@@ -328,6 +357,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     ),
                     companions=companion_specs,
                     docker_mode=profile.docker.mode,
+                    clarification_enabled=clarification_enabled,
                 )
                 companion_graph_prevalidated = True
             if self._stack_launcher is not None and hosted_pr_adoption:
@@ -341,7 +371,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
@@ -579,7 +612,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
                     )
