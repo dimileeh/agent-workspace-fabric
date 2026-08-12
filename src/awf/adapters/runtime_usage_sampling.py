@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.adapters.usage import IsolatedUsageSampleContext, IsolatedUsageSampler
+from awf.common.compose_exec import TrackedIsolatedComposeRun
 from awf.common.logging import get_logger
 
 if TYPE_CHECKING:
@@ -28,6 +29,30 @@ async def complete_isolated_usage_capture_after_cancellation(
             await asyncio.shield(capture_task)
     with contextlib.suppress(asyncio.CancelledError):
         capture_task.result()
+
+
+async def capture_isolated_usage_before_cleanup(
+    sampler_ctx: IsolatedUsageSampleContext | None,
+    invocation: Any,
+    *,
+    agent: str,
+    workspace_id: str | None,
+) -> None:
+    """Best-effort final capture before force-removing an isolated container."""
+    if sampler_ctx is None or not isinstance(invocation, TrackedIsolatedComposeRun):
+        return
+    try:
+        await sampler_ctx.capture_final_before_cleanup(container_name=invocation.container_name)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.warning(
+            "usage.collect.error",
+            agent=agent,
+            workspace_id=workspace_id,
+            phase="capture_before_isolated_cleanup",
+            exc_info=True,
+        )
 
 
 async def start_isolated_usage_sampling(

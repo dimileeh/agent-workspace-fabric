@@ -51,6 +51,7 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeGitPreparation,
 )
 from awf.adapters.runtime_usage_sampling import (
+    capture_isolated_usage_before_cleanup,
     complete_isolated_usage_capture_after_cancellation,
     start_isolated_usage_sampling,
 )
@@ -1490,17 +1491,9 @@ class AgentAdapter(ABC):
         workspace_id: str | None,
     ) -> None:
         """Best-effort final capture before force-removing an isolated container."""
-        if sampler_ctx is None or not isinstance(invocation, TrackedIsolatedComposeRun):
-            return
-        try:
-            await sampler_ctx.capture_final_before_cleanup(container_name=invocation.container_name)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.warning(
-                "usage.collect.error",
-                agent=self.name.value,
-                workspace_id=workspace_id,
-                phase="capture_before_isolated_cleanup",
-                exc_info=True,
-            )
+        await capture_isolated_usage_before_cleanup(
+            sampler_ctx,
+            invocation,
+            agent=self.name.value,
+            workspace_id=workspace_id,
+        )
