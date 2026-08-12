@@ -1329,6 +1329,10 @@ async def _enforce_needs_human_reason(
                 reask_result,
                 reason=sanitized_reask_reason,
             )
+            if hosted_read_only and reask_result.verdict == "agent_failed":
+                # Hosted clarification has no local isolation fallback. Its
+                # executor failed before a reason could be collected.
+                needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
             if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(
                 reask_result
             ):

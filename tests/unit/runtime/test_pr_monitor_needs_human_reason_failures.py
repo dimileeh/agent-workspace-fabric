@@ -99,6 +99,59 @@ async def test_needs_human_reason_reask_degrades_provider_failures_to_original_v
 
 
 @pytest.mark.unit
+async def test_hosted_needs_human_reason_reask_records_agent_failure_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    """A rejected hosted read-only clarification is unavailable, not merely blank."""
+    audit_events: list[dict[str, object]] = []
+    invocation: dict[str, object] = {}
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        """Return the executor-rejection verdict from this synthetic re-ask."""
+        invocation.update(kwargs)
+        return VerdictResult(verdict="agent_failed")
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record the missing-reason diagnostic for this test."""
+        audit_events.append(kwargs)
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(adapter=SimpleNamespace(is_hosted=True)),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id="ws_hosted",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="a" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_hosted",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human")
+    assert invocation["read_only"] is True
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
+
+
+@pytest.mark.unit
 async def test_needs_human_reason_reask_blocks_when_cleanup_fails_after_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
