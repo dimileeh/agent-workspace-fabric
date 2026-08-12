@@ -1147,11 +1147,18 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
+    @pytest.mark.parametrize(
+        ("object_format", "index_version"),
+        [(None, 2), (None, 4), ("sha256", 2), ("sha256", 4)],
+    )
     def test_isolated_reask_git_metadata_binds_copy_split_index_backing_file(
-        self, tmp_path: Path
+        self, tmp_path: Path, object_format: str | None, index_version: int
     ) -> None:
         """A split index snapshot remains usable by Git in the clarification worktree."""
-        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
+        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(
+            tmp_path, object_format=object_format
+        )
+        _git(["config", "index.version", str(index_version)], worktree_path)
         _git(["update-index", "--split-index"], worktree_path)
         shared_index_path = (
             worktree_path / _git(["rev-parse", "--shared-index-path"], worktree_path).stdout.strip()
@@ -1187,10 +1194,51 @@ class TestIsolatedReaskAdapter:
         finally:
             temporary_metadata.cleanup()
 
-    def test_isolated_reask_git_metadata_binds_disables_fsmonitor_for_shared_index_lookup(
+    def test_split_index_backing_file_name_rejects_malformed_indexes(self, tmp_path: Path) -> None:
+        """Malformed agent-provided index bytes cannot select a backing file."""
+        index_path = tmp_path / "index"
+        index_header = b"DIRC" + (2).to_bytes(4, "big") + (0).to_bytes(4, "big")
+        index_entry = b"\0" * 62 + b"\0\0"
+        checksum = b"\0" * 20
+        malformed_indexes = [
+            b"",
+            b"DIRC" + (1).to_bytes(4, "big") + (0).to_bytes(4, "big") + checksum,
+            b"DIRC" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big") + checksum,
+            b"DIRC"
+            + (2).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\0" * 60
+            + b"\x40\0"
+            + checksum,
+            b"DIRC"
+            + (3).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\0" * 60
+            + b"\x40\0"
+            + checksum,
+            b"DIRC" + (4).to_bytes(4, "big") + (1).to_bytes(4, "big") + b"\0" * 62 + checksum,
+            b"DIRC"
+            + (2).to_bytes(4, "big")
+            + (1).to_bytes(4, "big")
+            + b"\0" * 62
+            + b"path"
+            + checksum,
+            index_header + index_entry + b"x" + checksum,
+            index_header + index_entry + b"TREE" + (5).to_bytes(4, "big") + b"xx" + checksum,
+            index_header + index_entry + b"link" + (19).to_bytes(4, "big") + b"\0" * 19 + checksum,
+            index_header + index_entry + b"TREE" + (0).to_bytes(4, "big") + checksum,
+        ]
+
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "invalid") is None
+        assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+        for malformed_index in malformed_indexes:
+            index_path.write_bytes(malformed_index)
+            assert base_isolated_reask._split_index_backing_file_name(index_path, "0" * 40) is None
+
+    def test_isolated_reask_git_metadata_binds_avoids_git_config_for_shared_index_lookup(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Shared-index discovery cannot execute an agent-configured fsmonitor hook."""
+        """Shared-index discovery does not invoke Git with repository configuration."""
         mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
         _git(["update-index", "--split-index"], worktree_path)
         real_run = base_isolated_reask.subprocess.run
@@ -1211,82 +1259,20 @@ class TestIsolatedReaskAdapter:
 
         assert temporary_metadata is not None
         try:
-            assert shared_index_commands == [
-                [
-                    "git",
-                    "-C",
-                    str(worktree_path),
-                    "-c",
-                    "core.fsmonitor=false",
-                    "rev-parse",
-                    "--shared-index-path",
-                ]
-            ]
+            assert shared_index_commands == []
         finally:
             temporary_metadata.cleanup()
 
-    def test_isolated_reask_git_metadata_binds_keep_snapshot_when_shared_index_lookup_fails(
+    def test_isolated_reask_git_metadata_binds_keeps_snapshot_when_split_index_copy_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Optional split-index discovery cannot discard a completed snapshot."""
+        """Optional split-index copying cannot discard a completed snapshot."""
         mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
-        real_run = base_isolated_reask.subprocess.run
-
-        def _shared_index_lookup_failure(command: list[str], *args: Any, **kwargs: Any) -> Any:
-            if command == [
-                "git",
-                "-C",
-                str(worktree_path),
-                "-c",
-                "core.fsmonitor=false",
-                "rev-parse",
-                "--shared-index-path",
-            ]:
-                raise subprocess.CalledProcessError(1, command)
-            return real_run(command, *args, **kwargs)
-
-        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _shared_index_lookup_failure)
-
-        temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
-            worktree_path,
-            expected_ref=head_oid,
-            expected_source_mirror=mirror_path,
+        monkeypatch.setattr(
+            base_isolated_reask,
+            "_split_index_backing_file_name",
+            lambda _index_path, _expected_ref: "sharedindex.missing",
         )
-
-        assert temporary_metadata is not None
-        try:
-            snapshot_path = Path(temporary_metadata.name) / "linked-git"
-            assert (snapshot_path / "index").is_file()
-            assert binds == (
-                (snapshot_path, str(mirror_path / "worktrees" / worktree_path.name)),
-                (Path(temporary_metadata.name) / "common-git", "/awf-clarification-git-common"),
-            )
-        finally:
-            temporary_metadata.cleanup()
-
-    def test_isolated_reask_git_metadata_binds_skip_external_shared_index(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """An external shared-index path cannot discard a completed snapshot."""
-        mirror_path, worktree_path, head_oid, _unrelated_oid = _linked_reask_worktree(tmp_path)
-        external_shared_index = tmp_path / "sharedindex.external"
-        external_shared_index.write_bytes(b"external split-index backing file")
-        real_run = base_isolated_reask.subprocess.run
-
-        def _external_shared_index(command: list[str], *args: Any, **kwargs: Any) -> Any:
-            if command == [
-                "git",
-                "-C",
-                str(worktree_path),
-                "-c",
-                "core.fsmonitor=false",
-                "rev-parse",
-                "--shared-index-path",
-            ]:
-                return subprocess.CompletedProcess(command, 0, stdout=str(external_shared_index))
-            return real_run(command, *args, **kwargs)
-
-        monkeypatch.setattr(base_isolated_reask.subprocess, "run", _external_shared_index)
 
         temporary_metadata, binds = adapter_base._isolated_reask_git_metadata_volume_binds(
             worktree_path,

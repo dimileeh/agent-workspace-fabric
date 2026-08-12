@@ -259,6 +259,74 @@ def _write_isolated_reask_source_config(common_path: Path, expected_ref: str) ->
     raise OSError("re-ask ref does not use a supported Git object format")
 
 
+def _split_index_backing_file_name(index_path: Path, expected_ref: str) -> str | None:
+    """Return the split-index backing filename encoded in a copied Git index.
+
+    The index has already been copied from the agent-writable linked Git
+    directory. Reading its ``link`` extension avoids executing Git with that
+    directory's repository configuration just to discover the backing index.
+    """
+    object_id_bytes = len(expected_ref) // 2
+    if object_id_bytes not in (20, 32):
+        return None
+    try:
+        index = index_path.read_bytes()
+    except OSError:
+        return None
+    contents_end = len(index) - object_id_bytes
+    if contents_end < 12 or index[:4] != b"DIRC":
+        return None
+    version = int.from_bytes(index[4:8], byteorder="big")
+    if version not in (2, 3, 4):
+        return None
+    entry_count = int.from_bytes(index[8:12], byteorder="big")
+    offset = 12
+    entry_header_size = 42 + object_id_bytes
+    for _ in range(entry_count):
+        entry_start = offset
+        if offset + entry_header_size > contents_end:
+            return None
+        flags_offset = offset + 40 + object_id_bytes
+        flags = int.from_bytes(index[flags_offset : flags_offset + 2], byteorder="big")
+        offset += entry_header_size
+        if flags & 0x4000:
+            if version < 3 or offset + 2 > contents_end:
+                return None
+            offset += 2
+        if version == 4:
+            while True:
+                if offset >= contents_end:
+                    return None
+                byte = index[offset]
+                offset += 1
+                if not byte & 0x80:
+                    break
+        path_end = index.find(b"\0", offset, contents_end)
+        if path_end < 0:
+            return None
+        if version == 4:
+            offset = path_end + 1
+        else:
+            entry_size = path_end + 1 - entry_start
+            offset = entry_start + ((entry_size + 7) & ~7)
+        if offset > contents_end:
+            return None
+    while offset < contents_end:
+        if offset + 8 > contents_end:
+            return None
+        extension_signature = index[offset : offset + 4]
+        extension_size = int.from_bytes(index[offset + 4 : offset + 8], byteorder="big")
+        offset += 8
+        if extension_size > contents_end - offset:
+            return None
+        if extension_signature == b"link":
+            if extension_size < object_id_bytes:
+                return None
+            return f"sharedindex.{index[offset : offset + object_id_bytes].hex()}"
+        offset += extension_size
+    return None
+
+
 def _linked_worktree_common_git_dir(
     snapshot_path: Path,
     linked_git_dir: Path,
@@ -410,32 +478,15 @@ def _isolated_reask_git_metadata_volume_binds(
             pass
         else:
             try:
-                shared_index_output = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(worktree_path),
-                        "-c",
-                        "core.fsmonitor=false",
-                        "rev-parse",
-                        "--shared-index-path",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                ).stdout.strip()
-                shared_index_path = Path(shared_index_output)
-                if not shared_index_path.is_absolute():
-                    shared_index_path = worktree_path / shared_index_path
-                shared_index_path = Path(os.path.normpath(shared_index_path))
-                shared_index_relative_path = shared_index_path.relative_to(linked_git_dir)
-                if shared_index_relative_path.parent != Path():
-                    raise ValueError("shared index is not directly under the linked Git directory")
+                shared_index_name = _split_index_backing_file_name(
+                    snapshot_path / "index", expected_ref
+                )
+                if shared_index_name is None:
+                    raise ValueError("index does not reference a split-index backing file")
                 _copy_regular_git_metadata_file_from_directory_fd(
                     linked_git_dir_fd,
-                    shared_index_relative_path.name,
-                    snapshot_path / shared_index_relative_path.name,
+                    shared_index_name,
+                    snapshot_path / shared_index_name,
                     max_bytes=_MAX_ISOLATED_REASK_GIT_INDEX_BYTES,
                 )
             except (OSError, subprocess.SubprocessError, ValueError):
