@@ -114,6 +114,72 @@ async def test_isolated_reask_worktree_removes_checkout_when_filter_metadata_loo
 
 
 @pytest.mark.unit
+async def test_isolated_reask_worktree_removes_checkout_after_unexpected_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected checkout-setup error cannot strand the isolated worktree."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_unexpected_setup_error")
+
+    async def _raise_unexpected_filter_error(_runner: object, **_kwargs: object) -> list[str]:
+        """Simulate an unexpected failure before the isolated checkout is populated."""
+        raise ValueError("unexpected filter setup error")
+
+    monkeypatch.setattr(comments, "_checkout_filter_overrides", _raise_unexpected_filter_error)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_LocalCommandRunner()))
+
+    with pytest.raises(ValueError, match="unexpected filter setup error"):
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert not list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
+async def test_isolated_reask_worktree_surfaces_cleanup_failure_after_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stranded checkout after setup failure blocks clarification with its cleanup reason."""
+    worktree = _init_real_worktree(tmp_path, "ws_reask_setup_cleanup_failure")
+
+    class _CleanupFailingRunner(_LocalCommandRunner):
+        """Fail the removal command after the isolated checkout is registered."""
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            timeout_seconds: float | None = None,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            """Return a removal failure while running all setup commands normally."""
+            if "worktree" in args and "remove" in args:
+                return CommandResult(returncode=1, stdout="", stderr="worktree remove failed")
+            return await super().run(args, timeout_seconds=timeout_seconds, env=env)
+
+    async def _raise_unexpected_filter_error(_runner: object, **_kwargs: object) -> list[str]:
+        """Simulate an unexpected failure before the isolated checkout is populated."""
+        raise ValueError("unexpected filter setup error")
+
+    monkeypatch.setattr(comments, "_checkout_filter_overrides", _raise_unexpected_filter_error)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=_CleanupFailingRunner()))
+
+    with pytest.raises(comments._IsolatedReaskWorktreeCleanupFailedError) as raised:
+        await comments._create_isolated_reask_worktree(
+            runner,
+            worktree_path=worktree,
+            restore_ref=_git(worktree, "rev-parse", "HEAD").stdout.strip(),
+        )
+
+    assert raised.value.reason_code == "VALIDATION_WORKTREE_CLEANUP_FAILED"
+    assert list(worktree.parent.glob("*__companion__isolated_reask_*"))
+
+
+@pytest.mark.unit
 async def test_isolated_reask_worktree_removes_checkout_when_ownership_repair_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
