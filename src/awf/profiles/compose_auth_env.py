@@ -109,14 +109,23 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
     }
 )
 
-_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES: frozenset[str] = frozenset()
+_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES: frozenset[str] = frozenset(
+    {
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
+)
 
 # Credential identifiers that are not secrets by themselves but still must not
 # be transported as direct hosted job env values. Hosted executors should resolve
 # them from name-only passthrough alongside the corresponding secret material.
 _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS = frozenset({"AWS_ACCESS_KEY_ID"})
 
-_NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset({"AWS_ACCESS_KEY_ID"})
+_NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "GEMINI_API_KEY_AUTH_MECHANISM",
+    }
+)
 
 _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
     {
