@@ -30,6 +30,8 @@ AGENT_AUTH_ENV_VARS = (
     # Google Antigravity CLI headless auth (Gemini AI Studio key).
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
     # OpenCode via Ollama/Ollama Cloud.
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
@@ -63,6 +65,8 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "CURSOR_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_ACCESS_TOKEN",
         "OLLAMA_API_KEY",
         "XAI_API_KEY",
         # Claude Code Bedrock backend credentials (used when
