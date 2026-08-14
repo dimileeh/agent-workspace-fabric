@@ -144,7 +144,6 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "claude_code",
         "cursor",
         "antigravity",
-        "gemini",
         "opencode",
         "grok",
         "docker",
@@ -282,6 +281,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         # non-reachable.
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1",
         "CURSOR_API_KEY": "cursor_secret",
+        "GEMINI_API_KEY": "antigravity_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
     probe_calls: list[list[str]] = []
@@ -353,7 +353,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "sh",
         "awf-agent-runtime:latest",
         "-lc",
-        "command -v gemini",
+        "command -v agy",
     ] in probe_calls
     assert [
         "docker",
@@ -544,7 +544,7 @@ def test_launch_provider_by_agent_covers_every_agent_runtime() -> None:
     from awf.db.enums import AgentRuntime
     from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
-    assert set(_LAUNCH_PROVIDER_BY_AGENT) == set(AgentRuntime)
+    assert set(_LAUNCH_PROVIDER_BY_AGENT) == set(AgentRuntime) - {AgentRuntime.gemini}
 
 
 @pytest.mark.unit
