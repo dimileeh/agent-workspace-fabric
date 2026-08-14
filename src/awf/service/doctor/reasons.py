@@ -1144,6 +1144,19 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "https://docs.x.ai/build/cli",
     ),
+    "UNSUPPORTED_AGENT_RUNTIME": _ReasonText(
+        "The requested agent runtime is not supported by AWF.",
+        (
+            "Select a supported agent runtime (e.g. codex, claude_code, cursor, "
+            "antigravity, gemini, opencode, grok) or update the workspace profile configuration."
+        ),
+        (
+            "An operation or PR adoption request specified an agent runtime that is "
+            "not registered or supported in this version of AWF."
+        ),
+        "awf workspace create",
+        _reason_catalog_link("UNSUPPORTED_AGENT_RUNTIME"),
+    ),
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",
         "No action required.",

@@ -89,6 +89,19 @@ def test_grok_runtime_cli_missing_has_doctor_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_unsupported_agent_runtime_has_doctor_guidance() -> None:
+    """Verify unsupported agent runtime error code maps to operator guidance."""
+    code = "UNSUPPORTED_AGENT_RUNTIME"
+    reason = _REASON_TEXT[code]
+
+    assert "agent runtime" in reason.message.lower()
+    assert reason.action
+    assert reason.likely_cause
+    assert reason.related_command == "awf workspace create"
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
 def test_first_run_failure_reasons_have_operator_guidance() -> None:
     """Verify first-run failure reason codes map to operator guidance."""
     missing_codes = set(FIRST_RUN_FAILURE_REASON_CODES) - set(_REASON_TEXT)
