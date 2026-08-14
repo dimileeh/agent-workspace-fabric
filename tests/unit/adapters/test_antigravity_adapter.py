@@ -42,7 +42,7 @@ class TestAntigravityAdapter:
 
     @pytest.mark.unit
     async def test_produces_correct_default_cli_invocation(self) -> None:
-        """Default run uses shell preamble, skip-permissions, stream-json, model."""
+        """Default run uses shell preamble, bare -p, skip-permissions, stream-json."""
         runner = FakeCommandRunner()
         adapter = AntigravityAdapter(
             runner=runner,
@@ -60,9 +60,14 @@ class TestAntigravityAdapter:
         _assert_docker_exec_prefix(args)
         assert args[-3:-1] == ["sh", "-lc"]
         script = args[-1]
-        assert 'cat > "$prompt_path"' in script
-        assert "exec agy -p" in script
-        assert "--dangerously-skip-permissions" in script
+        # Bare -p (no argv prompt value): AWF streams the real task on stdin.
+        # Do not use -p "" (agy treats that as an empty prompt) or a tempfile pointer.
+        assert 'cat > "$prompt_path"' not in script
+        assert "Read and execute the full task prompt" not in script
+        assert "exec agy -p --dangerously-skip-permissions" in script
+        assert 'agy -p "' not in script
+        assert "agy -p ''" not in script
+        assert 'agy -p ""' not in script
         assert "--output-format stream-json" in script
         assert "--print-timeout 24h" in script
         assert "--model gemini-3.1-pro-high" in script
