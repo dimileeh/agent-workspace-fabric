@@ -696,6 +696,16 @@ async def create_provider_recovery_attempt_row(
         reason_code=decision.reason_code,
         payload=event_payload,
     )
+    if decision.action == "fallback":
+        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
+
+        await emit_agent_deprecated_event(
+            repo,
+            retried,
+            agent=target_agent,
+            selection_path="provider_recovery_fallback",
+            extra_payload={"source_workspace_id": source.id},
+        )
     await repo.add_event(
         retried,
         event_type="workspace.provider_recovery_created",
@@ -1023,6 +1033,16 @@ async def _record_monitor_in_place_recovery(
             "provider_recovery": provider_payload,
         },
     )
+    if decision.action == "fallback":
+        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
+
+        await emit_agent_deprecated_event(
+            repo,
+            source,
+            agent=decision.target_agent or source.agent,
+            selection_path="provider_recovery_fallback",
+            extra_payload={"recovery_scope": "monitor_in_place"},
+        )
     await session.flush()
     return ProviderRecoveryAttemptResult(
         source_workspace_id=source.id,

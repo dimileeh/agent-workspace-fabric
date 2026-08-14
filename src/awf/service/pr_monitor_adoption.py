@@ -512,6 +512,14 @@ class PullRequestMonitorAdoptionService:
             reason_code=PR_ADOPTION_REQUESTED_REASON,
             payload=event_payload,
         )
+        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
+
+        await emit_agent_deprecated_event(
+            workspace_repo,
+            workspace,
+            agent=request.agent,
+            selection_path="adopt_pr",
+        )
         if superseded_workspace is not None and superseded_payload is not None:
             await workspace_repo.add_event(
                 superseded_workspace,
