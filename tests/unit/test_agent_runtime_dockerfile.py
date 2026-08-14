@@ -126,7 +126,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
     assert "ARG CODEX_VERSION=0.144.1" in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=2.1.206" in dockerfile
-    assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
+    assert "ARG GEMINI_VERSION=" not in dockerfile
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
     assert "ARG GROK_VERSION=0.2.94" in dockerfile
@@ -150,7 +150,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG GROK_VERSION=latest" not in dockerfile
     assert "@openai/codex@${CODEX_VERSION}" in dockerfile
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
-    assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
+    assert "@google/gemini-cli" not in dockerfile
     assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
     assert 'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node' in dockerfile
     assert 'ln -sf "$(command -v node)" /usr/local/bin/node' not in dockerfile
@@ -177,7 +177,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "codex --version" in dockerfile
     assert "claude --version" in dockerfile
     assert "cursor-agent --version" in dockerfile
-    assert "gemini --version" in dockerfile
+    assert "gemini --version" not in dockerfile
     assert "opencode --version" in dockerfile
     assert "grok --version" in dockerfile
     assert "agy --version" in dockerfile
@@ -206,9 +206,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile
-    assert (
-        'gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null'
-    ) in dockerfile
+    assert "gemini --skip-trust" not in dockerfile
 
     assert "grok --version || true" not in dockerfile
     assert (
@@ -232,11 +230,11 @@ def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
 
 @pytest.mark.unit
 def test_agent_runtime_links_gemini_bundled_ripgrep() -> None:
-    """Verify agent runtime links gemini bundled ripgrep."""
+    """Verify agent runtime does not link gemini bundled ripgrep."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "vendor/ripgrep" in dockerfile
-    assert "rg-${rg_platform}-${rg_arch}" in dockerfile
+    assert "vendor/ripgrep" not in dockerfile
+    assert "rg-${rg_platform}-${rg_arch}" not in dockerfile
 
 
 @pytest.mark.unit
