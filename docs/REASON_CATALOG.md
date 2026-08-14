@@ -291,13 +291,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace create`
 **Docs Link:** [docs/REASON_CATALOG.md#forge_not_supported](#forge_not_supported)
 
-### GEMINI_AUTH_MISSING
-**Problem:** No Gemini auth signal was visible.
-**Likely Cause:** Missing Gemini API credentials.
-**Operator Fix:** Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.
-**Related Command:** `awf service doctor`
-**Docs Link:** [docs/REASON_CATALOG.md#gemini_auth_missing](#gemini_auth_missing)
-
 ### GITHUB_AUTH_UNUSABLE
 **Problem:** GitHub CLI auth is not usable for local service PR operations.
 **Likely Cause:** The GitHub token is expired, invalid, or lacks required scopes.
