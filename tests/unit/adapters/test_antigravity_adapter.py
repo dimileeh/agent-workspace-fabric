@@ -116,6 +116,53 @@ class TestAntigravityAdapter:
         assert "${ANTIGRAVITY_API_KEY:-}${GEMINI_API_KEY" not in script
 
     @pytest.mark.unit
+    async def test_settings_updates_existing_non_gemini_provider(self, tmp_path: Path) -> None:
+        """GEMINI_API_KEY mode rewrites modelProvider while preserving other settings."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text("#!/bin/sh\nexit 0\n")
+        fake_agy.chmod(0o755)
+
+        home = tmp_path / "home"
+        settings = home / ".gemini" / "antigravity-cli" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            '{"modelProvider":"vertexai","other":"preserve"}\n',
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "HOME": str(home),
+                "GEMINI_API_KEY": "test-key",
+            }
+        )
+        script = _render_cli_script()
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"ok\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+        _stdout, stderr = await proc.communicate()
+
+        assert proc.returncode == 0, stderr.decode()
+        updated = json.loads(settings.read_text(encoding="utf-8"))
+        assert updated["modelProvider"] == "gemini"
+        assert updated["other"] == "preserve"
+
+    @pytest.mark.unit
     async def test_no_model_omits_model_flag(self) -> None:
         """Without a model default/override, --model is omitted."""
         runner = FakeCommandRunner()

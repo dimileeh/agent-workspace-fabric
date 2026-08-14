@@ -24,9 +24,11 @@ only the inner ``agy`` argv uses the ``$(cat)`` bridge.
 
 Auth: agy 1.1.13 reads only ``GEMINI_API_KEY``. API-key mode requires
 ``settings.json`` ``{"modelProvider":"gemini"}`` **and** a non-empty
-``GEMINI_API_KEY``. The preamble seeds that settings file only when
-``GEMINI_API_KEY`` is set — never on ``ANTIGRAVITY_API_KEY`` alone, and never
-by aliasing credentials across env names.
+``GEMINI_API_KEY``. The preamble seeds that settings file when
+``GEMINI_API_KEY`` is set (create if missing; upsert ``modelProvider`` on an
+existing file while preserving unrelated keys) — never on
+``ANTIGRAVITY_API_KEY`` alone, and never by aliasing credentials across env
+names.
 
 Output uses ``stream-json`` so the idle stdout watchdog sees continuous events
 (``text``/``json`` buffer until completion).
@@ -79,18 +81,27 @@ class AntigravityAdapter(AgentAdapter):
         if selected_model:
             model_flag = f" --model {shlex.quote(selected_model)}"
 
-        # Seed modelProvider=gemini only when GEMINI_API_KEY is present —
+        # Seed/upsert modelProvider=gemini only when GEMINI_API_KEY is present —
         # that mode hard-requires GEMINI_API_KEY (agy does not read
         # ANTIGRAVITY_API_KEY). Do not alias credentials across env names.
+        # Missing file: create minimal settings. Existing file: set
+        # modelProvider via jq and preserve unrelated keys.
         # Prompt transport: awf_prompt=$(cat) then -p "$awf_prompt" last.
         script = (
             "set -eu\n"
             'settings_dir="${HOME}/.gemini/antigravity-cli"\n'
             'mkdir -p "$settings_dir"\n'
-            'if [ -n "${GEMINI_API_KEY:-}" ] '
-            '&& [ ! -f "$settings_dir/settings.json" ]; then\n'
-            "  printf '%s\\n' '{\"modelProvider\":\"gemini\"}' "
+            'if [ -n "${GEMINI_API_KEY:-}" ]; then\n'
+            '  if [ ! -f "$settings_dir/settings.json" ]; then\n'
+            "    printf '%s\\n' '{\"modelProvider\":\"gemini\"}' "
             '> "$settings_dir/settings.json"\n'
+            "  else\n"
+            "    jq '.modelProvider = \"gemini\"' "
+            '"$settings_dir/settings.json" '
+            '> "$settings_dir/settings.json.tmp"\n'
+            '    mv "$settings_dir/settings.json.tmp" '
+            '"$settings_dir/settings.json"\n'
+            "  fi\n"
             "fi\n"
             "awf_prompt=$(cat)\n"
             'if [ -z "$awf_prompt" ]; then\n'
