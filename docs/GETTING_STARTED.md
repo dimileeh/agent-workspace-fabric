@@ -411,7 +411,7 @@ Default agent models and effort are centralized in
 | `claude_code` | `claude-opus-4-8` | `xhigh` passed through to Claude Code |
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
 | `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
-| `antigravity` | `gemini-3.1-pro-high` | Effort accepted/recorded but unmapped in v1 (`agy --effort` exists; mapping deferred) |
+| `antigravity` | `gemini-3.1-pro-preview` | Effort accepted/recorded but never emitted (`agy` rejects `--effort` in API-key mode; OAuth uses composite slugs) |
 | `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking (deprecated personal path; retained for enterprise) |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
