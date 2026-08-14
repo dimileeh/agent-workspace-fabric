@@ -51,8 +51,7 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     ollama_home = work_dir / "auth" / "ws_auth" / "ollama"
     assert by_target["/home/agent/.config/gh"].source == str(host_home / ".config" / "gh")
     assert by_target["/home/agent/.config/gh"].mode == "ro"
-    assert by_target["/home/agent/.config/gcloud"].source == str(host_home / ".config" / "gcloud")
-    assert by_target["/home/agent/.config/gcloud"].mode == "ro"
+    assert "/home/agent/.config/gcloud" not in by_target
     assert by_target["/home/agent/.gitconfig"].source == str(host_home / ".gitconfig")
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
     assert by_target["/home/agent/.ssh"].source == str(host_home / ".ssh")
@@ -529,7 +528,7 @@ def test_chown_tree_uses_lchown_for_symlinks(
 
 
 @pytest.mark.unit
-def test_service_auth_mounts_include_google_application_credentials_file(
+def test_service_auth_mounts_do_not_include_google_application_credentials_file(
     tmp_path: Path,
 ) -> None:
     host_home = tmp_path / "host-home"
@@ -544,27 +543,7 @@ def test_service_auth_mounts_include_google_application_credentials_file(
         host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
     )
 
-    by_target = {m.target: m for m in mounts}
-    assert by_target[str(credentials)].source == str(credentials)
-    assert by_target[str(credentials)].mode == "ro"
-
-
-@pytest.mark.unit
-def test_service_auth_mounts_skip_missing_google_application_credentials_file(
-    tmp_path: Path,
-) -> None:
-    host_home = tmp_path / "host-home"
-    host_home.mkdir()
-    missing_credentials = tmp_path / "missing-service-account.json"
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=tmp_path / "work",
-        workspace_id="ws_auth",
-        host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(missing_credentials)},
-    )
-
-    assert all(m.target != str(missing_credentials) for m in mounts)
+    assert all(m.target != str(credentials) for m in mounts)
 
 
 @pytest.mark.unit

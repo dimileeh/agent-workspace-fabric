@@ -28,16 +28,8 @@ AGENT_AUTH_ENV_VARS = (
     # Cursor CLI headless auth.
     "CURSOR_API_KEY",
     # Google Antigravity CLI headless auth (Gemini AI Studio key).
-    # Gemini CLI headless auth.
     "GEMINI_API_KEY",
-    "GEMINI_API_KEY_AUTH_MECHANISM",
     "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
     # OpenCode via Ollama/Ollama Cloud.
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
@@ -71,8 +63,6 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "CURSOR_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLOUD_ACCESS_TOKEN",
         "OLLAMA_API_KEY",
         "XAI_API_KEY",
         # Claude Code Bedrock backend credentials (used when
@@ -119,27 +109,14 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
     }
 )
 
-_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
-    {
-        # ADC is a filesystem path whose local Compose contract includes an auth
-        # bind mount. Hosted requests currently carry env values only, so
-        # profile passthrough names and aliases must not re-add it after
-        # adapters omit it.
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    }
-)
+_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES: frozenset[str] = frozenset()
 
 # Credential identifiers that are not secrets by themselves but still must not
 # be transported as direct hosted job env values. Hosted executors should resolve
 # them from name-only passthrough alongside the corresponding secret material.
 _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS = frozenset({"AWS_ACCESS_KEY_ID"})
 
-_NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
-    {
-        "AWS_ACCESS_KEY_ID",
-        "GEMINI_API_KEY_AUTH_MECHANISM",
-    }
-)
+_NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset({"AWS_ACCESS_KEY_ID"})
 
 _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
     {
