@@ -246,7 +246,7 @@ class AgentRuntime(StrEnum):
     """Anthropic Claude Code — ``claude`` in non-interactive mode with ``--dangerously-skip-permissions``."""
 
     gemini = "gemini"
-    """Google Gemini CLI — ``gemini --yolo`` (deprecated for personal accounts; retained for enterprise)."""
+    # Retired runtime, retained only so historical rows parse; not launchable.
 
     antigravity = "antigravity"
     """Google Antigravity CLI — ``agy -p`` with ``--dangerously-skip-permissions`` (successor to personal gemini-cli)."""

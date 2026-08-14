@@ -30,7 +30,6 @@ from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_e
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.cursor import CursorAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
-from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -899,7 +898,6 @@ class TestClaudeCodeAdapter:
         (ClaudeCodeAdapter, AgentRuntime.claude_code),
         (CodexAdapter, AgentRuntime.codex),
         (CursorAdapter, AgentRuntime.cursor),
-        (GeminiAdapter, AgentRuntime.gemini),
         (AntigravityAdapter, AgentRuntime.antigravity),
         (OpenCodeAdapter, AgentRuntime.opencode),
         (GrokAdapter, AgentRuntime.grok),
@@ -936,7 +934,6 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
         (ClaudeCodeAdapter, (".claude/worktrees/",)),
         (CodexAdapter, ()),
         (CursorAdapter, ()),
-        (GeminiAdapter, ()),
         (AntigravityAdapter, ()),
         (OpenCodeAdapter, ()),
         (GrokAdapter, ()),
@@ -959,7 +956,6 @@ def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
         ClaudeCodeAdapter,
         CodexAdapter,
         CursorAdapter,
-        GeminiAdapter,
         AntigravityAdapter,
         OpenCodeAdapter,
         GrokAdapter,
@@ -975,7 +971,6 @@ class TestCentralDefaults:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-8"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
@@ -1006,7 +1001,6 @@ class TestRegistry:
         codex = get_adapter(AgentRuntime.codex, runner=runner)
         claude = get_adapter(AgentRuntime.claude_code, runner=runner)
         cursor = get_adapter(AgentRuntime.cursor, runner=runner)
-        gemini = get_adapter(AgentRuntime.gemini, runner=runner)
         antigravity = get_adapter(AgentRuntime.antigravity, runner=runner)
         opencode = get_adapter(AgentRuntime.opencode, runner=runner)
         grok = get_adapter(AgentRuntime.grok, runner=runner)
@@ -1014,7 +1008,7 @@ class TestRegistry:
         assert codex.name == AgentRuntime.codex
         assert claude.name == AgentRuntime.claude_code
         assert cursor.name == AgentRuntime.cursor
-        assert gemini.name == AgentRuntime.gemini
         assert antigravity.name == AgentRuntime.antigravity
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok
+        assert AgentRuntime.gemini not in DEFAULT_AGENT_DEFAULTS

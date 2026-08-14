@@ -50,8 +50,6 @@ _AUTH_FAILURE_MARKERS = (
     "gemini_api_key environment variable is not set",
     "gemini_api_key",
     "google_api_key",
-    "google_genai_use_vertexai",
-    "google_genai_use_gca",
     "ollama api key",
     "ollama cloud authentication",
     "opencode auth",

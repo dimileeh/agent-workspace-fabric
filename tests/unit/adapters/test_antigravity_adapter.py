@@ -48,14 +48,12 @@ class TestAntigravityAdapter:
         assert adapter.get_provider("gemini-3.1-pro-preview") == "antigravity"
 
     @pytest.mark.unit
-    def test_hosted_env_passthrough_names_are_antigravity_and_gemini_keys(self) -> None:
-        """Hosted passthrough carries both env keys; no GOOGLE_API_KEY alias."""
+    def test_hosted_env_passthrough_names_is_gemini_key_only(self) -> None:
+        """Hosted passthrough carries GEMINI_API_KEY only; ANTIGRAVITY_API_KEY is retired."""
         adapter = AntigravityAdapter(runner=FakeCommandRunner())
 
-        assert adapter.hosted_env_passthrough_names == (
-            "ANTIGRAVITY_API_KEY",
-            "GEMINI_API_KEY",
-        )
+        assert adapter.hosted_env_passthrough_names == ("GEMINI_API_KEY",)
+        assert "ANTIGRAVITY_API_KEY" not in adapter.hosted_env_passthrough_names
         assert "GOOGLE_API_KEY" not in adapter.hosted_env_passthrough_names
 
     @pytest.mark.unit
