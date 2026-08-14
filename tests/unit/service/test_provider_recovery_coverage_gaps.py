@@ -269,7 +269,7 @@ def test_provider_for_agent_model_falls_back_to_known_agent_provider() -> None:
     assert provider_for_agent_model("cursor", "gpt-5") == "cursor"
     assert provider_for_agent_model("antigravity", None) == "antigravity"
     assert provider_for_agent_model("antigravity", "gemini-3.1-pro-high") == "antigravity"
-    assert provider_for_agent_model("gemini", None) == "google"
+    assert provider_for_agent_model("gemini", None) is None
     assert provider_for_agent_model("claude_code", None) == "anthropic"
     assert provider_for_agent_model("opencode", None) == "opencode"
     assert provider_for_agent_model("grok", None) == "xai"

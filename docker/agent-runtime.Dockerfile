@@ -1,5 +1,5 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Cursor, Gemini, OpenCode, Grok). Built multi-arch
+# the coding CLIs (Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok). Built multi-arch
 # for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
 # --platform=...``.
 #
@@ -150,7 +150,6 @@ ARG CODEX_VERSION=0.144.1
 # older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
 # minimum supported CLI.
 ARG CLAUDE_CODE_VERSION=2.1.206
-ARG GEMINI_VERSION=0.50.0
 ARG OPENCODE_VERSION=1.17.18
 ARG GROK_VERSION=0.2.94
 ARG CURSOR_VERSION=2026.07.20-8cc9c0b
@@ -253,7 +252,6 @@ RUN set -eux; \
       if npm install -g --no-fund --no-audit \
         @openai/codex@${CODEX_VERSION} \
         @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
-        @google/gemini-cli@${GEMINI_VERSION} \
         opencode-ai@${OPENCODE_VERSION} \
         @xai-official/grok@${GROK_VERSION} \
         ccusage@${CCUSAGE_VERSION}; then \
@@ -272,27 +270,12 @@ RUN set -eux; \
     codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
-    gemini --version; \
-    gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null; \
     opencode --version || true; \
     grok --version; \
     grok -p "" --always-approve --no-alt-screen --no-auto-update --output-format plain --model grok-build --help >/dev/null; \
     agy --version; \
     agy --help >/dev/null; \
     ccusage --version
-
-# Gemini CLI 0.50.0 only enables its ripgrep-backed search tool when a bundled
-# platform-specific rg binary exists; it does not fall back to the system rg on
-# PATH. Link the Debian ripgrep package into the bundled layout so Gemini uses
-# its file-aware RipGrepTool instead of the directory-only GrepTool fallback.
-RUN set -eux; \
-    gemini_entrypoint="$(readlink -f "$(command -v gemini)")"; \
-    gemini_bundle_dir="$(dirname "$gemini_entrypoint")"; \
-    rg_platform="$(node -p 'process.platform')"; \
-    rg_arch="$(node -p 'process.arch')"; \
-    mkdir -p "$gemini_bundle_dir/vendor/ripgrep"; \
-    ln -sf "$(command -v rg)" "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"; \
-    test -x "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"
 
 # Neutral ccusage config consumed via ``--config`` by AWF's usage collector
 # (src/awf/service/usage_collection.py). The per-workspace auth copy seeds

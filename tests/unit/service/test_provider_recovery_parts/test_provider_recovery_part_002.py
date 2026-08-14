@@ -586,6 +586,7 @@ def test_fallback_targets_edge_cases():
         [
             "not_a_mapping",
             {"agent": "gemini"},
+            {"agent": "gemini", "model": "gemini-3.1-pro"},
             {"agent": "codex", "model": "gpt-4"},
             "another_string",
             True,

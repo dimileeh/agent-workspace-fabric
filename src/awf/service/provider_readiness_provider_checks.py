@@ -482,9 +482,7 @@ def _check_antigravity(
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     """Check whether Antigravity API-key auth is visible to the service."""
-    # Readiness accepts GEMINI_API_KEY as well (agy 1.1.x AI Studio path), but
-    # setup ``env_ref_vars`` stays primary-key-only like Cursor.
-    signal = _first_present_env(environ, (*_ANTIGRAVITY_ENV_KEYS, "GEMINI_API_KEY"))
+    signal = _first_present_env(environ, ("GEMINI_API_KEY",))
     if signal is not None:
         return _provider_result(
             ok=True,
@@ -515,9 +513,7 @@ def _check_antigravity(
         ok=False,
         strict=strict,
         reason="ANTIGRAVITY_AUTH_MISSING",
-        message=(
-            "No Antigravity auth signal was visible. Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY."
-        ),
+        message="No Antigravity auth signal was visible. Set GEMINI_API_KEY.",
         secrets=secrets,
         credential_scope="not_observed",
         isolation="none",
@@ -587,102 +583,6 @@ def _check_antigravity_readiness(
     return result
 
 
-def _check_gemini(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    file_sources = _existing_credential_sources(
-        ((host_home / ".gemini", "~/.gemini"),),
-        credential_scope="isolated_workspace",
-        isolation="per_workspace_copy",
-    )
-    if file_sources:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_FILE_AUTH_PRESENT",
-            message="Gemini auth files are visible to the local service.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _GEMINI_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Gemini auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=[
-                _security_warning(
-                    "STATIC_TOKEN_FALLBACK",
-                    f"Gemini auth is supplied by static service environment variable {signal}.",
-                )
-            ],
-        )
-
-    credentials = environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials and Path(credentials).expanduser().is_file():
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Google application credentials are visible to the local service.",
-            signals=["GOOGLE_APPLICATION_CREDENTIALS"],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="path",
-                    signal="GOOGLE_APPLICATION_CREDENTIALS",
-                    credential_scope="read_only_host_path",
-                    isolation="read_only_bind",
-                )
-            ],
-            credential_scope="read_only_host_path",
-            isolation="read_only_bind",
-            warnings=[],
-        )
-
-    message = (
-        "No Gemini auth signal was visible. Set GEMINI_API_KEY, GOOGLE_API_KEY, "
-        "GOOGLE_APPLICATION_CREDENTIALS, or mount ~/.gemini."
-    )
-    if credentials:
-        message = (
-            "GOOGLE_APPLICATION_CREDENTIALS is set but the file is not visible to "
-            "the local service. Mount the file or use GEMINI_API_KEY/GOOGLE_API_KEY."
-        )
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="GEMINI_AUTH_MISSING",
-        message=message,
-        signals=["GOOGLE_APPLICATION_CREDENTIALS"] if credentials else None,
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
 # Imported at module end to mirror the established mutual-import ordering: the
 # referenced constants, credential helpers, and redaction helpers are all bound on
 # the ``provider_readiness`` module (its own top-level constants plus the helper /
@@ -690,11 +590,9 @@ def _check_gemini(
 # in, and these helpers reference them only at call time, so the late binding is
 # safe.
 from awf.service.provider_readiness import (  # noqa: E402
-    _ANTIGRAVITY_ENV_KEYS,
     _CLAUDE_ENV_KEYS,
     _CODEX_ENV_KEYS,
     _CURSOR_ENV_KEYS,
-    _GEMINI_ENV_KEYS,
     _GITHUB_TIMEOUT_SECONDS,
     SubprocessRun,
     _credential_sources,
@@ -702,7 +600,6 @@ from awf.service.provider_readiness import (  # noqa: E402
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _codex_file_sources,
     _credential_source,
-    _existing_credential_sources,
     _first_present_env,
     _github_token,
     _probe_agent_runtime_cli,

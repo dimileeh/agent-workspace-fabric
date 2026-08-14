@@ -400,7 +400,7 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
     [
         (AgentRuntime.codex, "gpt-5.5"),
         (AgentRuntime.cursor, "sonnet-4-thinking"),
-        (AgentRuntime.gemini, "gemini-3.1-pro-preview"),
+        (AgentRuntime.antigravity, "gemini-3.1-pro-preview"),
         (AgentRuntime.claude_code, "claude-opus-4-8"),
         (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
     ],

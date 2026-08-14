@@ -25,6 +25,6 @@ def test_clarification_runtime_auth_mount_targets_cover_every_agent_runtime() ->
 def test_antigravity_clarification_maps_match_cursor_shaped_contract() -> None:
     """Antigravity is env-key auth like cursor: API keys, no file auth mounts."""
     assert _CLARIFICATION_RUNTIME_ENV_NAMES[AgentRuntime.antigravity] == frozenset(
-        {"ANTIGRAVITY_API_KEY", "GEMINI_API_KEY"}
+        {"GEMINI_API_KEY"}
     )
     assert _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[AgentRuntime.antigravity] == frozenset()

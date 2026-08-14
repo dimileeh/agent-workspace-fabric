@@ -244,7 +244,7 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     | _CLARIFICATION_CODEX_CREDENTIAL_ENV_NAMES,
     AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
     AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
-    AgentRuntime.antigravity: frozenset({"ANTIGRAVITY_API_KEY", "GEMINI_API_KEY"}),
+    AgentRuntime.antigravity: frozenset({"GEMINI_API_KEY"}),
     AgentRuntime.gemini: frozenset(),
     AgentRuntime.opencode: frozenset(
         {

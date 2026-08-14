@@ -15,7 +15,7 @@ from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
 )
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationType, WorkspaceStatus
 from awf.db.models import (
     Operation,
     QueueDecision,
@@ -1180,3 +1180,19 @@ class TestPullRequestMonitorAdoptionServicePart001:
             "existing_agent_effort": "xhigh",
             "requested_agent_effort": "high",
         }
+
+    async def test_adopt_pr_rejects_gemini_unsupported_runtime(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, settings=Settings())
+            request = PullRequestMonitorAdoptionRequest(
+                repo_slug="acme/app",
+                pr_number=123,
+                agent=AgentRuntime.gemini,
+            )
+            with pytest.raises(PRMonitorAdoptionError) as exc_info:
+                await service.adopt(request)
+            assert exc_info.value.error_code == "UNSUPPORTED_AGENT_RUNTIME"
+            assert "gemini" in str(exc_info.value)

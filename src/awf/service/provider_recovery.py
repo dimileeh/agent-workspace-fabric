@@ -696,16 +696,7 @@ async def create_provider_recovery_attempt_row(
         reason_code=decision.reason_code,
         payload=event_payload,
     )
-    if decision.action == "fallback":
-        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
 
-        await emit_agent_deprecated_event(
-            repo,
-            retried,
-            agent=target_agent,
-            selection_path="provider_recovery_fallback",
-            extra_payload={"source_workspace_id": source.id},
-        )
     await repo.add_event(
         retried,
         event_type="workspace.provider_recovery_created",
@@ -844,7 +835,6 @@ def provider_for_agent_model(agent: str, model: str | None) -> str | None:
         return inferred
     return {
         "codex": "openai",
-        "gemini": "google",
         "claude_code": "anthropic",
         "opencode": "opencode",
         "grok": "xai",
@@ -1032,16 +1022,7 @@ async def _record_monitor_in_place_recovery(
             "provider_recovery": provider_payload,
         },
     )
-    if decision.action == "fallback":
-        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
 
-        await emit_agent_deprecated_event(
-            repo,
-            source,
-            agent=decision.target_agent or source.agent,
-            selection_path="provider_recovery_fallback",
-            extra_payload={"recovery_scope": "monitor_in_place"},
-        )
     await session.flush()
     return ProviderRecoveryAttemptResult(
         source_workspace_id=source.id,
@@ -1196,12 +1177,20 @@ def _fallback_targets(raw: object) -> list[FallbackTarget]:
     if not isinstance(raw, Sequence) or isinstance(raw, str):
         return []
     targets: list[FallbackTarget] = []
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
     for item in raw:
         if not isinstance(item, Mapping):
             continue
         agent = _mapping_str(item, "agent")
         model = _mapping_str(item, "model")
         if agent is None or model is None:
+            continue
+        try:
+            runtime = AgentRuntime(agent)
+            if runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+                continue
+        except ValueError:
             continue
         provider = _mapping_str(item, "provider") or provider_for_agent_model(agent, model)
         targets.append(FallbackTarget(agent=agent, provider=provider, model=model))

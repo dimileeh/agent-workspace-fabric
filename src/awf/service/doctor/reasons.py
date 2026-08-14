@@ -1089,14 +1089,14 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "ANTIGRAVITY_AUTH_MISSING": _ReasonText(
         "No Antigravity auth signal was visible.",
-        "Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.",
+        "Set GEMINI_API_KEY before starting AWF.",
         "Missing Antigravity API credentials.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#antigravity_auth_missing",
     ),
     "ANTIGRAVITY_AUTH_REJECTED": _ReasonText(
         "Antigravity rejected the configured API credentials.",
-        "Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.",
+        "Verify GEMINI_API_KEY and re-run awf service doctor.",
         "Antigravity API key rejected by the provider.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#antigravity_auth_rejected",
@@ -1107,13 +1107,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Antigravity provider quota exhausted.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#antigravity_quota_exhausted",
-    ),
-    "GEMINI_AUTH_MISSING": _ReasonText(
-        "No Gemini auth signal was visible.",
-        "Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.",
-        "Missing Gemini API credentials.",
-        "awf service doctor",
-        "docs/REASON_CATALOG.md#gemini_auth_missing",
     ),
     "OPENCODE_OLLAMA_AUTH_MISSING": _ReasonText(
         "No OpenCode/Ollama auth signal was visible.",

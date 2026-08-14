@@ -21,7 +21,6 @@ ProviderName = Literal[
     "claude_code",
     "cursor",
     "antigravity",
-    "gemini",
     "opencode",
     "grok",
     "docker",
@@ -33,7 +32,6 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "claude_code",
     "cursor",
     "antigravity",
-    "gemini",
     "opencode",
     "grok",
     "docker",
@@ -65,12 +63,7 @@ _CLAUDE_ENV_KEYS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
 _CURSOR_ENV_KEYS = ("CURSOR_API_KEY",)
-_ANTIGRAVITY_ENV_KEYS = ("ANTIGRAVITY_API_KEY",)
-_GEMINI_ENV_KEYS = (
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-)
+_ANTIGRAVITY_ENV_KEYS = ("GEMINI_API_KEY",)
 _OPENCODE_ENV_KEYS = ("OLLAMA_API_KEY",)
 _XAI_ENV_KEYS = ("XAI_API_KEY",)
 _DOCKER_AUTH_ENV_KEYS = ("DOCKER_AUTH_CONFIG",)
@@ -81,7 +74,6 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_CLAUDE_ENV_KEYS,
         *_CURSOR_ENV_KEYS,
         *_ANTIGRAVITY_ENV_KEYS,
-        *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
         *_XAI_ENV_KEYS,
         *_DOCKER_AUTH_ENV_KEYS,
@@ -130,7 +122,6 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.claude_code: "claude_code",
     AgentRuntime.cursor: "cursor",
     AgentRuntime.antigravity: "antigravity",
-    AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
     AgentRuntime.grok: "grok",
 }
@@ -785,13 +776,6 @@ def _check_provider_readiness(
             strict=strict,
             secrets=secrets,
         )
-    if provider == "gemini":
-        return _check_gemini(
-            environ=environ,
-            host_home=host_home,
-            strict=strict,
-            secrets=secrets,
-        )
     if provider == "opencode":
         return _check_opencode(
             environ=environ,
@@ -846,7 +830,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "cursor", "antigravity", "gemini", "grok"}:
+        if provider in {"codex", "claude_code", "cursor", "antigravity", "grok"}:
             return runtime_probe
     if provider == "opencode":
         # Create-time admission must never block on (or perform) a pull: a
@@ -870,7 +854,6 @@ def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
         "claude_code": "CLAUDE",
         "cursor": "CURSOR",
         "antigravity": "ANTIGRAVITY",
-        "gemini": "GEMINI",
         "opencode": "OPENCODE",
         "grok": "GROK",
     }.get(provider, "PROVIDER")
@@ -882,7 +865,6 @@ def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
         "claude_code": "claude",
         "cursor": "cursor-agent",
         "antigravity": "agy",
-        "gemini": "gemini",
         "opencode": "opencode",
         "grok": "grok",
     }.get(provider)
@@ -1103,7 +1085,6 @@ from awf.service.provider_readiness_provider_checks import (  # noqa: E402
     _check_codex,
     _check_cursor,
     _check_cursor_readiness,
-    _check_gemini,
     _check_github,
 )
 from awf.service.provider_readiness_redaction import (  # noqa: E402

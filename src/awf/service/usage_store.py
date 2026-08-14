@@ -46,7 +46,6 @@ REASON_NO_RECORDS = "ccusage_no_records"
 _PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
     AgentRuntime.claude_code: "claude",
     AgentRuntime.codex: "codex",
-    AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
 }
 

@@ -152,6 +152,7 @@ class PullRequestMonitorAdoptionService:
         request: PullRequestMonitorAdoptionRequest,
     ) -> PullRequestMonitorAdoptionResponse:
         repo, pr_number = _normalize_request_identity(request)
+        _raise_if_unsupported_agent(request)
         _raise_if_hosted_delegation_unconfigured(request, self._settings)
         idempotency_key = pr_adoption_idempotency_key(
             repo_slug=repo.slug(),
@@ -511,14 +512,6 @@ class PullRequestMonitorAdoptionService:
             event_type=PR_ADOPTION_REQUESTED_EVENT_TYPE,
             reason_code=PR_ADOPTION_REQUESTED_REASON,
             payload=event_payload,
-        )
-        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
-
-        await emit_agent_deprecated_event(
-            workspace_repo,
-            workspace,
-            agent=request.agent,
-            selection_path="adopt_pr",
         )
         if superseded_workspace is not None and superseded_payload is not None:
             await workspace_repo.add_event(
@@ -1026,6 +1019,21 @@ def _raise_if_hosted_delegation_unconfigured(
             message=("Hosted PR monitor adoption requires configured hosted delegation settings."),
             detail=exc.detail(),
         ) from exc
+
+
+def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    if request.agent not in _LAUNCH_PROVIDER_BY_AGENT:
+        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+        raise PRMonitorAdoptionError(
+            error_code="UNSUPPORTED_AGENT_RUNTIME",
+            message=f"Agent runtime {request.agent.value!r} is not supported for PR monitor adoption; supported runtimes: {supported}.",
+            detail={
+                "agent": request.agent.value,
+                "supported_agents": [r.value for r in _LAUNCH_PROVIDER_BY_AGENT],
+            },
+        )
 
 
 def _adoption_task_prompt(

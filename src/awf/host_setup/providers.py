@@ -151,16 +151,11 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
         env_ref_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     ),
     ProviderSpec(name="opencode", readiness_provider="opencode", env_ref_vars=("OLLAMA_API_KEY",)),
-    ProviderSpec(
-        name="gemini",
-        readiness_provider="gemini",
-        env_ref_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_ACCESS_TOKEN"),
-    ),
     ProviderSpec(name="cursor", readiness_provider="cursor", env_ref_vars=("CURSOR_API_KEY",)),
     ProviderSpec(
         name="antigravity",
         readiness_provider="antigravity",
-        env_ref_vars=("ANTIGRAVITY_API_KEY",),
+        env_ref_vars=("GEMINI_API_KEY",),
     ),
     ProviderSpec(name="grok", readiness_provider="grok", env_ref_vars=("XAI_API_KEY",)),
 )

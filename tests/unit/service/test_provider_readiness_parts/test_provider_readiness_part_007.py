@@ -144,85 +144,19 @@ def test_selected_launch_probe_returns_runtime_failure_and_unavailable_provider(
 
 
 @pytest.mark.unit
-def test_selected_gemini_preflight_requires_usable_non_secret_probe(
+def test_selected_gemini_preflight_returns_unsupported_agent_runtime(
     tmp_path: Path,
 ) -> None:
-    home = tmp_path / "home"
-    (home / ".gemini").mkdir(parents=True)
-    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
-    token = "AIzaGeminiProbeSecret"
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        assert args == [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v gemini",
-        ]
-        assert kwargs["env"]["GEMINI_API_KEY"] == token
-        return _completed(returncode=1, stdout=f"missing cli with token {token}")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="gemini",
-        task_policy={},
-        environ={"GEMINI_API_KEY": token},
-        run_subprocess=_run,
-    )
-
-    assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "GEMINI_RUNTIME_CLI_NOT_FOUND"
-    assert result["blocks_launch"] is True
-    serialized = json.dumps(result, sort_keys=True)
-    assert token not in serialized
-    assert "gemini_file_secret" not in serialized
-    assert "<redacted>" in serialized
-
-
-@pytest.mark.unit
-def test_selected_gemini_preflight_uses_agent_runtime_cli_not_api_cli(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".gemini").mkdir(parents=True)
-    calls: list[list[str]] = []
-
-    def _run(args: list[str], **_kwargs: object) -> Any:
-        calls.append(args)
-        if args[0] == "gemini":
-            raise FileNotFoundError("api container gemini is absent")
-        return _completed(stdout="/usr/bin/gemini\n")
-
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="gemini",
         task_policy={},
         environ={},
-        run_subprocess=_run,
+        run_subprocess=_unexpected_subprocess,
     )
 
-    assert result["provider"] == "gemini"
-    assert result["readiness_status"] == "ready"
-    assert result["probe_status"] == "ok"
-    assert result["reason_code"] == "PROVIDER_READY"
-    assert result["blocks_launch"] is False
-    assert calls == [
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v gemini",
-        ]
-    ]
+    assert result["reason_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+    assert result["probe_status"] == "skipped"
 
 
 @pytest.mark.unit
