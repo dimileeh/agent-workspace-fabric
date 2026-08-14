@@ -163,6 +163,12 @@ async def execute(
     ):
         return
 
+    if await self._reject_unsupported_agent_runtime(
+        workspace_id=workspace_id,
+        workspace=ws,
+    ):
+        return
+
     # Forge-support gate — fail fast on a detected-but-unimplemented forge
     # (e.g. bitbucket) BEFORE every downstream gh path (non-feature dispatch,
     # agent run, push, ``gh pr create``). See ``forge_gate`` for the

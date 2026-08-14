@@ -577,3 +577,102 @@ class TestTaskKindFailFast:
             assert op.error_code == reason_code
             assert op.result == {"reason_code": reason_code}
             assert op.finished_at is not None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_execute_fails_fast_on_unsupported_agent_runtime(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A queued workspace with an unsupported/historical agent runtime (like gemini)
+        must fail fast on execute without trying to build an adapter or run the agent.
+        """
+        ws_id = await _seed_ready(factory, agent=agent)
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_resume_pr_monitor_fails_fast_on_unsupported_agent_runtime(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A legacy workspace with an unsupported agent runtime in monitoring_pr must
+        fail fast on resume_pr_monitor.
+        """
+        ws_id = await _seed_monitoring_pr(factory, agent=agent)
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("resume must not build a monitor for unsupported runtimes")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_reject_unsupported_agent_runtime_finalizes_active_recovery(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A reclaimed workspace with an unsupported agent runtime must finalize any active
+        recovery operation before failing.
+        """
+        ws_id = await _seed_ready(factory, agent=agent)
+        async with factory() as s:
+            op = await OperationRepository(s).create(
+                workspace_id=ws_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"source": "worker_restart", "recovery_mode": "validate_only"},
+                idempotency_key=f"worker_restart:validate_only:{ws_id}",
+            )
+            op_id = op.id
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+            op = await OperationRepository(s).get(op_id)
+            assert op is not None
+            assert op.status == OperationStatus.failed.value
+            assert op.error_code == "UNSUPPORTED_AGENT_RUNTIME"
+            assert op.result == {"reason_code": "UNSUPPORTED_AGENT_RUNTIME"}
+            assert op.finished_at is not None

@@ -29,6 +29,7 @@ from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
     _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
     _SUPPORTED_TASK_KINDS,
+    _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
 )
 from awf.control.executor.forge_gate import unsupported_forge_error
@@ -182,6 +183,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         return None
 
     if await self._reject_unsupported_task_kind(
+        workspace_id=workspace_id,
+        workspace=ws,
+        from_status=WorkspaceStatus.monitoring_pr,
+    ):
+        return None
+
+    if await self._reject_unsupported_agent_runtime(
         workspace_id=workspace_id,
         workspace=ws,
         from_status=WorkspaceStatus.monitoring_pr,
@@ -793,6 +801,51 @@ async def _reject_unsupported_task_kind(
             message=message,
             reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
             details={"task_kind": task_kind},
+        )
+        return True
+    return False
+
+
+async def _reject_unsupported_agent_runtime(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
+) -> bool:
+    """Fail fast unsupported agent runtimes; return True if rejected.
+
+    Runs unconditionally before agent setup or dispatch so an already-queued
+    row with a historical or unknown agent runtime (such as retired Gemini)
+    fails fast without consuming provisioning resources or raising KeyError
+    from get_adapter.
+    """
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    try:
+        agent = AgentRuntime(workspace.agent)
+    except ValueError:
+        agent = None
+
+    if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
+        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+        message = (
+            f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."
+        )
+        if _get_active_recovery_payload(workspace) is not None:
+            await self._finish_active_recovery_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+                error_message=message,
+            )
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.policy_failure,
+            message=message,
+            reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+            details={"agent": workspace.agent},
         )
         return True
     return False
