@@ -3,12 +3,30 @@
 Uses the official Antigravity CLI ``agy`` binary in print/headless mode.
 Headless docs: https://antigravity.google/docs/cli/headless
 
-AWF streams the wrapped prompt on stdin. ``agy`` 1.1.x rejects ``-p ""`` as an
-empty prompt and has no ``--prompt-file`` flag; a single ``-p <text>`` argv also
-hits the kernel ``MAX_ARG_STRLEN`` (~128KiB) ceiling for large AWF prompts.
-Bare ``-p`` / ``--print`` (no value) accepts the operator prompt on stdin —
-including large payloads — so the shell preamble only seeds AI Studio settings
-and ``exec``s ``agy`` with stdin inherited.
+Verified ``agy`` 1.1.13 contract (operator evidence; trust over older docs):
+
+- ``-p`` / ``--print`` is a **value-consuming** string flag. ``agy -p --model X``
+  makes the prompt the literal string ``--model`` and turns ``X`` into a
+  positional that stops further flag parsing (later flags silently ignored;
+  stdin never read). ``-p`` with no following token errors "flag needs an
+  argument". ``-p -`` sends an empty prompt (stdin ignored).
+- There is **no** bare-``-p``-reads-stdin mode and **no** ``--prompt-file``.
+- The only stdin-compatible transport is a shell bridge: read the AWF prompt
+  with ``awf_prompt=$(cat)``, then pass ``-p "$awf_prompt"`` as the **last**
+  flag pair after all other options.
+- A single argv string hits the kernel ``MAX_ARG_STRLEN`` (~128KiB) ceiling;
+  the preamble fails closed above 100000 bytes rather than surfacing noisy
+  ``execve`` ``E2BIG``. Empty prompts also fail closed (agy would otherwise
+  idle-chat).
+
+AWF still streams the wrapped prompt on docker-exec stdin into ``sh -lc``;
+only the inner ``agy`` argv uses the ``$(cat)`` bridge.
+
+Auth: agy 1.1.13 reads only ``GEMINI_API_KEY``. API-key mode requires
+``settings.json`` ``{"modelProvider":"gemini"}`` **and** a non-empty
+``GEMINI_API_KEY``. The preamble seeds that settings file only when
+``GEMINI_API_KEY`` is set — never on ``ANTIGRAVITY_API_KEY`` alone, and never
+by aliasing credentials across env names.
 
 Output uses ``stream-json`` so the idle stdout watchdog sees continuous events
 (``text``/``json`` buffer until completion).
@@ -49,7 +67,7 @@ class AntigravityAdapter(AgentAdapter):
         return ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY")
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        """Build the agy print-mode command; prompt stays on inherited stdin."""
+        """Build the agy print-mode command; prompt bridged via ``$(cat)``."""
         selected_model = model or self._default_model
         # Effort is accepted and recorded on the adapter but intentionally
         # unmapped in v1 (no model_selection mapping yet), even though agy
@@ -61,22 +79,35 @@ class AntigravityAdapter(AgentAdapter):
         if selected_model:
             model_flag = f" --model {shlex.quote(selected_model)}"
 
-        # Seed modelProvider=gemini when an API key is present so headless
-        # AI Studio auth works without an interactive login. Do not alias
-        # ANTIGRAVITY_API_KEY onto GEMINI_API_KEY (explicit over clever).
-        # Bare ``-p`` (no value) enables print mode and reads the operator
-        # prompt from stdin — do not pass ``-p ""`` (empty-prompt error) or a
-        # tempfile pointer (real task would not be the CLI prompt).
+        # Seed modelProvider=gemini only when GEMINI_API_KEY is present —
+        # that mode hard-requires GEMINI_API_KEY (agy does not read
+        # ANTIGRAVITY_API_KEY). Do not alias credentials across env names.
+        # Prompt transport: awf_prompt=$(cat) then -p "$awf_prompt" last.
         script = (
             "set -eu\n"
             'settings_dir="${HOME}/.gemini/antigravity-cli"\n'
             'mkdir -p "$settings_dir"\n'
-            'if [ -n "${ANTIGRAVITY_API_KEY:-}${GEMINI_API_KEY:-}" ] '
+            'if [ -n "${GEMINI_API_KEY:-}" ] '
             '&& [ ! -f "$settings_dir/settings.json" ]; then\n'
             "  printf '%s\\n' '{\"modelProvider\":\"gemini\"}' "
             '> "$settings_dir/settings.json"\n'
             "fi\n"
-            "exec agy -p --dangerously-skip-permissions --output-format stream-json "
-            f"--print-timeout 24h{model_flag}\n"
+            "awf_prompt=$(cat)\n"
+            'if [ -z "$awf_prompt" ]; then\n'
+            "  printf '%s\\n' \"agy prompt is empty; refusing to start idle chat\" >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            # Portable length check (no bash ${#var}); printf '%s' avoids a
+            # trailing newline that would inflate wc -c.
+            "prompt_len=$(printf '%s' \"$awf_prompt\" | wc -c)\n"
+            'if [ "$prompt_len" -gt 100000 ]; then\n'
+            "  printf '%s\\n' "
+            '"agy prompt exceeds 100000 bytes '
+            "(kernel MAX_ARG_STRLEN ~128KiB single-arg ceiling); "
+            'refusing to exec" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            "exec agy --dangerously-skip-permissions --output-format stream-json "
+            f'--print-timeout 24h{model_flag} -p "$awf_prompt"\n'
         )
         return ["sh", "-lc", script]

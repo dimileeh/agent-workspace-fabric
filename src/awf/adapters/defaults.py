@@ -19,10 +19,10 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # Gemini CLI 0.39+ documents Gemini 3.1 Pro Preview as the direct
         # Pro-class model ID when the account has access.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
-        # Antigravity CLI headless model list (agy models / docs) uses
-        # gemini-3.1-pro-high as the Pro-class slug. Effort is recorded but
+        # Antigravity CLI headless model list (agy models) uses
+        # gemini-3.1-pro-preview as the Pro-class slug. Effort is recorded but
         # unmapped in v1 (agy --effort exists; mapping deferred).
-        AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro-high", effort="xhigh"),
+        AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
         AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
         # The Grok Build CLI reports grok-build as the current default coding model.
         AgentRuntime.grok: AgentDefaults(model="grok-build", effort="xhigh"),

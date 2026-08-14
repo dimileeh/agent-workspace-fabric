@@ -13,6 +13,43 @@ from awf.adapters.provider_failures import (
 )
 
 
+def test_classifies_antigravity_agy_auth_required_marker() -> None:
+    """agy 1.1.13 OAuth-only stderr classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Error: authentication required. Run 'agy' to log in, then retry.",
+        provider="antigravity",
+        model="gemini-3.1-pro-preview",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "antigravity"
+    assert classification.retryable is True
+
+
+def test_classifies_antigravity_missing_gemini_api_key_marker() -> None:
+    """agy 1.1.13 missing GEMINI_API_KEY stderr classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr=(
+            'modelProvider is set to "gemini" in settings.json, but the '
+            "GEMINI_API_KEY environment variable is not set."
+        ),
+        provider="antigravity",
+        model="gemini-3.1-pro-preview",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "antigravity"
+    assert classification.retryable is True
+
+
 def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None:
     classification = classify_provider_failure(
         reason_code=None,
