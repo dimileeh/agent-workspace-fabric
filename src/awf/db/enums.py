@@ -246,7 +246,10 @@ class AgentRuntime(StrEnum):
     """Anthropic Claude Code — ``claude`` in non-interactive mode with ``--dangerously-skip-permissions``."""
 
     gemini = "gemini"
-    """Google Gemini CLI — ``gemini --yolo``."""
+    """Google Gemini CLI — ``gemini --yolo`` (deprecated for personal accounts; retained for enterprise)."""
+
+    antigravity = "antigravity"
+    """Google Antigravity CLI — ``agy -p`` with ``--dangerously-skip-permissions`` (successor to personal gemini-cli)."""
 
     cursor = "cursor"
     """Cursor CLI — ``cursor-agent -p --force`` for non-interactive workspace edits."""
