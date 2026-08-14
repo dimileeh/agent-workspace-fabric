@@ -1148,7 +1148,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "The requested agent runtime is not supported by AWF.",
         (
             "Select a supported agent runtime (e.g. codex, claude_code, cursor, "
-            "antigravity, gemini, opencode, grok) or update the workspace profile configuration."
+            "antigravity, opencode, grok) or update the workspace profile configuration."
         ),
         (
             "An operation or PR adoption request specified an agent runtime that is "

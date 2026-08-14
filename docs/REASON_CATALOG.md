@@ -840,7 +840,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### UNSUPPORTED_AGENT_RUNTIME
 **Problem:** The requested agent runtime is not supported by AWF.
 **Likely Cause:** An operation or PR adoption request specified an agent runtime that is not registered or supported in this version of AWF.
-**Operator Fix:** Select a supported agent runtime (e.g. codex, claude_code, cursor, antigravity, gemini, opencode, grok) or update the workspace profile configuration.
+**Operator Fix:** Select a supported agent runtime (e.g. codex, claude_code, cursor, antigravity, opencode, grok) or update the workspace profile configuration.
 **Related Command:** `awf workspace create`
 **Docs Link:** [docs/REASON_CATALOG.md#unsupported_agent_runtime](#unsupported_agent_runtime)
 
