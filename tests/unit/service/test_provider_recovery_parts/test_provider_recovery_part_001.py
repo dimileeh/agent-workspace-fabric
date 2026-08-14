@@ -392,6 +392,110 @@ def test_decide_provider_recovery_unsupported_agent_runtime_is_terminal() -> Non
     )
 
 
+def test_decide_provider_recovery_unsupported_agent_runtime_auth_failure_is_terminal() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_AUTH_FAILED,
+        message="Authentication failed",
+        details={"provider": "google", "model": "gemini-2.5-pro"},
+        task_policy={},
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="UNSUPPORTED_AGENT_RUNTIME",
+        terminal_reason="UNSUPPORTED_AGENT_RUNTIME",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+
+def test_decide_provider_recovery_unsupported_agent_runtime_non_retryable_is_terminal() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    metadata = {
+        "failure_type": "invalid_request",
+        "reason_code": "INVALID_PROMPT",
+        "retryable": False,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+    }
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="UNSUPPORTED_AGENT_RUNTIME",
+        terminal_reason="UNSUPPORTED_AGENT_RUNTIME",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+
+def test_decide_provider_recovery_unsupported_agent_runtime_repeated_fingerprint_is_terminal() -> (
+    None
+):
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    task_policy = {
+        "provider_recovery_state": {
+            "failure_fingerprints": ["fp_gemini_123"],
+        }
+    }
+    metadata = {
+        "failure_type": "capacity",
+        "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        "retryable": True,
+        "failure_fingerprint": "fp_gemini_123",
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+    }
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy=task_policy,
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="UNSUPPORTED_AGENT_RUNTIME",
+        terminal_reason="UNSUPPORTED_AGENT_RUNTIME",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+
 def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchable_fallback() -> (
     None
 ):

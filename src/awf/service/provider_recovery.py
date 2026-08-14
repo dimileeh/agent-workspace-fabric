@@ -212,11 +212,20 @@ def decide_provider_recovery(
     is_launchable = current_runtime is not None and current_runtime in _LAUNCH_PROVIDER_BY_AGENT
 
     if _is_auth_failure_metadata(metadata):
-        return _terminal_decision(PROVIDER_AUTH_FAILED, state=state)
+        return _terminal_decision(
+            PROVIDER_AUTH_FAILED if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
     if not bool(metadata.get("retryable")):
-        return _terminal_decision("NON_RETRYABLE_PROVIDER_FAILURE", state=state)
+        return _terminal_decision(
+            NON_RETRYABLE_PROVIDER_FAILURE if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
     if fingerprint is not None and fingerprint in state.failure_fingerprints:
-        return _terminal_decision(PROVIDER_RECOVERY_NO_LOOP_REASON, state=state)
+        return _terminal_decision(
+            PROVIDER_RECOVERY_NO_LOOP_REASON if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
 
     default_fallback_target = _default_capacity_fallback_target(
         metadata,
