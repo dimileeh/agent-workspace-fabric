@@ -113,11 +113,11 @@ def _green_status() -> dict[str, object]:
                     "reason": "CURSOR_ENV_AUTH_PRESENT",
                     "message": "Cursor auth is visible.",
                 },
-                "gemini": {
+                "antigravity": {
                     "ok": True,
                     "status": "ok",
-                    "reason": "GEMINI_FILE_AUTH_PRESENT",
-                    "message": "Gemini auth files are visible.",
+                    "reason": "ANTIGRAVITY_FILE_AUTH_PRESENT",
+                    "message": "Antigravity auth files are visible.",
                 },
                 "opencode": {
                     "ok": True,
