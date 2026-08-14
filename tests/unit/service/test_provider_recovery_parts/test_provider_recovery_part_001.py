@@ -392,6 +392,45 @@ def test_decide_provider_recovery_unsupported_agent_runtime_is_terminal() -> Non
     )
 
 
+def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchable_fallback() -> (
+    None
+):
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [{"agent": "antigravity", "model": "gemini-2.5-pro"}],
+        }
+    }
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        message="MODEL_CAPACITY_EXHAUSTED",
+        details={"provider": "google", "model": "gemini-2.5-pro"},
+        task_policy=task_policy,
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy=task_policy,
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="fallback",
+        retryable=True,
+        not_before=None,
+        target_agent="antigravity",
+        target_provider="antigravity",
+        target_model="gemini-2.5-pro",
+        reason_code="PROVIDER_FALLBACK_SELECTED",
+        terminal_reason=None,
+        fallback_attempt_number=1,
+        retry_attempt_number=0,
+    )
+
+
 def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
     now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
     metadata = provider_recovery_metadata_from_failure(

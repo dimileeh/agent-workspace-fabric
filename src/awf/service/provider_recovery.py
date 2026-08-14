@@ -205,8 +205,7 @@ def decide_provider_recovery(
     except ValueError:
         current_runtime = None
 
-    if current_runtime is None or current_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
-        return _terminal_decision(UNSUPPORTED_AGENT_RUNTIME, state=state)
+    is_launchable = current_runtime is not None and current_runtime in _LAUNCH_PROVIDER_BY_AGENT
 
     if _is_auth_failure_metadata(metadata):
         return _terminal_decision(PROVIDER_AUTH_FAILED, state=state)
@@ -240,7 +239,7 @@ def decide_provider_recovery(
             retry_attempt_number=0,
         )
 
-    if state.retry_attempt_number < policy.max_same_provider_retries:
+    if is_launchable and state.retry_attempt_number < policy.max_same_provider_retries:
         delay = _retry_delay_seconds(metadata, policy, state)
         return ProviderRecoveryDecision(
             action="retry",
@@ -269,6 +268,9 @@ def decide_provider_recovery(
             fallback_attempt_number=state.fallback_attempt_number + 1,
             retry_attempt_number=0,
         )
+
+    if not is_launchable:
+        return _terminal_decision(UNSUPPORTED_AGENT_RUNTIME, state=state)
 
     return _terminal_decision("PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED", state=state)
 
