@@ -431,6 +431,114 @@ def test_selected_antigravity_preflight_requires_env_key_and_runtime_cli(
 
 
 @pytest.mark.unit
+def test_selected_antigravity_preflight_blocks_missing_env_key(tmp_path: Path) -> None:
+    """Antigravity selected preflight blocks launch when API-key auth is absent."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="antigravity",
+        task_policy={},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "antigravity"
+    assert result["agent"] == "antigravity"
+    assert result["model"] == "gemini-3.1-pro-high"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "fail"
+    assert result["auth_source"] == "not_observed"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "ANTIGRAVITY_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_antigravity_preflight_blocks_missing_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    """Antigravity selected preflight blocks launch when agy is missing."""
+    secret = "antigravity_missing_cli_secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        """Simulate a missing agy executable."""
+        assert args[-1] == "command -v agy"
+        assert kwargs["env"]["ANTIGRAVITY_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"agy missing with {secret}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="antigravity",
+        task_policy={},
+        environ={"ANTIGRAVITY_API_KEY": secret},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "antigravity"
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "ANTIGRAVITY_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_antigravity_env_auth_requires_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    """Strict Antigravity readiness reports a CLI probe failure after auth succeeds."""
+    secret = "antigravity_provider_readiness_secret"
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        """Record the Antigravity runtime probe and return a missing CLI result."""
+        calls.append(args)
+        assert args[-1] == "command -v agy"
+        assert kwargs["env"]["ANTIGRAVITY_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"missing agy for {secret}")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"ANTIGRAVITY_API_KEY": secret},
+        strict_providers=["antigravity"],
+        run_subprocess=_run,
+    )
+
+    antigravity = payload["providers"]["antigravity"]
+    assert antigravity["ok"] is False
+    assert antigravity["status"] == "fail"
+    assert antigravity["reason"] == "ANTIGRAVITY_RUNTIME_CLI_NOT_FOUND"
+    assert antigravity["credential_scope"] == "static_env_token"
+    assert antigravity["isolation"] == "service_env"
+    assert antigravity["credential_sources"] == [
+        {
+            "type": "env",
+            "signal": "ANTIGRAVITY_API_KEY",
+            "credential_scope": "static_env_token",
+            "isolation": "service_env",
+        }
+    ]
+    assert antigravity["runtime_cli_probe"]["status"] == "fail"
+    assert antigravity["runtime_cli_probe"]["reason_code"] == "ANTIGRAVITY_RUNTIME_CLI_NOT_FOUND"
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v agy",
+        ]
+    ]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
 def test_launch_provider_by_agent_covers_every_agent_runtime() -> None:
     """Missing launch-map entries reject agents as UNSUPPORTED_AGENT_RUNTIME."""
     from awf.db.enums import AgentRuntime
