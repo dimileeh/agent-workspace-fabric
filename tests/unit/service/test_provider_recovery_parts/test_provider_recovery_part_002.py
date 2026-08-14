@@ -43,6 +43,7 @@ from awf.service.provider_recovery import (
     _source_suppression_not_before,
     create_provider_recovery_attempt_row,
     decide_provider_recovery,
+    parse_provider_recovery_policy,
     provider_cooldown_not_before,
     provider_for_agent_model,
     provider_recovery_metadata_from_failure,
@@ -593,11 +594,44 @@ def test_fallback_targets_edge_cases():
             {"model": "missing_agent"},
         ]
     )
-    assert len(targets) == 1
-    assert targets[0].agent == "codex"
+    assert len(targets) == 2
+    assert targets[0] is None
+    assert targets[1].agent == "codex"
 
     assert _fallback_targets(None) == []
     assert _fallback_targets("string") == []
+
+
+def test_fallback_targets_preserves_retired_agent_positions():
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "model": "gpt-4"},
+            ],
+        }
+    }
+    policy = parse_provider_recovery_policy(task_policy)
+    assert len(policy.fallbacks) == 2
+    assert policy.fallbacks[0] is None
+    assert policy.fallbacks[1] == FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+
+    # When Gemini fails with stored fallback_attempt_number == 1
+    state_after_gemini = ProviderRecoveryState(fallback_attempt_number=1)
+    target = _select_fallback_target(policy, state_after_gemini)
+    assert target == FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+    decision = decide_provider_recovery(
+        metadata={"retryable": True, "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED"},
+        task_policy={**task_policy, "provider_recovery_state": {"fallback_attempt_number": 1}},
+        current_agent="gemini",
+        current_model="gemini-1.5-pro",
+        now=now,
+    )
+    assert decision.action == "fallback"
+    assert decision.target_agent == "codex"
+    assert decision.fallback_attempt_number == 2
 
 
 def test_policy_model_edge_cases():

@@ -77,7 +77,7 @@ class FallbackTarget:
 
 @dataclass(frozen=True)
 class ProviderRecoveryPolicy:
-    fallbacks: tuple[FallbackTarget, ...] = ()
+    fallbacks: tuple[FallbackTarget | None, ...] = ()
     max_fallback_attempts: int = 0
     max_same_provider_retries: int = 1
     cooldown_seconds: int = 300
@@ -168,8 +168,12 @@ def provider_recovery_metadata_from_failure(
         False
         if auth_failure
         else (
-            bool(policy.fallbacks)
-            and state.fallback_attempt_number < policy.max_fallback_attempts
+            any(
+                target is not None
+                for target in policy.fallbacks[
+                    state.fallback_attempt_number : policy.max_fallback_attempts
+                ]
+            )
             and bool(metadata.get("retryable"))
         )
     )
@@ -254,7 +258,7 @@ def decide_provider_recovery(
             retry_attempt_number=state.retry_attempt_number + 1,
         )
 
-    fallback_target = _select_fallback_target(policy, state)
+    fallback_target, target_index = _select_fallback_target_with_index(policy, state)
     if fallback_target is not None:
         return ProviderRecoveryDecision(
             action="fallback",
@@ -265,7 +269,7 @@ def decide_provider_recovery(
             target_model=fallback_target.model,
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
-            fallback_attempt_number=state.fallback_attempt_number + 1,
+            fallback_attempt_number=target_index + 1,
             retry_attempt_number=0,
         )
 
@@ -298,7 +302,7 @@ def _default_capacity_fallback_target(
     current_model: str | None,
     default_model: str | None,
 ) -> FallbackTarget | None:
-    if policy.fallbacks:
+    if any(target is not None for target in policy.fallbacks):
         return None
     if state.fallback_attempt_number > 0:
         return None
@@ -908,12 +912,21 @@ def _select_fallback_target(
     policy: ProviderRecoveryPolicy,
     state: ProviderRecoveryState,
 ) -> FallbackTarget | None:
-    if state.fallback_attempt_number >= policy.max_fallback_attempts:
-        return None
+    target, _ = _select_fallback_target_with_index(policy, state)
+    return target
+
+
+def _select_fallback_target_with_index(
+    policy: ProviderRecoveryPolicy,
+    state: ProviderRecoveryState,
+) -> tuple[FallbackTarget | None, int]:
     index = state.fallback_attempt_number
-    if index >= len(policy.fallbacks):
-        return None
-    return policy.fallbacks[index]
+    while index < policy.max_fallback_attempts and index < len(policy.fallbacks):
+        target = policy.fallbacks[index]
+        if target is not None:
+            return target, index
+        index += 1
+    return None, index
 
 
 def _retry_delay_seconds(
@@ -1187,10 +1200,10 @@ def _has_existing_provider_recovery_event(
     return False
 
 
-def _fallback_targets(raw: object) -> list[FallbackTarget]:
+def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
     if not isinstance(raw, Sequence) or isinstance(raw, str):
         return []
-    targets: list[FallbackTarget] = []
+    targets: list[FallbackTarget | None] = []
     from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
     for item in raw:
@@ -1203,8 +1216,10 @@ def _fallback_targets(raw: object) -> list[FallbackTarget]:
         try:
             runtime = AgentRuntime(agent)
             if runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+                targets.append(None)
                 continue
         except ValueError:
+            targets.append(None)
             continue
         provider = _mapping_str(item, "provider") or provider_for_agent_model(agent, model)
         targets.append(FallbackTarget(agent=agent, provider=provider, model=model))
