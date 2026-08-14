@@ -205,7 +205,7 @@ class TestAntigravityAdapter:
 
     @pytest.mark.unit
     async def test_effort_is_accepted_but_unmapped_into_cli_args(self) -> None:
-        """Effort is recorded on the adapter but never mapped to --effort in v1."""
+        """Effort is recorded on the adapter but never emitted; agy rejects --effort."""
         runner = FakeCommandRunner()
         adapter = AntigravityAdapter(
             runner=runner,
@@ -222,6 +222,44 @@ class TestAntigravityAdapter:
         assert adapter._default_effort == "high"
         script = runner.calls[0].args[-1]
         assert "--effort" not in script
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+        ],
+    )
+    def test_api_key_mode_allowlist_accepts_exact_slugs(self, model: str) -> None:
+        """agy 1.1.13 API-key mode accepts exactly these three model slugs."""
+        script = _render_cli_script(model=model)
+        assert f"--model {model}" in script
+        assert "--effort" not in script
+
+    @pytest.mark.unit
+    def test_api_key_mode_allowlist_rejects_gemini_3_7_flash(self) -> None:
+        """gemini-3.7-flash exists in Gemini API but agy 1.1.13 rejects it."""
+        with pytest.raises(ValueError, match=r"gemini-3\.7-flash") as exc:
+            _render_cli_script(model="gemini-3.7-flash")
+        message = str(exc.value)
+        assert "gemini-3.1-pro-preview" in message
+        assert "gemini-3.5-flash" in message
+        assert "gemini-3.6-flash" in message
+
+    @pytest.mark.unit
+    def test_api_key_mode_allowlist_rejects_unknown_model(self) -> None:
+        """Unknown model slugs fail fast with the valid allowlist listed."""
+        with pytest.raises(ValueError, match=r"not-a-real-model") as exc:
+            _render_cli_script(model="not-a-real-model")
+        message = str(exc.value)
+        for slug in (
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+        ):
+            assert slug in message
 
     @pytest.mark.unit
     async def test_sh_stub_receives_prompt_as_final_p_value(self, tmp_path: Path) -> None:

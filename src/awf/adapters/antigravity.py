@@ -18,6 +18,13 @@ Verified ``agy`` 1.1.13 contract (operator evidence; trust over older docs):
   the preamble fails closed above 100000 bytes rather than surfacing noisy
   ``execve`` ``E2BIG``. Empty prompts also fail closed (agy would otherwise
   idle-chat).
+- API-key mode accepts **exactly** the model slugs in
+  ``ANTIGRAVITY_API_KEY_MODE_MODELS`` (agy hardcodes them; e.g.
+  ``gemini-3.7-flash`` exists in the Gemini API but agy rejects it).
+- ``--effort`` is rejected by agy for **all** models in API-key mode. Effort
+  exists only on the OAuth path as composite model slugs (e.g.
+  ``gemini-3.6-flash-high``). AWF still accepts and records effort on the
+  adapter for policy/observability, but never emits ``--effort``.
 
 AWF still streams the wrapped prompt on docker-exec stdin into ``sh -lc``;
 only the inner ``agy`` argv uses the ``$(cat)`` bridge.
@@ -40,6 +47,28 @@ import shlex
 
 from awf.adapters.base import AgentAdapter, register_adapter
 from awf.db.enums import AgentRuntime
+
+# Exact API-key mode model slugs hardcoded by agy 1.1.13. Mirrors the
+# ANTIGRAVITY_VERSION pin in docker/agent-runtime.Dockerfile — re-verify this
+# frozenset when that pin is bumped (agy may add/remove slugs; Gemini API
+# availability is not authoritative).
+ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
+    {
+        "gemini-3.1-pro-preview",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+    }
+)
+
+
+def _validate_api_key_mode_model(model: str) -> None:
+    """Fail fast when ``model`` is outside agy's API-key allowlist."""
+    if model in ANTIGRAVITY_API_KEY_MODE_MODELS:
+        return
+    valid = ", ".join(sorted(ANTIGRAVITY_API_KEY_MODE_MODELS))
+    raise ValueError(
+        f"antigravity API-key mode does not accept model {model!r}; valid slugs: {valid}"
+    )
 
 
 @register_adapter
@@ -69,18 +98,20 @@ class AntigravityAdapter(AgentAdapter):
         return ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY")
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        """Build the agy print-mode command; prompt bridged via ``$(cat)``."""
+        """Build the agy print-mode command; prompt bridged via ``$(cat)``.
+
+        Effort is accepted and recorded on the adapter (``self._default_effort``)
+        for policy/observability, but never emitted as ``--effort``: agy
+        rejects that flag for every model in API-key mode (OAuth uses
+        composite slugs such as ``gemini-3.6-flash-high`` instead).
+        """
         selected_model = model or self._default_model
-        # Effort is accepted and recorded on the adapter but intentionally
-        # unmapped in v1 (no model_selection mapping yet), even though agy
-        # exposes ``--effort``. Keep that axis out of argv until a deliberate
-        # mapping lands in adapters/model_selection.py.
         _ = self._default_effort
 
         model_flag = ""
         if selected_model:
+            _validate_api_key_mode_model(selected_model)
             model_flag = f" --model {shlex.quote(selected_model)}"
-
         # Seed/upsert modelProvider=gemini only when GEMINI_API_KEY is present —
         # that mode hard-requires GEMINI_API_KEY (agy does not read
         # ANTIGRAVITY_API_KEY). Do not alias credentials across env names.
