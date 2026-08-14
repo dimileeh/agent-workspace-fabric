@@ -118,10 +118,10 @@ def test_metadata_skips_evidence_when_message_empty() -> None:
 
 def test_decision_terminal_when_metadata_marked_non_retryable() -> None:
     decision = decide_provider_recovery(
-        {"retryable": False, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": False, "provider": "openai", "model": "gpt-5.5"},
         task_policy={},
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -141,13 +141,13 @@ def test_decision_terminal_when_metadata_marked_non_retryable() -> None:
 
 def test_decision_terminal_when_attempts_exhausted() -> None:
     decision = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
                 "max_same_provider_retries": 1,
                 "max_fallback_attempts": 1,
                 "fallbacks": [
-                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                    {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
                 ],
             },
             "provider_recovery_state": {
@@ -155,8 +155,8 @@ def test_decision_terminal_when_attempts_exhausted() -> None:
                 "retry_attempt_number": 1,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -166,7 +166,7 @@ def test_decision_terminal_when_attempts_exhausted() -> None:
 
 def test_decision_terminal_when_no_fallbacks_configured_and_retries_exhausted() -> None:
     decision = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
                 "max_same_provider_retries": 1,
@@ -174,8 +174,8 @@ def test_decision_terminal_when_no_fallbacks_configured_and_retries_exhausted() 
             },
             "provider_recovery_state": {"retry_attempt_number": 1},
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -678,8 +678,8 @@ async def test_create_attempt_returns_none_when_no_recovery_metadata(
         task={
             "title": "Untouched workspace",
             "prompt": "Plain prompt with no failure event.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
         },
@@ -720,8 +720,8 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
         task={
             "title": "Exhausted workspace",
             "prompt": "Already burnt through the policy budget.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
             "provider_recovery": {
@@ -813,8 +813,8 @@ async def test_retry_task_for_source_creates_task_when_attempt_missing(
         task={
             "title": "Workspace without attempt",
             "prompt": "We will simulate the no-attempt branch.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
         },
@@ -869,8 +869,8 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         task={
             "title": "Already-recovered workspace",
             "prompt": "Will short-circuit on duplicate recovery event.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
             "provider_recovery": {

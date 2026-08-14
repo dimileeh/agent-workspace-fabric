@@ -44,6 +44,7 @@ NON_RETRYABLE_PROVIDER_FAILURE = "NON_RETRYABLE_PROVIDER_FAILURE"
 PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED = "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 PROVIDER_RECOVERY_STALE_SOURCE = "PROVIDER_RECOVERY_STALE_SOURCE"
 PROVIDER_RECOVERY_EXPECTED_SOURCE = "recoverable_provider_failure"
+UNSUPPORTED_AGENT_RUNTIME = "UNSUPPORTED_AGENT_RUNTIME"
 
 PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
     {
@@ -54,6 +55,7 @@ PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
         PROVIDER_RECOVERY_NO_LOOP_REASON,
         NON_RETRYABLE_PROVIDER_FAILURE,
         PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED,
+        UNSUPPORTED_AGENT_RUNTIME,
     }
 )
 
@@ -195,6 +197,16 @@ def decide_provider_recovery(
         current_model,
     )
     model = _metadata_str(metadata, "model") or current_model
+
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    try:
+        current_runtime = AgentRuntime(current_agent)
+    except ValueError:
+        current_runtime = None
+
+    if current_runtime is None or current_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+        return _terminal_decision(UNSUPPORTED_AGENT_RUNTIME, state=state)
 
     if _is_auth_failure_metadata(metadata):
         return _terminal_decision(PROVIDER_AUTH_FAILED, state=state)

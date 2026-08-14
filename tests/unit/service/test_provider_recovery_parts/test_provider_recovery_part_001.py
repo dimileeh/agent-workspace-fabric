@@ -51,8 +51,8 @@ def _request() -> WorkspaceCreateRequest:
         task={
             "title": "Recover provider outage",
             "prompt": "Implement the provider recovery behavior.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "external_id": "PROVIDER-1",
             "task_class": "test_task",
             "owned_paths": ["src/awf/provider/**"],
@@ -94,7 +94,7 @@ async def _seed_monitoring_provider_workspace(
         repo = WorkspaceRepository(session)
         source = await repo.get(response.id)
         assert source is not None
-        source.agent = "gemini"
+        source.agent = "codex"
         source.branch_name = f"awf/{source.id}"
         source.remote_push_branch = source.branch_name
         source.base_commit = "a" * 40
@@ -107,7 +107,7 @@ async def _seed_monitoring_provider_workspace(
         source.monitor_last_commit_sha = "b" * 40
         source.task_policy = {
             **source.task_policy,
-            "agent_model": "gemini-2.5-pro",
+            "agent_model": "gpt-5.5",
             "provider_recovery": {
                 "fallbacks": [
                     {
@@ -186,7 +186,7 @@ async def _move_workspace_to_status(
 def test_workspace_create_task_policy_snapshot_persists_provider_fallback_policy() -> None:
     policy = workspace_create_task_policy_snapshot(_request())
 
-    assert policy["agent_model"] == "gemini-2.5-pro"
+    assert policy["agent_model"] == "gpt-5.5"
     assert policy["provider_recovery"] == {
         "fallbacks": [
             {
@@ -333,6 +333,38 @@ def test_retryable_failure_without_fallback_policy_delays_same_provider_retry() 
     metadata = provider_recovery_metadata_from_failure(
         reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         message="MODEL_CAPACITY_EXHAUSTED",
+        details={"provider": "openai", "model": "gpt-5.5"},
+        task_policy={},
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="retry",
+        retryable=True,
+        not_before=now + timedelta(seconds=300),
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.5",
+        reason_code="PROVIDER_RETRY_DELAYED",
+        terminal_reason=None,
+        fallback_attempt_number=0,
+        retry_attempt_number=1,
+    )
+
+
+def test_decide_provider_recovery_unsupported_agent_runtime_is_terminal() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        message="MODEL_CAPACITY_EXHAUSTED",
         details={"provider": "google", "model": "gemini-2.5-pro"},
         task_policy={},
     )
@@ -347,16 +379,16 @@ def test_retryable_failure_without_fallback_policy_delays_same_provider_retry() 
     )
 
     assert decision == ProviderRecoveryDecision(
-        action="retry",
-        retryable=True,
-        not_before=now + timedelta(seconds=300),
-        target_agent="gemini",
-        target_provider="google",
-        target_model="gemini-2.5-pro",
-        reason_code="PROVIDER_RETRY_DELAYED",
-        terminal_reason=None,
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="UNSUPPORTED_AGENT_RUNTIME",
+        terminal_reason="UNSUPPORTED_AGENT_RUNTIME",
         fallback_attempt_number=0,
-        retry_attempt_number=1,
+        retry_attempt_number=0,
     )
 
 
@@ -501,12 +533,12 @@ def test_non_retryable_provider_failure_is_terminal() -> None:
     decision = decide_provider_recovery(
         {
             "retryable": False,
-            "provider": "google",
-            "model": "gemini-2.5-pro",
+            "provider": "openai",
+            "model": "gpt-5.5",
         },
         task_policy={},
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -527,7 +559,7 @@ def test_auth_provider_failure_is_terminal_even_with_retry_or_fallback_budget() 
         },
         task_policy={
             "provider_recovery": {
-                "fallbacks": [{"agent": "gemini", "model": "gemini-3.1-pro-preview"}],
+                "fallbacks": [{"agent": "claude_code", "model": "claude-3-7-sonnet"}],
                 "max_fallback_attempts": 1,
                 "max_same_provider_retries": 3,
             }
@@ -547,17 +579,17 @@ def test_retryable_failure_without_available_fallback_is_terminal_after_retry_bu
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
     no_configured_fallback = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={"provider_recovery_state": {"retry_attempt_number": 1}},
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
     exhausted_fallback_budget = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
-                "fallbacks": [{"agent": "codex", "model": "gpt-5.5"}],
+                "fallbacks": [{"agent": "claude_code", "model": "claude-3-7-sonnet"}],
                 "max_fallback_attempts": 1,
             },
             "provider_recovery_state": {
@@ -565,15 +597,15 @@ def test_retryable_failure_without_available_fallback_is_terminal_after_retry_bu
                 "fallback_attempt_number": 1,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
     fallback_index_without_target = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
-                "fallbacks": [{"agent": "codex", "model": "gpt-5.5"}],
+                "fallbacks": [{"agent": "claude_code", "model": "claude-3-7-sonnet"}],
                 "max_fallback_attempts": 2,
             },
             "provider_recovery_state": {
@@ -581,8 +613,8 @@ def test_retryable_failure_without_available_fallback_is_terminal_after_retry_bu
                 "fallback_attempt_number": 1,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
 
@@ -600,16 +632,16 @@ def test_same_provider_retry_precedes_available_fallback() -> None:
     decision = decide_provider_recovery(
         {
             "retryable": True,
-            "provider": "google",
-            "model": "gemini-2.5-pro",
+            "provider": "openai",
+            "model": "gpt-5.5",
         },
         task_policy={
             "provider_recovery": {
                 "fallbacks": [
                     {
-                        "agent": "codex",
-                        "provider": "openai",
-                        "model": "gpt-5.3-codex",
+                        "agent": "claude_code",
+                        "provider": "anthropic",
+                        "model": "claude-3-7-sonnet",
                     }
                 ],
                 "max_fallback_attempts": 1,
@@ -617,8 +649,8 @@ def test_same_provider_retry_precedes_available_fallback() -> None:
                 "cooldown_seconds": 180,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
 
@@ -626,9 +658,9 @@ def test_same_provider_retry_precedes_available_fallback() -> None:
         action="retry",
         retryable=True,
         not_before=now + timedelta(seconds=180),
-        target_agent="gemini",
-        target_provider="google",
-        target_model="gemini-2.5-pro",
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.5",
         reason_code="PROVIDER_RETRY_DELAYED",
         terminal_reason=None,
         fallback_attempt_number=0,
@@ -642,8 +674,8 @@ def test_same_provider_retry_backoff_is_capped_by_retry_after_cap() -> None:
     decision = decide_provider_recovery(
         {
             "retryable": True,
-            "provider": "google",
-            "model": "gemini-2.5-pro",
+            "provider": "openai",
+            "model": "gpt-5.5",
             "retry_after_seconds": 120,
         },
         task_policy={
@@ -655,8 +687,8 @@ def test_same_provider_retry_backoff_is_capped_by_retry_after_cap() -> None:
             },
             "provider_recovery_state": {"retry_attempt_number": 2},
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
 
@@ -670,16 +702,16 @@ def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None
     decision = decide_provider_recovery(
         {
             "retryable": True,
-            "provider": "google",
-            "model": "gemini-2.5-pro",
+            "provider": "openai",
+            "model": "gpt-5.5",
         },
         task_policy={
             "provider_recovery": {
                 "fallbacks": [
                     {
-                        "agent": "codex",
-                        "provider": "openai",
-                        "model": "gpt-5.5",
+                        "agent": "claude_code",
+                        "provider": "anthropic",
+                        "model": "claude-3-7-sonnet",
                     }
                 ],
                 "max_fallback_attempts": 1,
@@ -691,8 +723,8 @@ def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None
                 "retry_attempt_number": 2,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=now,
     )
 
@@ -700,9 +732,9 @@ def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None
         action="fallback",
         retryable=True,
         not_before=None,
-        target_agent="codex",
-        target_provider="openai",
-        target_model="gpt-5.5",
+        target_agent="claude_code",
+        target_provider="anthropic",
+        target_model="claude-3-7-sonnet",
         reason_code="PROVIDER_FALLBACK_SELECTED",
         terminal_reason=None,
         fallback_attempt_number=1,
@@ -715,7 +747,7 @@ def test_repeated_identical_fingerprint_is_terminal_no_loop() -> None:
     metadata = provider_recovery_metadata_from_failure(
         reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         message="RESOURCE_EXHAUSTED RetryableQuotaError",
-        details={"provider": "google", "model": "gemini-2.5-pro"},
+        details={"provider": "openai", "model": "gpt-5.5"},
         task_policy=policy,
     )
     assert metadata is not None
@@ -728,8 +760,8 @@ def test_repeated_identical_fingerprint_is_terminal_no_loop() -> None:
     decision = decide_provider_recovery(
         metadata,
         task_policy=policy,
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -1272,7 +1304,7 @@ async def test_monitoring_pr_fallback_missing_monitor_metadata_creates_workspace
     assert result.in_place is False
     assert len(workspaces) == len(before_workspaces) + 1
     assert source.status == WorkspaceStatus.monitoring_pr.value
-    assert source.agent == "gemini"
+    assert source.agent == "codex"
     assert fallback.status == WorkspaceStatus.requested.value
     assert fallback.agent == "codex"
     assert fallback.pr_url == source.pr_url
@@ -1344,8 +1376,8 @@ async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
         ]
 
     assert result is None
-    assert source.agent == "gemini"
-    assert source.task_policy["agent_model"] == "gemini-2.5-pro"
+    assert source.agent == "codex"
+    assert source.task_policy["agent_model"] == "gpt-5.5"
     assert "provider_recovery_state" not in source.task_policy
     assert len(recovery_events) == 1
     assert cooldown_events == []
@@ -1363,8 +1395,8 @@ async def test_monitoring_pr_repeated_in_place_fingerprint_records_terminal_no_l
         "reason_code": AGENT_IDLE_TIMEOUT,
         "failure_type": "idle_timeout",
         "retryable": True,
-        "provider": "google",
-        "model": "gemini-2.5-pro",
+        "provider": "openai",
+        "model": "gpt-5.5",
         "failure_fingerprint": "idle-timeout:repeat-pr-169",
         "recommended_action": "Retry PR monitor on another provider.",
     }
@@ -1444,7 +1476,7 @@ async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
                 "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
                 "failure_type": "capacity",
                 "retryable": True,
-                "provider": "google",
+                "provider": "openai",
                 "failure_fingerprint": "capacity:pr-169:no-model",
                 "recommended_action": "Retry PR monitor on another provider.",
             },
@@ -1456,11 +1488,11 @@ async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
     async with factory() as session:
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         source_breaker = await breaker_repo.get(
-            provider="google",
-            model="gemini-2.5-pro",
+            provider="openai",
+            model="gpt-5.5",
         )
         fallback_breaker = await breaker_repo.get(
-            provider="google",
+            provider="openai",
             model="gpt-5.3-codex",
         )
 

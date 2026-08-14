@@ -67,8 +67,8 @@ def _request() -> WorkspaceCreateRequest:
         task={
             "title": "Recover provider outage",
             "prompt": "Implement the provider recovery behavior.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "external_id": "PROVIDER-1",
             "task_class": "test_task",
             "owned_paths": ["src/awf/provider/**"],
@@ -110,7 +110,7 @@ async def _seed_monitoring_provider_workspace(
         repo = WorkspaceRepository(session)
         source = await repo.get(response.id)
         assert source is not None
-        source.agent = "gemini"
+        source.agent = "codex"
         source.branch_name = f"awf/{source.id}"
         source.remote_push_branch = source.branch_name
         source.base_commit = "a" * 40
@@ -262,7 +262,7 @@ async def test_monitoring_pr_same_provider_retry_keeps_pr_workspace_on_cooldown(
     assert len(attempts) == len(before_attempts)
     assert len(candidates) == len(before_candidates) == 1
     assert source.status == WorkspaceStatus.monitoring_pr.value
-    assert source.agent == "gemini"
+    assert source.agent == "codex"
     state = source.task_policy["provider_recovery_state"]
     assert state["action"] == "retry"
     assert state["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
@@ -297,7 +297,7 @@ async def test_retry_recovery_without_source_attempt_creates_retry_task(
             branch_base="development",
             task_title="Recover provider outage",
             task_prompt="Retry without a source attempt row.",
-            agent="gemini",
+            agent="codex",
             test_commands=["uv run pytest tests/unit -q"],
             task_policy={"provider_recovery": {"max_same_provider_retries": 1}},
         )
@@ -519,8 +519,8 @@ def test_decide_provider_recovery_non_retryable():
     decision = decide_provider_recovery(
         {"retryable": False},
         task_policy={},
-        current_agent="gemini",
-        current_model="gemini-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime.now(UTC),
     )
     assert decision.action == "terminal"
@@ -528,7 +528,7 @@ def test_decide_provider_recovery_non_retryable():
 
 
 def test_provider_for_agent_model():
-    assert provider_for_agent_model("gemini", None) == "google"
+    assert provider_for_agent_model("gemini", None) is None
     assert provider_for_agent_model("antigravity", None) == "antigravity"
     assert provider_for_agent_model("codex", None) == "openai"
     assert provider_for_agent_model("claude_code", None) == "anthropic"
@@ -556,7 +556,7 @@ async def test_create_provider_recovery_attempt_row_terminal(factory):
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={},
             test_commands=[],
             owned_paths=[],
@@ -786,12 +786,12 @@ async def test_record_provider_circuit_breaker_edge_cases(factory):
 
 def test_decide_provider_recovery_attempts_exhausted():
     decision = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery_state": {"retry_attempt_number": 1, "fallback_attempt_number": 0}
         },
-        current_agent="gemini",
-        current_model="gemini",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime.now(UTC),
     )
     assert decision.action == "terminal"
@@ -943,10 +943,10 @@ async def test_create_provider_recovery_attempt_row_immediate_fallback(factory):
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={
                 "provider_recovery": {
-                    "fallbacks": [{"agent": "codex", "model": "gpt-4"}],
+                    "fallbacks": [{"agent": "claude_code", "model": "claude-3-7-sonnet"}],
                     "max_same_provider_retries": 0,
                     "max_fallback_attempts": 1,
                 }
@@ -961,7 +961,7 @@ async def test_create_provider_recovery_attempt_row_immediate_fallback(factory):
         result = await create_provider_recovery_attempt_row(
             session,
             ws_id,
-            metadata={"retryable": True, "provider": "google", "model": "gemini"},
+            metadata={"retryable": True, "provider": "openai", "model": "gpt-5.5"},
             now=datetime.now(UTC),
         )
         assert result is not None
@@ -977,7 +977,7 @@ async def test_create_provider_recovery_attempt_row_no_target_model_and_existing
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={},
             test_commands=[],
             owned_paths=[],
@@ -996,7 +996,7 @@ async def test_create_provider_recovery_attempt_row_no_target_model_and_existing
             ws_id,
             metadata={
                 "retryable": True,
-                "provider": "google",
+                "provider": "openai",
                 "model": None,
                 "failure_fingerprint": "f1",
             },
@@ -1017,7 +1017,7 @@ async def test_create_provider_recovery_attempt_row_existing_event_does_not_doub
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={
                 "provider_recovery": {
                     "circuit_breaker": {
@@ -1035,8 +1035,8 @@ async def test_create_provider_recovery_attempt_row_existing_event_does_not_doub
             payload={"provider_recovery": {"failure_fingerprint": "capacity:f1"}},
         )
         await ProviderModelCircuitBreakerRepository(session).record_failure(
-            provider="google",
-            model="gemini",
+            provider="openai",
+            model="gpt-5.5",
             reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
             failure_fingerprint="capacity:f1",
             workspace_id=ws.id,
@@ -1054,16 +1054,16 @@ async def test_create_provider_recovery_attempt_row_existing_event_does_not_doub
             ws_id,
             metadata={
                 "retryable": True,
-                "provider": "google",
-                "model": "gemini",
+                "provider": "openai",
+                "model": "gpt-5.5",
                 "failure_fingerprint": "capacity:f1",
                 "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
             },
             now=now + timedelta(seconds=10),
         )
         breaker = await ProviderModelCircuitBreakerRepository(session).get(
-            provider="google",
-            model="gemini",
+            provider="openai",
+            model="gpt-5.5",
         )
 
         assert result is None
@@ -1081,7 +1081,7 @@ async def test_create_provider_recovery_attempt_row_no_metadata_from_workspace(f
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={},
             test_commands=[],
             owned_paths=[],
@@ -1105,7 +1105,7 @@ async def test_create_provider_recovery_attempt_row_retry_no_model(factory):
             branch_base="main",
             task_title="title",
             task_prompt="prompt",
-            agent="gemini",
+            agent="codex",
             task_policy={"provider_recovery": {"max_same_provider_retries": 1}},
             test_commands=[],
             owned_paths=[],
@@ -1117,7 +1117,7 @@ async def test_create_provider_recovery_attempt_row_retry_no_model(factory):
         result = await create_provider_recovery_attempt_row(
             session,
             ws_id,
-            metadata={"retryable": True, "provider": "google"},
+            metadata={"retryable": True, "provider": "openai"},
             now=datetime.now(UTC),
         )
         assert result is not None
@@ -1462,8 +1462,8 @@ class TestTerminalState:
         decision = decide_provider_recovery(
             metadata,
             task_policy=policy,
-            current_agent="gemini",
-            current_model="gemini-2.5-pro",
+            current_agent="codex",
+            current_model="gpt-5.5",
             now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
         )
 

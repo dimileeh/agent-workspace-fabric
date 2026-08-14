@@ -33,8 +33,8 @@ async def test_provider_recovery_preserves_source_task_tag(
         task={
             "title": "Recover tagged provider outage",
             "prompt": "Implement the provider recovery behavior.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "external_id": "PROVIDER-TAG-1",
             "task_tag": "PROJ-77",
             "task_class": "test_task",
