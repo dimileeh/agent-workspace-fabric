@@ -94,6 +94,12 @@ def test_provider_ccusage_source_grok_is_explicitly_unsupported() -> None:
 
 
 @pytest.mark.unit
+def test_provider_ccusage_source_antigravity_is_explicitly_unsupported() -> None:
+    """Antigravity day-one cost visibility is zero until ccusage adds a source."""
+    assert provider_ccusage_source(AgentRuntime.antigravity) is None
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_reads_totals() -> None:
     raw = json.dumps(
         {

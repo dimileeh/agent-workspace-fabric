@@ -18,6 +18,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
 
+### ANTIGRAVITY_AUTH_MISSING
+**Problem:** No Antigravity auth signal was visible.
+**Likely Cause:** Missing Antigravity API credentials.
+**Operator Fix:** Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_missing](#antigravity_auth_missing)
+
+### ANTIGRAVITY_AUTH_REJECTED
+**Problem:** Antigravity rejected the configured API credentials.
+**Likely Cause:** Antigravity API key rejected by the provider.
+**Operator Fix:** Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_rejected](#antigravity_auth_rejected)
+
+### ANTIGRAVITY_QUOTA_EXHAUSTED
+**Problem:** Antigravity quota or rate limit is exhausted.
+**Likely Cause:** Antigravity provider quota exhausted.
+**Operator Fix:** Wait for quota reset or switch providers, then re-check readiness.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_quota_exhausted](#antigravity_quota_exhausted)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.

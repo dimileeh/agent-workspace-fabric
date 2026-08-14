@@ -411,8 +411,17 @@ Default agent models and effort are centralized in
 | `claude_code` | `claude-opus-4-8` | `xhigh` passed through to Claude Code |
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
 | `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
-| `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
+| `antigravity` | `gemini-3.1-pro-high` | Effort accepted/recorded but unmapped in v1 (`agy --effort` exists; mapping deferred) |
+| `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking (deprecated personal path; retained for enterprise) |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
+
+**Antigravity migration:** existing `GEMINI_API_KEY` users need no config change to
+keep using the deprecated `gemini` agent. To run `--agent antigravity`, set
+`ANTIGRAVITY_API_KEY` and/or `GEMINI_API_KEY` (agy 1.1.x AI Studio path). There is
+**no** credential aliasing across `GOOGLE_API_KEY` / `GEMINI_API_KEY` /
+`ANTIGRAVITY_API_KEY` — `GOOGLE_API_KEY`-only operators must set `GEMINI_API_KEY`
+or `ANTIGRAVITY_API_KEY` explicitly. Antigravity workspaces suppress host
+`~/.gemini` staging (machine-bound `credentials.enc` must not poison container auth).
 
 If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. In the workspace create

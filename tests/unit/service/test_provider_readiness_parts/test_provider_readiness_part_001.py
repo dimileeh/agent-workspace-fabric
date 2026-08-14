@@ -404,6 +404,41 @@ def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
 
 
 @pytest.mark.unit
+def test_selected_antigravity_preflight_requires_env_key_and_runtime_cli(
+    tmp_path: Path,
+) -> None:
+    """Antigravity selected preflight requires API-key auth and agy."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="antigravity",
+        task_policy={},
+        environ={"ANTIGRAVITY_API_KEY": "antigravity_secret"},
+        run_subprocess=_runtime_cli_ok("agy"),
+    )
+
+    assert result["provider"] == "antigravity"
+    assert result["agent"] == "antigravity"
+    assert result["model"] == "gemini-3.1-pro-high"
+    assert result["readiness_status"] == "ready"
+    assert result["auth_status"] == "ok"
+    assert result["auth_source"] == "ANTIGRAVITY_API_KEY"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    serialized = json.dumps(result, sort_keys=True)
+    assert "antigravity_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_launch_provider_by_agent_covers_every_agent_runtime() -> None:
+    """Missing launch-map entries reject agents as UNSUPPORTED_AGENT_RUNTIME."""
+    from awf.db.enums import AgentRuntime
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    assert set(_LAUNCH_PROVIDER_BY_AGENT) == set(AgentRuntime)
+
+
+@pytest.mark.unit
 def test_selected_cursor_preflight_lower_effort_uses_implicit_runtime_model(
     tmp_path: Path,
 ) -> None:

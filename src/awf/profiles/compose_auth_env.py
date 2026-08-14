@@ -27,6 +27,8 @@ AGENT_AUTH_ENV_VARS = (
     "CLAUDE_CODE_USE_VERTEX",
     # Cursor CLI headless auth.
     "CURSOR_API_KEY",
+    # Google Antigravity CLI headless auth (primary + Gemini AI Studio fallback).
+    "ANTIGRAVITY_API_KEY",
     # Gemini CLI headless auth.
     "GEMINI_API_KEY",
     "GEMINI_API_KEY_AUTH_MECHANISM",
@@ -68,6 +70,7 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CURSOR_API_KEY",
+        "ANTIGRAVITY_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "GOOGLE_APPLICATION_CREDENTIALS",
