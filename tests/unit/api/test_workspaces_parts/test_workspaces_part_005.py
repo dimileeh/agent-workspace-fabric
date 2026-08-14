@@ -810,20 +810,21 @@ class TestCreateWorkspacePolicyMetadata:
     async def test_exposes_default_effective_agent_identity_on_workspace_surfaces(
         self,
         client: AsyncClient,
+        engine: AsyncEngine,
     ) -> None:
-        payload = _v2_body(title="default gemini model")
-        payload["task"] = {
-            **payload["task"],  # type: ignore[index]
-            "agent": "gemini",
-        }
-        payload["preflight"] = {
-            "provider_readiness_override": True,
-            "provider_readiness_override_reason": "identity projection test",
-        }
-
-        create = await client.post("/v1/workspaces", json=payload)
-        assert create.status_code == 202
-        workspace_id = create.json()["workspace_id"]
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.create(
+                repo_url="git@github.com:dimileeh/aira-agent.git",
+                branch_base="development",
+                task_title="default gemini model",
+                task_prompt="Add a one-line docstring to src/aira_agent/api/main.py.",
+                agent="antigravity",
+                test_commands=["pytest -q"],
+            )
+            await session.commit()
+            workspace_id = ws.id
 
         detail = await client.get(f"/v1/workspaces/{workspace_id}")
         listed = await client.get("/v1/workspaces")
@@ -843,6 +844,30 @@ class TestCreateWorkspacePolicyMetadata:
         for row in rows:
             _assert_effective_identity(row, model="gemini-3.1-pro-preview")
             _assert_usage_unavailable(row)
+
+    @pytest.mark.unit
+    async def test_rejects_unsupported_runtime_creation_even_with_readiness_override(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(title="default gemini model")
+        payload["task"] = {
+            **payload["task"],  # type: ignore[index]
+            "agent": "gemini",
+        }
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "identity projection test",
+        }
+
+        create = await client.post("/v1/workspaces", json=payload)
+        assert create.status_code == 409
+        body = create.json()
+        assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+        assert (
+            body["detail"]["provider_readiness_preflight"]["reason_code"]
+            == "UNSUPPORTED_AGENT_RUNTIME"
+        )
 
     @pytest.mark.unit
     async def test_legacy_v1_workspace_exposes_default_effective_identity(
