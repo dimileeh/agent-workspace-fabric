@@ -20,8 +20,6 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     (host_home / ".ssh").mkdir(parents=True)
     (host_home / ".claude").mkdir()
     (host_home / ".claude" / "settings.json").write_text('{"theme": "dark"}\n')
-    (host_home / ".gemini").mkdir()
-    (host_home / ".gemini" / "settings.json").write_text('{"selectedAuthType": "oauth"}\n')
     (host_home / ".config" / "opencode").mkdir(parents=True)
     (host_home / ".config" / "opencode" / "opencode.json").write_text('{"model": "ollama/x"}\n')
     (host_home / ".grok").mkdir()
@@ -48,7 +46,6 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
 
     by_target = {m.target: m for m in mounts}
     claude_home = work_dir / "auth" / "ws_auth" / "claude"
-    gemini_home = work_dir / "auth" / "ws_auth" / "gemini"
     opencode_home = work_dir / "auth" / "ws_auth" / "opencode"
     grok_home = work_dir / "auth" / "ws_auth" / "grok"
     ollama_home = work_dir / "auth" / "ws_auth" / "ollama"
@@ -66,11 +63,6 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     assert by_target["/home/agent/.claude.json"].mode == "rw"
     assert (claude_home / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
     assert (claude_home / ".claude.json").read_text() == "{}\n"
-    assert by_target["/home/agent/.gemini"].source == str(gemini_home / ".gemini")
-    assert by_target["/home/agent/.gemini"].mode == "rw"
-    assert (gemini_home / ".gemini" / "settings.json").read_text() == (
-        '{"selectedAuthType": "oauth"}\n'
-    )
     assert by_target["/home/agent/.config/opencode"].source == str(
         opencode_home / ".config" / "opencode"
     )
@@ -292,27 +284,6 @@ def test_service_auth_mounts_exclude_claude_usage_history(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_service_auth_mounts_exclude_gemini_usage_history(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    host_gemini = host_home / ".gemini"
-    (host_gemini / "tmp" / "session").mkdir(parents=True)
-    (host_gemini / "tmp" / "session" / "logs.json").write_text('[{"tokens": 999}]\n')
-    (host_gemini / "settings.json").write_text('{"selectedAuthType": "oauth"}\n')
-    work_dir = tmp_path / "work"
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_auth",
-        host_env={},
-    )
-
-    gemini_home = Path({m.target: m for m in mounts}["/home/agent/.gemini"].source)
-    assert (gemini_home / "settings.json").read_text() == '{"selectedAuthType": "oauth"}\n'
-    assert not (gemini_home / "tmp").exists()
-
-
-@pytest.mark.unit
 def test_service_auth_mounts_preserve_existing_workspace_claude_auth(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_claude = host_home / ".claude"
@@ -344,34 +315,6 @@ def test_service_auth_mounts_preserve_existing_workspace_claude_auth(tmp_path: P
 
     assert (claude_dir / "settings.json").read_text() == '{"theme": "agent-refreshed"}\n'
     assert claude_config.read_text() == '{"token": "agent-refreshed"}\n'
-
-
-@pytest.mark.unit
-def test_service_auth_mounts_preserve_existing_workspace_gemini_auth(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    host_gemini = host_home / ".gemini"
-    host_gemini.mkdir(parents=True)
-    (host_gemini / "settings.json").write_text('{"auth": "initial"}\n')
-    work_dir = tmp_path / "work"
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_auth",
-        host_env={},
-    )
-    gemini_dir = Path({m.target: m for m in mounts}["/home/agent/.gemini"].source)
-    (gemini_dir / "settings.json").write_text('{"auth": "agent-refreshed"}\n')
-    (host_gemini / "settings.json").write_text('{"auth": "host-updated"}\n')
-
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_auth",
-        host_env={},
-    )
-
-    assert (gemini_dir / "settings.json").read_text() == '{"auth": "agent-refreshed"}\n'
 
 
 @pytest.mark.unit
@@ -448,13 +391,11 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     host_home = tmp_path / "host-home"
     host_codex = host_home / ".codex"
     host_claude = host_home / ".claude"
-    host_gemini = host_home / ".gemini"
     host_opencode = host_home / ".config" / "opencode"
     host_grok = host_home / ".grok"
     host_ollama = host_home / ".ollama"
     host_codex.mkdir(parents=True)
     host_claude.mkdir(parents=True)
-    host_gemini.mkdir(parents=True)
     host_opencode.mkdir(parents=True)
     host_grok.mkdir(parents=True)
     host_ollama.mkdir(parents=True)
@@ -463,7 +404,6 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     (host_codex / "rules" / "default.rules").write_text("rule\n")
     (host_claude / "settings.json").write_text('{"token": "claude"}\n')
     (host_home / ".claude.json").write_text('{"token": "claude-file"}\n')
-    (host_gemini / "settings.json").write_text('{"token": "gemini"}\n')
     (host_opencode / "opencode.json").write_text('{"token": "opencode"}\n')
     (host_grok / "auth.json").write_text('{"token": "grok"}\n')
     (host_grok / "config.toml").write_text("auto_update = false\n")
@@ -495,8 +435,6 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
         Path(by_target["/home/agent/.claude"].source),
         Path(by_target["/home/agent/.claude"].source) / "settings.json",
         Path(by_target["/home/agent/.claude.json"].source),
-        Path(by_target["/home/agent/.gemini"].source),
-        Path(by_target["/home/agent/.gemini"].source) / "settings.json",
         Path(by_target["/home/agent/.config/opencode"].source),
         Path(by_target["/home/agent/.config/opencode"].source) / "opencode.json",
         Path(by_target["/home/agent/.grok"].source),
@@ -700,3 +638,22 @@ def test_chown_workspace_auth_sources_skips_read_only_mounts() -> None:
         uid=1000,
         gid=1000,
     )
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_does_not_stage_gemini_host_credentials(tmp_path: Path) -> None:
+    """Retired Gemini host credentials in ~/.gemini are not staged into per-workspace auth mounts."""
+    host_home = tmp_path / "host-home"
+    host_gemini = host_home / ".gemini"
+    host_gemini.mkdir(parents=True)
+    (host_gemini / "settings.json").write_text('{"token": "retired_credentials"}\n')
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    targets = {m.target for m in mounts}
+    assert "/home/agent/.gemini" not in targets

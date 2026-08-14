@@ -93,7 +93,6 @@ _HOSTED_FILE_AUTH_MOUNT_TARGETS = frozenset(
         "/home/agent/.config/gh",
         "/home/agent/.config/gcloud",
         "/home/agent/.config/opencode",
-        "/home/agent/.gemini",
         "/home/agent/.gitconfig",
         "/home/agent/.grok",
         "/home/agent/.ollama",

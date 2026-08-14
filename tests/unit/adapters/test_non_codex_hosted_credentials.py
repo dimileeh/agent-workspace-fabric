@@ -366,12 +366,6 @@ class TestNonCodexHostedCredentials:
                 "/host/auth/ws/ollama:/home/agent/.ollama:rw",
                 "/host/auth/ws/grok:/home/agent/.grok:rw",
                 ("/run/awf/hosted-auth-placeholders/run__secrets__npmrc:/run/secrets/npmrc:ro"),
-                {
-                    "type": "bind",
-                    "source": "/host/auth/ws/gemini",
-                    "target": "/home/agent/.gemini",
-                    "read_only": False,
-                },
             ),
         )
         adapter = _build(OpenCodeAdapter)
@@ -383,7 +377,6 @@ class TestNonCodexHostedCredentials:
             "/home/agent/.ollama",
             "/home/agent/.grok",
             "/run/secrets/npmrc",
-            "/home/agent/.gemini",
         )
         blob = "\x00".join(request.file_auth_mount_targets)
         assert "/host/auth" not in blob

@@ -770,12 +770,15 @@ def test_gemini_clarification_selects_only_its_active_credential_source() -> Non
         agent_runtime=AgentRuntime.gemini,
     ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
 
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        mounts,
-        agent_environment=(),
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (AuthMount(source=gemini_auth.source, target=gemini_auth.target, mode="ro"),)
+    assert (
+        stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
+            mounts,
+            agent_environment=(),
+            mirror_target=mirror_target,
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == ()
+    )
     assert (
         stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
             {"GEMINI_API_KEY": "api-key-without-selector"}

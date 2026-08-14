@@ -121,7 +121,6 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.config/gh",
     "/home/agent/.config/gcloud",
     "/home/agent/.config/opencode",
-    "/home/agent/.gemini",
     "/home/agent/.gitconfig",
     "/home/agent/.grok",
     "/home/agent/.ollama",
@@ -229,7 +228,7 @@ _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS: dict[str, frozenset[str]] = {
     "api_key": frozenset(),
     "google_cloud": frozenset({"/home/agent/.config/gcloud"}),
     "access_token": frozenset(),
-    "file": frozenset({"/home/agent/.gemini"}),
+    "file": frozenset(),
 }
 _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.codex: frozenset(
@@ -253,8 +252,6 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     ),
     AgentRuntime.grok: frozenset({"XAI_API_KEY"}),
 }
-# Antigravity must not stage host ~/.gemini (machine-bound credentials.enc poison).
-_ANTIGRAVITY_SUPPRESSED_AUTH_MOUNT_TARGETS = frozenset({"/home/agent/.gemini"})
 _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES: dict[str, frozenset[str]] = {
     "ollama": frozenset(
         {
@@ -1198,8 +1195,6 @@ class ComposeStackLauncher:
             else frozenset()
         )
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
-        if request.agent_runtime is AgentRuntime.antigravity:
-            suppressed_legacy_targets |= _ANTIGRAVITY_SUPPRESSED_AUTH_MOUNT_TARGETS
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
                 auth_mounts,
@@ -1210,12 +1205,7 @@ class ComposeStackLauncher:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
                 workspace_id=request.workspace_id,
-                suppressed_targets=satisfied_targets
-                | (
-                    _ANTIGRAVITY_SUPPRESSED_AUTH_MOUNT_TARGETS
-                    if request.agent_runtime is AgentRuntime.antigravity
-                    else frozenset()
-                ),
+                suppressed_targets=satisfied_targets,
                 suppressed_providers=satisfied_providers,
             )
             auth_mounts.extend(

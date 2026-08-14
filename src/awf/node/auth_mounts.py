@@ -80,13 +80,11 @@ _GCLOUD_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gcloud"
 _GITCONFIG_TARGET = f"{_CONTAINER_HOME}/.gitconfig"
 _SSH_TARGET = f"{_CONTAINER_HOME}/.ssh"
 _CODEX_TARGET = f"{_CONTAINER_HOME}/.codex"
-_GEMINI_TARGET = f"{_CONTAINER_HOME}/.gemini"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
 _GROK_TARGET = f"{_CONTAINER_HOME}/.grok"
 _OLLAMA_TARGET = f"{_CONTAINER_HOME}/.ollama"
 _GROK_AUTH_FILES = frozenset(("auth.json", "config.toml"))
 _OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
-_GEMINI_USAGE_HISTORY_DIRS = ("tmp",)
 _LEGACY_PROVIDER_TARGETS: Mapping[str, frozenset[str]] = {
     "github": frozenset({_GH_CONFIG_TARGET}),
 }
@@ -252,13 +250,6 @@ def _workspace_auth_mounts(
     mounts.extend(claude_auth.mounts)
     chown_exempt_sources.update(claude_auth.chown_exempt_sources)
     extra_chown_paths.extend(claude_auth.extra_chown_paths)
-    if _GEMINI_TARGET not in suppressed_targets:
-        mounts.extend(
-            _prepare_isolated_gemini_auth(
-                host_home=host_home,
-                target_root=auth_root / "gemini",
-            )
-        )
     if _OPENCODE_TARGET not in suppressed_targets:
         mounts.extend(
             _prepare_isolated_opencode_auth(
@@ -347,31 +338,6 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
         shutil.copytree(rules, target_root / "rules")
 
     return target_root
-
-
-def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
-    """Seed per-workspace Gemini auth without sharing writable host files."""
-
-    source_dir = host_home / ".gemini"
-    target_dir = target_root / ".gemini"
-    if not source_dir.is_dir():
-        return ()
-
-    target_root.mkdir(parents=True, exist_ok=True)
-    if not target_dir.exists():
-        shutil.copytree(
-            source_dir,
-            target_dir,
-            ignore=shutil.ignore_patterns(*_GEMINI_USAGE_HISTORY_DIRS),
-        )
-
-    return (
-        AuthMount(
-            source=str(target_dir),
-            target=_GEMINI_TARGET,
-            mode="rw",
-        ),
-    )
 
 
 def _prepare_isolated_opencode_auth(

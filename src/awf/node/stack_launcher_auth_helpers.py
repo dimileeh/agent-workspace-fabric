@@ -28,7 +28,7 @@ _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS: dict[AgentRuntime, frozenset[str]] = 
     AgentRuntime.claude_code: frozenset({"/home/agent/.claude", "/home/agent/.claude.json"}),
     AgentRuntime.cursor: frozenset(),
     AgentRuntime.antigravity: frozenset(),
-    AgentRuntime.gemini: frozenset({"/home/agent/.config/gcloud", "/home/agent/.gemini"}),
+    AgentRuntime.gemini: frozenset({"/home/agent/.config/gcloud"}),
     AgentRuntime.opencode: frozenset(),
     AgentRuntime.grok: frozenset({"/home/agent/.grok"}),
 }
