@@ -32,6 +32,7 @@ def test_provider_recovery_reason_codes_are_stable() -> None:
             "REPEATED_PROVIDER_FAILURE_FINGERPRINT",
             "NON_RETRYABLE_PROVIDER_FAILURE",
             "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+            "UNSUPPORTED_AGENT_RUNTIME",
         }
     )
     assert expected == PROVIDER_RECOVERY_REASON_CODES
