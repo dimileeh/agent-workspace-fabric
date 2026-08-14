@@ -27,9 +27,9 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   // Validate agent filter
   await expect(page.getByText("agent opencode", { exact: false })).toBeVisible();
 
-  // Multi-select keeps Gemini and OpenCode visible together.
-  await agentGroup.getByLabel("gemini").check();
-  await expect(page.getByText("Gemini workspace").first()).toBeVisible();
+  // Multi-select keeps Codex and OpenCode visible together.
+  await agentGroup.getByLabel("codex").check();
+  await expect(page.getByText("Completed workspace").first()).toBeVisible();
   await expect(page.getByText("OpenCode workspace").first()).toBeVisible();
   await agentGroup.getByLabel("all").check();
 

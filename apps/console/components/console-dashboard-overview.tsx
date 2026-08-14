@@ -349,7 +349,6 @@ export function WorkspaceFilters({
     "claude_code",
     "cursor",
     "antigravity",
-    "gemini",
     "opencode",
     "grok",
   ];
