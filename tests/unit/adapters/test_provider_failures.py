@@ -30,6 +30,22 @@ def test_classifies_antigravity_agy_auth_required_marker() -> None:
     assert classification.retryable is True
 
 
+def test_classifies_agy_auth_required_without_provider_metadata() -> None:
+    """Command-result path (provider=None, model=None) still classifies agy auth."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Error: authentication required. Run 'agy' to log in, then retry.",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.retryable is True
+
+
 def test_classifies_antigravity_missing_gemini_api_key_marker() -> None:
     """agy 1.1.13 missing GEMINI_API_KEY stderr classifies as AGENT_AUTH_FAILED."""
     classification = classify_provider_failure(
