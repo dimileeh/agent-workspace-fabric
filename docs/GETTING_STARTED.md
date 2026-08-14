@@ -22,7 +22,7 @@ Install:
     the installed Codex CLI.
   - Claude Code auth in `~/.claude` / `~/.claude.json` or Anthropic env vars.
   - Cursor CLI auth through `CURSOR_API_KEY`.
-  - Gemini auth in `~/.gemini` or Google/Gemini env vars.
+  - Antigravity CLI auth through `GEMINI_API_KEY`.
   - OpenCode via Ollama auth/state in `~/.config/opencode` and `~/.ollama`.
 
 Verify forge access (run the check that matches your repo's host):
@@ -310,7 +310,6 @@ container:
 - `~/.ssh`
 - `~/.codex` copied into a per-workspace isolated auth directory.
 - `~/.claude` and `~/.claude.json`
-- `~/.gemini`
 - `~/.config/opencode` and small `~/.ollama` auth files copied into
   per-workspace isolated auth directories for OpenCode/Ollama runs.
 - selected provider environment variables.
@@ -381,8 +380,7 @@ file contents:
 - Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude`, or `~/.claude.json`.
 - Cursor: `CURSOR_API_KEY`; no host credential directory mount is required.
-- Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
-  visible `GOOGLE_APPLICATION_CREDENTIALS`, or `~/.gemini`.
+- Antigravity: `GEMINI_API_KEY`; host `~/.gemini` staging is suppressed.
 - OpenCode/Ollama: `~/.config/opencode`, selected small `~/.ollama` auth files,
   `OLLAMA_API_KEY`, and a cheap Ollama `/api/version` reachability probe.
 - Docker: configured Docker host/socket control and Docker registry auth signals
@@ -412,16 +410,13 @@ Default agent models and effort are centralized in
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
 | `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
 | `antigravity` | `gemini-3.1-pro-preview` | Effort accepted/recorded but never emitted (`agy` rejects `--effort` in API-key mode; OAuth uses composite slugs) |
-| `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking (deprecated personal path; retained for enterprise) |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
-**Antigravity migration:** existing `GEMINI_API_KEY` users need no config change to
-keep using the deprecated `gemini` agent. To run `--agent antigravity`, set
-`ANTIGRAVITY_API_KEY` and/or `GEMINI_API_KEY` (agy 1.1.x AI Studio path). There is
-**no** credential aliasing across `GOOGLE_API_KEY` / `GEMINI_API_KEY` /
-`ANTIGRAVITY_API_KEY` — `GOOGLE_API_KEY`-only operators must set `GEMINI_API_KEY`
-or `ANTIGRAVITY_API_KEY` explicitly. Antigravity workspaces suppress host
-`~/.gemini` staging (machine-bound `credentials.enc` must not poison container auth).
+**Antigravity migration:** the `antigravity` agent runtime authenticates exclusively
+using `GEMINI_API_KEY` (AI Studio key). The `gemini` agent runtime and `ANTIGRAVITY_API_KEY`
+have been retired. `GOOGLE_API_KEY`-only operators must set `GEMINI_API_KEY`
+explicitly. Antigravity workspaces suppress host `~/.gemini` staging (machine-bound
+`credentials.enc` must not poison container auth).
 
 If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. In the workspace create

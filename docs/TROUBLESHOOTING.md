@@ -259,7 +259,6 @@ awf service status --provider codex --format pretty
 awf service status --provider claude_code --format pretty
 awf service status --provider cursor --format pretty
 awf service status --provider antigravity --format pretty
-awf service status --provider gemini --format pretty
 awf service status --provider opencode --format pretty
 ```
 
@@ -268,14 +267,12 @@ Verify the configured provider auth surface:
 - `codex`: `OPENAI_API_KEY` (or `OPENAI_API_TOKEN`, `CODEX_API_KEY`, `CODEX_AUTH_TOKEN`)
 - `claude_code`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`
 - `cursor`: `CURSOR_API_KEY`
-- `antigravity`: `ANTIGRAVITY_API_KEY` (primary) or `GEMINI_API_KEY`; no `GOOGLE_API_KEY` aliasing; host `~/.gemini` is not staged
-- `gemini`: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS`
+- `antigravity`: `GEMINI_API_KEY` (AI Studio key); no `GOOGLE_API_KEY` aliasing; host `~/.gemini` is not staged
 - `opencode`: `OLLAMA_API_KEY` (OpenCode’s Ollama auth surface) plus local auth at
   `~/.config/opencode` or `~/.ollama`
 - Local provider auth mounts are copied into per-workspace directories and injected at runtime:
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex` → `/home/agent/.codex`
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/claude/.claude` and `.../auth/<workspace>/claude/.claude.json` → `/home/agent/.claude` and `/home/agent/.claude.json`
-  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/gemini/.gemini` → `/home/agent/.gemini`
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/opencode/.config/opencode` → `/home/agent/.config/opencode`
 - Cursor uses env-only `CURSOR_API_KEY`; there is no `~/.cursor` auth mount.
 - Antigravity uses env-only keys like Cursor; host `~/.gemini` staging is suppressed.

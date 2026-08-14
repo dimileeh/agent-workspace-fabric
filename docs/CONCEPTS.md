@@ -42,7 +42,7 @@
         | Coding Agent CLI                   |
         |                                    |
         | codex / claude / cursor            |
-        | gemini (deprecated) / antigravity  |
+        | antigravity                        |
         | opencode / grok                    |
         | edits files                        |
         | commits changes                    |

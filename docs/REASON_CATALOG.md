@@ -21,14 +21,14 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### ANTIGRAVITY_AUTH_MISSING
 **Problem:** No Antigravity auth signal was visible.
 **Likely Cause:** Missing Antigravity API credentials.
-**Operator Fix:** Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.
+**Operator Fix:** Set GEMINI_API_KEY before starting AWF.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_missing](#antigravity_auth_missing)
 
 ### ANTIGRAVITY_AUTH_REJECTED
 **Problem:** Antigravity rejected the configured API credentials.
 **Likely Cause:** Antigravity API key rejected by the provider.
-**Operator Fix:** Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.
+**Operator Fix:** Verify GEMINI_API_KEY and re-run awf service doctor.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_rejected](#antigravity_auth_rejected)
 
