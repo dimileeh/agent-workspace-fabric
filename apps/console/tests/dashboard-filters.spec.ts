@@ -21,6 +21,7 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   await agentGroup.getByRole("button", { name: /Agent all/ }).click();
   await expect(agentGroup.getByLabel("cursor")).toBeVisible();
   await expect(agentGroup.getByLabel("antigravity")).toBeVisible();
+  await expect(agentGroup.getByLabel("gemini")).toBeVisible();
   await expect(agentGroup.getByLabel("grok")).toBeVisible();
   await agentGroup.getByLabel("opencode").check();
 

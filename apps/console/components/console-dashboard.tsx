@@ -171,6 +171,10 @@ const searchParams = useSearchParams();
     return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
   }, [overview]);
 
+  const availableAgents = useMemo(() => {
+    return Array.from(new Set(overview.map((w) => w.agent).filter((a): a is string => Boolean(a)))).sort();
+  }, [overview]);
+
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
@@ -968,6 +972,7 @@ const searchParams = useSearchParams();
             agentFilters={agentFilters}
             modelFilters={modelFilters}
             availableModels={availableModels}
+            availableAgents={availableAgents}
             repoFilter={repoFilter}
             searchText={searchText}
             sortKey={sortKey}
