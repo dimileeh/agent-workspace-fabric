@@ -237,29 +237,125 @@ class TestAntigravityAdapter:
         script = _render_cli_script(model=model)
         assert f"--model {model}" in script
         assert "--effort" not in script
+        # Allowlisted models must not embed a GEMINI_API_KEY-gated reject.
+        assert "API-key mode does not accept model" not in script
 
     @pytest.mark.unit
-    def test_api_key_mode_allowlist_rejects_gemini_3_7_flash(self) -> None:
-        """gemini-3.7-flash exists in Gemini API but agy 1.1.13 rejects it."""
-        with pytest.raises(ValueError, match=r"gemini-3\.7-flash") as exc:
-            _render_cli_script(model="gemini-3.7-flash")
-        message = str(exc.value)
-        assert "gemini-3.1-pro-preview" in message
-        assert "gemini-3.5-flash" in message
-        assert "gemini-3.6-flash" in message
+    def test_oauth_composite_model_slug_passes_through_cli_args(self) -> None:
+        """OAuth composite slugs must not be rejected at Python argv-build time."""
+        script = _render_cli_script(model="gemini-3.6-flash-high")
+        assert "--model gemini-3.6-flash-high" in script
+        # Reject is deferred to the GEMINI_API_KEY branch (API-key mode only).
+        assert "API-key mode does not accept model" in script
 
     @pytest.mark.unit
-    def test_api_key_mode_allowlist_rejects_unknown_model(self) -> None:
-        """Unknown model slugs fail fast with the valid allowlist listed."""
-        with pytest.raises(ValueError, match=r"not-a-real-model") as exc:
-            _render_cli_script(model="not-a-real-model")
-        message = str(exc.value)
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gemini-3.7-flash",
+            "not-a-real-model",
+            "gemini-3.6-flash-high",
+        ],
+    )
+    async def test_api_key_mode_allowlist_rejects_outside_slugs_at_runtime(
+        self,
+        tmp_path: Path,
+        model: str,
+    ) -> None:
+        """API-key mode (GEMINI_API_KEY set) rejects models outside the allowlist."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text("#!/bin/sh\nexit 0\n")
+        fake_agy.chmod(0o755)
+
+        script = _render_cli_script(model=model)
+        home = tmp_path / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "HOME": str(home),
+                "GEMINI_API_KEY": "test-key-triggers-api-key-mode",
+            }
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"prompt\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+        _stdout, stderr = await proc.communicate()
+
+        assert proc.returncode == 1
+        message = stderr.decode()
+        assert model in message
+        assert "API-key mode does not accept model" in message
         for slug in (
             "gemini-3.1-pro-preview",
             "gemini-3.5-flash",
             "gemini-3.6-flash",
         ):
             assert slug in message
+
+    @pytest.mark.unit
+    async def test_oauth_composite_slug_runs_without_gemini_api_key(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Without GEMINI_API_KEY, OAuth composite slugs must reach agy."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_copy = tmp_path / "argv.json"
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['AWF_FAKE_AGY_ARGV'], 'w', encoding='utf-8') as fh:\n"
+            "    json.dump(sys.argv[1:], fh)\n"
+        )
+        fake_agy.chmod(0o755)
+
+        script = _render_cli_script(model="gemini-3.6-flash-high")
+        home = tmp_path / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env.pop("GEMINI_API_KEY", None)
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "HOME": str(home),
+                "AWF_FAKE_AGY_ARGV": str(argv_copy),
+            }
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"oauth prompt\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+        _stdout, stderr = await proc.communicate()
+
+        assert proc.returncode == 0, stderr.decode()
+        captured = json.loads(argv_copy.read_text())
+        assert captured[captured.index("--model") + 1] == "gemini-3.6-flash-high"
 
     @pytest.mark.unit
     async def test_sh_stub_receives_prompt_as_final_p_value(self, tmp_path: Path) -> None:

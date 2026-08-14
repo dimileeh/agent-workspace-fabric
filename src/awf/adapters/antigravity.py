@@ -61,14 +61,10 @@ ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
 )
 
 
-def _validate_api_key_mode_model(model: str) -> None:
-    """Fail fast when ``model`` is outside agy's API-key allowlist."""
-    if model in ANTIGRAVITY_API_KEY_MODE_MODELS:
-        return
+def _api_key_mode_model_reject_message(model: str) -> str:
+    """Human-readable reject text for a model outside the API-key allowlist."""
     valid = ", ".join(sorted(ANTIGRAVITY_API_KEY_MODE_MODELS))
-    raise ValueError(
-        f"antigravity API-key mode does not accept model {model!r}; valid slugs: {valid}"
-    )
+    return f"antigravity API-key mode does not accept model {model!r}; valid slugs: {valid}"
 
 
 @register_adapter
@@ -104,14 +100,28 @@ class AntigravityAdapter(AgentAdapter):
         for policy/observability, but never emitted as ``--effort``: agy
         rejects that flag for every model in API-key mode (OAuth uses
         composite slugs such as ``gemini-3.6-flash-high`` instead).
+
+        Model allowlisting is API-key-mode only. ``_cli_args`` does not know
+        the credential mode (hosted OAuth injects credentials later), so
+        non-allowlisted models pass through into argv and are rejected only
+        inside the ``GEMINI_API_KEY`` shell branch at runtime.
         """
         selected_model = model or self._default_model
         _ = self._default_effort
 
         model_flag = ""
+        api_key_model_reject = ""
         if selected_model:
-            _validate_api_key_mode_model(selected_model)
             model_flag = f" --model {shlex.quote(selected_model)}"
+            if selected_model not in ANTIGRAVITY_API_KEY_MODE_MODELS:
+                # Gate on GEMINI_API_KEY below — OAuth composite slugs must
+                # still reach the runtime when API-key mode is inactive.
+                api_key_model_reject = (
+                    f"  printf '%s\\n' "
+                    f"{shlex.quote(_api_key_mode_model_reject_message(selected_model))} "
+                    ">&2\n"
+                    "  exit 1\n"
+                )
         # Seed/upsert modelProvider=gemini only when GEMINI_API_KEY is present —
         # that mode hard-requires GEMINI_API_KEY (agy does not read
         # ANTIGRAVITY_API_KEY). Do not alias credentials across env names.
@@ -133,6 +143,7 @@ class AntigravityAdapter(AgentAdapter):
             '    mv "$settings_dir/settings.json.tmp" '
             '"$settings_dir/settings.json"\n'
             "  fi\n"
+            f"{api_key_model_reject}"
             "fi\n"
             "awf_prompt=$(cat)\n"
             'if [ -z "$awf_prompt" ]; then\n'
