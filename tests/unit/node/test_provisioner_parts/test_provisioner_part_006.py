@@ -404,3 +404,52 @@ class TestFailureHandlingEdgesPart006:
                 excluding_workspace_id=None,
             )
             assert conflicts == []
+
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_unsupported_agent_runtime_marks_workspace_failed_before_git_work(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        agent: str,
+    ) -> None:
+        """A claimed workspace with an unsupported agent runtime must fail fast before provisioning."""
+
+        class _FailingGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError(
+                    "add_worktree must not be called for unsupported agent runtimes"
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_FailingGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent=agent,
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_message is not None
+            assert f"agent runtime {agent!r} is not supported" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE
+            ]
+            assert failed_events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"

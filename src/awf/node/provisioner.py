@@ -134,6 +134,10 @@ Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; th
 string is the end-to-end contract shared with the worker's
 ``EXECUTION_CLAIM_FENCED`` constant."""
 
+_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
+"""Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
+
+
 _log = get_logger(__name__)
 
 
@@ -285,6 +289,13 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             expected=WorkspaceStatus.provisioning,
             action="provision",
             reason_code="PROVISIONER_STALE_STATUS",
+        ):
+            return
+
+        if await self._reject_unsupported_agent_runtime(
+            workspace_id=workspace_id,
+            workspace=ws,
+            execution_claim_epoch=execution_claim_epoch,
         ):
             return
 
@@ -1134,6 +1145,40 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 reason_code="TERMINAL_CLEANUP_CHECK_FAILED",
             )
             return False
+
+    async def _reject_unsupported_agent_runtime(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        execution_claim_epoch: int | None = None,
+    ) -> bool:
+        """Fail fast unsupported agent runtimes before provisioning; return True if rejected.
+
+        Runs unconditionally before creating worktrees, Compose stacks, or auth mounts
+        so a requested row with a historical or unknown agent runtime (such as retired Gemini)
+        fails fast without consuming provisioning resources.
+        """
+        from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+        try:
+            agent = AgentRuntime(workspace.agent)
+        except ValueError:
+            agent = None
+
+        if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
+            supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+            message = f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.policy_failure,
+                message=message,
+                from_status=WorkspaceStatus.provisioning,
+                reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+                execution_claim_epoch=execution_claim_epoch,
+            )
+            return True
+        return False
 
     async def _mark_failed(
         self,
