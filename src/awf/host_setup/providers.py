@@ -618,7 +618,7 @@ def _orchestrate_file_backed_provider(
 
     Reached when there is no captured secret and no service-visible env ref, and
     either no prior config or a prior *file-backed* (``source="file"``) entry.
-    Providers such as Codex (``~/.codex``), Claude Code (``~/.claude``), Gemini
+    Providers such as Codex (``~/.codex``), Claude Code (``~/.claude``), Antigravity
     (``~/.gemini``/``GOOGLE_APPLICATION_CREDENTIALS``), and OpenCode
     (``~/.config/opencode``/``~/.ollama``) can still be ready via mounted auth
     files that ``awf start`` copies per workspace. Run the same bounded readiness
