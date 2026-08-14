@@ -147,6 +147,25 @@ def test_service_log_pem_patterns_use_shared_assignment_key_pattern() -> None:
 
 
 @pytest.mark.unit
+def test_shared_redactors_mask_antigravity_api_key_assignment_and_google_aiza_shape() -> None:
+    """ANTIGRAVITY_API_KEY assignments and AIza… values redact under existing patterns."""
+    assignment = "ANTIGRAVITY_API_KEY=AIzaSyA-test-key-1234567890ab"
+    bare = "provider rejected AIzaSyA-test-key-1234567890ab during auth"
+
+    runtime_assignment = redaction.redact_secrets(assignment)
+    audit_assignment = audit.redact_audit_text(assignment, limit=500)
+    assert "AIzaSyA-test-key-1234567890ab" not in runtime_assignment
+    assert "AIzaSyA-test-key-1234567890ab" not in audit_assignment
+    assert "ANTIGRAVITY_API_KEY=<redacted>" in runtime_assignment
+    assert "ANTIGRAVITY_API_KEY=[redacted]" in audit_assignment
+
+    runtime_bare = redaction.redact_secrets(bare)
+    audit_bare = audit.redact_audit_text(bare, limit=500)
+    assert "AIzaSyA-test-key-1234567890ab" not in runtime_bare
+    assert "AIzaSyA-test-key-1234567890ab" not in audit_bare
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("raw_token", ["glpat-", "glpat-a"])
 def test_shared_redactors_catch_truncated_gitlab_pats(raw_token: str) -> None:
     """Verify shortened rejected GitLab PAT values do not leak in diagnostics."""
