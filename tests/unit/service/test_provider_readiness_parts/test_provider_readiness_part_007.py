@@ -151,12 +151,17 @@ def test_selected_gemini_preflight_returns_unsupported_agent_runtime(
         _settings(tmp_path),
         agent="gemini",
         task_policy={},
+        override=True,
+        override_reason="force launch gemini",
         environ={},
         run_subprocess=_unexpected_subprocess,
     )
 
     assert result["reason_code"] == "UNSUPPORTED_AGENT_RUNTIME"
     assert result["probe_status"] == "skipped"
+    assert result["blocks_launch"] is True
+    assert result["readiness_status"] == "blocked"
+    assert result["override_used"] is False
 
 
 @pytest.mark.unit

@@ -329,7 +329,7 @@ def selected_provider_readiness_preflight(
             probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
             reason_code="UNSUPPORTED_AGENT_RUNTIME",
             message=f"Agent runtime {agent!s} is not supported for launch preflight.",
-            override=override,
+            override=False,
             override_reason=override_reason,
             checked_at=checked,
             secrets=secrets,
