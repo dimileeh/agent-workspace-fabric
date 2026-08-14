@@ -143,6 +143,7 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "codex",
         "claude_code",
         "cursor",
+        "antigravity",
         "gemini",
         "opencode",
         "grok",

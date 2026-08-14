@@ -836,10 +836,9 @@ def parse_provider_recovery_state(
 
 
 def provider_for_agent_model(agent: str, model: str | None) -> str | None:
-    if agent == "cursor":
-        return "cursor"
-    if agent == "antigravity":
-        return "antigravity"
+    # Env-key-only runtimes keep a stable provider identity independent of model IDs.
+    if agent in {"cursor", "antigravity"}:
+        return agent
     inferred = infer_provider(model=model)
     if inferred is not None:
         return inferred
@@ -1473,40 +1472,12 @@ def _merge_recovery_views(
         return event_view
     if event_view is None:
         return policy_view
-    return ProviderRecoveryStateView(
-        action=policy_view.action if policy_view.action is not None else event_view.action,
-        reason_code=policy_view.reason_code
-        if policy_view.reason_code is not None
-        else event_view.reason_code,
-        source_provider=policy_view.source_provider
-        if policy_view.source_provider is not None
-        else event_view.source_provider,
-        source_model=policy_view.source_model
-        if policy_view.source_model is not None
-        else event_view.source_model,
-        retry_attempt_number=policy_view.retry_attempt_number
-        if policy_view.retry_attempt_number is not None
-        else event_view.retry_attempt_number,
-        fallback_attempt_number=policy_view.fallback_attempt_number
-        if policy_view.fallback_attempt_number is not None
-        else event_view.fallback_attempt_number,
-        cooldown_until=policy_view.cooldown_until
-        if policy_view.cooldown_until is not None
-        else event_view.cooldown_until,
-        next_eligible_at=policy_view.next_eligible_at
-        if policy_view.next_eligible_at is not None
-        else event_view.next_eligible_at,
-        fallback_target=policy_view.fallback_target
-        if policy_view.fallback_target is not None
-        else event_view.fallback_target,
-        source_workspace_id=policy_view.source_workspace_id
-        if policy_view.source_workspace_id is not None
-        else event_view.source_workspace_id,
-        source_attempt_id=policy_view.source_attempt_id
-        if policy_view.source_attempt_id is not None
-        else event_view.source_attempt_id,
-        recommended_action=policy_view.recommended_action
-        if policy_view.recommended_action is not None
-        else event_view.recommended_action,
-        terminal=policy_view.terminal if policy_view.terminal is not None else event_view.terminal,
-    )
+    merged = {
+        name: (
+            getattr(policy_view, name)
+            if getattr(policy_view, name) is not None
+            else getattr(event_view, name)
+        )
+        for name in ProviderRecoveryStateView.__dataclass_fields__
+    }
+    return ProviderRecoveryStateView(**merged)
