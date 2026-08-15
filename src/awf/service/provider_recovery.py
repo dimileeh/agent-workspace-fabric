@@ -1387,17 +1387,17 @@ def _build_provider_recovery_state_view(
     source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     retry_attempt_number = (
         _nonnegative_int(recovery["retry_attempt_number"], default=0)
-        if "retry_attempt_number" in recovery
+        if recovery.get("retry_attempt_number") is not None
         else None
     )
     fallback_attempt_number = (
         _nonnegative_int(recovery["fallback_attempt_number"], default=0)
-        if "fallback_attempt_number" in recovery
+        if recovery.get("fallback_attempt_number") is not None
         else None
     )
     launched_fallback_attempts = (
         _nonnegative_int(recovery["launched_fallback_attempts"], default=0)
-        if "launched_fallback_attempts" in recovery
+        if recovery.get("launched_fallback_attempts") is not None
         else None
     )
     cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))

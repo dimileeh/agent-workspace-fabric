@@ -1142,3 +1142,33 @@ def test_parse_provider_recovery_state_counts_retired_targets_in_legacy_state() 
     )
     assert decision2.action == "terminal"
     assert decision2.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_parse_provider_recovery_state_counts_active_targets_in_legacy_state() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 1,
+        },
+    }
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 1
+    assert state.launched_fallback_attempts == 1
+
+    task_policy_zero = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 0,
+        },
+    }
+    state_zero = parse_provider_recovery_state(task_policy_zero)
+    assert state_zero.fallback_attempt_number == 0
+    assert state_zero.launched_fallback_attempts == 0

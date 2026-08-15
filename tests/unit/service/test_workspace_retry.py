@@ -21,6 +21,7 @@ from awf.service.workspaces import (
     create_workspace_row,
     retry_workspace_row,
 )
+from awf.service.workspaces_retry import _prune_retired_fallbacks
 from tests.unit.service._workspace_retry_helpers import (
     _docker_ok,
     _mark_failed,
@@ -604,3 +605,39 @@ async def test_retry_prunes_retired_fallbacks_from_cloned_policy(
     assert any(isinstance(item, dict) and item.get("agent") == "codex" for item in fallbacks)
     preflight = retried_policy["provider_readiness_preflight"]
     assert preflight["readiness_status"] == "ready"
+
+
+def test_prune_retired_fallbacks_handles_missing_or_invalid_structure() -> None:
+    # Missing provider_recovery
+    assert _prune_retired_fallbacks({}) == {}
+
+    # Invalid fallbacks type (not a sequence or is a string)
+    policy_str = {"provider_recovery": {"fallbacks": "invalid_string"}}
+    assert _prune_retired_fallbacks(policy_str) == policy_str
+
+    policy_int = {"provider_recovery": {"fallbacks": 123}}
+    assert _prune_retired_fallbacks(policy_int) == policy_int
+
+    # fallbacks list containing non-mapping elements or mappings without valid agent
+    policy_mixed = {
+        "provider_recovery": {
+            "fallbacks": [
+                None,
+                "not_a_dict",
+                123,
+                {"agent": None},
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "model": "gpt-5.5"},
+            ]
+        }
+    }
+    pruned = _prune_retired_fallbacks(policy_mixed)
+    fallbacks = pruned["provider_recovery"]["fallbacks"]
+    assert fallbacks == [
+        None,
+        None,
+        None,
+        None,
+        None,
+        {"agent": "codex", "model": "gpt-5.5"},
+    ]
