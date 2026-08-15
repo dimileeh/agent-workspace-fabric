@@ -280,20 +280,25 @@ def _idempotency_key_error() -> CallToolResult:
 
 def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
     """Extract the accepted-workspace response fields from a workspace object."""
-    workspace_id = ws.id
+    workspace_id = getattr(ws, "workspace_id", None) or getattr(ws, "id", None)
+    status = getattr(ws, "status", None)
+    version = getattr(ws, "version", 1)
+    accepted_at = getattr(ws, "accepted_at", None) or getattr(ws, "created_at", None)
+    coordination_warnings = getattr(ws, "coordination_warnings", None) or []
     warnings = [
         warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
-        for warning in ws.coordination_warnings
+        for warning in coordination_warnings
     ]
+    provider_readiness_preflight = getattr(ws, "provider_readiness_preflight", None)
     return WorkspaceAcceptedResponse(
         workspace_id=workspace_id,
-        status=ws.status,
-        version=ws.version,
+        status=status,
+        version=version,
         status_url=f"/v1/workspaces/{workspace_id}",
         events_url=f"/v1/workspaces/{workspace_id}/events",
-        accepted_at=ws.created_at,
+        accepted_at=accepted_at,
         warnings=warnings,
-        provider_readiness_preflight=ws.provider_readiness_preflight,
+        provider_readiness_preflight=provider_readiness_preflight,
     ).model_dump(mode="json")
 
 

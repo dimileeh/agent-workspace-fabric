@@ -598,6 +598,66 @@ class TestCreateWorkspace:
         }
 
     @pytest.mark.unit
+    async def test_create_workspace_allows_retired_gemini_idempotency_replay(
+        self,
+        mcp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        idempotency_key = "mcp-gemini-replay-key"
+
+        # Create initial workspace row for gemini while preflight is bypassed
+        monkeypatch.setattr(
+            "awf.service.workspaces_create._raise_if_provider_preflight_blocks",
+            lambda _p: None,
+        )
+        initial_result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "agent": "gemini",
+                "idempotency_key": idempotency_key,
+                "provider_readiness_override": False,
+            },
+        )
+        assert isinstance(initial_result, CallToolResult)
+        assert initial_result.isError is False
+        existing_id = initial_result.structuredContent["workspace_id"]
+
+        monkeypatch.undo()
+
+        # Replay identical MCP create call; preflight is active but bypassed via idempotency lookup
+        replay_result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "agent": "gemini",
+                "idempotency_key": idempotency_key,
+                "provider_readiness_override": False,
+            },
+        )
+        assert isinstance(replay_result, CallToolResult)
+        assert replay_result.isError is False
+        assert replay_result.structuredContent["workspace_id"] == existing_id
+
+    @pytest.mark.unit
+    async def test_create_workspace_rejects_fresh_gemini_creation(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "agent": "gemini",
+                "idempotency_key": "fresh-mcp-gemini-key",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+
+    @pytest.mark.unit
     async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(
         self,
         mcp,
