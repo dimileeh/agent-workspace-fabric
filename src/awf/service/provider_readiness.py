@@ -362,7 +362,7 @@ def selected_provider_readiness_preflight(
                             probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
                             reason_code="UNSUPPORTED_AGENT_RUNTIME",
                             message=f"fallback agent runtime {raw_fb!r} is retired or not launchable; supported fallback agents are: {supported}.",
-                            override=override,
+                            override=False,
                             override_reason=override_reason,
                             checked_at=checked,
                             secrets=secrets,

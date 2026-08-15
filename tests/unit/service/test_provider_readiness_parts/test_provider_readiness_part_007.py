@@ -312,3 +312,26 @@ def test_selected_codex_preflight_blocks_when_runtime_cli_missing(
     assert result["probe_status"] == "fail"
     assert result["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
     assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_fallback_unsupported_agent_runtime_ignores_override(
+    tmp_path: Path,
+) -> None:
+    task_policy = {"provider_recovery": {"fallbacks": [{"agent": "gemini"}]}}
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="codex",
+        task_policy=task_policy,
+        override=True,
+        override_reason="force override with retired fallback",
+        environ={"OPENAI_API_KEY": "sk-proj-valid-secret"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["reason_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+    assert "fallback agent runtime 'gemini' is retired or not launchable" in result["message"]
+    assert result["probe_status"] == "skipped"
+    assert result["blocks_launch"] is True
+    assert result["readiness_status"] == "blocked"
+    assert result["override_used"] is False
