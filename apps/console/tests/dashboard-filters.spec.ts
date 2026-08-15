@@ -49,6 +49,7 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   });
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(page.getByText("Gemini workspace").first()).not.toBeVisible();
+  await agentGroup.getByRole("button", { name: /Agent/ }).click();
   await expect(agentGroup.getByLabel("gemini")).toBeVisible();
 
   // Restore default overview route for subsequent model filter assertions
