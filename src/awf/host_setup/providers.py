@@ -338,11 +338,12 @@ def orchestrate_provider_setup(
     for spec in PROVIDER_REGISTRY:
         if spec.name not in target_names:
             continue
+        current_config = config.model_copy(update={"providers": providers_config})
         result, provider_config = _orchestrate_one(
             spec,
             settings=settings,
             environ=env,
-            config=config,
+            config=current_config,
             allow_plain_secrets=allow_plain_secrets,
             non_interactive=non_interactive,
             capabilities=capabilities,
