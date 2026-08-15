@@ -322,6 +322,11 @@ class TestTaskList:
             workspace.base_commit = "a" * 40
             workspace.pr_url = "https://github.com/example/console/pull/41"
             workspace.pr_number = 41
+            # ``candidate.ready`` now requires the workspace to opt into
+            # auto-merge; this test asserts the canonical candidate is
+            # merge-ready, so seed the opt-in intent (a False/unset workspace is
+            # manual-merge-required, not ready).
+            workspace.auto_merge = True
             await repo.transition(
                 workspace,
                 to=WorkspaceStatus.monitoring_pr,

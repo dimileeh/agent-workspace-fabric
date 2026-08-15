@@ -11,6 +11,8 @@ PUBLIC_CALLBACK_EVENT_TYPES: Final[tuple[str, ...]] = (
     "workspace.created",
     "workspace.state_changed",
     "workspace.secondary_failure_recorded",
+    "workspace.attention_required",
+    "workspace.attention_cleared",
     "operation.state_changed",
     "merge.candidate_updated",
 )

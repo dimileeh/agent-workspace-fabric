@@ -38,12 +38,14 @@ class _StdoutTimeoutAdapter:
         self._satisfied_stdout = satisfied_stdout
         self.prompts: list[str] = []
         self.worktree_paths: list[object] = []
+        self.hosted_pr_identities: list[object] = []
 
     async def run(self, **kwargs: object) -> SimpleNamespace:
         prompt = kwargs.get("prompt")
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
         self.worktree_paths.append(kwargs.get("worktree_path"))
+        self.hosted_pr_identities.append(kwargs.get("hosted_pr_identity"))
         if len(self.prompts) == 3:
             raise AgentRunError(
                 agent=AgentRuntime.codex,
@@ -60,13 +62,15 @@ class _StdoutTimeoutAdapter:
 
 
 class _CaptureWorktreeAdapter:
-    """Capture worktree_path forwarded on every adapter.run call."""
+    """Capture checkout context forwarded on every adapter.run call."""
 
     def __init__(self) -> None:
         self.worktree_paths: list[object] = []
+        self.hosted_pr_identities: list[object] = []
 
     async def run(self, **kwargs: object) -> SimpleNamespace:
         self.worktree_paths.append(kwargs.get("worktree_path"))
+        self.hosted_pr_identities.append(kwargs.get("hosted_pr_identity"))
         return SimpleNamespace(stdout="ok", stderr="")
 
 
@@ -99,6 +103,12 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
         }
     )
     satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+    hosted_pr_identity = {
+        "repo_url": "https://github.com/example/repo.git",
+        "pr_number": 778,
+        "head_ref": "feature/hosted",
+        "expected_head_sha": "a" * 40,
+    }
 
     adapter = _StdoutTimeoutAdapter(satisfied_stdout=satisfied)
     result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
@@ -109,6 +119,7 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
         compose_file=tmp_path / "compose.yml",
         worktree_path=worktree,
         model=None,
+        hosted_pr_identity=hosted_pr_identity,
     )
 
     assert result is None
@@ -121,6 +132,7 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
     # Hosted agent-start env_file scanning needs the checkout path on every
     # create-path run (plan / execute / conformance), not only later fix paths.
     assert adapter.worktree_paths == [worktree, worktree, worktree]
+    assert adapter.hosted_pr_identities == [hosted_pr_identity] * 3
 
 
 @pytest.mark.unit
@@ -137,6 +149,12 @@ async def test_optional_planning_forwards_worktree_path_when_planning_not_requir
         }
     )
     adapter = _CaptureWorktreeAdapter()
+    hosted_pr_identity = {
+        "repo_url": "https://github.com/example/repo.git",
+        "pr_number": 778,
+        "head_ref": "feature/hosted",
+        "expected_head_sha": "a" * 40,
+    }
 
     result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
         adapter=adapter,  # type: ignore[arg-type]
@@ -151,7 +169,9 @@ async def test_optional_planning_forwards_worktree_path_when_planning_not_requir
         compose_file=tmp_path / "compose.yml",
         worktree_path=worktree,
         model=None,
+        hosted_pr_identity=hosted_pr_identity,
     )
 
     assert result is None
     assert adapter.worktree_paths == [worktree]
+    assert adapter.hosted_pr_identities == [hosted_pr_identity]

@@ -988,6 +988,29 @@ def test_profile_schema_rejects_service_named_docker_when_dind() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_service_named_clarification() -> None:
+    with pytest.raises(ValidationError, match="reserved for the managed clarification service"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad",
+                "services": [{"name": "clarification", "image": "example:latest"}],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_persisted_profile_allows_legacy_clarification_service() -> None:
+    profile = WorkspaceProfile.model_validate_persisted(
+        {
+            "name": "legacy",
+            "services": [{"name": "clarification", "image": "example:latest"}],
+        }
+    )
+
+    assert profile.services[0].name == "clarification"
+
+
+@pytest.mark.unit
 def test_profile_schema_allows_service_named_docker_without_dind() -> None:
     profile = WorkspaceProfile.model_validate(
         {

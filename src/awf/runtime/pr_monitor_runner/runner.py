@@ -328,6 +328,13 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     cleared_retry_state = True
                 if cleared_retry_state:
                     await self._persist_state(workspace_id, state)
+                current_head_ref = status.head_ref
+                state.current_pr_head_ref = (
+                    current_head_ref.strip()
+                    if isinstance(current_head_ref, str) and current_head_ref.strip()
+                    else None
+                )
+                state.current_pr_head_ref_checked = True
                 feedback_state_changed = await self._refresh_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -338,8 +345,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 if feedback_state_changed:
                     await self._persist_state(workspace_id, state)
 
-                # Determine the remote push target for this workspace.
-                # ``remote_push_branch`` is the canonical destination.
+                # Determine the remote push target for this workspace. A live PR
+                # snapshot is authoritative after a branch rename; the persisted
+                # branch remains the fallback for older forge/test snapshots.
                 #
                 # Pre-migration fallback — task-kind-conditional:
                 #   * ``feature_branch_pr``: ``branch_name`` (e.g. ``awf/<id>``)
@@ -351,7 +359,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 #     PR's head. Refuse and fail fast instead; the row
                 #     predates this migration and must be re-attached
                 #     fresh (which will populate remote_push_branch).
-                remote_branch = ws.remote_push_branch
+                remote_branch = state.current_pr_head_ref or ws.remote_push_branch
                 if remote_branch is None and ws.task_kind == "feature_branch_pr":
                     remote_branch = ws.branch_name
                 if not remote_branch:

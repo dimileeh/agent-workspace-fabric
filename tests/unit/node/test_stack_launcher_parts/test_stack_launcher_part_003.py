@@ -615,4 +615,5 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
         "profile_services": (),
         "companions": (),
         "docker_mode": request.profile.docker.mode,
+        "clarification_enabled": True,
     }

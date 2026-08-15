@@ -260,6 +260,7 @@ def test_normalize_inline_profile_snapshot_backfills_missing_monitor_grace() -> 
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "auto_merge": {"default": False, "by_base_branch": {}},
         },
     }
     # The input snapshot (a live ORM attribute at the call sites) must not mutate.
@@ -273,7 +274,11 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
     explicit = {
         "name": "inline",
         "forge": "auto",
-        "monitor": {"awaiting_required_checks_grace_seconds": 120.0, "require_ci": True},
+        "monitor": {
+            "awaiting_required_checks_grace_seconds": 120.0,
+            "require_ci": True,
+            "auto_merge": {"default": True, "by_base_branch": {}},
+        },
     }
 
     normalized = normalize_inline_profile_snapshot(explicit)
@@ -281,6 +286,55 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
     assert normalized == explicit
     assert normalized is not explicit
     assert normalized["monitor"] == explicit["monitor"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_missing_monitor_auto_merge() -> None:
+    """A pre-``auto_merge`` legacy snapshot's ``monitor`` lacks the block; normalization
+    adds the default dump so it compares equal to a fresh replay that dumps
+    ``auto_merge={"default": False, "by_base_branch": {}}``."""
+    legacy = {"name": "inline", "forge": "auto", "monitor": {"require_ci": True}}
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {
+            "require_ci": True,
+            "awaiting_required_checks_grace_seconds": 600.0,
+            "auto_merge": {"default": False, "by_base_branch": {}},
+        },
+    }
+    # The backfilled nested dict must not be a shared/mutable module-level object.
+    normalized["monitor"]["auto_merge"]["default"] = True
+    again = normalize_inline_profile_snapshot(legacy)
+    assert again["monitor"]["auto_merge"] == {"default": False, "by_base_branch": {}}
+    # Input snapshot (a live ORM attribute at the call sites) must not mutate.
+    assert legacy == {"name": "inline", "forge": "auto", "monitor": {"require_ci": True}}
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_preserves_present_monitor_auto_merge() -> None:
+    """A snapshot whose ``monitor`` already carries ``auto_merge`` is unchanged
+    by normalization (other than a shallow copy)."""
+    explicit = {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {
+            "require_ci": True,
+            "awaiting_required_checks_grace_seconds": 600.0,
+            "auto_merge": {"default": True, "by_base_branch": {"main": True}},
+        },
+    }
+
+    normalized = normalize_inline_profile_snapshot(explicit)
+
+    assert normalized == explicit
+    assert normalized["monitor"]["auto_merge"] == {
+        "default": True,
+        "by_base_branch": {"main": True},
+    }
 
 
 @pytest.mark.unit
@@ -345,6 +399,7 @@ def test_normalize_inline_profile_snapshot_backfills_both_forge_and_monitor_grac
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "auto_merge": {"default": False, "by_base_branch": {}},
         },
     }
     assert legacy == {"name": "inline", "monitor": {"require_ci": True}}

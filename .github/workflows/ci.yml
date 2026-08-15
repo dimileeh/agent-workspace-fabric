@@ -75,6 +75,13 @@ jobs:
   python-coverage-shards:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Hosted runners intermittently failed the PR merge-ref fetch inside
+    # actions/checkout with ``server certificate verification failed.
+    # CAfile: none`` (e.g. runs 31574790529, 31564213289's predecessor).
+    # Keep TLS verification enabled and point Git at the standard Ubuntu
+    # trust store explicitly for every command in this job.
+    env:
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     strategy:
       fail-fast: false
       matrix:

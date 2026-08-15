@@ -463,6 +463,13 @@ async def _mark_failed(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 payload={"message": safe_message[:1000]},
             )
+        # Same as operator cancel/stop and PRMonitorRunner._terminate_failed:
+        # monitoring_pr→failed (including resume_pr_monitor_handoff before the
+        # runner starts) must clear HUMAN_WAIT attention so a persisted episode
+        # does not strand awaiting_human_since / skip attention_cleared
+        # (PRRT_kwDOSJAM6s6XdyUu).
+        if from_status == WorkspaceStatus.monitoring_pr:
+            await repo.clear_workspace_attention(workspace_id)
         await session.commit()
 
 
@@ -624,15 +631,18 @@ async def _blocked_resume_setup_phase_names(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    validation: Any | None = None,
     worktree_path: Path | None = None,
+    pr_identity: Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
     """Return the profile-setup phase set for a *directive* blocked-resume (#743).
 
     The caller invokes this only on a directive resume (the agent re-runs). It
     reuses the warm venv/stack and SKIPS the flaky ``setup`` phase when an
     env-health probe confirms the validate toolchain still resolves in the
-    container; on ANY doubt (a missing tool, a probe-infra error, a torn-down
-    stack, OR a profile with no probeable validate targets) it re-runs setup.
+    selected local or hosted validation environment; on ANY doubt (a missing
+    tool, a probe-infra error, a torn-down stack, OR a profile with no probeable
+    validate targets) it re-runs setup.
 
     A profile that yields no probeable validate targets short-circuits the probe
     without exec (``probe_ran=False``); that empty result is NOT evidence of a
@@ -640,12 +650,17 @@ async def _blocked_resume_setup_phase_names(
     slip straight to pre_agent/agent and re-block repeatedly instead of
     reprovisioning. Treat a non-run probe as doubt and re-run setup (#746).
     """
-    env_probe = await self._validation.probe_validate_command_tools(
+    probe_kwargs: dict[str, Any] = {}
+    if pr_identity is not None:
+        probe_kwargs["pr_identity"] = pr_identity
+    validation_runner = self._validation if validation is None else validation
+    env_probe = await validation_runner.probe_validate_command_tools(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
         worktree_path=worktree_path,
+        **probe_kwargs,
     )
     if env_probe.probe_ran and not env_probe.probe_errored and not env_probe.missing:
         _log.info("executor.blocked_resume_setup_skipped_env_healthy", workspace_id=workspace_id)

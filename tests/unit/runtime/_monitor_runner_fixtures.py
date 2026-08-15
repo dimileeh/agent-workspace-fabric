@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
@@ -119,6 +120,7 @@ class FakeAdapter(AgentAdapter):
         workspace_id: str | None = None,
         log_source: str = "agent",
         hosted_pr_identity: dict[str, Any] | None = None,
+        git_preparation: AgentRuntimeGitPreparation | None = None,
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
     ) -> AgentRunResult:
@@ -168,6 +170,8 @@ class RecordedSleep:
 def pr_payload(
     *,
     head_sha: str = "abc1234567890def",
+    head_ref: str | None = None,
+    base_ref: str = "development",
     created_at: str = "2026-05-06T10:00:00Z",
     committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
@@ -183,6 +187,10 @@ def pr_payload(
     comments: list[dict] | None = None,
 ) -> str:
     """Build a GraphQL-like PR payload for monitor status helpers.
+
+    ``base_ref`` is the PR's live base branch; tests driving a workspace whose
+    ``branch_base`` is not ``development`` must pass their own, otherwise the
+    monitor reads the snapshot as a PR retargeted after provisioning and blocks.
 
     ``check_contexts_total_count`` sets the rollup ``contexts.totalCount`` that
     drives ``PRStatus.no_checks_observed`` (a present-but-empty rollup reports
@@ -200,6 +208,7 @@ def pr_payload(
                     "pullRequest": {
                         "number": 42,
                         "createdAt": created_at,
+                        "headRefName": head_ref,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
@@ -207,7 +216,7 @@ def pr_payload(
                         "closed": closed,
                         "merged": merged,
                         "mergeCommit": {"oid": merge_commit_sha} if merged else None,
-                        "baseRef": {"name": "development", "target": {"oid": "base0"}},
+                        "baseRef": {"name": base_ref, "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [
                                 {
@@ -367,6 +376,7 @@ def make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
+    delete_source_branch_on_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
     non_check_reviewer_settle_seconds: float = 0,
@@ -391,6 +401,7 @@ def make_runner(
         "gh": gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         "monitor_config": MonitorConfig(
             auto_merge=auto_merge,
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,

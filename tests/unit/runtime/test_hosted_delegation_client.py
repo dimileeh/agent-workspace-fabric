@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from awf.adapters.runtime_executor import AgentRuntimeExecRequest
+from awf.adapters.runtime_executor import AgentRuntimeExecRequest, AgentRuntimeGitPreparation
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
@@ -24,6 +24,7 @@ from awf.runtime.hosted_delegation import (
     hosted_delegation_config_from_settings,
     hosted_delegation_config_from_values,
 )
+from awf.runtime.hosted_delegation_payloads import _agent_start_payload
 
 
 def _config(**overrides: object) -> HostedDelegationConfig:
@@ -61,6 +62,65 @@ def _agent_request(**overrides: object) -> AgentRuntimeExecRequest:
     }
     values.update(overrides)
     return AgentRuntimeExecRequest(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_agent_payload_serializes_exact_secret_free_git_preparation() -> None:
+    url_secret = "ghp_should-never-enter-git-preparation"
+    preparation = AgentRuntimeGitPreparation(
+        mode="merge_base",
+        base_ref="development",
+        expected_base_sha="b" * 40,
+    )
+
+    payload = _agent_start_payload(
+        _agent_request(
+            prompt_stdin=b"resolve conflict",
+            repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
+            head_repo_url=f"https://user:{url_secret}@github.com/dimileeh/aira-web.git",
+            git_preparation=preparation,
+        )
+    )
+
+    assert payload["git_preparation"] == {
+        "mode": "merge_base",
+        "base_ref": "development",
+        "expected_base_sha": "b" * 40,
+    }
+    assert set(payload["git_preparation"]) == {
+        "mode",
+        "base_ref",
+        "expected_base_sha",
+    }
+    assert url_secret not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_agent_payload_serializes_read_only_clarification_contract() -> None:
+    """Hosted reason clarification tells the executor to prohibit repository writes."""
+    payload = _agent_start_payload(_agent_request(read_only=True))
+
+    assert payload["read_only"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("log_source", "prompt"),
+    [
+        ("monitor.review", "Resolve review comments and push the repair."),
+        ("monitor.ci", "Fix CI failures on the pull request."),
+        ("validation.repair", "Repair validation failures before merge."),
+    ],
+)
+def test_agent_payload_ordinary_runs_omit_git_preparation(
+    log_source: str,
+    prompt: str,
+) -> None:
+    payload = _agent_start_payload(
+        _agent_request(log_source=log_source, prompt_stdin=prompt.encode())
+    )
+
+    assert "git_preparation" not in payload
 
 
 @pytest.mark.unit
@@ -284,6 +344,47 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
         "owned_paths": ["src/**"],
         "expected_head_sha": "a" * 40,
     }
+
+
+@pytest.mark.unit
+async def test_read_only_agent_delegation_accepts_success_without_terminal_head_sha() -> None:
+    """Immutable clarification runs cannot advance the PR head."""
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            assert json.loads(request.content)["read_only"] is True
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "returncode": 0,
+                    "stdout": "NEEDS_HUMAN: select a region",
+                    "stderr": "",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/operations/op_1/cancel":
+            return httpx.Response(202, json={"state": "cancelled"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request(read_only=True)
+        )
+
+    assert result.returncode == 0
+    assert result.stdout == "NEEDS_HUMAN: select a region"
+    assert result.terminal_head_sha is None
 
 
 @pytest.mark.unit

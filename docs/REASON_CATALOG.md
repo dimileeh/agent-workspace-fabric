@@ -18,6 +18,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
 
+### ANTIGRAVITY_AUTH_MISSING
+**Problem:** No Antigravity auth signal was visible.
+**Likely Cause:** Missing Antigravity API credentials.
+**Operator Fix:** Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_missing](#antigravity_auth_missing)
+
+### ANTIGRAVITY_AUTH_REJECTED
+**Problem:** Antigravity rejected the configured API credentials.
+**Likely Cause:** Antigravity API key rejected by the provider.
+**Operator Fix:** Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_rejected](#antigravity_auth_rejected)
+
+### ANTIGRAVITY_QUOTA_EXHAUSTED
+**Problem:** Antigravity quota or rate limit is exhausted.
+**Likely Cause:** Antigravity provider quota exhausted.
+**Operator Fix:** Wait for quota reset or switch providers, then re-check readiness.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_quota_exhausted](#antigravity_quota_exhausted)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.
@@ -500,6 +521,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** No action is usually required if another recovery operation is already running. If the workspace is stuck without an active monitor, remonitor it.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
+
+### NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
+**Problem:** A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.
+**Likely Cause:** AWF could not complete the read-only clarification follow-up because the hosted executor rejected or failed the isolated run, or the local worktree could not be prepared as an isolated checkout.
+**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_clarification_unavailable](#needs_human_reason_clarification_unavailable)
+
+### NEEDS_HUMAN_REASON_MISSING
+**Problem:** A review-repair agent requested human input without saying what to decide.
+**Likely Cause:** The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.
+**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_missing](#needs_human_reason_missing)
 
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.

@@ -449,14 +449,18 @@ def test_validation_tier_for_workspace_uses_active_validate_operation_payload_ti
 
 
 @pytest.mark.unit
-async def test_baseline_coverage_preflight_forwards_worktree_path(
+async def test_baseline_coverage_preflight_forwards_hosted_runner_identity_and_worktree(
     tmp_path: Path,
 ) -> None:
-    """Baseline preflight must pass worktree_path so hosted env_file resolution
-    matches phase/final coverage (repo checkout, not compose dir)."""
+    """Hosted baseline uses the delegate with PR identity and checkout env base."""
     baseline = _coverage(tmp_path, percent=88, minimum=99)
-    validation = _CoverageValidation(baseline)
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    local_validation = _CoverageValidation(None)
+    hosted_validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(
+        FakeCommandRunner(),
+        tmp_path,
+        validation=local_validation,
+    )
     profile = WorkspaceProfile.model_validate(
         {
             "name": "coverage-preflight-worktree",
@@ -477,11 +481,15 @@ async def test_baseline_coverage_preflight_forwards_worktree_path(
         compose_file=tmp_path / "compose.yml",
         profile=profile,
         worktree_path=worktree,
+        coverage_runner=hosted_validation,
+        coverage_run_kwargs={"pr_identity": {"pr_number": 42}},
     )
 
     assert result is baseline
-    assert validation.calls == ["baseline_coverage"]
-    assert validation.kwargs[0]["worktree_path"] == worktree
+    assert local_validation.calls == []
+    assert hosted_validation.calls == ["baseline_coverage"]
+    assert hosted_validation.kwargs[0]["worktree_path"] == worktree
+    assert hosted_validation.kwargs[0]["pr_identity"] == {"pr_number": 42}
 
 
 @pytest.mark.unit

@@ -312,6 +312,7 @@ async def test_readyz_response_shape_matches_contract(
         "codex",
         "claude_code",
         "cursor",
+        "antigravity",
         "gemini",
         "opencode",
         "grok",

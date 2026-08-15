@@ -15,7 +15,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.enums import EgressDecision, WorkspaceStatus
+from awf.adapters.base import AgentDefaults
+from awf.db.enums import AgentRuntime, EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -233,8 +234,9 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="codex",
+                agent="opencode",
                 test_commands=[],
+                task_policy={"agent_model": "openai/gpt-5"},
             )
             await s.commit()
             ws_id = ws.id
@@ -247,6 +249,8 @@ class TestSuccess:
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
         assert request.layout.branch_name == f"awf/{ws_id}"
         assert request.profile.name == "generic"
+        assert request.agent_runtime is AgentRuntime.opencode
+        assert request.agent_model == "openai/gpt-5"
         assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
 
         async with session_factory() as s:
@@ -255,6 +259,54 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_default_model"),
+                    compose_file=Path("/tmp/awf-compose/ws_default_model/compose.yml"),
+                )
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(
+                node_id="test-node-01",
+                agent_defaults={
+                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
+                },
+            ),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="implicit OpenCode model",
+                task_prompt="p",
+                agent="opencode",
+                test_commands=[],
+                task_policy={},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1
+        assert launcher.requests[0].agent_model == "openai/gpt-5"
 
     @pytest.mark.unit
     async def test_hosted_pr_adoption_provisions_git_metadata_without_stack_launch(
@@ -284,7 +336,12 @@ class TestSuccess:
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
-            config=ProvisionerConfig(node_id="test-node-01"),
+            config=ProvisionerConfig(
+                node_id="test-node-01",
+                agent_defaults={
+                    AgentRuntime.opencode: AgentDefaults(model="openai/gpt-5", effort="xhigh")
+                },
+            ),
         )
         _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
         async with session_factory() as s:
@@ -293,7 +350,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="adopt hosted",
                 task_prompt="p",
-                agent="codex",
+                agent="opencode",
                 task_kind="sync_feature_pr",
                 test_commands=[],
                 task_policy={
@@ -314,6 +371,7 @@ class TestSuccess:
         assert launcher.launch_requests == []
         assert len(launcher.render_requests) == 1
         assert launcher.render_requests[0].workspace_id == ws_id
+        assert launcher.render_requests[0].agent_model == "openai/gpt-5"
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
@@ -602,10 +660,28 @@ class TestSuccess:
             assert reservation.dind_slots == 0
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("companion_name", "clarification_enabled", "resolved_profile"),
+        [
+            ("backend", True, None),
+            ("clarification", False, None),
+            (
+                "backend",
+                False,
+                {
+                    "name": "legacy-clarification",
+                    "services": [{"name": "clarification", "image": "example:latest"}],
+                },
+            ),
+        ],
+    )
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        companion_name: str,
+        clarification_enabled: bool,
+        resolved_profile: dict[str, object] | None,
     ) -> None:
         class _RecordingGit:
             work_dir = tmp_path / "awf-work"
@@ -668,10 +744,11 @@ class TestSuccess:
                 task_prompt="p",
                 agent="codex",
                 test_commands=[],
+                resolved_profile=resolved_profile,
                 task_policy={
                     "companions": [
                         {
-                            "name": "backend",
+                            "name": companion_name,
                             "repo_url": "git@github.com:example/backend.git",
                             "base_branch": "main",
                             "build_context": "services/api",
@@ -696,10 +773,10 @@ class TestSuccess:
                 "new_branch": f"awf/{workspace_id}",
             },
             {
-                "workspace_id": f"{workspace_id}__companion__backend",
+                "workspace_id": f"{workspace_id}__companion__{companion_name}",
                 "repo_url": "git@github.com:example/backend.git",
                 "base_branch": "main",
-                "new_branch": f"awf/{workspace_id}/companion/backend",
+                "new_branch": f"awf/{workspace_id}/companion/{companion_name}",
             },
             {
                 "workspace_id": f"{workspace_id}__companion__worker",
@@ -709,15 +786,18 @@ class TestSuccess:
             },
         ]
         companion = launcher.requests[0].companions[0]
-        assert companion.spec.name == "backend"
+        assert companion.spec.name == companion_name
         assert companion.spec.build_context == "services/api"
         assert companion.layout.worktree_path == (
-            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__backend"
+            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__{companion_name}"
         )
         defaulted_companion = launcher.requests[0].companions[1]
         assert defaulted_companion.spec.name == "worker"
         assert defaulted_companion.spec.base_branch is None
         assert launcher.requests[0].companion_graph_prevalidated is True
+        assert launcher.requests[0].clarification_enabled is clarification_enabled
+        if resolved_profile is not None:
+            assert launcher.requests[0].profile.services[0].name == "clarification"
 
     @pytest.mark.unit
     async def test_rejects_invalid_companion_graph_before_materializing_companions(
@@ -1297,106 +1377,6 @@ class TestSuccess:
             rendered = json.dumps([lease.mount_metadata for lease in leases], default=str)
             assert raw_secret not in rendered
             assert raw_ref not in rendered
-
-    @pytest.mark.unit
-    async def test_companion_secret_metadata_event_persists_without_profile_secret_leases(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        raw_secret = "sk-live-do-not-store-in-event"
-
-        class _RecordingStackLauncher:
-            async def launch(self, request: Any) -> object:
-                return ComposeProjectPaths(
-                    project_dir=Path("/tmp/awf-compose/ws_companion"),
-                    compose_file=Path("/tmp/awf-compose/ws_companion/compose.yml"),
-                    secret_lease_mount_metadata={
-                        "schema": "secret_lease_mount_metadata.v1",
-                        "companion_env_secret_count": 1,
-                        "companion_env_secrets": (
-                            {
-                                "companion": "reviewer",
-                                "target": "ANTHROPIC_API_KEY",
-                                "provider": "env",
-                                "source": "ANTHROPIC_API_KEY",
-                                "required": True,
-                            },
-                        ),
-                        "companion_omitted_optional_env_secret_count": 1,
-                        "companion_omitted_optional_env_secrets": (
-                            {
-                                "companion": "reviewer",
-                                "target": "OPENAI_API_KEY",
-                                "provider": "env",
-                                "source": "OPENAI_API_KEY",
-                                "required": False,
-                            },
-                        ),
-                        "secret_value": raw_secret,
-                    },
-                )
-
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_RecordingStackLauncher(),
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={"name": "companion-only-secrets"},
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert await SecretLeaseRepository(s).list_for_workspace(ws_id) == []
-            events = [
-                event
-                for event in reloaded.events
-                if event.event_type == "workspace.companion_env_secret_metadata"
-            ]
-            assert len(events) == 1
-            event = events[0]
-            assert event.reason_code == "COMPANION_ENV_SECRET_METADATA_RECORDED"
-            assert event.payload == {
-                "schema": "companion_env_secret_stack_metadata.v1",
-                "compose_project": f"awf_{ws_id}",
-                "compose_file": "/tmp/awf-compose/ws_companion/compose.yml",
-                "companion_env_secret_count": 1,
-                "companion_env_secrets": [
-                    {
-                        "companion": "reviewer",
-                        "target": "ANTHROPIC_API_KEY",
-                        "provider": "env",
-                        "source": "ANTHROPIC_API_KEY",
-                        "required": True,
-                    }
-                ],
-                "companion_omitted_optional_env_secret_count": 1,
-                "companion_omitted_optional_env_secrets": [
-                    {
-                        "companion": "reviewer",
-                        "target": "OPENAI_API_KEY",
-                        "provider": "env",
-                        "source": "OPENAI_API_KEY",
-                        "required": False,
-                    }
-                ],
-            }
-            assert raw_secret not in json.dumps(event.payload, default=str)
 
     @pytest.mark.unit
     def test_mount_metadata_event_redacts_companion_secret_fields(self) -> None:

@@ -50,6 +50,55 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest.mark.unit
+async def test_merge_deletes_head_branch_by_default(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A feature-branch auto-merge reaps its throwaway head branch."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=["MERGESHA123"],
+    )
+
+    terminal, _state, _sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is True
+    assert gh.merge_calls == ["squash"]
+    assert gh.delete_branch_calls == [True]
+
+
+@pytest.mark.unit
+async def test_merge_preserves_head_branch_for_release_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A ``sync_release_pr`` auto-merge must not delete its long-lived source
+    branch (development); the runner forwards ``delete_branch=False`` to
+    ``merge_pr`` (PRRT_kwDOSJAM6s6U3YAS)."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=["MERGESHA123"],
+    )
+
+    terminal, _state, _sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+        delete_source_branch_on_merge=False,
+    )
+
+    assert terminal is True
+    assert gh.merge_calls == ["squash"]
+    assert gh.delete_branch_calls == [False]
+
+
+@pytest.mark.unit
 async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

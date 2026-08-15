@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
-from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
@@ -118,6 +119,9 @@ _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
+_SYNC_BASE_MERGE_FAILED_REASON = "SYNC_BASE_MERGE_FAILED"
+_SYNC_BASE_GIT_PREPARATION_FAILED_REASON = "SYNC_BASE_GIT_PREPARATION_FAILED"
+_SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON = "SYNC_BASE_PUSHED_HEAD_UNAVAILABLE"
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 # Orphaned AWF branch refs surface as ``refs/heads/awf/ws_...`` and, for
@@ -203,6 +207,10 @@ class _GitPushResult:
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
                 _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                _SYNC_BASE_MERGE_FAILED_REASON,
+                _SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                _SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
+                "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH",
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -244,6 +252,10 @@ class _WorkflowScopePushBlock:
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
+    if push_result.reason_code == _SYNC_BASE_MERGE_FAILED_REASON:
+        return "sync_base_merge_failed"
+    if push_result.reason_code == _SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON:
+        return "sync_base_pushed_head_unavailable"
     if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
         return "pre_push_validation_toolchain_missing"
     if push_result.reason_code in {
@@ -498,19 +510,25 @@ async def _count_base_behind(self: Any, *, worktree_path: Path, base_branch: str
         ) from exc
 
 
-async def _rev_parse_head(self: Any, worktree_path: Path) -> str | None:
+async def _rev_parse_head(
+    self: Any,
+    worktree_path: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> str | None:
     """Resolve the current worktree HEAD SHA, returning None on failure."""
-    result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "rev-parse",
-            "HEAD",
-        ],
-        env=git_env_without_object_lookup_overrides(),
-    )
+    command = [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "rev-parse",
+        "HEAD",
+    ]
+    kwargs: dict[str, Any] = {"env": git_env_without_object_lookup_overrides()}
+    if timeout_seconds is not None:
+        kwargs["timeout_seconds"] = timeout_seconds
+    result = await self._deps.runner.run(command, **kwargs)
     if not result.ok:
         return None
     value = result.stdout.strip()
@@ -807,11 +825,23 @@ async def _run_sync_base(
     if head_result is not None:
         return head_result
 
-    async def _git(*args: str) -> tuple[int, str, str]:
+    async def _git(
+        *args: str,
+        clear_identity_overrides: bool = False,
+    ) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
+        env = git_env_without_object_lookup_overrides()
+        if clear_identity_overrides:
+            for key in (
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ):
+                env.pop(key, None)
         r = await runner._deps.runner.run(
             git_worktree_command(worktree_path, *args),
-            env=git_env_without_object_lookup_overrides(),
+            env=env,
         )
         return r.returncode, r.stdout, r.stderr
 
@@ -862,14 +892,67 @@ async def _run_sync_base(
                 f"Merge remote-tracking branch 'origin/{base_branch}'", task_tag
             ),
         )
-    rc, _stdout, stderr = await _git(*merge_args)
+    rc, _stdout, stderr = await _git(
+        *git_identity_config_args(),
+        *merge_args,
+        clear_identity_overrides=True,
+    )
     if rc != 0:
-        _rc_status, status_out, _ = await _git("status", "--porcelain")
+        status_rc, status_out, status_stderr = await _git("status", "--porcelain")
         conflicting_files = tuple(
             line[3:]
             for line in status_out.splitlines()
             if line.startswith(("UU ", "AA ", "DD ", "AU ", "UA ", "DU ", "UD "))
         )
+        if status_rc != 0 or not conflicting_files:
+            diagnostics = [f"sync-base merge failed for origin/{base_branch}"]
+            if stderr.strip():
+                diagnostics.append(f"merge stderr: {stderr.strip()}")
+            if status_rc != 0:
+                diagnostics.append(
+                    f"status stderr: {status_stderr.strip()}"
+                    if status_stderr.strip()
+                    else "git status --porcelain failed without output"
+                )
+            else:
+                diagnostics.append("git status --porcelain found no recognized unmerged entries")
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=rc,
+                stderr=redact_audit_text("\n".join(diagnostics), limit=2000),
+                reason_code=_SYNC_BASE_MERGE_FAILED_REASON,
+                details={
+                    "base_ref": base_branch,
+                    "merge_returncode": rc,
+                    "status_returncode": status_rc,
+                },
+            )
+        is_hosted = bool(getattr(getattr(runner._deps, "adapter", None), "is_hosted", False))
+        git_preparation: AgentRuntimeGitPreparation | None = None
+        if is_hosted:
+            # The mirror's origin/<base> ref is shared across worktrees and can
+            # advance after this merge. MERGE_HEAD is worktree-local and records
+            # the exact commit that produced the conflict being delegated.
+            base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git("rev-parse", "MERGE_HEAD")
+            expected_base_sha = base_sha_stdout.strip()
+            if base_sha_rc != 0 or re.fullmatch(r"[0-9a-f]{40}", expected_base_sha) is None:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=base_sha_rc or 1,
+                    stderr="could not pin the fetched base commit for hosted conflict repair",
+                    reason_code=_SYNC_BASE_GIT_PREPARATION_FAILED_REASON,
+                    details={
+                        "base_ref": base_branch,
+                        "merge_ref": "MERGE_HEAD",
+                    },
+                )
+            git_preparation = AgentRuntimeGitPreparation(
+                mode="merge_base",
+                base_ref=base_branch,
+                expected_base_sha=expected_base_sha,
+            )
         prompt = sync_base_conflict_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -921,17 +1004,29 @@ async def _run_sync_base(
                     details=repair_details,
                 )
         try:
-            await runner._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source="recovery",
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-                state=state,
-            )
+            agent_run_kwargs: dict[str, Any] = {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": compose_file,
+                "prompt": prompt,
+                "log_source": "recovery",
+                "command_evidence": command_evidence,
+                "operation_start_head": operation_start_head,
+                "state": state,
+            }
+            if git_preparation is not None:
+                agent_run_kwargs["git_preparation"] = git_preparation
+            await runner._run_monitor_agent_with_service_recovery(**agent_run_kwargs)
         except AgentRunError as exc:
+            if exc.reason_code == "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH":
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=exc.result.returncode,
+                    stderr=exc.result.stderr,
+                    reason_code=exc.reason_code,
+                    details=exc.details,
+                )
             agent_run_err = exc
             append_command_evidence(
                 command_evidence,
@@ -1093,7 +1188,7 @@ async def _run_sync_base(
             stderr=protected_scope_block.message,
             reason_code=protected_scope_block.reason_code,
         )
-    return await runner._validated_git_push_result(
+    push_result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
@@ -1103,6 +1198,40 @@ async def _run_sync_base(
         state=state,
         operation_start_head=operation_start_head,
     )
+    if (
+        state is None
+        or push_result.paused_into_blocked
+        or push_result.recovered_by_resync
+        or push_result.failed
+        or not push_result.pushed
+    ):
+        return push_result
+
+    pushed_head = await runner._rev_parse_head(worktree_path)
+    if pushed_head is None or re.fullmatch(r"[0-9a-fA-F]{40}", pushed_head) is None:
+        head_resolution = "unavailable" if pushed_head is None else "invalid"
+        details: dict[str, object] = {
+            "phase": "post_sync_base_push_head_resolution",
+            "push_reported_success": True,
+            "head_resolution": head_resolution,
+        }
+        if pushed_head is not None:
+            details["resolved_head_length"] = len(pushed_head)
+        return _GitPushResult(
+            pushed=True,
+            failed=True,
+            returncode=1,
+            stdout=push_result.stdout,
+            stderr=(
+                "SyncBase push succeeded, but the pushed local HEAD could not be "
+                "resolved to a valid full commit SHA."
+            ),
+            reason_code=_SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
+            details=details,
+        )
+
+    cast("MonitorState", state).last_push_sha = pushed_head.lower()
+    return push_result
 
 
 async def _refresh_staleness_after_sync_base(

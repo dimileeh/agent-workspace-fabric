@@ -16,6 +16,7 @@ from awf.adapters.provider_failures import (
     AGENT_TIMEOUT,
     classify_provider_failure,
 )
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
@@ -76,6 +77,7 @@ _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEO
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS = 300
 _HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON = "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+_HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH_REASON = "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH"
 
 
 async def _run_monitor_agent_with_service_recovery(
@@ -89,7 +91,13 @@ async def _run_monitor_agent_with_service_recovery(
     command_evidence: list[str] | None = None,
     operation_start_head: str | None = None,
     state: Any | None = None,
+    git_preparation: AgentRuntimeGitPreparation | None = None,
+    isolated_worktree_host_path: Path | None = None,
+    isolated_worktree_ref: str | None = None,
+    isolated_worktree_source_mirror: Path | None = None,
+    read_only: bool = False,
 ) -> AgentRunResult:
+    """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted
@@ -97,27 +105,67 @@ async def _run_monitor_agent_with_service_recovery(
     )
     restart_attempts = 0
     while True:
+        if self._deps.adapter.is_hosted and git_preparation is not None:
+            trusted_base_ref = _nonblank_str((hosted_pr_identity or {}).get("base_ref"))
+            if trusted_base_ref != git_preparation.base_ref:
+                raise AgentRunError(
+                    agent=self._deps.adapter.name,
+                    result=CommandResult(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "hosted git preparation base ref does not match "
+                            "the trusted PR base identity"
+                        ),
+                    ),
+                    reason_code=_HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH_REASON,
+                    details={
+                        "preparation_base_ref": git_preparation.base_ref,
+                        "trusted_base_ref": trusted_base_ref,
+                    },
+                )
         try:
             if self._deps.adapter.is_hosted:
-                result = await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source=log_source,
-                    hosted_pr_identity=hosted_pr_identity,
-                    profile=getattr(self, "_workspace_profile", None),
-                    worktree_path=self._worktrees_root / workspace_id,
-                )
+                hosted_run_kwargs: dict[str, Any] = {
+                    "compose_project": compose_project,
+                    "compose_file": compose_file,
+                    "prompt": prompt,
+                    "workspace_id": workspace_id,
+                    "log_source": log_source,
+                    "hosted_pr_identity": hosted_pr_identity,
+                    "profile": getattr(self, "_workspace_profile", None),
+                    "worktree_path": self._worktrees_root / workspace_id,
+                }
+                if git_preparation is not None:
+                    hosted_run_kwargs["git_preparation"] = git_preparation
+                if read_only:
+                    hosted_run_kwargs["read_only"] = True
+                result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
-                result = await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source=log_source,
-                )
+                local_run_kwargs: dict[str, Any] = {
+                    "compose_project": compose_project,
+                    "compose_file": compose_file,
+                    "prompt": prompt,
+                    "workspace_id": workspace_id,
+                    "log_source": log_source,
+                }
+                profile = getattr(self, "_workspace_profile", None)
+                if profile is not None:
+                    local_run_kwargs["profile"] = profile
+                if isolated_worktree_host_path is not None:
+                    local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
+                if isolated_worktree_ref is not None:
+                    local_run_kwargs["isolated_worktree_ref"] = isolated_worktree_ref
+                if isolated_worktree_source_mirror is not None:
+                    local_run_kwargs["isolated_worktree_source_mirror"] = (
+                        isolated_worktree_source_mirror
+                    )
+                result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
+            if isolated_worktree_host_path is not None or read_only:
+                # A clarification re-ask gets exactly one isolated invocation;
+                # never restart the persistent service and re-run it.
+                raise
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
@@ -168,6 +216,10 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
+            if isolated_worktree_host_path is not None or read_only:
+                # A clarification run must not trigger a persistent-agent
+                # recovery retry after cleanup failure.
+                raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
@@ -189,7 +241,7 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        if self._deps.adapter.is_hosted:
+        if self._deps.adapter.is_hosted and not read_only:
             if not result.terminal_head_sha:
                 raise AgentRunError(
                     agent=self._deps.adapter.name,
@@ -884,7 +936,7 @@ async def _monitor_agent_service_restart_timeout_seconds(
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None or not workspace.resolved_profile:
                 return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
-            profile = WorkspaceProfile.model_validate(workspace.resolved_profile)
+            profile = WorkspaceProfile.model_validate_persisted(workspace.resolved_profile)
             task_policy = (
                 workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
             )

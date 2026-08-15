@@ -191,9 +191,11 @@ files are repo files, not generated local secret files. Use
 `compose_up_timeout_seconds` inside the companion JSON when a companion image
 needs a longer cold-cache build/start budget than the profile default.
 
-Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
-comment, and `--initial-review-grace-period-seconds 0` only for explicit
-fast-path tests.
+Auto-merge is opt-in: omit the flag to use the repo/profile default (off unless
+configured in `monitor.auto_merge`), which keeps AWF monitoring after it posts
+the ready-for-human comment. Add `--auto-merge` to let the monitor merge once
+gates are green, or `--no-auto-merge` to force manual merge. Use
+`--initial-review-grace-period-seconds 0` only for explicit fast-path tests.
 
 Adopt an already-open GitHub PR into monitoring without rerunning the original
 coding agent:

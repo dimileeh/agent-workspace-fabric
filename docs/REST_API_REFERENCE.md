@@ -163,6 +163,20 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/overview?status=monitoring_pr&agent=codex&limit=25"
 ```
 
+### Batch workspace overview (hosted projection)
+
+Bounded lookup for known workspace IDs (1–200 unique IDs). Returns overview
+items in request order for IDs that exist, plus `missing_workspace_ids` for the
+rest (also request-ordered). Reuses the same overview projection as the list
+endpoint.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/overview/batch" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_ids":["ws_a","ws_b","ws_missing"]}'
+```
+
 ### List workspaces (full detail)
 
 ```bash
@@ -223,6 +237,11 @@ Events response shape:
   "has_more": false
 }
 ```
+
+Attention flips also appear on this timeline as first-class events:
+`workspace.attention_required` (enter) and `workspace.attention_cleared`
+(clear). Payload fields and callback subscription details are documented under
+[Create a callback subscription](#create-a-callback-subscription).
 
 ### List workspace events (per-workspace)
 
@@ -578,7 +597,8 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
 Public callback subscriptions accept the wildcards `workspace.*`, `merge.*`,
 and `operation.*`, plus exact public event types such as
 `workspace.created`, `workspace.state_changed`,
-`workspace.secondary_failure_recorded`, `operation.state_changed`, and
+`workspace.secondary_failure_recorded`, `workspace.attention_required`,
+`workspace.attention_cleared`, `operation.state_changed`, and
 `merge.candidate_updated`.
 
 Workspace callback deliveries use a sanitized envelope. For
@@ -613,6 +633,48 @@ event envelope used for other workspace events:
 The internal failure-causality payload keys stored on the workspace event, such
 as `primary_failure`, `secondary_failure`, and `secondary_failures`, are not
 part of the external callback envelope.
+
+`workspace.attention_required` and `workspace.attention_cleared` use the same
+workspace event envelope. They fire once per attention flip (enter or clear),
+not on every monitor poll while attention persists. The table below describes
+the **stored timeline event `payload`** (written by
+`monitoring_pr_attention_payload` / `blocked_attention_payload`), not the
+sanitized outbound callback body — those attention payload keys are not part of
+the external callback envelope.
+
+| Field | When present | Notes |
+|---|---|---|
+| `source` | always | `"monitoring_pr"` (HUMAN_WAIT) or `"blocked"` (protected-gate pause) |
+| `reason` | always (may be `null`) | `monitoring_pr`: escalation reason (nullable). `blocked`: explicit reason, else `block_reason_code` (may still be `null`) |
+| `pr_url` | `monitoring_pr` only, when truthy | Omitted unless the workspace row has a truthy PR URL; never emitted as `null` |
+| `block_reason_code` | always on `blocked` | Durable protected-gate reason code; key always present, value may be `null` |
+| `block_type` | always on `blocked` | e.g. `protected_quality_gate`; key always present, value may be `null` |
+
+`monitoring_pr_attention_payload` always includes `reason` and `source`; `reason`
+may be `null`, and `pr_url` is omitted unless truthy.
+`blocked_attention_payload` always includes `source`, `block_reason_code`,
+`block_type`, and `reason`; nullable values are stored as JSON `null`.
+
+Example monitoring_pr enter payload (timeline event `payload`):
+
+```json
+{
+  "reason": "merge conflict needs human resolution",
+  "source": "monitoring_pr",
+  "pr_url": "https://github.com/example/app/pull/42"
+}
+```
+
+Example blocked enter payload:
+
+```json
+{
+  "reason": "QUALITY_GATE_POLICY_CHANGED",
+  "source": "blocked",
+  "block_reason_code": "QUALITY_GATE_POLICY_CHANGED",
+  "block_type": "protected_quality_gate"
+}
+```
 
 For each outbound delivery, callback target URLs are revalidated before the POST
 is sent:

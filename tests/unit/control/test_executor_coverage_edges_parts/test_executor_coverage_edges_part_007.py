@@ -324,13 +324,16 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("hosted_fix_nonzero", [False, True])
+@pytest.mark.parametrize(
+    "hosted_fix_outcome",
+    ["success", "error_with_head", "error_without_head"],
+)
 async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    hosted_fix_nonzero: bool,
+    hosted_fix_outcome: str,
 ) -> None:
-    """Hosted validation fix passes must pass PR identity and sync the remote fix."""
+    """Hosted validation fixes must sync a reported head or fail before local git."""
     profile = WorkspaceProfile.model_validate({"name": "hosted-validation-fix-pass"})
     initial_head = "c" * 40
     terminal_head = "d" * 40
@@ -422,18 +425,22 @@ async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
         _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
     )
     hosted_fix_result = CommandResult(
-        returncode=1 if hosted_fix_nonzero else 0,
+        returncode=0 if hosted_fix_outcome == "success" else 1,
         stdout="hosted fix stdout",
-        stderr="hosted fix stderr" if hosted_fix_nonzero else "",
+        stderr="" if hosted_fix_outcome == "success" else "hosted fix stderr",
     )
     adapter = SimpleNamespace(is_hosted=True)
-    if hosted_fix_nonzero:
+    if hosted_fix_outcome != "success":
         adapter.run = AsyncMock(
             side_effect=AgentRunError(
                 agent=AgentRuntime.codex,
                 result=hosted_fix_result,
                 reason_code="AGENT_CLI_FAILED",
-                details={"terminal_head_sha": terminal_head},
+                details=(
+                    {"terminal_head_sha": terminal_head}
+                    if hosted_fix_outcome == "error_with_head"
+                    else {}
+                ),
             )
         )
     else:
@@ -485,6 +492,11 @@ async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
         ),
     )
 
+    git_in_worktree = AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr=""))
+    if hosted_fix_outcome == "error_without_head":
+        git_in_worktree.side_effect = AssertionError(
+            "hosted missing-head errors must not use local git"
+        )
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id=workspace.id,
@@ -500,8 +512,18 @@ async def test_hosted_validation_fix_pass_syncs_returned_terminal_head(
         planning_validation_handoff=None,
         recovery={"source": "monitor", "recovery_mode": "validate"},
         rebase_recovery_result=None,
-        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+        git_in_worktree=git_in_worktree,
     )
+
+    if hosted_fix_outcome == "error_without_head":
+        assert result.stop
+        runner.run.assert_not_awaited()
+        git_in_worktree.assert_not_awaited()
+        finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+        assert finish_kwargs["reason_code"] == "HOSTED_REMOTE_HEAD_MISSING"
+        mark_kwargs = executor._mark_failed.await_args.kwargs
+        assert mark_kwargs["reason_code"] == "HOSTED_REMOTE_HEAD_MISSING"
+        return
 
     assert not result.stop
     assert adapter.run.await_args.kwargs["profile"] is profile

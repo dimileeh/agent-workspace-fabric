@@ -114,6 +114,9 @@ from awf.service.workspace_runtime_health import (
 
 _HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
 _HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE = "HOSTED_PR_ADOPTION_PR_URL_MISSING"
+_HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED_REASON_CODE = (
+    "HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED"
+)
 
 
 async def _maybe_recover_stale_active_executions(self: Any) -> None:
@@ -540,7 +543,22 @@ async def _recover_hosted_pr_adoption_active_execution(
                 reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
             )
             return False
-        if not await _has_hosted_monitor_handoff_setup_completed(session, ws):
+        setup_completed = await _has_hosted_monitor_handoff_setup_completed(session, ws)
+        if candidate.status == WorkspaceStatus.ready and not setup_completed:
+            previous_claim = _workspace_claim_snapshot(ws)
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+            await session.commit()
+            _log.warning(
+                "worker.hosted_pr_adoption_ready_stale_claim_cleared",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code=_HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED_REASON_CODE,
+                previous_claim=previous_claim,
+            )
+            return True
+        if not setup_completed:
             _log.warning(
                 "worker.hosted_pr_adoption_stale_active_setup_incomplete",
                 workspace_id=candidate.workspace_id,

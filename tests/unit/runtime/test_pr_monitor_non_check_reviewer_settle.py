@@ -110,6 +110,7 @@ def test_non_check_reviewer_login_normalization_is_conservative() -> None:
 def test_non_check_reviewer_wait_starts_for_green_pr_without_visible_reviewer_check() -> None:
     state = MonitorState()
     cfg = MonitorConfig(
+        auto_merge=True,
         poll_interval_seconds=60,
         non_check_reviewer_settle_seconds=180,
         non_check_reviewer_logins=("greptile-apps",),
@@ -142,6 +143,7 @@ def test_non_check_reviewer_wait_starts_for_green_pr_without_visible_reviewer_ch
 def test_zero_poll_interval_still_waits_for_non_check_reviewer_settle() -> None:
     state = MonitorState()
     cfg = MonitorConfig(
+        auto_merge=True,
         poll_interval_seconds=0,
         non_check_reviewer_settle_seconds=180,
         non_check_reviewer_logins=("greptile-apps",),
@@ -917,6 +919,7 @@ def test_visible_check_matching_accepts_provider_identity_metadata() -> None:
 def test_wait_is_per_head_sha_and_restarts_after_new_head() -> None:
     state = MonitorState()
     cfg = MonitorConfig(
+        auto_merge=True,
         poll_interval_seconds=60,
         non_check_reviewer_settle_seconds=180,
         non_check_reviewer_logins=("greptile-apps",),

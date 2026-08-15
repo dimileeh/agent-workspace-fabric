@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
@@ -42,6 +42,20 @@ _HOSTED_TIMEOUT_RETURN_CODE = 124
 #: distinguish wall-clock vs idle timeouts. Other values are reserved; the
 #: adapter treats any non-empty ``timeout_reason`` as authoritative.
 _HOSTED_TIMEOUT_REASONS = frozenset({COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON})
+
+
+@dataclass(frozen=True)
+class AgentRuntimeGitPreparation:
+    """Explicit, secret-free checkout preparation for a hosted agent run.
+
+    Normal runs omit this value. ``merge_base`` asks the hosted runtime to
+    merge the trusted base ref pinned to the exact 40-character lowercase SHA
+    Core already fetched.
+    """
+
+    mode: Literal["merge_base"]
+    base_ref: str
+    expected_base_sha: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +135,8 @@ class AgentRuntimeExecRequest:
     head_repo_slug: str | None = None
     owned_paths: tuple[str, ...] = ()
     expected_head_sha: str | None = None
+    git_preparation: AgentRuntimeGitPreparation | None = None
+    read_only: bool = False
     on_stdout: StreamCallback | None = None
     on_stderr: StreamCallback | None = None
     profile: WorkspaceProfile | None = None
@@ -164,6 +180,12 @@ class AgentRuntimeExecutor(Protocol):
     ``request.profile_env`` carries literal profile-owned env values the
     executor injects directly (not worker-resolved); those are non-secret
     profile configuration (e.g. ``OLLAMA_HOST``) and may be set on the job env.
+
+    Read-only clarification contract: when ``request.read_only`` is true, the
+    executor MUST run the agent against an isolated, immutable checkout pinned
+    to ``request.expected_head_sha`` and reject the request if it cannot do so.
+    It must not grant push-capable Git credentials or otherwise let the run
+    advance the PR head.
 
     Streaming contract: when the caller supplies ``request.on_stdout`` /
     ``request.on_stderr`` callbacks, implementations SHOULD invoke them with

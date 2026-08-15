@@ -378,17 +378,6 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
-        # A directive resume reuses the warm env + skips flaky ``setup`` when a
-        # probe passes; grant/normal runs re-run it (#743).
-        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
-        if resume_from_blocked and not resume_skip_agent:
-            setup_phase_names = await self._blocked_resume_setup_phase_names(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                worktree_path=worktree_path,
-            )
         setup_validation_runner = self._validation
         setup_run_kwargs: dict[str, Any] = {}
         if hosted_pr_adoption:
@@ -421,6 +410,20 @@ async def execute(
                 "include_coverage": False,
                 "pr_identity": hosted_pr_identity,
             }
+        # A directive resume reuses the warm env + skips flaky ``setup`` when a
+        # probe passes; grant/normal runs re-run it (#743). Probe the same local
+        # or hosted environment that will execute the selected setup phases.
+        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
+        if resume_from_blocked and not resume_skip_agent:
+            setup_phase_names = await self._blocked_resume_setup_phase_names(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                validation=setup_validation_runner,
+                worktree_path=worktree_path,
+                pr_identity=hosted_pr_identity,
+            )
         try:
             setup_result = await setup_validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
@@ -541,7 +544,7 @@ async def execute(
             )
             return
         if recovery is None and not resume_skip_agent:
-            if not await self._run_agent_git_writability_preflight(
+            if not hosted_pr_adoption and not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -579,6 +582,10 @@ async def execute(
                     reuse=baseline_coverage,
                     skip_measure=resume_from_blocked,
                     worktree_path=worktree_path,
+                    coverage_runner=(setup_validation_runner if hosted_pr_adoption else None),
+                    coverage_run_kwargs=(
+                        {"pr_identity": hosted_pr_identity} if hosted_pr_adoption else None
+                    ),
                 )
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -615,6 +622,7 @@ async def execute(
                     model=run_model,
                     command_evidence=agent_command_evidence,
                     workspace_id=workspace_id,
+                    hosted_pr_identity=hosted_pr_identity,
                     execution_owner_id=execution_owner_id,
                     before_mark_failed=_deposit_planning_artifacts,
                     before_agent_retry=before_agent_retry,
@@ -1046,6 +1054,7 @@ async def execute(
                                 ws=ws,
                                 profile=profile,
                                 command_evidence=agent_command_evidence,
+                                hosted_pr_identity=hosted_pr_identity,
                                 execution_owner_id=execution_owner_id,
                                 before_mark_failed=_deposit_planning_artifacts,
                                 before_agent_retry=before_agent_retry,

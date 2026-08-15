@@ -262,6 +262,7 @@ async def run_validation_and_fix_cycle(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             ignore_all_ignored=True,
+            remove_empty_untracked_dirs=True,
         )
         validation_run_id = await self._start_validation_run(
             workspace_id=workspace_id,
@@ -1151,14 +1152,12 @@ async def run_validation_and_fix_cycle(
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
-            if getattr(adapter, "is_hosted", False) and (
-                terminal_head_sha := _hosted_agent_error_terminal_head_sha(exc)
-            ):
+            if getattr(adapter, "is_hosted", False):
                 fix_result = AgentRunResult(
                     returncode=exc.result.returncode,
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
-                    terminal_head_sha=terminal_head_sha,
+                    terminal_head_sha=_hosted_agent_error_terminal_head_sha(exc),
                 )
             # Coding CLI exited non-zero on the fix pass. Mirrors the
             # initial-run behaviour: log, remember the note, fall
