@@ -1292,6 +1292,19 @@
         "title": "HttpExceptionErrorResponse",
         "type": "object"
       },
+      "LaunchableAgentRuntime": {
+        "description": "Launchable coding CLI runtimes that can execute tasks or fallbacks inside workspaces.\n\nExcludes retired runtimes (e.g. gemini) so OpenAPI schemas and client generators\nonly advertise active, launchable runtimes.",
+        "enum": [
+          "codex",
+          "claude_code",
+          "antigravity",
+          "cursor",
+          "opencode",
+          "grok"
+        ],
+        "title": "LaunchableAgentRuntime",
+        "type": "string"
+      },
       "LocalCapacitySourceResponse": {
         "description": "Local runtime capacity origin metadata exposed in saturation responses.",
         "properties": {
@@ -10049,7 +10062,7 @@
         "additionalProperties": false,
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "$ref": "#/components/schemas/LaunchableAgentRuntime"
           },
           "model": {
             "maxLength": 128,
