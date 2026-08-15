@@ -1267,9 +1267,9 @@ def test_retired_gemini_entry_dropped_when_antigravity_exists(tmp_path: Path) ->
                 status="ready",
             ),
             "antigravity": ProviderConfig(
-                credential_ref="env://GEMINI_API_KEY",
-                backend="env_ref",
-                source="env",
+                credential_ref="keyring://antigravity_key",
+                backend="keyring",
+                source="keyring",
                 status="ready",
             ),
         }
@@ -1287,6 +1287,7 @@ def test_retired_gemini_entry_dropped_when_antigravity_exists(tmp_path: Path) ->
 
     assert "gemini" not in updated_config.providers
     assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].credential_ref == "keyring://antigravity_key"
 
 
 @pytest.mark.unit
