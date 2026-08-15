@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -519,6 +519,24 @@ class WorkspaceRepository:
             stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc())
             .options(selectinload(Workspace.operations))
             .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def list_by_ids(
+        self,
+        workspace_ids: Sequence[str],
+    ) -> builtins.list[Workspace]:
+        """Fetch workspaces whose ids appear in ``workspace_ids`` (unordered).
+
+        Callers that need request-order projection must reorder the returned
+        rows. An empty id list short-circuits to avoid an empty ``IN ()``.
+        """
+        if not workspace_ids:
+            return []
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id.in_(list(workspace_ids)))
+            .options(selectinload(Workspace.operations))
         )
         return list((await self._session.execute(stmt)).scalars())
 
