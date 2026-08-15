@@ -32,8 +32,8 @@ HISTORICAL_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyTy
     {
         **DEFAULT_AGENT_DEFAULTS,
         # Retired runtimes retained so historical adoptions resolve implicit effort
-        # correctly when comparing replay requests.
-        AgentRuntime.gemini: AgentDefaults(model="gemini-1.5-pro", effort="xhigh"),
+        # and historical workspace projections report last-known defaults.
+        AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
     }
 )
 

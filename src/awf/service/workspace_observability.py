@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol, TypedDict, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.api.schemas import (
     StaleReasonListResponse,
@@ -490,7 +490,7 @@ def effective_agent_identity(
     task_policy: Mapping[str, object] | None,
 ) -> AgentIdentity:
     runtime = _coerce_agent_runtime(agent)
-    defaults = DEFAULT_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
+    defaults = HISTORICAL_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
     explicit_model = _nonblank_policy_string(task_policy, "agent_model")
     explicit_effort = _nonblank_policy_string(task_policy, "agent_effort")
 
