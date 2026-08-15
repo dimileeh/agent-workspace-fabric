@@ -473,6 +473,28 @@ def test_select_fallback_target_returns_indexed_target() -> None:
     assert _select_fallback_target(policy, state) is target
 
 
+def test_select_fallback_target_counts_retired_targets_before_cursor() -> None:
+    target = FallbackTarget(agent="codex", provider="openai", model="gpt-5")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target),
+        max_fallback_attempts=1,
+    )
+    state = ProviderRecoveryState(fallback_attempt_number=1)
+
+    assert _select_fallback_target(policy, state) is None
+
+
+def test_select_fallback_target_skips_retired_targets_at_or_after_cursor_for_free() -> None:
+    target = FallbackTarget(agent="codex", provider="openai", model="gpt-5")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target),
+        max_fallback_attempts=1,
+    )
+    state = ProviderRecoveryState(fallback_attempt_number=0)
+
+    assert _select_fallback_target(policy, state) is target
+
+
 def test_source_suppression_returns_decision_not_before_when_set() -> None:
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     decision = ProviderRecoveryDecision(
