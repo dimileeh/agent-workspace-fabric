@@ -22,6 +22,7 @@ from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
 )
+from awf.profiles.compose_auth_env import _AGENT_AUTH_SECRET_ENV_VARS, AGENT_AUTH_ENV_VARS
 from tests.unit.runtime.test_workspace_services_compose_parts import (
     test_workspace_services_compose_part_001 as _part_001,
 )
@@ -487,3 +488,33 @@ def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_overri
     assert profile_env["PLAIN_EMPTY"] == ""
     assert "OPENAI_API_KEY" not in filtered
     assert "PLAIN_EMPTY" not in filtered
+
+
+@pytest.mark.unit
+def test_google_application_credentials_not_forwarded_by_legacy_host_auth() -> None:
+    # Removing GOOGLE_APPLICATION_CREDENTIALS from AGENT_AUTH_ENV_VARS stops
+    # agent_environment_with_legacy_host_auth from ambiently forwarding the
+    # host ADC file path to every workspace while preserving secret redaction.
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_APPLICATION_CREDENTIALS": "/host/service-account.json"},
+    )
+
+    assert env == ()
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in _AGENT_AUTH_SECRET_ENV_VARS
+
+
+@pytest.mark.unit
+def test_google_api_key_not_forwarded_by_legacy_host_auth() -> None:
+    # Removing GOOGLE_API_KEY from AGENT_AUTH_ENV_VARS stops
+    # agent_environment_with_legacy_host_auth from ambiently forwarding
+    # legacy Google API keys to every workspace while preserving secret redaction.
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_API_KEY": "AIzaSyLegacyKey"},
+    )
+
+    assert env == ()
+    assert "GOOGLE_API_KEY" not in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_API_KEY" in _AGENT_AUTH_SECRET_ENV_VARS

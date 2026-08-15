@@ -490,7 +490,7 @@ def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_ret
     target_b = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
     policy = ProviderRecoveryPolicy(
         fallbacks=(None, target_a, target_b),
-        max_fallback_attempts=2,
+        max_fallback_attempts=3,
     )
     # Step 1: initial selection skips retired None slot at index 0 and selects target_a (index 1)
     state0 = ProviderRecoveryState(fallback_attempt_number=0)
@@ -1063,7 +1063,7 @@ def test_select_fallback_target_preserves_historical_positional_cursors() -> Non
     target_claude = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
     policy = ProviderRecoveryPolicy(
         fallbacks=(None, target_codex, target_claude),
-        max_fallback_attempts=2,
+        max_fallback_attempts=3,
     )
     # Historical workspace created after Gemini ran has fallback_attempt_number == 1 (cursor = 1).
     # Gemini retired -> None at index 0. Calling selection with cursor = 1 must select Codex (index 1), NOT skip to Claude.

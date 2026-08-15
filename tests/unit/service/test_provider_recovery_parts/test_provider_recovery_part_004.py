@@ -177,3 +177,106 @@ class TestTerminalState:
         assert decision.action == "terminal"
         assert decision.retryable is False
         assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_unsupported_agent_runtime_discards_inherited_recommended_action() -> None:
+    from awf.service.provider_recovery import (
+        ProviderRecoveryDecision,
+        _build_provider_recovery_state_view,
+        _decision_payload,
+        _recovery_task_policy,
+    )
+
+    metadata = {
+        "reason_code": "AGENT_AUTH_FAILED",
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "recommended_action": "Refresh provider credentials before retrying this workspace.",
+    }
+    decision = ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="UNSUPPORTED_AGENT_RUNTIME",
+        terminal_reason="UNSUPPORTED_AGENT_RUNTIME",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+    payload = _decision_payload(decision, metadata)
+    assert "recommended_action" not in payload
+
+    policy = _recovery_task_policy(
+        {},
+        source_workspace_id="ws-123",
+        source_attempt=None,
+        source_canonical_attempt=None,
+        metadata=metadata,
+        decision=decision,
+    )
+    assert "recommended_action" not in policy["provider_recovery_state"]
+
+    view = _build_provider_recovery_state_view(
+        {
+            **payload,
+            "recommended_action": "Refresh provider credentials before retrying this workspace.",
+        }
+    )
+    assert view.action == "terminal"
+    assert view.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+    assert view.recommended_action == "No further recovery possible; inspect failure details."
+
+
+def test_supported_terminal_decision_preserves_recommended_action() -> None:
+    from awf.service.provider_recovery import (
+        ProviderRecoveryDecision,
+        _build_provider_recovery_state_view,
+        _decision_payload,
+        _recovery_task_policy,
+    )
+
+    metadata = {
+        "reason_code": "PROVIDER_AUTH_FAILED",
+        "provider": "openai",
+        "model": "gpt-5",
+        "recommended_action": "Refresh provider credentials before retrying this workspace.",
+    }
+    decision = ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="PROVIDER_AUTH_FAILED",
+        terminal_reason="PROVIDER_AUTH_FAILED",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+    payload = _decision_payload(decision, metadata)
+    assert (
+        payload["recommended_action"]
+        == "Refresh provider credentials before retrying this workspace."
+    )
+
+    policy = _recovery_task_policy(
+        {},
+        source_workspace_id="ws-123",
+        source_attempt=None,
+        source_canonical_attempt=None,
+        metadata=metadata,
+        decision=decision,
+    )
+    assert (
+        policy["provider_recovery_state"]["recommended_action"]
+        == "Refresh provider credentials before retrying this workspace."
+    )
+
+    view = _build_provider_recovery_state_view(payload)
+    assert view.action == "terminal"
+    assert view.reason_code == "PROVIDER_AUTH_FAILED"
+    assert view.recommended_action == "Refresh provider credentials before retrying this workspace."

@@ -125,14 +125,7 @@ class ProviderRecoveryAttemptResult:
 
 @dataclass(frozen=True)
 class ProviderInPlaceRecoveryDecision:
-    """A retryable provider failure that should pause the SAME workspace into
-    ``recovering`` and re-run the agent in place after the cooldown (#612),
-    rather than fail-and-relaunch a fresh workspace.
-
-    ``not_before`` is the provider cooldown deadline; ``retry_attempt_number`` is
-    the budget-consuming count to persist so a second failure on the resumed run
-    correctly sees the budget spent; ``metadata`` is the classified provider
-    failure metadata to persist for observability / loop detection."""
+    """A retryable provider failure that pauses the workspace into recovering (#612)."""
 
     not_before: datetime
     reason_code: str
@@ -366,21 +359,7 @@ def should_recover_in_place(
     now: datetime,
     effective_default_model: str | None = None,
 ) -> ProviderInPlaceRecoveryDecision | None:
-    """Decide whether an agent-run failure should divert into in-place ``recovering``.
-
-    Single-sources the classify + budget logic the fail-and-relaunch path uses:
-    reconstructs the SAME provider-failure metadata
-    (``provider_recovery_metadata_from_failure``) and runs the SAME decision
-    (``decide_provider_recovery``). Returns a decision ONLY when the result is an
-    in-place retry — ``action == "retry"`` AND the target stays the current agent
-    (a fallback to a different agent/model is not an in-place resume and keeps
-    today's fresh-relaunch path). Returns ``None`` for a non-provider failure
-    (no metadata), a terminal/budget-exhausted decision, an auth failure, a loop
-    fingerprint, or a fallback — the caller then falls through to ``_mark_failed``
-    (and the existing downstream ``_prepare_provider_recovery`` policy is
-    unchanged for those branches). T7: lifting this UP to the executor fork lets
-    the divert land in ``recovering`` BEFORE the terminal teardown fires, with no
-    duplicated classification."""
+    """Decide whether an agent-run failure should divert into in-place recovering."""
     metadata = provider_recovery_metadata_from_failure(
         reason_code=reason_code,
         message=message,
