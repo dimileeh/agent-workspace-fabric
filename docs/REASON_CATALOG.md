@@ -39,6 +39,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_quota_exhausted](#antigravity_quota_exhausted)
 
+### ANTIGRAVITY_RUNTIME_CLI_PROBE_ERROR
+**Problem:** An error occurred while probing the Antigravity CLI ('agy') inside the agent runtime container.
+**Likely Cause:** The Antigravity CLI probe command failed or raised an unexpected error.
+**Operator Fix:** Verify the agent-runtime Docker image is accessible and intact, check worker logs, and re-run readiness checks.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_runtime_cli_probe_error](#antigravity_runtime_cli_probe_error)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.

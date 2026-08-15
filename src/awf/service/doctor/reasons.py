@@ -1109,6 +1109,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#antigravity_quota_exhausted",
     ),
+    "ANTIGRAVITY_RUNTIME_CLI_PROBE_ERROR": _ReasonText(
+        "An error occurred while probing the Antigravity CLI ('agy') inside the agent runtime container.",
+        "Verify the agent-runtime Docker image is accessible and intact, check worker logs, and re-run readiness checks.",
+        "The Antigravity CLI probe command failed or raised an unexpected error.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_runtime_cli_probe_error",
+    ),
     "OPENCODE_OLLAMA_AUTH_MISSING": _ReasonText(
         "No OpenCode/Ollama auth signal was visible.",
         "Mount ~/.config/opencode, mount ~/.ollama auth files, or set OLLAMA_API_KEY.",
