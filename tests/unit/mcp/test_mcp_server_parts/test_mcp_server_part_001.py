@@ -837,6 +837,56 @@ class TestToolRegistration:
         assert result.structuredContent["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_redacts_validation_credentials(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        secret_token = "sk-proj-secret123456789"
+        result = await mcp.call_tool(
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "profile": {
+                    "runtime": {"environment": {"API_KEY": secret_token}},
+                    "services": [{"name": "db"}, {"name": "db"}],
+                },
+            },
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        message = result.structuredContent["message"]
+        assert secret_token not in message
+        assert "sk-proj-" not in message
+        assert "profile.services" in message
+
+    @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_allows_retired_gemini_idempotency_replay(
         self,
         factory: async_sessionmaker[AsyncSession],

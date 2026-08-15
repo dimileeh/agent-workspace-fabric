@@ -32,11 +32,11 @@ from awf.db.enums import (
     AgentRuntime,
 )
 from awf.mcp.server import (
-    _error_result,
     _idempotency_key_error,
     _required_idempotency_key,
     _tool_error,
     _tool_result,
+    _validation_error_result,
     _workspace_error_result,
 )
 from awf.service.controls import WorkspaceControlError
@@ -249,7 +249,7 @@ def register_control_tools(
         except PRMonitorAdoptionError as exc:
             return _workspace_error_result(exc)
         except ValidationError as exc:
-            return _error_result("INVALID_REQUEST", str(exc))
+            return _validation_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_remonitor_workspace")

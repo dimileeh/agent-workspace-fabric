@@ -22,13 +22,14 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
     ErrorResponse,
     WorkspaceAcceptedResponse,
 )
+from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
@@ -256,6 +257,28 @@ def _error_result(
     """Build a ``CallToolResult`` error from an error code, message, and optional detail."""
     error = ErrorResponse(error_code=error_code, message=message, detail=detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    """Format a safe, redacted validation error message without model input payloads."""
+    errors = exc.errors(include_input=False, include_url=False)
+    if not errors:
+        return redact_audit_text("Validation error")
+    formatted: list[str] = []
+    for err in errors:
+        loc = err.get("loc", ())
+        loc_str = ".".join(str(part) for part in loc) if isinstance(loc, tuple) else str(loc)
+        msg = str(err.get("msg", "Validation error"))
+        if loc_str:
+            formatted.append(f"{loc_str}: {msg}")
+        else:
+            formatted.append(msg)
+    return redact_audit_text("; ".join(formatted))
+
+
+def _validation_error_result(exc: ValidationError) -> CallToolResult:
+    """Build an INVALID_REQUEST MCP error with safe, redacted validation details."""
+    return _error_result("INVALID_REQUEST", _validation_error_message(exc))
 
 
 def _required_idempotency_key(idempotency_key: str | None) -> str | None:
