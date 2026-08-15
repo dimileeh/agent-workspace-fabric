@@ -296,6 +296,29 @@ class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
         )
 
 
+class WorkspaceUnsupportedAgentRuntimeError(WorkspaceRetryError):
+    """Raised when an unsupported or retired agent runtime is requested during workspace creation."""
+
+    error_code = "UNSUPPORTED_AGENT_RUNTIME"
+
+    def __init__(self, agent: AgentRuntime | str) -> None:
+        """Initialise with the unsupported agent runtime."""
+        from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+        agent_str = agent.value if isinstance(agent, AgentRuntime) else str(agent)
+        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+        message = (
+            f"Agent runtime {agent_str!r} is not supported for workspace creation; "
+            f"supported runtimes: {supported}."
+        )
+        detail: dict[str, Any] = {
+            "agent": agent_str,
+            "supported_agents": [r.value for r in _LAUNCH_PROVIDER_BY_AGENT],
+        }
+        self.agent = agent_str
+        super().__init__(message, detail=detail)
+
+
 class WorkspaceCreateIdempotencyConflictError(Exception):
     """Raised when an idempotency key has conflicting payload data."""
 
@@ -1381,6 +1404,7 @@ __all__ = [
     "WorkspaceRetryExhaustedError",
     "WorkspaceRetrySalvageUnavailableError",
     "WorkspaceProviderReadinessBlockedError",
+    "WorkspaceUnsupportedAgentRuntimeError",
     "WorkspaceCreateIdempotencyConflictError",
     "HostPortConflict",
     "WorkspaceCreateHostPortConflictError",

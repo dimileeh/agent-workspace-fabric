@@ -605,7 +605,11 @@ class TestCreateWorkspace:
     ) -> None:  # type: ignore[no-untyped-def]
         idempotency_key = "mcp-gemini-replay-key"
 
-        # Create initial workspace row for gemini while preflight is bypassed
+        # Create initial workspace row for gemini while launchability and preflight are bypassed
+        monkeypatch.setattr(
+            "awf.service.workspaces_create._assert_supported_agent_runtime",
+            lambda _a: None,
+        )
         monkeypatch.setattr(
             "awf.service.workspaces_create._raise_if_provider_preflight_blocks",
             lambda _p: None,
@@ -655,7 +659,7 @@ class TestCreateWorkspace:
 
         assert isinstance(result, CallToolResult)
         assert result.isError is True
-        assert result.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+        assert result.structuredContent["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
     async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(

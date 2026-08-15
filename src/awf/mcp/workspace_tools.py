@@ -101,6 +101,7 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetrySourceRuntimeNotReleasedError,
     WorkspaceService,
+    WorkspaceUnsupportedAgentRuntimeError,
 )
 
 if TYPE_CHECKING:
@@ -473,6 +474,8 @@ def register_workspace_tools(
         except WorkspaceCreateHostPortConflictError as exc:
             return _workspace_error_result(exc)
         except WorkspaceCreateDuplicateHostPortError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceUnsupportedAgentRuntimeError as exc:
             return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(

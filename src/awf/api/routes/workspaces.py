@@ -98,6 +98,7 @@ from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceRetryNotFoundError,
+    WorkspaceUnsupportedAgentRuntimeError,
     _egress_audit_response,
     create_workspace_row_checked,
     owned_path_overlap_warnings,
@@ -362,6 +363,9 @@ async def create_workspace(
     except WorkspaceProviderReadinessBlockedError as exc:
         await session.rollback()
         return _provider_readiness_blocked_response(exc)
+    except WorkspaceUnsupportedAgentRuntimeError as exc:
+        await session.rollback()
+        return _workspace_conflict_error_response(exc)
 
     if idempotency_key is not None:
         replay_key_cache.remember(
