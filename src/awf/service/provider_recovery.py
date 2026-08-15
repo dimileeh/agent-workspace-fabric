@@ -841,9 +841,13 @@ def parse_provider_recovery_state(
     else:
         policy = parse_provider_recovery_policy(task_policy)
         if policy.fallbacks and fallback_attempt_number > 0:
-            launched_fallback_attempts = sum(
+            non_none_count = sum(
                 1 for target in policy.fallbacks[:fallback_attempt_number] if target is not None
             )
+            if fallback_attempt_number == 1 and non_none_count == 0:
+                launched_fallback_attempts = 1
+            else:
+                launched_fallback_attempts = non_none_count
         else:
             launched_fallback_attempts = fallback_attempt_number
 

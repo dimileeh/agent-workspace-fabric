@@ -1081,3 +1081,64 @@ def test_select_fallback_target_preserves_historical_positional_cursors() -> Non
     # After Claude Code runs, fallback_attempt_number becomes 3 (out of bounds).
     state3 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1)
     assert _select_fallback_target(policy, state3) is None
+
+
+def test_parse_provider_recovery_state_counts_retired_targets_in_legacy_state() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "max_fallback_attempts": 2,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+                {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 1,
+        },
+    }
+
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 1
+    assert state.launched_fallback_attempts == 1
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "fallback"
+    assert decision.target_agent == "codex"
+    assert decision.launched_fallback_attempts == 2
+
+    task_policy_after_codex_failure = {
+        "provider_recovery": task_policy["provider_recovery"],
+        "provider_recovery_state": {
+            "fallback_attempt_number": decision.fallback_attempt_number,
+            "launched_fallback_attempts": decision.launched_fallback_attempts,
+        },
+    }
+    decision2 = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4",
+        },
+        task_policy=task_policy_after_codex_failure,
+        current_agent="codex",
+        current_model="gpt-4",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision2.action == "terminal"
+    assert decision2.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
