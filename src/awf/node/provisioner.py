@@ -1153,22 +1153,9 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         workspace: Workspace,
         execution_claim_epoch: int | None = None,
     ) -> bool:
-        """Fail fast unsupported agent runtimes before provisioning; return True if rejected.
-
-        Runs unconditionally before creating worktrees, Compose stacks, or auth mounts
-        so a requested row with a historical or unknown agent runtime (such as retired Gemini)
-        fails fast without consuming provisioning resources.
-        """
-        from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
-
-        try:
-            agent = AgentRuntime(workspace.agent)
-        except ValueError:
-            agent = None
-
-        if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
-            supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
-            message = f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."
+        """Fail fast unsupported agent runtimes before provisioning; return True if rejected."""
+        message = _provisioner_helpers.check_unsupported_agent_runtime(workspace.agent)
+        if message is not None:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.policy_failure,
@@ -1503,20 +1490,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         reason_code: str,
     ) -> None:
         """Log and record an event when an action is skipped due to a stale workspace status."""
-        _log.info(
-            "provisioner.skip_stale_status",
-            workspace_id=ws.id,
-            action=action,
-            expected_status=expected.value,
-            status=ws.status,
-        )
-        await repo.add_event(
-            ws,
-            event_type="workspace.stale_action_skipped",
-            reason_code=reason_code,
-            payload={
-                "action": action,
-                "expected_status": expected.value,
-                "actual_status": ws.status,
-            },
+        await _provisioner_helpers.record_stale_action_skip(
+            repo, ws, action=action, expected=expected, reason_code=reason_code
         )

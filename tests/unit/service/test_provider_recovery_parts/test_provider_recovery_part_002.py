@@ -50,7 +50,7 @@ from awf.service.provider_recovery import (
     provider_recovery_metadata_from_workspace,
     provider_recovery_state_for_workspace,
 )
-from awf.service.workspaces import WorkspaceService, workspace_create_task_policy_snapshot
+from awf.service.workspaces import WorkspaceService
 from tests.postgres import postgres_test_engine
 
 """Provider/model recovery policy and fallback attempt tests."""
@@ -1468,65 +1468,3 @@ class TestFallbackInheritanceCompleteness:
         assert fallback_attempt.parent_attempt_id == attempts[0].id
         assert fallback_attempt.redispatch_from_attempt_id == attempts[0].id
         assert fallback_attempt.is_canonical_for_merge is False
-
-
-class TestTerminalState:
-    """Prove finite termination for repeated fingerprints and exhausted
-    fallbacks."""
-
-    def test_repeated_fingerprint_three_times_is_terminal(self) -> None:
-        policy = workspace_create_task_policy_snapshot(_request())
-        metadata = provider_recovery_metadata_from_failure(
-            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-            message="RESOURCE_EXHAUSTED RetryableQuotaError",
-            details={"provider": "google", "model": "gemini-2.5-pro"},
-            task_policy=policy,
-        )
-        assert metadata is not None
-        policy["provider_recovery_state"] = {
-            "failure_fingerprints": [
-                "other-fingerprint",
-                metadata["failure_fingerprint"],
-                metadata["failure_fingerprint"],
-            ],
-            "fallback_attempt_number": 0,
-            "retry_attempt_number": 3,
-        }
-
-        decision = decide_provider_recovery(
-            metadata,
-            task_policy=policy,
-            current_agent="codex",
-            current_model="gpt-5.5",
-            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
-        )
-
-        assert decision.action == "terminal"
-        assert decision.retryable is False
-        assert decision.terminal_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
-
-    def test_exhausted_fallbacks_is_terminal(self) -> None:
-        policy = workspace_create_task_policy_snapshot(_request())
-        metadata = provider_recovery_metadata_from_failure(
-            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-            message="RESOURCE_EXHAUSTED RetryableQuotaError",
-            details={"provider": "google", "model": "gemini-2.5-pro"},
-            task_policy=policy,
-        )
-        assert metadata is not None
-        policy["provider_recovery_state"] = {
-            "fallback_attempt_number": 1,
-            "retry_attempt_number": 1,
-        }
-
-        decision = decide_provider_recovery(
-            metadata,
-            task_policy=policy,
-            current_agent="codex",
-            current_model="gpt-5.3-codex",
-            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
-        )
-
-        assert decision.action == "terminal"
-        assert decision.retryable is False
-        assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"

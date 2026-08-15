@@ -1037,7 +1037,6 @@ class TestUnexpectedErrorDuringAgentRun:
             task_policy={
                 "agent_model": override_model,
                 "provider_recovery": {
-                    "fallbacks": [],
                     "max_same_provider_retries": 1,
                     "cooldown_seconds": 30,
                     "backoff_seconds": 30,

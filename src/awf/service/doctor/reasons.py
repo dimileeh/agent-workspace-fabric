@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
+from awf.service.doctor.reasons_helpers import get_salvage_and_monitor_reasons
 
 
 @dataclass(frozen=True)
@@ -1374,88 +1375,8 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "uv run --python 3.12 --extra dev pre-commit run --all-files",
         "docs/REASON_CATALOG.md#post_agent_commit_precommit_failed",
     ),
-    "POST_AGENT_FORMAT_REPAIR_FAILED": _ReasonText(
-        (
-            "AWF detected a repairable post-agent pre-commit failure but the "
-            "repair pipeline itself exited non-zero before the retry commit could run."
-        ),
-        "Inspect the workspace logs for the repair sub-step stderr, fix the toolchain or git state, and remonitor.",
-        (
-            "The workspace image is missing `uv` or dev extras, the pinned Python "
-            "version is unavailable, `ruff` crashed on flagged paths, or the "
-            "post-repair `git add` failed. The corresponding "
-            "``workspace.post_agent_commit_repair`` event records "
-            '``retry_outcome="error"``.'
-        ),
-        "awf workspace logs <workspace_id>",
-        "docs/REASON_CATALOG.md#post_agent_format_repair_failed",
-    ),
-    "POST_AGENT_GIT_ADD_FAILED": _ReasonText(
-        (
-            "``git add -A`` failed during post-agent salvage (e.g. exit 128 with "
-            "``fatal: not a git repository``)."
-        ),
-        "Inspect the worktree, recover any salvageable files manually, and recreate the workspace.",
-        (
-            "The agent damaged the worktree's git metadata or removed ``.git``; "
-            "no commit could be attempted to capture work."
-        ),
-        "awf workspace logs <workspace_id>",
-        "docs/REASON_CATALOG.md#post_agent_git_add_failed",
-    ),
-    "PROVIDER_AUTH_FAILED": _ReasonText(
-        (
-            "A workspace agent or PR monitor could not run because the selected "
-            "LLM provider authentication failed."
-        ),
-        (
-            "Refresh the provider credentials, restart or rebuild the AWF "
-            "service/runtime if credentials are mounted into containers, then "
-            "remonitor or reschedule the workspace."
-        ),
-        (
-            "The provider token is expired, reused, missing inside the workspace "
-            "runtime, or rejected by the provider CLI/API."
-        ),
-        "awf service doctor",
-        "docs/REASON_CATALOG.md#provider_auth_failed",
-    ),
-    "OLLAMA_MODEL_PULL_FAILED": _ReasonText(
-        (
-            "AWF could not make the requested OpenCode/Ollama model available: the "
-            "host daemon failed to pull it before the agent run."
-        ),
-        (
-            "Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), "
-            "confirm the model name and registry reachability, then recreate or "
-            "remonitor the workspace once the model can be pulled."
-        ),
-        (
-            "The requested model is not present in the daemon's `/api/tags`, is not "
-            "an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` "
-            "reported an error, timed out, or left the model still missing — for "
-            "example a misspelled model name or an unreachable model registry."
-        ),
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("OLLAMA_MODEL_PULL_FAILED"),
-    ),
-    "MONITOR_RECOVERY_SUPERSEDED": _ReasonText(
-        (
-            "AWF cancelled a PR-monitor recovery operation because another worker "
-            "claimed the monitor lease and started a replacement recovery operation."
-        ),
-        (
-            "No action is usually required if another recovery operation is already "
-            "running. If the workspace is stuck without an active monitor, remonitor it."
-        ),
-        (
-            "This worker lost the monitoring_pr claim to another worker that registered "
-            "a replacement remonitor recovery operation before this worker could finalize."
-        ),
-        "awf workspace show <workspace_id>",
-        _reason_catalog_link("MONITOR_RECOVERY_SUPERSEDED"),
-    ),
 }
+_REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
 
 
 def _reason_text(
@@ -1468,37 +1389,40 @@ def _reason_text(
     """Return catalog text or fallback diagnostic guidance for a reason."""
     text = _REASON_TEXT.get(reason)
     if text is None:
-        if status == "ok":
-            return _ReasonText(f"{label} check passed.", "No action required.", "", "", "")
-        if status == "skipped":
-            return _ReasonText(
-                f"{label} check was skipped.",
-                "Fix prerequisite checks first.",
-                "Prerequisites failed.",
-                "awf service doctor",
-                "",
+        msg = (
+            f"{label} check passed."
+            if status == "ok"
+            else (
+                f"{label} check was skipped."
+                if status == "skipped"
+                else f"{label} check reported {status}."
             )
-        return _ReasonText(
-            f"{label} check reported {status}.",
-            "Inspect the diagnostic detail and the matching service status check.",
-            "An unknown diagnostic check failed.",
-            "awf service doctor",
-            "",
         )
-    if reason == "API_UNREACHABLE" and context and context.get("url"):
-        return _ReasonText(
-            f"AWF API is not reachable at {context['url']}.",
-            text.action,
-            text.likely_cause,
-            text.related_command,
-            text.docs_link,
+        act = (
+            "No action required."
+            if status == "ok"
+            else (
+                "Fix prerequisite checks first."
+                if status == "skipped"
+                else "Inspect diagnostic detail and matching check."
+            )
         )
-    if reason == "PORT_OPEN" and context and context.get("endpoint"):
-        return _ReasonText(
-            f"{context['endpoint']} is accepting connections.",
-            text.action,
-            text.likely_cause,
-            text.related_command,
-            text.docs_link,
+        cause = (
+            ""
+            if status == "ok"
+            else ("Prerequisites failed." if status == "skipped" else "An unknown check failed.")
         )
+        cmd = "" if status == "ok" else "awf service doctor"
+        return _ReasonText(msg, act, cause, cmd, "")
+    if context and reason in ("API_UNREACHABLE", "PORT_OPEN"):
+        val = context.get("url" if reason == "API_UNREACHABLE" else "endpoint")
+        if val:
+            summary = (
+                f"AWF API is not reachable at {val}."
+                if reason == "API_UNREACHABLE"
+                else f"{val} is accepting connections."
+            )
+            return _ReasonText(
+                summary, text.action, text.likely_cause, text.related_command, text.docs_link
+            )
     return text

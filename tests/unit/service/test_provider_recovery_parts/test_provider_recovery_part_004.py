@@ -100,3 +100,80 @@ def test_service_down_does_not_reclassify_non_timeout_failures() -> None:
     assert result.reason_code == AGENT_AUTH_FAILED
     assert result.failure_type == "auth"
     assert result.failure_scope == "provider"
+
+
+class TestTerminalState:
+    """Prove finite termination for repeated fingerprints and exhausted fallbacks."""
+
+    def test_repeated_fingerprint_three_times_is_terminal(self) -> None:
+        from datetime import UTC, datetime
+
+        from awf.service.provider_recovery import decide_provider_recovery
+        from awf.service.workspaces import workspace_create_task_policy_snapshot
+        from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_002 import (
+            _request,
+        )
+
+        policy = workspace_create_task_policy_snapshot(_request())
+        metadata = provider_recovery_metadata_from_failure(
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            message="RESOURCE_EXHAUSTED RetryableQuotaError",
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+            task_policy=policy,
+        )
+        assert metadata is not None
+        policy["provider_recovery_state"] = {
+            "failure_fingerprints": [
+                "other-fingerprint",
+                metadata["failure_fingerprint"],
+                metadata["failure_fingerprint"],
+            ],
+            "fallback_attempt_number": 0,
+            "retry_attempt_number": 3,
+        }
+
+        decision = decide_provider_recovery(
+            metadata,
+            task_policy=policy,
+            current_agent="codex",
+            current_model="gpt-5.5",
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        )
+
+        assert decision.action == "terminal"
+        assert decision.retryable is False
+        assert decision.terminal_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+
+    def test_exhausted_fallbacks_is_terminal(self) -> None:
+        from datetime import UTC, datetime
+
+        from awf.service.provider_recovery import decide_provider_recovery
+        from awf.service.workspaces import workspace_create_task_policy_snapshot
+        from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_002 import (
+            _request,
+        )
+
+        policy = workspace_create_task_policy_snapshot(_request())
+        metadata = provider_recovery_metadata_from_failure(
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            message="RESOURCE_EXHAUSTED RetryableQuotaError",
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+            task_policy=policy,
+        )
+        assert metadata is not None
+        policy["provider_recovery_state"] = {
+            "fallback_attempt_number": 1,
+            "retry_attempt_number": 1,
+        }
+
+        decision = decide_provider_recovery(
+            metadata,
+            task_policy=policy,
+            current_agent="codex",
+            current_model="gpt-5.3-codex",
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        )
+
+        assert decision.action == "terminal"
+        assert decision.retryable is False
+        assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"

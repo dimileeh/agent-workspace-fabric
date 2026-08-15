@@ -1367,40 +1367,50 @@ def _parse_not_before(not_before_str: str | None) -> tuple[datetime | None, date
         return None, None
 
 
-def _provider_recovery_state_from_task_policy(
-    recovery_state: Mapping[str, Any],
-) -> ProviderRecoveryStateView | None:
-    action = _validate_recovery_action(_mapping_str(recovery_state, "action"))
-    reason_code = _mapping_str(recovery_state, "decision_reason_code") or _mapping_str(
-        recovery_state, "source_reason_code"
+def _build_provider_recovery_state_view(
+    recovery: Mapping[str, Any],
+    payload: Mapping[str, Any] | None = None,
+    default_reason_code: str | None = None,
+) -> ProviderRecoveryStateView:
+    payload_map = payload or {}
+    action = _validate_recovery_action(_mapping_str(recovery, "action"))
+    reason_code = (
+        _mapping_str(recovery, "decision_reason_code")
+        or _mapping_str(recovery, "source_reason_code")
+        or _mapping_str(recovery, "reason_code")
+        or default_reason_code
     )
-    source_provider = _mapping_str(recovery_state, "source_provider")
-    source_model = _mapping_str(recovery_state, "source_model")
+    source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(
+        recovery, "provider"
+    )
+    source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     retry_attempt_number = (
-        _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0)
-        if "retry_attempt_number" in recovery_state
+        _nonnegative_int(recovery.get("retry_attempt_number"), default=0)
+        if "retry_attempt_number" in recovery
         else None
     )
     fallback_attempt_number = (
-        _nonnegative_int(recovery_state.get("fallback_attempt_number"), default=0)
-        if "fallback_attempt_number" in recovery_state
+        _nonnegative_int(recovery.get("fallback_attempt_number"), default=0)
+        if "fallback_attempt_number" in recovery
         else None
     )
-    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery_state, "not_before"))
-    target_agent = _mapping_str(recovery_state, "target_agent")
-    target_provider = _mapping_str(recovery_state, "target_provider")
-    target_model = _mapping_str(recovery_state, "target_model")
-    fallback_target: FallbackTarget | None = None
-    if action == "fallback" and target_agent is not None and target_model is not None:
-        fallback_target = FallbackTarget(
-            agent=target_agent,
-            provider=target_provider,
-            model=target_model,
-        )
-    source_workspace_id = _mapping_str(recovery_state, "source_workspace_id")
-    source_attempt_id = _mapping_str(recovery_state, "source_attempt_id")
+    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
+    target_agent = _mapping_str(recovery, "target_agent")
+    target_provider = _mapping_str(recovery, "target_provider")
+    target_model = _mapping_str(recovery, "target_model")
+    fallback_target = (
+        FallbackTarget(agent=target_agent, provider=target_provider, model=target_model)
+        if action == "fallback" and target_agent and target_model
+        else None
+    )
+    source_workspace_id = _mapping_str(recovery, "source_workspace_id") or _mapping_str(
+        payload_map, "source_workspace_id"
+    )
+    source_attempt_id = _mapping_str(recovery, "source_attempt_id") or _mapping_str(
+        payload_map, "source_attempt_id"
+    )
     recommended_action = _mapping_str(
-        recovery_state, "recommended_action"
+        recovery, "recommended_action"
     ) or _recommended_action_for_action(action)
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
@@ -1418,6 +1428,12 @@ def _provider_recovery_state_from_task_policy(
         recommended_action=recommended_action,
         terminal=terminal,
     )
+
+
+def _provider_recovery_state_from_task_policy(
+    recovery_state: Mapping[str, Any],
+) -> ProviderRecoveryStateView | None:
+    return _build_provider_recovery_state_view(recovery_state)
 
 
 def _provider_recovery_state_from_events(
@@ -1446,57 +1462,9 @@ def _provider_recovery_state_from_events(
     recovery = payload.get("provider_recovery")
     if not isinstance(recovery, Mapping):
         recovery = payload
-    action = _validate_recovery_action(_mapping_str(recovery, "action"))
-    reason_code = (
-        _mapping_str(recovery, "decision_reason_code")
-        or _mapping_str(recovery, "reason_code")
-        or (getattr(latest_event, "reason_code", None) or None)
-    )
-    source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(
-        recovery, "provider"
-    )
-    source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
-    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
-    target_agent = _mapping_str(recovery, "target_agent")
-    target_provider = _mapping_str(recovery, "target_provider")
-    target_model = _mapping_str(recovery, "target_model")
-    fallback_target: FallbackTarget | None = None
-    if action == "fallback" and target_agent is not None and target_model is not None:
-        fallback_target = FallbackTarget(
-            agent=target_agent,
-            provider=target_provider,
-            model=target_model,
-        )
-    source_workspace_id = _mapping_str(payload, "source_workspace_id")
-    source_attempt_id = _mapping_str(payload, "source_attempt_id")
-    retry_attempt_number = (
-        _nonnegative_int(recovery.get("retry_attempt_number"), default=0)
-        if "retry_attempt_number" in recovery
-        else None
-    )
-    fallback_attempt_number = (
-        _nonnegative_int(recovery.get("fallback_attempt_number"), default=0)
-        if "fallback_attempt_number" in recovery
-        else None
-    )
-    recommended_action = _mapping_str(
-        recovery, "recommended_action"
-    ) or _recommended_action_for_action(action)
-    terminal = action == "terminal" if action is not None else None
-    return ProviderRecoveryStateView(
-        action=action,
-        reason_code=reason_code,
-        source_provider=source_provider,
-        source_model=source_model,
-        retry_attempt_number=retry_attempt_number,
-        fallback_attempt_number=fallback_attempt_number,
-        cooldown_until=cooldown_until,
-        next_eligible_at=next_eligible_at,
-        fallback_target=fallback_target,
-        source_workspace_id=source_workspace_id,
-        source_attempt_id=source_attempt_id,
-        recommended_action=recommended_action,
-        terminal=terminal,
+    default_reason = getattr(latest_event, "reason_code", None) or None
+    return _build_provider_recovery_state_view(
+        recovery, payload=payload, default_reason_code=default_reason
     )
 
 

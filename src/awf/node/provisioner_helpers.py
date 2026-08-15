@@ -245,3 +245,50 @@ def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
     if mode == ProfileEgressMode.offline:
         return "internal_only"
     return "policy_decision"
+
+
+async def record_stale_action_skip(
+    repo: Any,
+    ws: Workspace,
+    *,
+    action: str,
+    expected: Any,
+    reason_code: str,
+) -> None:
+    """Log and record an event when an action is skipped due to a stale workspace status."""
+    import structlog
+
+    _log = structlog.get_logger(__name__)
+    _log.info(
+        "provisioner.skip_stale_status",
+        workspace_id=ws.id,
+        action=action,
+        expected_status=expected.value,
+        status=ws.status,
+    )
+    await repo.add_event(
+        ws,
+        event_type="workspace.stale_action_skipped",
+        reason_code=reason_code,
+        payload={
+            "action": action,
+            "expected_status": expected.value,
+            "actual_status": ws.status,
+        },
+    )
+
+
+def check_unsupported_agent_runtime(agent_name: str) -> str | None:
+    """Return error message if agent_name is unsupported, else None."""
+    from awf.db.enums import AgentRuntime
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+    try:
+        agent = AgentRuntime(agent_name)
+    except ValueError:
+        agent = None
+
+    if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
+        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+        return f"agent runtime {agent_name!r} is not supported; supported runtimes: {supported}."
+    return None

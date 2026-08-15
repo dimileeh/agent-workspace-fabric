@@ -1313,7 +1313,7 @@ class TestGetAndList:
                 **_CREATE_ARGS,
                 "repo_url": repo_url,
                 "task_title": "matching",
-                "agent": "gemini",
+                "agent": "opencode",
             },
         )
         wrong_status = await _call(
@@ -1323,7 +1323,7 @@ class TestGetAndList:
                 **_CREATE_ARGS,
                 "repo_url": repo_url,
                 "task_title": "wrong status",
-                "agent": "gemini",
+                "agent": "opencode",
             },
         )
         wrong_agent = await _call(
@@ -1343,7 +1343,7 @@ class TestGetAndList:
                 **_CREATE_ARGS,
                 "repo_url": "git@github.com:example/other.git",
                 "task_title": "wrong repo",
-                "agent": "gemini",
+                "agent": "opencode",
             },
         )
         assert isinstance(matching, dict)
@@ -1373,7 +1373,7 @@ class TestGetAndList:
             "awf_list_workspaces",
             {
                 "status": "ready",
-                "agent": "gemini",
+                "agent": "opencode",
                 "repo_url": repo_url,
                 "limit": 10,
             },
