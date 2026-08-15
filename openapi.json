@@ -9424,6 +9424,7 @@
         "type": "object"
       },
       "WorkspaceOverviewBatchRequest": {
+        "additionalProperties": false,
         "description": "Bounded batch lookup for known workspace IDs (hosted projection).",
         "properties": {
           "workspace_ids": {

@@ -1220,6 +1220,8 @@ class WorkspaceOverviewListResponse(BaseModel):
 class WorkspaceOverviewBatchRequest(BaseModel):
     """Bounded batch lookup for known workspace IDs (hosted projection)."""
 
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     workspace_ids: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=128)]],
         Field(min_length=1, max_length=200),

@@ -117,6 +117,8 @@ async def test_batch_overview_route_direct_call_covers_handler(
         {"workspace_ids": "ws_a"},
         {"workspace_ids": [1]},
         {"workspace_ids": [""]},
+        {"workspace_ids": ["   "]},
+        {"workspace_ids": ["ws_a"], "unexpected": True},
     ],
 )
 async def test_batch_overview_rejects_invalid_payloads(
