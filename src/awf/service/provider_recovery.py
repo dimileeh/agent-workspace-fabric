@@ -993,6 +993,7 @@ def _terminal_decision(
         terminal_reason=terminal_reason,
         fallback_attempt_number=state.fallback_attempt_number,
         retry_attempt_number=state.retry_attempt_number,
+        launched_fallback_attempts=state.launched_fallback_attempts,
     )
 
 

@@ -614,6 +614,7 @@ def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_b
         terminal_reason="PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
         fallback_attempt_number=2,
         retry_attempt_number=0,
+        launched_fallback_attempts=1,
     )
 
 
@@ -966,6 +967,42 @@ def test_skipped_placeholder_slot_remains_free_across_decisions() -> None:
     )
     assert decision3.action == "terminal"
     assert decision3.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+    assert decision3.launched_fallback_attempts == 2
+
+
+def test_terminal_decision_preserves_launched_fallback_attempts() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [{"agent": "codex", "model": "gpt-5.5"}],
+            "max_fallback_attempts": 1,
+            "max_same_provider_retries": 1,
+        },
+        "provider_recovery_state": {
+            "retry_attempt_number": 1,
+            "fallback_attempt_number": 1,
+            "launched_fallback_attempts": 1,
+        },
+    }
+    decision = decide_provider_recovery(
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+    assert decision.action == "terminal"
+    assert decision.launched_fallback_attempts == 1
+
+    updated_policy = provider_recovery_mod._recovery_task_policy(
+        task_policy,
+        source_workspace_id="ws-123",
+        source_attempt=None,
+        source_canonical_attempt=None,
+        metadata={"reason_code": "PROVIDER_FAILURE"},
+        decision=decision,
+    )
+    assert updated_policy["provider_recovery_state"]["launched_fallback_attempts"] == 1
 
 
 def test_same_provider_retry_precedes_available_fallback() -> None:
