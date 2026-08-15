@@ -736,24 +736,24 @@ class TestUnexpectedErrorDuringAgentRun:
         from awf.adapters import base as adapter_base
         from awf.db.enums import AgentRuntime, FailureReason
 
-        class _StderrClassifyingGeminiAdapter(adapter_base.AgentAdapter):
-            runtime = AgentRuntime.gemini
+        class _StderrClassifyingAntigravityAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.antigravity
 
             @property
             def name(self) -> AgentRuntime:
-                return AgentRuntime.gemini
+                return AgentRuntime.antigravity
 
             def get_provider(self, model: str | None) -> str:
                 return "google"
 
             def _cli_args(self, *, model: str | None) -> list[str]:
                 del model
-                return ["gemini", "run"]
+                return ["antigravity", "run"]
 
         monkeypatch.setitem(
             adapter_base._REGISTRY,
-            AgentRuntime.gemini,
-            _StderrClassifyingGeminiAdapter,
+            AgentRuntime.antigravity,
+            _StderrClassifyingAntigravityAdapter,
         )
 
         resolved_profile = _provider_recovery_resolved_profile()
@@ -763,7 +763,7 @@ class TestUnexpectedErrorDuringAgentRun:
         ]
         ws_id = await _seed_ready(
             factory,
-            agent="gemini",
+            agent="antigravity",
             task_prompt="Preserve this prompt for fallback execution.",
             task_policy=_provider_recovery_policy(max_same_provider_retries=0),
             owned_paths=["src/awf/control/**", "tests/unit/control/**"],
@@ -924,24 +924,24 @@ class TestUnexpectedErrorDuringAgentRun:
         from awf.adapters import base as adapter_base
         from awf.db.enums import AgentRuntime
 
-        class _StderrClassifyingGeminiAdapter(adapter_base.AgentAdapter):
-            runtime = AgentRuntime.gemini
+        class _StderrClassifyingAntigravityAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.antigravity
 
             @property
             def name(self) -> AgentRuntime:
-                return AgentRuntime.gemini
+                return AgentRuntime.antigravity
 
             def get_provider(self, model: str | None) -> str:
                 return "google"
 
             def _cli_args(self, *, model: str | None) -> list[str]:
                 del model
-                return ["gemini", "run"]
+                return ["antigravity", "run"]
 
         monkeypatch.setitem(
             adapter_base._REGISTRY,
-            AgentRuntime.gemini,
-            _StderrClassifyingGeminiAdapter,
+            AgentRuntime.antigravity,
+            _StderrClassifyingAntigravityAdapter,
         )
         task_policy = _provider_recovery_policy(max_same_provider_retries=1)
         retry_after_seconds = 45
@@ -951,7 +951,7 @@ class TestUnexpectedErrorDuringAgentRun:
 
         ws_id = await _seed_ready(
             factory,
-            agent="gemini",
+            agent="antigravity",
             task_policy=task_policy,
             create_task_attempt=True,
         )
