@@ -223,14 +223,15 @@ convention — pg16 wants `/var/lib/postgresql/data`, pg18 wants
 You do **not** pass auth bind mounts — AWF resolves and prepares auth
 per-workspace (`src/awf/node/auth_mounts.py`):
 
-- **rw provider auth** (codex, claude, antigravity, opencode, grok, ollama) is
+- **rw provider auth** (codex, claude, opencode, grok, ollama) is
   **seeded from your host into per-workspace isolated dirs** under
   `${AWF_HOST_WORK_DIR:-~/.awf/service}/auth/<workspace_id>/<tool>/` — not bind-
   mounted live from `~`. (Claude uses an overlayfs scheme plus the single-file
   `/home/agent/.claude.json` mount it needs to find its own config on token
   refresh.)
 - **ro auth**: `~/.config/gh`, `~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, plus
-  `GOOGLE_APPLICATION_CREDENTIALS` if set. Cursor is env-key-only (no mount).
+  `GOOGLE_APPLICATION_CREDENTIALS` if set. Cursor and Antigravity are env-key-only
+  (no mount; Antigravity uses `GEMINI_API_KEY`).
 - For anything non-default, use **profile secret leases** (§6), not raw mounts.
 
 The container user is `agent` (UID 1000); AWF chowns the per-workspace auth dirs
@@ -436,7 +437,7 @@ Common failure modes + fixes:
 | Companion never `service_healthy` | Wrong health URL | Curl the real service's health route on the host; fix `healthcheck_cmd` |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or didn't commit) | Widen prompt scope; check `git log base..HEAD` in the worktree |
 | `failed to parse compose.yml` | Hand-rolled compose with mixed quoting | The template uses `tojson`; declare via the profile, don't hand-roll |
-| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/antigravity/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
+| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/opencode/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
 
 ## 12 — Cleanup
 
