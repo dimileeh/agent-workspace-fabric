@@ -34,6 +34,28 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   await expect(page.getByText("OpenCode workspace").first()).toBeVisible();
   await agentGroup.getByLabel("all").check();
 
+  // Mock a subsequent overview response that omits Gemini to test retained agent options
+  await page.route("**/api/awf/workspaces/overview*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        listEnvelope([
+          workspaceOverview("ws_2", "OpenCode workspace", "opencode", "ollama/glm-5.1:cloud", "running"),
+          workspaceOverview("ws_3", "Completed workspace", "codex", "gpt-5.5", "completed"),
+        ])
+      ),
+    });
+  });
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(page.getByText("Gemini workspace").first()).not.toBeVisible();
+  await expect(agentGroup.getByLabel("gemini")).toBeVisible();
+
+  // Restore default overview route for subsequent model filter assertions
+  await page.unroute("**/api/awf/workspaces/overview*");
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(page.getByText("Gemini workspace").first()).toBeVisible();
+
   // Find model selector and select exact models
   const modelGroup = page.getByRole("group", { name: "Model" });
   await modelGroup.getByRole("button", { name: /Model all/ }).click();
