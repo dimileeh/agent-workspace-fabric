@@ -168,13 +168,30 @@ const searchParams = useSearchParams();
     }
   }, [selectedId]);
 
-  const availableModels = useMemo(() => {
-    return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
+  const [retainedAgents, setRetainedAgents] = useState<AgentRuntime[]>([]);
+  const [retainedModels, setRetainedModels] = useState<string[]>([]);
+
+  useEffect(() => {
+    const agents = overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a));
+    if (agents.length > 0) {
+      setRetainedAgents((prev) => Array.from(new Set([...prev, ...agents])).sort());
+    }
+    const models = overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m));
+    if (models.length > 0) {
+      setRetainedModels((prev) => Array.from(new Set([...prev, ...models])).sort());
+    }
   }, [overview]);
 
+  const availableModels = useMemo(() => {
+    const currentModels = overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m));
+    return Array.from(new Set([...retainedModels, ...currentModels])).sort();
+  }, [overview, retainedModels]);
+
   const availableAgents = useMemo(() => {
-    return Array.from(new Set(overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a)))).sort();
-  }, [overview]);
+    const currentAgents = overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a));
+    return Array.from(new Set([...retainedAgents, ...currentAgents])).sort();
+  }, [overview, retainedAgents]);
+
 
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
