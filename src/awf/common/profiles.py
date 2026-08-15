@@ -109,12 +109,14 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
     "agent",
     "agent_image",
     "allow_hosts",
+    "app_endpoints",
     "artifacts",
     "auto_merge",
     "awf",
     "base_branch",
     "browsers",
     "build_context",
+    "by_base_branch",
     "command",
     "commit_message",
     "compose_env_file",
@@ -122,7 +124,10 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
     "coverage",
     "currency",
     "custom",
+    "database",
+    "default",
     "details",
+    "docker",
     "effort",
     "egress",
     "environment",
@@ -143,12 +148,15 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
     "logs",
     "mode",
     "model",
+    "monitor",
     "name",
     "offset",
     "operation_type",
     "out_of_scope_change_policy",
     "owned_paths",
     "payload",
+    "phases",
+    "planning",
     "ports",
     "pr_number",
     "pr_url",
@@ -156,12 +164,14 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
     "profile",
     "profile_ref",
     "pull_request_number",
+    "quality",
     "reason",
     "report_path",
     "repo_slug",
     "repo_url",
     "retries",
     "runtime",
+    "secrets",
     "security",
     "services",
     "settings",
@@ -190,11 +200,14 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
 }
 
 _DYNAMIC_MAPPING_FIELDS: set[str] = {
+    "by_base_branch",
     "custom",
+    "details",
     "environment",
     "extra_env",
     "headers",
     "labels",
+    "ports",
     "toolchains",
     "variables",
 }
@@ -215,17 +228,15 @@ def format_safe_validation_location(loc: Any) -> str:
     prev_field: str | None = None
 
     for part in loc_tuple:
-        is_int_index = isinstance(part, int) or (isinstance(part, str) and part.isdigit())
-
-        if is_int_index:
+        if prev_field in _DYNAMIC_MAPPING_FIELDS:
+            formatted.append("<key>")
+            prev_field = None
+        elif isinstance(part, int) or (isinstance(part, str) and part.isdigit()):
             formatted.append(str(part))
             prev_field = None
         else:
             part_str = str(part)
-            if prev_field in _DYNAMIC_MAPPING_FIELDS:
-                formatted.append("<key>")
-                prev_field = None
-            elif part_str in _ALLOWLISTED_FIELD_NAMES:
+            if part_str in _ALLOWLISTED_FIELD_NAMES:
                 formatted.append(part_str)
                 prev_field = part_str
             else:

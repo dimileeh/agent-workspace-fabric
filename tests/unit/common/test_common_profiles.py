@@ -102,6 +102,37 @@ def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_seg
         == "runtime.toolchains.<key>.0"
     )
 
+    # Numeric keys under dynamic mappings (must not bypass scrubbing)
+    assert (
+        format_safe_validation_location(("runtime", "environment", "8080"))
+        == "runtime.environment.<key>"
+    )
+    assert (
+        format_safe_validation_location(("runtime", "environment", 8080))
+        == "runtime.environment.<key>"
+    )
+    assert format_safe_validation_location(("labels", "12345")) == "labels.<key>"
+
+    # Dict fields: ports, by_base_branch, details
+    assert format_safe_validation_location(("ports", "8080")) == "ports.<key>"
+    assert format_safe_validation_location(("ports", 8080)) == "ports.<key>"
+    assert (
+        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "main"))
+        == "monitor.auto_merge.by_base_branch.<key>"
+    )
+    assert (
+        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "123"))
+        == "monitor.auto_merge.by_base_branch.<key>"
+    )
+    assert format_safe_validation_location(("details", "error_code")) == "details.<key>"
+
+    # Keys under dynamic mappings that collide with allowlisted field names
+    assert format_safe_validation_location(("ports", "command")) == "ports.<key>"
+    assert (
+        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "command"))
+        == "monitor.auto_merge.by_base_branch.<key>"
+    )
+
     # Dynamic service names or unallowlisted field segments
     assert (
         format_safe_validation_location(("services", "my-custom-service", "image"))
