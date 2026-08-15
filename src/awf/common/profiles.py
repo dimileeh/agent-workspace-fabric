@@ -310,9 +310,10 @@ def format_safe_validation_location(loc: Any) -> str:
 
     formatted: list[str] = []
     prev_field: str | None = None
+    in_services = False
 
     for part in loc_tuple:
-        if prev_field in _DYNAMIC_MAPPING_FIELDS:
+        if prev_field in _DYNAMIC_MAPPING_FIELDS and not (prev_field == "ports" and in_services):
             formatted.append("<key>")
             prev_field = None
         elif isinstance(part, int) or (isinstance(part, str) and part.isdigit()):
@@ -323,6 +324,8 @@ def format_safe_validation_location(loc: Any) -> str:
             if part_str in _ALLOWLISTED_FIELD_NAMES:
                 formatted.append(part_str)
                 prev_field = part_str
+                if part_str == "services":
+                    in_services = True
             else:
                 formatted.append("<key>")
                 prev_field = None

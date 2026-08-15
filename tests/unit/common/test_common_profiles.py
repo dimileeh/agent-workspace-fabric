@@ -142,6 +142,12 @@ def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_seg
         format_safe_validation_location(("services", "my-custom-service", "environment", "SECRET"))
         == "services.<key>.environment.<key>"
     )
+    assert format_safe_validation_location(("services", 0, "ports", 0)) == "services.0.ports.0"
+    assert format_safe_validation_location(("services", 0, "ports", 0, 1)) == "services.0.ports.0.1"
+    assert (
+        format_safe_validation_location(("services", "my-custom-service", "ports", 0))
+        == "services.<key>.ports.0"
+    )
 
     # Standard nested profile fields
     assert format_safe_validation_location(("docker", "compose_files")) == "docker.compose_files"
