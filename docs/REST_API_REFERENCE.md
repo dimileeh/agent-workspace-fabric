@@ -171,10 +171,10 @@ rest (also request-ordered). Reuses the same overview projection as the list
 endpoint.
 
 ```bash
-curl -X POST -H "Authorization: Bearer $AWF_API_TOKEN" \
+curl -X POST "http://localhost:8000/v1/workspaces/overview/batch" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"workspace_ids":["ws_a","ws_b","ws_missing"]}' \
-  "http://localhost:8000/v1/workspaces/overview/batch"
+  -d '{"workspace_ids":["ws_a","ws_b","ws_missing"]}'
 ```
 
 ### List workspaces (full detail)
