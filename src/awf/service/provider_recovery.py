@@ -1418,10 +1418,10 @@ def _build_provider_recovery_state_view(
         payload_map, "source_attempt_id"
     )
     recommended_action = (
-        _mapping_str(recovery, "recommended_action")
+        _mapping_str(recovery, "recommended_action") or _recommended_action_for_action(action)
         if reason_code != UNSUPPORTED_AGENT_RUNTIME
         else None
-    ) or _recommended_action_for_action(action)
+    )
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
         action=action,

@@ -227,7 +227,7 @@ def test_unsupported_agent_runtime_discards_inherited_recommended_action() -> No
     )
     assert view.action == "terminal"
     assert view.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
-    assert view.recommended_action == "No further recovery possible; inspect failure details."
+    assert view.recommended_action is None
 
 
 def test_supported_terminal_decision_preserves_recommended_action() -> None:
