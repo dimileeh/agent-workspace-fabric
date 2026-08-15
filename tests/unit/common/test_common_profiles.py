@@ -73,6 +73,21 @@ def test_format_safe_validation_message_unknown_error_type() -> None:
     }
     assert format_safe_validation_message(err) == "Validation error"
 
+    allowlisted_custom = {
+        "type": "custom_type",
+        "msg": "schema validation failed",
+    }
+    assert format_safe_validation_message(allowlisted_custom) == "schema validation failed"
+
+    workspace_relative_custom = {
+        "type": "custom_type",
+        "msg": "profile path must be a workspace-relative path",
+    }
+    assert (
+        format_safe_validation_message(workspace_relative_custom)
+        == "profile path must be a workspace-relative path"
+    )
+
 
 @pytest.mark.unit
 def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_segments() -> None:
@@ -167,3 +182,8 @@ def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_seg
 
     # Unallowlisted extra field segment
     assert format_safe_validation_location(("unknown_secret_field",)) == "<key>"
+
+    # Single string, int, or scalar non-sequence locations
+    assert format_safe_validation_location("runtime") == "runtime"
+    assert format_safe_validation_location(42) == "42"
+    assert format_safe_validation_location(12.34) == "<key>"

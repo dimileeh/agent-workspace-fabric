@@ -656,3 +656,48 @@ def test_service_auth_mounts_does_not_stage_gemini_host_credentials(tmp_path: Pa
 
     targets = {m.target for m in mounts}
     assert "/home/agent/.gemini" not in targets
+
+
+@pytest.mark.unit
+def test_chown_workspace_auth_sources_respects_exempt_sources_and_extra_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exempt_dir = tmp_path / "exempt"
+    exempt_dir.mkdir()
+    extra_dir = tmp_path / "extra"
+    extra_dir.mkdir()
+    rw_dir = tmp_path / "rw"
+    rw_dir.mkdir()
+
+    monkeypatch.setattr(auth_mounts_mod, "_chown_tree", lambda *_args, **_kwargs: None)
+
+    # Pass exempt_sources containing exempt_dir.source so it is skipped during chown
+    auth_mounts_mod._chown_workspace_auth_sources(  # noqa: SLF001
+        [
+            AuthMount(source=str(exempt_dir), target="/agent/exempt", mode="rw"),
+            AuthMount(source=str(rw_dir), target="/agent/rw", mode="rw"),
+        ],
+        uid=1000,
+        gid=1000,
+        exempt_sources=frozenset([str(exempt_dir)]),
+        extra_paths=[extra_dir],
+    )
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_suppressed_grok_target(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_grok = host_home / ".grok"
+    host_grok.mkdir(parents=True)
+    (host_grok / "auth.json").write_text('{"token": "xyz"}\n')
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        workspace_id="ws_auth",
+        host_env={},
+        suppressed_targets=("/home/agent/.grok",),
+    )
+
+    targets = {m.target for m in mounts}
+    assert "/home/agent/.grok" not in targets
