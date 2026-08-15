@@ -249,7 +249,7 @@ class WorkspaceTask(BaseModel):
     title: Annotated[str, Field(min_length=1, max_length=512)]
     prompt: Annotated[str, Field(min_length=1, max_length=16384)]
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
-    agent: LaunchableAgentRuntime = Field(default=LaunchableAgentRuntime.codex)
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
@@ -470,7 +470,7 @@ class WorkspaceCreateRequest(BaseModel):
         return self.task.task_tag
 
     @property
-    def agent(self) -> LaunchableAgentRuntime:
+    def agent(self) -> AgentRuntime:
         return self.task.agent
 
     @property
