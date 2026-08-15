@@ -3958,6 +3958,17 @@
               }
             ]
           },
+          "launched_fallback_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launched Fallback Attempts"
+          },
           "next_eligible_at": {
             "anyOf": [
               {

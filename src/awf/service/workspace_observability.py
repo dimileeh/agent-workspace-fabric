@@ -1041,6 +1041,9 @@ def recovery_payload(
                 "source_model": summary.provider_recovery.source_model,
                 "retry_attempt_number": summary.provider_recovery.retry_attempt_number,
                 "fallback_attempt_number": summary.provider_recovery.fallback_attempt_number,
+                "launched_fallback_attempts": getattr(
+                    summary.provider_recovery, "launched_fallback_attempts", None
+                ),
                 "fallback_target": (
                     {
                         "agent": summary.provider_recovery.fallback_target.agent,

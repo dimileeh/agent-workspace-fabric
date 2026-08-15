@@ -777,6 +777,7 @@ class ProviderRecoveryStateResponse(BaseModel):
     source_attempt_id: str | None = None
     recommended_action: str | None = None
     terminal: bool | None = None
+    launched_fallback_attempts: int | None = None
 
 
 class WorkspaceFailureDetailsResponse(BaseModel):

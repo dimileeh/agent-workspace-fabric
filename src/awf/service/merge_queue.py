@@ -856,4 +856,5 @@ def _provider_recovery_state_response(
         source_attempt_id=view.source_attempt_id,
         recommended_action=view.recommended_action,
         terminal=view.terminal,
+        launched_fallback_attempts=getattr(view, "launched_fallback_attempts", None),
     )

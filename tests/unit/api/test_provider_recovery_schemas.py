@@ -66,6 +66,7 @@ def test_provider_recovery_state_response_all_fields_serializes() -> None:
         source_attempt_id="att-001",
         recommended_action="Retry after provider cooldown.",
         terminal=False,
+        launched_fallback_attempts=1,
     )
     dumped = response.model_dump()
     roundtripped = ProviderRecoveryStateResponse.model_validate(dumped)
@@ -75,6 +76,7 @@ def test_provider_recovery_state_response_all_fields_serializes() -> None:
     assert roundtripped.source_model == "gpt-5"
     assert roundtripped.retry_attempt_number == 1
     assert roundtripped.fallback_attempt_number == 0
+    assert roundtripped.launched_fallback_attempts == 1
     assert roundtripped.cooldown_until is not None
     assert roundtripped.next_eligible_at is not None
     assert roundtripped.fallback_target is not None
@@ -100,6 +102,7 @@ def test_provider_recovery_state_response_missing_fields_use_placeholders() -> N
         source_attempt_id=None,
         recommended_action=None,
         terminal=None,
+        launched_fallback_attempts=None,
     )
     assert response.cooldown_until is None
     assert response.next_eligible_at is None
@@ -108,10 +111,12 @@ def test_provider_recovery_state_response_missing_fields_use_placeholders() -> N
     assert response.source_attempt_id is None
     assert response.recommended_action is None
     assert response.terminal is None
+    assert response.launched_fallback_attempts is None
     dumped = response.model_dump()
     reloaded = ProviderRecoveryStateResponse.model_validate(dumped)
     assert reloaded.cooldown_until is None
     assert reloaded.fallback_target is None
+    assert reloaded.launched_fallback_attempts is None
 
 
 def test_workspace_failure_details_response_provider_recovery_state_compat() -> None:
