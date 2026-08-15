@@ -97,6 +97,7 @@ class ProviderRecoveryState:
     failure_fingerprints: tuple[str, ...] = ()
     fallback_attempt_number: int = 0
     retry_attempt_number: int = 0
+    launched_fallback_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ class ProviderRecoveryDecision:
     terminal_reason: str | None
     fallback_attempt_number: int
     retry_attempt_number: int
+    launched_fallback_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -242,6 +244,7 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number + 1,
             retry_attempt_number=0,
+            launched_fallback_attempts=state.launched_fallback_attempts + 1,
         )
 
     if is_launchable and state.retry_attempt_number < policy.max_same_provider_retries:
@@ -257,6 +260,7 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number,
             retry_attempt_number=state.retry_attempt_number + 1,
+            launched_fallback_attempts=state.launched_fallback_attempts,
         )
 
     fallback_target, target_index = _select_fallback_target_with_index(policy, state)
@@ -272,6 +276,7 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=target_index + 1,
             retry_attempt_number=0,
+            launched_fallback_attempts=state.launched_fallback_attempts + 1,
         )
 
     if not is_launchable:
@@ -305,7 +310,7 @@ def _default_capacity_fallback_target(
 ) -> FallbackTarget | None:
     if policy.has_explicit_fallbacks or any(target is not None for target in policy.fallbacks):
         return None
-    if state.fallback_attempt_number > 0:
+    if state.launched_fallback_attempts > 0:
         return None
     if current_agent != AgentRuntime.codex.value:
         return None
@@ -431,6 +436,7 @@ def in_place_recovery_task_policy(
         # already-exhausted fallback attempt.
         "fallback_attempt_number": state.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": state.launched_fallback_attempts,
         "not_before": decision.not_before.isoformat(),
         "recommended_action": _metadata_str(decision.metadata, "recommended_action"),
     }
@@ -825,16 +831,30 @@ def parse_provider_recovery_state(
         if isinstance(fingerprints, Sequence) and not isinstance(fingerprints, str)
         else ()
     )
+    fallback_attempt_number = _nonnegative_int(
+        state.get("fallback_attempt_number"),
+        default=0,
+    )
+    raw_launched = state.get("launched_fallback_attempts")
+    if raw_launched is not None:
+        launched_fallback_attempts = _nonnegative_int(raw_launched, default=0)
+    else:
+        policy = parse_provider_recovery_policy(task_policy)
+        if policy.fallbacks and fallback_attempt_number > 0:
+            launched_fallback_attempts = sum(
+                1 for target in policy.fallbacks[:fallback_attempt_number] if target is not None
+            )
+        else:
+            launched_fallback_attempts = fallback_attempt_number
+
     return ProviderRecoveryState(
         failure_fingerprints=fingerprint_values,
-        fallback_attempt_number=_nonnegative_int(
-            state.get("fallback_attempt_number"),
-            default=0,
-        ),
+        fallback_attempt_number=fallback_attempt_number,
         retry_attempt_number=_nonnegative_int(
             state.get("retry_attempt_number"),
             default=0,
         ),
+        launched_fallback_attempts=launched_fallback_attempts,
     )
 
 
@@ -914,17 +934,13 @@ def _select_fallback_target_with_index(
     policy: ProviderRecoveryPolicy,
     state: ProviderRecoveryState,
 ) -> tuple[FallbackTarget | None, int]:
+    if state.launched_fallback_attempts >= policy.max_fallback_attempts:
+        return None, len(policy.fallbacks)
+
     index = state.fallback_attempt_number
     while index < len(policy.fallbacks):
         target = policy.fallbacks[index]
         if target is not None:
-            selected_attempts = sum(
-                1
-                for i in range(index)
-                if i < state.fallback_attempt_number or policy.fallbacks[i] is not None
-            )
-            if selected_attempts >= policy.max_fallback_attempts:
-                break
             return target, index
         index += 1
     return None, len(policy.fallbacks)
@@ -1092,6 +1108,7 @@ def _recovery_task_policy(
         "failure_fingerprints": fingerprints,
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": decision.launched_fallback_attempts,
         "action": decision.action,
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
@@ -1141,6 +1158,7 @@ def _decision_payload(
         "target_model": decision.target_model,
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": decision.launched_fallback_attempts,
         "terminal_reason": decision.terminal_reason,
     }
     if decision.reason_code == UNSUPPORTED_AGENT_RUNTIME:
@@ -1300,6 +1318,7 @@ class ProviderRecoveryStateView:
     source_attempt_id: str | None
     recommended_action: str | None
     terminal: bool | None
+    launched_fallback_attempts: int | None = None
 
 
 def provider_recovery_state_for_workspace(
@@ -1386,6 +1405,11 @@ def _build_provider_recovery_state_view(
         if "fallback_attempt_number" in recovery
         else None
     )
+    launched_fallback_attempts = (
+        _nonnegative_int(recovery.get("launched_fallback_attempts"), default=0)
+        if "launched_fallback_attempts" in recovery
+        else None
+    )
     cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
     target_agent = _mapping_str(recovery, "target_agent")
     target_provider = _mapping_str(recovery, "target_provider")
@@ -1421,6 +1445,7 @@ def _build_provider_recovery_state_view(
         source_attempt_id=source_attempt_id,
         recommended_action=recommended_action,
         terminal=terminal,
+        launched_fallback_attempts=launched_fallback_attempts,
     )
 
 

@@ -490,22 +490,22 @@ def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_ret
     target_b = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
     policy = ProviderRecoveryPolicy(
         fallbacks=(None, target_a, target_b),
-        max_fallback_attempts=3,
+        max_fallback_attempts=2,
     )
     # Step 1: initial selection skips retired None slot at index 0 and selects target_a (index 1)
-    state0 = ProviderRecoveryState(fallback_attempt_number=0)
+    state0 = ProviderRecoveryState(fallback_attempt_number=0, launched_fallback_attempts=0)
     target1, idx1 = _select_fallback_target_with_index(policy, state0)
     assert target1 == target_a
     assert idx1 == 1
 
-    # Step 2: after target_a is selected, stored fallback_attempt_number is target_index + 1 == 2
-    state1 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1)
+    # Step 2: after target_a is selected, stored fallback_attempt_number is target_index + 1 == 2, launched == 1
+    state1 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1, launched_fallback_attempts=1)
     target2, idx2 = _select_fallback_target_with_index(policy, state1)
     assert target2 == target_b
     assert idx2 == 2
 
-    # Step 3: after target_b is selected, state has fallback_attempt_number == 3 (exceeds budget)
-    state2 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1)
+    # Step 3: after target_b is selected, launched_fallback_attempts == 2 (exceeds budget)
+    state2 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1, launched_fallback_attempts=2)
     assert _select_fallback_target(policy, state2) is None
 
 

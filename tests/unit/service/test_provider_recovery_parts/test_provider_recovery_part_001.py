@@ -531,6 +531,7 @@ def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchab
         terminal_reason=None,
         fallback_attempt_number=1,
         retry_attempt_number=0,
+        launched_fallback_attempts=1,
     )
 
 
@@ -574,6 +575,7 @@ def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_b
         terminal_reason=None,
         fallback_attempt_number=2,
         retry_attempt_number=0,
+        launched_fallback_attempts=1,
     )
 
     # After running the codex fallback, fallback_attempt_number becomes 2.
@@ -645,6 +647,7 @@ def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
         terminal_reason=None,
         fallback_attempt_number=1,
         retry_attempt_number=0,
+        launched_fallback_attempts=1,
     )
 
 
@@ -865,6 +868,7 @@ def test_historically_launched_retired_fallbacks_consume_budget() -> None:
         "provider_recovery_state": {
             "retry_attempt_number": 1,
             "fallback_attempt_number": 1,
+            "launched_fallback_attempts": 1,
         },
     }
 
@@ -878,11 +882,13 @@ def test_historically_launched_retired_fallbacks_consume_budget() -> None:
     assert decision1.action == "fallback"
     assert decision1.target_agent == "codex"
     assert decision1.fallback_attempt_number == 2
+    assert decision1.launched_fallback_attempts == 2
 
     task_policy_step2 = dict(task_policy)
     task_policy_step2["provider_recovery_state"] = {
         "retry_attempt_number": 1,
         "fallback_attempt_number": 2,
+        "launched_fallback_attempts": 2,
     }
     decision2 = decide_provider_recovery(
         {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
@@ -893,6 +899,73 @@ def test_historically_launched_retired_fallbacks_consume_budget() -> None:
     )
     assert decision2.action == "terminal"
     assert decision2.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_skipped_placeholder_slot_remains_free_across_decisions() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "invalid_retired_agent", "model": "m1"},
+                {"agent": "codex", "model": "gpt-5.5"},
+                {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+            ],
+            "max_fallback_attempts": 2,
+            "max_same_provider_retries": 1,
+        },
+        "provider_recovery_state": {
+            "retry_attempt_number": 1,
+            "fallback_attempt_number": 0,
+            "launched_fallback_attempts": 0,
+        },
+    }
+
+    decision1 = decide_provider_recovery(
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+    assert decision1.action == "fallback"
+    assert decision1.target_agent == "codex"
+    assert decision1.fallback_attempt_number == 2
+    assert decision1.launched_fallback_attempts == 1
+
+    task_policy_step2 = dict(task_policy)
+    task_policy_step2["provider_recovery_state"] = {
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 2,
+        "launched_fallback_attempts": 1,
+    }
+    decision2 = decide_provider_recovery(
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy_step2,
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+    assert decision2.action == "fallback"
+    assert decision2.target_agent == "claude_code"
+    assert decision2.fallback_attempt_number == 3
+    assert decision2.launched_fallback_attempts == 2
+
+    task_policy_step3 = dict(task_policy)
+    task_policy_step3["provider_recovery_state"] = {
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 3,
+        "launched_fallback_attempts": 2,
+    }
+    decision3 = decide_provider_recovery(
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy_step3,
+        current_agent="claude_code",
+        current_model="claude-3-7-sonnet",
+        now=now,
+    )
+    assert decision3.action == "terminal"
+    assert decision3.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 
 
 def test_same_provider_retry_precedes_available_fallback() -> None:
@@ -1008,6 +1081,7 @@ def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None
         terminal_reason=None,
         fallback_attempt_number=1,
         retry_attempt_number=0,
+        launched_fallback_attempts=1,
     )
 
 
