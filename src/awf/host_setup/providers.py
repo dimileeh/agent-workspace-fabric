@@ -169,6 +169,7 @@ _RETIRED_PROVIDER_MIGRATIONS: Mapping[str, str] = {
 
 def _prune_and_migrate_provider_config(
     providers: Mapping[str, ProviderConfig],
+    environ: Mapping[str, str] | None = None,
 ) -> dict[str, ProviderConfig]:
     """Prune retired providers and migrate legacy provider entries to canonical names."""
     result = dict(providers)
@@ -176,6 +177,14 @@ def _prune_and_migrate_provider_config(
         if legacy_name in result:
             legacy_cfg = result.pop(legacy_name)
             if target_name not in result:
+                if (
+                    environ is not None
+                    and legacy_cfg.backend == "env_ref"
+                    and _as_setup_status(legacy_cfg.status) == "ready"
+                ):
+                    spec = _SPEC_BY_NAME.get(target_name)
+                    if spec is not None and _first_present(environ, spec.env_ref_vars) is None:
+                        legacy_cfg = legacy_cfg.model_copy(update={"status": "unavailable"})
                 result[target_name] = legacy_cfg
     for name in list(result):
         if name not in _SPEC_BY_NAME:
@@ -314,7 +323,7 @@ def orchestrate_provider_setup(
         keyring=keyring_backend, env=env_backend, plain_file=plain_file_backend
     )
 
-    providers_config = _prune_and_migrate_provider_config(config.providers)
+    providers_config = _prune_and_migrate_provider_config(config.providers, environ=env)
     results: list[ProviderSetupResult] = []
     # Iterate registry order (not selection order) for a deterministic summary.
     for spec in PROVIDER_REGISTRY:
