@@ -20,6 +20,7 @@ from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
+    LaunchableAgentRuntime,
     TaskClass,
     TaskKind,
     WorkspaceStatus,
@@ -192,19 +193,20 @@ class WorkspaceRepo(BaseModel):
 class WorkspaceProviderFallbackTarget(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    agent: AgentRuntime
+    agent: LaunchableAgentRuntime
     provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
     model: Annotated[str, Field(min_length=1, max_length=128)]
 
-    @field_validator("agent")
+    @field_validator("agent", mode="before")
     @classmethod
-    def _validate_agent(cls, value: AgentRuntime) -> AgentRuntime:
+    def _validate_agent(cls, value: Any) -> Any:
         from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
-        if value not in _LAUNCH_PROVIDER_BY_AGENT:
+        raw_val = value.value if hasattr(value, "value") else value
+        if isinstance(raw_val, str) and raw_val not in {a.value for a in _LAUNCH_PROVIDER_BY_AGENT}:
             supported = ", ".join(sorted(a.value for a in _LAUNCH_PROVIDER_BY_AGENT))
             raise ValueError(
-                f"fallback agent runtime {value.value!r} is retired or not launchable; "
+                f"fallback agent runtime {raw_val!r} is retired or not launchable; "
                 f"supported fallback agents are: {supported}."
             )
         return value

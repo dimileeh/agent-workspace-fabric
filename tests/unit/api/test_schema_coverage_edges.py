@@ -862,3 +862,13 @@ def test_workspace_create_request_rejects_retired_fallback_agent_at_admission() 
             }
         )
     assert "fallback agent runtime 'gemini' is retired or not launchable" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_workspace_provider_fallback_target_json_schema_excludes_retired_gemini() -> None:
+    schema = api_schemas.WorkspaceProviderFallbackTarget.model_json_schema()
+    defs = schema.get("$defs", {})
+    launchable_def = defs.get("LaunchableAgentRuntime", {})
+    enum_values = launchable_def.get("enum", [])
+    assert "gemini" not in enum_values
+    assert {"codex", "claude_code", "antigravity", "cursor", "opencode", "grok"} <= set(enum_values)
