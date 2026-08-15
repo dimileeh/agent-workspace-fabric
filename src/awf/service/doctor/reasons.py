@@ -7,7 +7,12 @@ from dataclasses import dataclass
 
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
-from awf.service.doctor.reasons_helpers import get_salvage_and_monitor_reasons
+from awf.service.doctor.reasons_helpers import (
+    get_salvage_and_monitor_reasons,
+)
+from awf.service.doctor.reasons_helpers import (
+    reason_catalog_link as _reason_catalog_link,
+)
 
 
 @dataclass(frozen=True)
@@ -19,11 +24,6 @@ class _ReasonText:
     likely_cause: str
     related_command: str
     docs_link: str
-
-
-def _reason_catalog_link(reason_code: str) -> str:
-    """Return the local reason catalog anchor for a stable reason code."""
-    return f"docs/REASON_CATALOG.md#{reason_code.lower()}"
 
 
 def reason_text_for_code(reason_code: str) -> _ReasonText | None:

@@ -1024,21 +1024,20 @@ def _raise_if_hosted_delegation_unconfigured(
 
 
 def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.provider_readiness import (
+        is_launchable_agent,
+        supported_launchable_agents,
+    )
 
-    try:
-        agent_runtime = AgentRuntime(request.agent.value)
-    except ValueError:
-        agent_runtime = None
-
-    if agent_runtime is None or agent_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
-        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+    if not is_launchable_agent(request.agent.value):
+        supported_agents = supported_launchable_agents()
+        supported = ", ".join(sorted(supported_agents))
         raise PRMonitorAdoptionError(
             error_code="UNSUPPORTED_AGENT_RUNTIME",
             message=f"Agent runtime {request.agent.value!r} is not supported for PR monitor adoption; supported runtimes: {supported}.",
             detail={
                 "agent": request.agent.value,
-                "supported_agents": [r.value for r in _LAUNCH_PROVIDER_BY_AGENT],
+                "supported_agents": list(supported_agents),
             },
         )
 

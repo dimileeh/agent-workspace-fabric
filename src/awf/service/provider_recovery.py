@@ -196,14 +196,9 @@ def decide_provider_recovery(
     )
     model = _metadata_str(metadata, "model") or current_model
 
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.provider_readiness import is_launchable_agent
 
-    try:
-        current_runtime = AgentRuntime(current_agent)
-    except ValueError:
-        current_runtime = None
-
-    is_launchable = current_runtime is not None and current_runtime in _LAUNCH_PROVIDER_BY_AGENT
+    is_launchable = is_launchable_agent(current_agent)
 
     if _is_auth_failure_metadata(metadata):
         return _terminal_decision(
@@ -308,7 +303,7 @@ def _default_capacity_fallback_target(
     current_model: str | None,
     default_model: str | None,
 ) -> FallbackTarget | None:
-    if policy.has_explicit_fallbacks or any(target is not None for target in policy.fallbacks):
+    if policy.has_explicit_fallbacks:
         return None
     if state.launched_fallback_attempts > 0:
         return None
@@ -836,6 +831,10 @@ def parse_provider_recovery_state(
     if raw_launched is not None:
         launched_fallback_attempts = _nonnegative_int(raw_launched, default=0)
     else:
+        # Reconstruct launched_fallback_attempts for legacy state written before the field existed.
+        # Count non-None valid slots up to fallback_attempt_number. If fallback_attempt_number is 1
+        # but that single slot was pruned/invalid (count == 0), retain 1 attempt so legacy single-attempt
+        # state does not lose its recorded attempt budget.
         policy = parse_provider_recovery_policy(task_policy)
         if policy.fallbacks and fallback_attempt_number > 0:
             count = sum(
@@ -1219,7 +1218,7 @@ def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
     if not isinstance(raw, Sequence) or isinstance(raw, str):
         return []
     targets: list[FallbackTarget | None] = []
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.provider_readiness import is_launchable_agent
 
     for item in raw:
         if item is None:
@@ -1233,12 +1232,7 @@ def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
         if agent is None or model is None:
             targets.append(None)
             continue
-        try:
-            runtime = AgentRuntime(agent)
-            if runtime not in _LAUNCH_PROVIDER_BY_AGENT:
-                targets.append(None)
-                continue
-        except ValueError:
+        if not is_launchable_agent(agent):
             targets.append(None)
             continue
         provider = _mapping_str(item, "provider") or provider_for_agent_model(agent, model)

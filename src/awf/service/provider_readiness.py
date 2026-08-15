@@ -131,6 +131,26 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.opencode: "opencode",
     AgentRuntime.grok: "grok",
 }
+
+
+def is_launchable_agent(agent: str | AgentRuntime | None) -> bool:
+    """Return whether an agent name or runtime enum is a supported launchable agent."""
+    if agent is None:
+        return False
+    if isinstance(agent, AgentRuntime):
+        return agent in _LAUNCH_PROVIDER_BY_AGENT
+    try:
+        runtime = AgentRuntime(agent)
+    except ValueError:
+        return False
+    return runtime in _LAUNCH_PROVIDER_BY_AGENT
+
+
+def supported_launchable_agents() -> tuple[str, ...]:
+    """Return the supported launchable agent runtime names."""
+    return tuple(a.value for a in _LAUNCH_PROVIDER_BY_AGENT)
+
+
 _RedactionSegment = tuple[Literal["literal", "redaction"], str]
 _log = logging.getLogger(__name__)
 

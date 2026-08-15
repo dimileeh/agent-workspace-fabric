@@ -648,17 +648,13 @@ def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_fallbacks, Sequence) or isinstance(raw_fallbacks, str):
         return policy
 
-    from awf.service.provider_readiness import (
-        _LAUNCH_PROVIDER_BY_AGENT,
-        _coerce_launch_agent,
-    )
+    from awf.service.provider_readiness import is_launchable_agent
 
     pruned: list[Any] = []
     for item in raw_fallbacks:
         if isinstance(item, Mapping):
             fb_agent = item.get("agent")
-            fb_runtime = _coerce_launch_agent(fb_agent) if fb_agent is not None else None
-            if fb_runtime is not None and fb_runtime in _LAUNCH_PROVIDER_BY_AGENT:
+            if fb_agent is not None and is_launchable_agent(fb_agent):
                 pruned.append(item)
             else:
                 pruned.append(None)

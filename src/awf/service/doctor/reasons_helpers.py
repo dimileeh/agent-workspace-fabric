@@ -32,7 +32,7 @@ def get_salvage_and_monitor_reasons(
                 '``retry_outcome="error"``.'
             ),
             "awf workspace logs <workspace_id>",
-            "docs/REASON_CATALOG.md#post_agent_format_repair_failed",
+            reason_catalog_link("POST_AGENT_FORMAT_REPAIR_FAILED"),
         ),
         "POST_AGENT_GIT_ADD_FAILED": reason_text_cls(
             (
@@ -45,7 +45,7 @@ def get_salvage_and_monitor_reasons(
                 "no commit could be attempted to capture work."
             ),
             "awf workspace logs <workspace_id>",
-            "docs/REASON_CATALOG.md#post_agent_git_add_failed",
+            reason_catalog_link("POST_AGENT_GIT_ADD_FAILED"),
         ),
         "PROVIDER_AUTH_FAILED": reason_text_cls(
             (
@@ -62,7 +62,7 @@ def get_salvage_and_monitor_reasons(
                 "runtime, or rejected by the provider CLI/API."
             ),
             "awf service doctor",
-            "docs/REASON_CATALOG.md#provider_auth_failed",
+            reason_catalog_link("PROVIDER_AUTH_FAILED"),
         ),
         "OLLAMA_MODEL_PULL_FAILED": reason_text_cls(
             (
