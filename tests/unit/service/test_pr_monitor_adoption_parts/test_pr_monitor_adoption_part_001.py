@@ -1198,3 +1198,59 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 await service.adopt(request)
             assert exc_info.value.error_code == "UNSUPPORTED_AGENT_RUNTIME"
             assert "gemini" in str(exc_info.value)
+
+    @pytest.mark.unit
+    async def test_adopt_pr_allows_retired_gemini_replay_with_omitted_effort_and_model_override(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        idempotency_key = "pr-adoption:acme/app:123"
+        async with factory() as session:
+            workspace_repo = WorkspaceRepository(session)
+            workspace = await workspace_repo.create(
+                repo_url="https://github.com/acme/app",
+                branch_base="main",
+                task_title="Pre-upgrade Gemini adoption",
+                task_prompt="prompt",
+                agent="gemini",
+                test_commands=[],
+                requires_database=False,
+                owned_paths=[],
+                task_policy={
+                    "agent_model": "gemini-1.5-pro",
+                    "agent_effort": "xhigh",
+                    "auto_merge_intent": None,
+                    "pr_adoption": {
+                        "repo_slug": "acme/app",
+                        "pr_number": 123,
+                        "execution": {"mode": "local"},
+                    },
+                },
+                profile_ref="auto",
+                idempotency_key=idempotency_key,
+                task_kind="sync_feature_pr",
+                remote_push_branch="feature/test",
+            )
+            workspace.pr_number = 123
+            workspace.pr_url = "https://github.com/acme/app/pull/123"
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            await session.commit()
+            existing_id = workspace.id
+
+        request = PullRequestMonitorAdoptionRequest(
+            repo_slug="acme/app",
+            pr_number=123,
+            agent=AgentRuntime.gemini,
+            model="gemini-1.5-pro",
+            effort=None,
+        )
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(number=123, head_repo_slug="acme/app")),
+            )
+            response = await service.adopt(request)
+
+        assert response.attached_existing is True
+        assert response.workspace_id == existing_id

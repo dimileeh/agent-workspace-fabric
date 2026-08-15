@@ -28,11 +28,20 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     }
 )
 
+HISTORICAL_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
+    {
+        **DEFAULT_AGENT_DEFAULTS,
+        # Retired runtimes retained so historical adoptions resolve implicit effort
+        # correctly when comparing replay requests.
+        AgentRuntime.gemini: AgentDefaults(model="gemini-1.5-pro", effort="xhigh"),
+    }
+)
+
 
 def defaults_with_model_overrides(
     model_overrides: Mapping[AgentRuntime, str] | None,
     *,
-    base: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS,
+    base: Mapping[AgentRuntime, AgentDefaults] = HISTORICAL_AGENT_DEFAULTS,
 ) -> dict[AgentRuntime, AgentDefaults]:
     """Merge legacy model-only overrides with the central defaults.
 

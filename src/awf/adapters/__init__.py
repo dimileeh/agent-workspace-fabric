@@ -17,7 +17,7 @@ from awf.adapters.base import (
     AgentRunResult,
     get_adapter,
 )
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, HISTORICAL_AGENT_DEFAULTS
 from awf.adapters.runtime_executor import (
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
@@ -33,5 +33,6 @@ __all__ = [
     "AgentRuntimeExecResult",
     "AgentRuntimeExecutor",
     "DEFAULT_AGENT_DEFAULTS",
+    "HISTORICAL_AGENT_DEFAULTS",
     "get_adapter",
 ]
