@@ -831,33 +831,26 @@ def parse_provider_recovery_state(
         if isinstance(fingerprints, Sequence) and not isinstance(fingerprints, str)
         else ()
     )
-    fallback_attempt_number = _nonnegative_int(
-        state.get("fallback_attempt_number"),
-        default=0,
-    )
+    fallback_attempt_number = _nonnegative_int(state.get("fallback_attempt_number"), default=0)
     raw_launched = state.get("launched_fallback_attempts")
     if raw_launched is not None:
         launched_fallback_attempts = _nonnegative_int(raw_launched, default=0)
     else:
         policy = parse_provider_recovery_policy(task_policy)
         if policy.fallbacks and fallback_attempt_number > 0:
-            non_none_count = sum(
+            count = sum(
                 1 for target in policy.fallbacks[:fallback_attempt_number] if target is not None
             )
-            if fallback_attempt_number == 1 and non_none_count == 0:
-                launched_fallback_attempts = 1
-            else:
-                launched_fallback_attempts = non_none_count
+            launched_fallback_attempts = (
+                1 if (fallback_attempt_number == 1 and count == 0) else count
+            )
         else:
             launched_fallback_attempts = fallback_attempt_number
 
     return ProviderRecoveryState(
         failure_fingerprints=fingerprint_values,
         fallback_attempt_number=fallback_attempt_number,
-        retry_attempt_number=_nonnegative_int(
-            state.get("retry_attempt_number"),
-            default=0,
-        ),
+        retry_attempt_number=_nonnegative_int(state.get("retry_attempt_number"), default=0),
         launched_fallback_attempts=launched_fallback_attempts,
     )
 
@@ -867,32 +860,29 @@ def provider_for_agent_model(agent: str, model: str | None) -> str | None:
     if agent in {"cursor", "antigravity"}:
         return agent
     inferred = infer_provider(model=model)
-    if inferred is not None:
-        return inferred
-    return {
-        "codex": "openai",
-        "claude_code": "anthropic",
-        "opencode": "opencode",
-        "grok": "xai",
-    }.get(agent)
+    return (
+        inferred
+        if inferred is not None
+        else {
+            "codex": "openai",
+            "claude_code": "anthropic",
+            "opencode": "opencode",
+            "grok": "xai",
+        }.get(agent)
+    )
 
 
 def provider_cooldown_not_before(
     task_policy: Mapping[str, Any] | None,
 ) -> datetime | None:
     raw = task_policy.get(PROVIDER_RECOVERY_STATE_KEY) if task_policy else None
-    if not isinstance(raw, Mapping):
-        return None
-    value = raw.get("not_before")
-    if not isinstance(value, str):
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("not_before"), str):
         return None
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(raw["not_before"])
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _classification_metadata(
@@ -1202,12 +1192,7 @@ def _latest_failed_state_event(workspace: Workspace) -> Any | None:
     for event in reversed(getattr(workspace, "events", []) or []):
         if (
             getattr(event, "event_type", None) == "workspace.state_changed"
-            and getattr(
-                event,
-                "new_state",
-                None,
-            )
-            == "failed"
+            and getattr(event, "new_state", None) == "failed"
         ):
             return event
     return None
@@ -1401,17 +1386,17 @@ def _build_provider_recovery_state_view(
     )
     source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     retry_attempt_number = (
-        _nonnegative_int(recovery.get("retry_attempt_number"), default=0)
+        _nonnegative_int(recovery["retry_attempt_number"], default=0)
         if "retry_attempt_number" in recovery
         else None
     )
     fallback_attempt_number = (
-        _nonnegative_int(recovery.get("fallback_attempt_number"), default=0)
+        _nonnegative_int(recovery["fallback_attempt_number"], default=0)
         if "fallback_attempt_number" in recovery
         else None
     )
     launched_fallback_attempts = (
-        _nonnegative_int(recovery.get("launched_fallback_attempts"), default=0)
+        _nonnegative_int(recovery["launched_fallback_attempts"], default=0)
         if "launched_fallback_attempts" in recovery
         else None
     )
