@@ -332,6 +332,23 @@ def test_worker_ollama_base_url_injected_when_profile_declares_none() -> None:
 
 
 @pytest.mark.unit
+def test_google_cloud_access_token_not_forwarded_by_legacy_host_auth() -> None:
+    # Retiring GOOGLE_CLOUD_ACCESS_TOKEN from AGENT_AUTH_ENV_VARS stops
+    # agent_environment_with_legacy_host_auth from ambiently forwarding the
+    # bearer token when present in worker/service env.
+    from awf.profiles import compose_auth_env
+
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_CLOUD_ACCESS_TOKEN": "ya29.obsolete_bearer_token"},
+    )
+
+    assert env == ()
+    assert "GOOGLE_CLOUD_ACCESS_TOKEN" not in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_CLOUD_ACCESS_TOKEN" in compose_auth_env._AGENT_AUTH_SECRET_ENV_VARS
+
+
+@pytest.mark.unit
 def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
