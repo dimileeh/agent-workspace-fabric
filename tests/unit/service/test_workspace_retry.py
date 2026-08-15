@@ -568,6 +568,9 @@ async def test_retry_prunes_retired_fallbacks_from_cloned_policy(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True, exist_ok=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
     settings = _settings_with_host_home(tmp_path)
     async with factory() as session:
         first = await create_workspace_row(
