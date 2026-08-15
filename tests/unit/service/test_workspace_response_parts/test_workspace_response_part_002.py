@@ -194,6 +194,7 @@ def test_workspace_response_populates_provider_recovery_state() -> None:
             "source_model": "gemini-2.5-pro",
             "retry_attempt_number": 0,
             "fallback_attempt_number": 1,
+            "launched_fallback_attempts": 2,
             "target_agent": "codex",
             "target_provider": "openai",
             "target_model": "gpt-5",
@@ -242,6 +243,7 @@ def test_workspace_response_populates_provider_recovery_state() -> None:
     assert response.provider_recovery_state.action == "fallback"
     assert response.provider_recovery_state.source_provider == "google"
     assert response.provider_recovery_state.source_model == "gemini-2.5-pro"
+    assert response.provider_recovery_state.launched_fallback_attempts == 2
     assert response.provider_recovery_state.fallback_target is not None
     assert response.provider_recovery_state.fallback_target.provider == "openai"
     assert response.provider_recovery_state.fallback_target.model == "gpt-5"

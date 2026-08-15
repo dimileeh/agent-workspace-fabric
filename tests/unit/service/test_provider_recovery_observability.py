@@ -35,6 +35,7 @@ def _workspace_with_provider_recovery_state(
     source_reason_code: str = "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
     retry_attempt_number: int = 1,
     fallback_attempt_number: int = 0,
+    launched_fallback_attempts: int = 0,
     target_agent: str = "codex",
     target_provider: str | None = "openai",
     target_model: str = "gpt-5",
@@ -52,6 +53,7 @@ def _workspace_with_provider_recovery_state(
         "source_model": source_model,
         "retry_attempt_number": retry_attempt_number,
         "fallback_attempt_number": fallback_attempt_number,
+        "launched_fallback_attempts": launched_fallback_attempts,
         "target_agent": target_agent,
         "target_provider": target_provider,
         "target_model": target_model,
@@ -453,6 +455,7 @@ def test_recovery_payload_provider_recovery_includes_all_state_view_fields() -> 
         source_model="gpt-4",
         retry_attempt_number=2,
         fallback_attempt_number=0,
+        launched_fallback_attempts=1,
         source_workspace_id="ws-source-042",
         source_attempt_id="att-042",
         not_before=not_before.isoformat(),
@@ -481,6 +484,7 @@ def test_recovery_payload_provider_recovery_includes_all_state_view_fields() -> 
         "source_model": pr.source_model,
         "retry_attempt_number": pr.retry_attempt_number,
         "fallback_attempt_number": pr.fallback_attempt_number,
+        "launched_fallback_attempts": pr.launched_fallback_attempts,
         "fallback_target": (
             {
                 "agent": pr.fallback_target.agent,
@@ -505,6 +509,7 @@ def test_recovery_payload_provider_recovery_includes_all_state_view_fields() -> 
     assert serialized["source_model"] == "gpt-4"
     assert serialized["retry_attempt_number"] == 2
     assert serialized["fallback_attempt_number"] == 0
+    assert serialized["launched_fallback_attempts"] == 1
     assert serialized["source_workspace_id"] == "ws-source-042"
     assert serialized["source_attempt_id"] == "att-042"
     assert serialized["terminal"] is False
