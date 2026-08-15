@@ -29,7 +29,6 @@ AGENT_AUTH_ENV_VARS = (
     "CURSOR_API_KEY",
     # Google Antigravity CLI headless auth (Gemini AI Studio key).
     "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
     # OpenCode via Ollama/Ollama Cloud.
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",

@@ -366,6 +366,23 @@ def test_google_application_credentials_not_forwarded_by_legacy_host_auth() -> N
 
 
 @pytest.mark.unit
+def test_google_api_key_not_forwarded_by_legacy_host_auth() -> None:
+    # Removing GOOGLE_API_KEY from AGENT_AUTH_ENV_VARS stops
+    # agent_environment_with_legacy_host_auth from ambiently forwarding
+    # legacy Google API keys to every workspace while preserving secret redaction.
+    from awf.profiles import compose_auth_env
+
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_API_KEY": "AIzaSyLegacyKey"},
+    )
+
+    assert env == ()
+    assert "GOOGLE_API_KEY" not in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_API_KEY" in compose_auth_env._AGENT_AUTH_SECRET_ENV_VARS
+
+
+@pytest.mark.unit
 def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
