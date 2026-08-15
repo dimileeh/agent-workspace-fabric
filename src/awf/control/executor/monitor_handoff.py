@@ -758,7 +758,8 @@ async def _reject_unsupported_task_kind(
     if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
         message = (
             "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-            "release/manual PR via PR adoption with auto_merge=false instead."
+            "release/manual PR via PR adoption instead (auto_merge defaults to "
+            "false, giving the manual/no-auto-merge gate)."
         )
         if _get_active_recovery_payload(workspace) is not None:
             await self._finish_active_recovery_operations(

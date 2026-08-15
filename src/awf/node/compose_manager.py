@@ -18,20 +18,40 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import secrets
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
+import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from awf.common.audit import redact_audit_value
 from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.db.enums import AgentRuntime
+from awf.node.compose_diagnostics import (
+    _capture_error_detail_raw,
+    _compose_service_name,
+    _container_health_summary,
+    _container_healthcheck_test,
+    _container_is_unhealthy,
+    _redacted_diagnostics,
+)
+from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
+from awf.node.compose_manager_clarification import (
+    _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED,
+    _PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+    _attach_persisted_clarification_model_network,
+    _clarification_model_service_names,
+    _is_managed_persisted_clarification_service,
+    _pending_persisted_clarification_model_network_services,
+)
 
 _log = get_logger(__name__)
 
@@ -50,43 +70,292 @@ _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown flag: --remove-orphans",
 )
 
+
+def _legacy_bind_mount(value: object) -> AuthMount | None:
+    """Parse the string bind syntax emitted by older AWF Compose templates."""
+    if not isinstance(value, str):
+        return None
+    parts = value.rsplit(":", 2)
+    if len(parts) == 2:
+        source, target = parts
+        mode = "ro"
+    elif len(parts) == 3:
+        source, target, mode = parts
+    else:
+        return None
+    if not source or not target or not target.startswith("/"):
+        return None
+    return AuthMount(source=source, target=target, mode=mode)
+
+
+def _legacy_shared_git_mirror_target(auth_mounts: list[AuthMount]) -> str:
+    """Return the persisted shared-mirror target, or a harmless sentinel."""
+    return next(
+        (
+            mount.target
+            for mount in auth_mounts
+            if mount.source == mount.target and mount.target.endswith(".git")
+        ),
+        "/__awf_legacy_shared_git_mirror__",
+    )
+
+
+def upgrade_persisted_clarification_service(
+    *,
+    compose_file: Path,
+    workspace_id: str,
+    agent_runtime: AgentRuntime,
+    agent_model: str | None = None,
+) -> tuple[str, ...] | None:
+    """Add clarification safely to a legacy persisted stack, if needed.
+
+    Resume and monitor paths intentionally retain their original rendered stack
+    rather than re-resolving a profile. This narrowly augments those generated
+    files from the persisted agent inputs, preserving services while denying the
+    clarification container the primary worktree and Git credentials. Returns
+    the model services whose network declaration changed or whose earlier
+    persisted migration remains incomplete; returns ``None`` when clarification
+    was already present and fully reconciled.
+    """
+    try:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"could not read persisted Compose file {compose_file}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("persisted Compose file must contain a mapping")
+    services = document.get("services")
+    if not isinstance(services, dict):
+        raise ValueError("persisted Compose file must contain a services mapping")
+    if "clarification" in services:
+        agent = services.get("agent")
+        agent_image = agent.get("image") if isinstance(agent, Mapping) else None
+        agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
+        if _is_managed_persisted_clarification_service(
+            services["clarification"],
+            legacy_agent_image=agent_image,
+            legacy_agent_working_dir=agent_working_dir,
+        ):
+            pending_model_services = _pending_persisted_clarification_model_network_services(
+                document, services
+            )
+            return pending_model_services or None
+        raise ValueError(
+            "persisted Compose file clarification service conflicts with the managed "
+            "clarification service"
+        )
+    agent = services.get("agent")
+    if not isinstance(agent, dict):
+        raise ValueError("persisted Compose file must contain an agent service")
+    image = agent.get("image")
+    if not isinstance(image, str) or not image:
+        raise ValueError("persisted agent service must declare an image")
+    # Import lazily: stack launching imports this manager, while a compatibility
+    # upgrade runs only when an isolated clarification invocation is requested.
+    # Reuse the current allowlist so legacy migration cannot drift from the
+    # regular clarification service's credential isolation policy.
+    from awf.node.stack_launcher import (
+        _clarification_agent_environment,
+        _clarification_auth_mounts,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
+        aws_profile_path_rewrites as _aws_profile_path_rewrites,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
+        external_account_subject_token_file_rewrites as _external_account_subject_token_file_rewrites,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
+        legacy_clarification_entrypoint,
+    )
+
+    raw_environment = agent.get("environment", {})
+    agent_environment = (
+        {str(name): value for name, value in raw_environment.items() if isinstance(value, str)}
+        if isinstance(raw_environment, Mapping)
+        else {}
+    )
+    raw_volumes = agent.get("volumes", ())
+    auth_mounts = (
+        [mount for value in raw_volumes if (mount := _legacy_bind_mount(value)) is not None]
+        if isinstance(raw_volumes, list)
+        else []
+    )
+    mirror_target = _legacy_shared_git_mirror_target(auth_mounts)
+    agent_environment_items = tuple(agent_environment.items())
+    # Never hand the primary worktree to a reason-only invocation, even if a
+    # malformed legacy environment happens to name it as a provider setting.
+    provider_auth_mounts = [mount for mount in auth_mounts if mount.target != "/workspace"]
+    selected_mounts = _clarification_auth_mounts(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    provider_environment = _clarification_agent_environment(
+        agent_environment_items,
+        auth_mounts=provider_auth_mounts,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        prefer_file_auth=False,
+    )
+    external_account_subject_token_file_rewrites = _external_account_subject_token_file_rewrites(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    aws_profile_rewrites = _aws_profile_path_rewrites(
+        provider_auth_mounts,
+        agent_environment=agent_environment_items,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    clarification_environment = dict(provider_environment)
+    if external_account_subject_token_file_rewrites:
+        clarification_environment[
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"
+        ] = json.dumps(external_account_subject_token_file_rewrites).replace("$", "$$")
+    if aws_profile_rewrites:
+        clarification_environment["AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES"] = json.dumps(
+            aws_profile_rewrites
+        ).replace("$", "$$")
+    clarification_volumes: list[str] = []
+    for index, mount in enumerate(selected_mounts):
+        clarification_environment[f"AWF_CLARIFICATION_AUTH_TARGET_{index}"] = mount.target.replace(
+            "$", "$$"
+        )
+        clarification_volumes.append(f"{mount.source}:/run/awf/clarification-auth/{index}:ro")
+    clarification_model_services = _attach_persisted_clarification_model_network(
+        services,
+        _clarification_model_service_names(
+            clarification_environment.items(),
+            service_names=(
+                str(name)
+                for name, service in services.items()
+                if name != "agent" and isinstance(service, dict)
+            ),
+        ),
+    )
+
+    clarification: dict[str, object] = {
+        "image": image,
+        _PERSISTED_CLARIFICATION_SERVICE_MANAGED: True,
+        "working_dir": agent.get("working_dir", "/workspace"),
+        "networks": [
+            "clarification_egress_net",
+            *(("clarification_model_net",) if clarification_model_services else ()),
+        ],
+        "profiles": ["awf-clarification"],
+        "command": ["sh", "-c", "sleep infinity"],
+        "restart": "no",
+    }
+    if clarification_environment:
+        clarification["environment"] = clarification_environment
+    if clarification_volumes:
+        clarification["volumes"] = clarification_volumes
+        clarification["entrypoint"] = legacy_clarification_entrypoint(
+            len(selected_mounts),
+            rewrite_external_account_subject_token_file=bool(
+                external_account_subject_token_file_rewrites
+            ),
+            rewrite_aws_profile_paths=bool(aws_profile_rewrites),
+        )
+    if "host.docker.internal:host-gateway" in agent.get("extra_hosts", []):
+        clarification["extra_hosts"] = ["host.docker.internal:host-gateway"]
+    if isinstance(agent.get("deploy"), Mapping):
+        clarification["deploy"] = copy.deepcopy(agent["deploy"])
+    services["clarification"] = clarification
+
+    raw_networks = document.get("networks")
+    if raw_networks is None:
+        networks: dict[str, object] = {}
+        document["networks"] = networks
+    elif isinstance(raw_networks, dict):
+        networks = raw_networks
+    else:
+        raise ValueError("persisted Compose file networks must be a mapping")
+    clarification_network: dict[str, object] = {
+        "name": f"awf-{workspace_id}-clarification-egress-net"
+    }
+    awf_network = networks.get("awf_net")
+    if isinstance(awf_network, Mapping) and awf_network.get("internal") is True:
+        clarification_network["internal"] = True
+    networks.setdefault("clarification_egress_net", clarification_network)
+    if clarification_model_services:
+        networks.setdefault(
+            "clarification_model_net",
+            {
+                "name": f"awf-{workspace_id}-clarification-model-net",
+                "internal": True,
+            },
+        )
+    document[_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED] = not bool(
+        clarification_model_services
+    )
+
+    temporary_path: Path | None = None
+    try:
+        file_mode = compose_file.stat().st_mode & 0o777
+        fd, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{compose_file.name}.",
+            suffix=".tmp",
+            dir=compose_file.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            yaml.safe_dump(document, temporary_file, sort_keys=False)
+        temporary_path.chmod(file_mode)
+        temporary_path.replace(compose_file)
+    except (OSError, yaml.YAMLError) as exc:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+        raise ValueError(f"could not upgrade persisted Compose file {compose_file}") from exc
+    return clarification_model_services
+
+
+def mark_persisted_clarification_model_network_reconciled(*, compose_file: Path) -> None:
+    """Durably record that Compose recreated a migrated model sidecar."""
+    try:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"could not read persisted Compose file {compose_file}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("persisted Compose file must contain a mapping")
+    if document.get(_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED) is True:
+        return
+
+    document[_PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED] = True
+    temporary_path: Path | None = None
+    try:
+        file_mode = compose_file.stat().st_mode & 0o777
+        fd, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{compose_file.name}.",
+            suffix=".tmp",
+            dir=compose_file.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            yaml.safe_dump(document, temporary_file, sort_keys=False)
+        temporary_path.chmod(file_mode)
+        temporary_path.replace(compose_file)
+    except (OSError, yaml.YAMLError) as exc:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+        raise ValueError(
+            f"could not mark persisted Compose model network reconciled {compose_file}"
+        ) from exc
+
+
 DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200
 """Default number of companion log lines captured on a service-startup failure."""
 
 SERVICE_STARTUP_DIAGNOSTICS_SCHEMA = "service_startup_diagnostics.v1"
 """Schema marker for the persisted ``SERVICE_STARTUP_FAILURE`` diagnostics payload."""
-
-_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES = 5
-"""How many trailing ``.State.Health.Log`` entries to persist per companion."""
-
-
-class ComposeOperationError(Exception):
-    """Raised when a ``docker compose`` command exits non-zero.
-
-    Carries stdout/stderr plus a structured reason code so the provisioner can
-    convert it to a workspace failure without regex-parsing error messages.
-    """
-
-    def __init__(
-        self,
-        *,
-        operation: str,
-        returncode: int,
-        stdout: str,
-        stderr: str,
-        reason_code: str = "COMPOSE_COMMAND_FAILED",
-    ) -> None:
-        """Capture the failed compose operation and its diagnostic streams."""
-        self.operation = operation
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.reason_code = reason_code
-        super().__init__(
-            f"docker compose {operation} failed "
-            f"(exit={returncode}, reason={reason_code}): "
-            f"{stderr.strip() or stdout.strip() or '<no output>'}"
-        )
 
 
 @dataclass(frozen=True)
@@ -225,6 +494,11 @@ class WorkspaceComposeSpec:
     cpu_limit: str | None = None
     memory_limit: str | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_enabled: bool = False
+    clarification_agent_environment: tuple[tuple[str, str], ...] = ()
+    clarification_auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
+    clarification_aws_profile_path_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -346,6 +620,14 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
+        clarification_model_services = (
+            _clarification_model_service_names(
+                spec.clarification_agent_environment,
+                service_names=(str(service["name"]) for service in services),
+            )
+            if spec.clarification_enabled
+            else ()
+        )
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services
@@ -371,6 +653,20 @@ class ComposeManager:
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
+            clarification_enabled=spec.clarification_enabled,
+            clarification_service_marker=_PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+            clarification_model_services=clarification_model_services,
+            clarification_agent_environment=spec.clarification_agent_environment,
+            clarification_auth_mounts=[
+                {"source": m.source, "target": m.target, "mode": m.mode}
+                for m in spec.clarification_auth_mounts
+            ],
+            clarification_external_account_subject_token_file_rewrites_json=json.dumps(
+                spec.clarification_external_account_subject_token_file_rewrites
+            ).replace("$", "$$"),
+            clarification_aws_profile_path_rewrites_json=json.dumps(
+                spec.clarification_aws_profile_path_rewrites
+            ).replace("$", "$$"),
             git_name=spec.git_name,
             git_email=spec.git_email,
             agent_environment=agent_env,
@@ -1148,87 +1444,3 @@ class ComposeManager:
         if postgres_password is None:
             return value
         return value.replace("${AWF_POSTGRES_PASSWORD}", postgres_password)
-
-
-def _redacted_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
-    """Redact every captured string in the diagnostics payload before persistence."""
-    return cast("dict[str, Any]", redact_audit_value(payload))
-
-
-def _capture_error_detail_raw(exc: ComposeOperationError) -> str:
-    """Summarize a docker capture failure for a diagnostics marker.
-
-    WARNING: the returned string is UNREDACTED — it embeds ``exc.stderr``/
-    ``exc.stdout``, which can contain credential material from docker output. It
-    MUST pass through ``redact_audit_value`` (via ``_redacted_diagnostics``)
-    before being persisted, returned to a caller, or logged directly. Every
-    current caller stores it in a payload that is redacted unconditionally before
-    return; new callers must preserve that contract.
-    """
-    detail = exc.stderr.strip() or exc.stdout.strip() or "<no output>"
-    return f"{exc.reason_code}: {detail}"
-
-
-def _container_is_unhealthy(container: Any) -> bool:
-    """Return whether an inspected container is worth capturing diagnostics for.
-
-    A container is interesting when its healthcheck is not ``healthy`` (failed,
-    starting, or still probing) or — absent a healthcheck — when it has exited
-    with a non-zero code.
-
-    Docker/Podman report the literal ``"none"`` (``types.NoHealthcheck``) status
-    for containers without a healthcheck; that is treated like an absent
-    ``Health`` block so running sidecars (e.g. the agent) are not flagged just
-    because a different companion failed startup.
-    """
-    if not isinstance(container, Mapping):
-        return False
-    state = container.get("State")
-    if not isinstance(state, Mapping):
-        return False
-    health = state.get("Health")
-    if isinstance(health, Mapping):
-        status = health.get("Status")
-        if isinstance(status, str) and status != "none":
-            return status != "healthy"
-    exit_code = state.get("ExitCode") or 0
-    return state.get("Status") == "exited" and exit_code != 0
-
-
-def _compose_service_name(container: Mapping[str, Any]) -> str | None:
-    """Return the compose service label for a container, if present."""
-    config = container.get("Config")
-    labels = config.get("Labels") if isinstance(config, Mapping) else None
-    if not isinstance(labels, Mapping):
-        return None
-    name = labels.get("com.docker.compose.service")
-    return name if isinstance(name, str) and name else None
-
-
-def _container_health_summary(container: Mapping[str, Any]) -> dict[str, Any]:
-    """Summarize state + the trailing ``.State.Health.Log`` entries for a container."""
-    state = container.get("State")
-    state_map = state if isinstance(state, Mapping) else {}
-    health = state_map.get("Health")
-    health_map = health if isinstance(health, Mapping) else {}
-    raw_log = health_map.get("Log")
-    health_log: list[dict[str, Any]] = []
-    if isinstance(raw_log, list):
-        for entry in raw_log[-_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES:]:
-            if not isinstance(entry, Mapping):
-                continue
-            health_log.append({"ExitCode": entry.get("ExitCode"), "Output": entry.get("Output")})
-    return {
-        "status": state_map.get("Status"),
-        "exit_code": state_map.get("ExitCode"),
-        "health_status": health_map.get("Status"),
-        "health_log": health_log,
-    }
-
-
-def _container_healthcheck_test(container: Mapping[str, Any]) -> list[Any] | None:
-    """Return the rendered healthcheck ``Test`` array as parsed by compose, if any."""
-    config = container.get("Config")
-    healthcheck = config.get("Healthcheck") if isinstance(config, Mapping) else None
-    test = healthcheck.get("Test") if isinstance(healthcheck, Mapping) else None
-    return test if isinstance(test, list) else None

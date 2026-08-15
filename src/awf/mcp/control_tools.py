@@ -173,9 +173,14 @@ def register_control_tools(
                 "protected files when review or CI repair is expected to touch them."
             ),
         ),
-        auto_merge: bool = Field(
-            default=True,
-            description="Whether AWF may merge the adopted PR once monitor gates are green.",
+        auto_merge: bool | None = Field(
+            default=None,
+            description=(
+                "Tri-state auto-merge intent for the adopted PR. True/False set it "
+                "explicitly; omit (null) to use the repo/profile default (off "
+                "unless the profile's monitor.auto_merge enables it). Off means the "
+                "monitor reports readiness without merging."
+            ),
         ),
         execution: PullRequestMonitorExecutionPolicy = Field(
             default_factory=PullRequestMonitorExecutionPolicy,

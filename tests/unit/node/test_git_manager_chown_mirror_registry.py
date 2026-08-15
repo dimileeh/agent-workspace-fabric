@@ -292,6 +292,37 @@ def test_repair_agent_writable_worktree_fallback_repairs_linked_git_dir(
 
 
 @pytest.mark.unit
+def test_repair_agent_writable_worktree_can_skip_shared_git_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    mirror = tmp_path / "mirror.git"
+    linked_git_dir = mirror / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    captured: list[tuple[git_manager._ChownTarget, ...]] = []  # noqa: SLF001
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        git_manager,
+        "_chown_targets",
+        lambda targets, _uid, _gid: captured.append(targets),
+    )
+
+    git_manager.repair_agent_writable_worktree(
+        mirror,
+        worktree,
+        linked_git_dir=linked_git_dir,
+        repair_shared_git_metadata=False,
+    )
+
+    assert captured == [
+        (git_manager._ChownTarget(worktree, recursive=True),)  # noqa: SLF001
+    ]
+
+
+@pytest.mark.unit
 def test_repair_agent_writable_worktree_repairs_runtime_venv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

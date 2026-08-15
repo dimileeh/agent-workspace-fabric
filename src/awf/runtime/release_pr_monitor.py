@@ -65,10 +65,15 @@ def build_release_pr_monitor(
     workspace_runtime_context: str = "",
     workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
+    delete_source_branch_on_merge: bool = True,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
     release PRs — the single divergence from a feature PR is
-    ``auto_merge=False``."""
+    ``auto_merge=False``.
+
+    ``delete_source_branch_on_merge`` is accepted for signature parity with
+    ``build_feature_pr_monitor`` (the worker passes the same kwargs to either
+    builder) but is inert here: the release/manual variant never merges."""
     return PullRequestMonitorRunner(
         session_factory=session_factory,
         runner=runner,
@@ -76,6 +81,7 @@ def build_release_pr_monitor(
         gh=gh,
         monitor_config=MonitorConfig(
             auto_merge=False,  # the point of this whole module
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             require_ci=require_ci,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
@@ -126,10 +132,14 @@ def build_feature_pr_monitor(
     workspace_runtime_context: str = "",
     workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
+    delete_source_branch_on_merge: bool = True,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` for feature→development
     work. ``auto_merge=True``; on green gates the monitor squash-merges
-    and deletes the branch."""
+    and, when ``delete_source_branch_on_merge`` is True (the feature-branch
+    default), deletes the PR head branch. The worker passes it False for a
+    ``sync_release_pr`` workspace so the long-lived release source branch
+    survives the merge (PRRT_kwDOSJAM6s6U3YAS)."""
     return PullRequestMonitorRunner(
         session_factory=session_factory,
         runner=runner,
@@ -137,6 +147,7 @@ def build_feature_pr_monitor(
         gh=gh,
         monitor_config=MonitorConfig(
             auto_merge=True,
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             require_ci=require_ci,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,

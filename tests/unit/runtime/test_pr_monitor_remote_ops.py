@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.runtime.pr_monitor_runner import pre_push_validation, remote_ops
+from awf.control.quality_gates import QualityGateViolation
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner import pre_push_validation, remote_ops, remote_repair_protected
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -65,6 +67,45 @@ def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> tuple[Path
     )
     (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
     return worktree, mirror
+
+
+@pytest.mark.unit
+async def test_protected_scope_notification_preserves_all_quality_gate_details() -> None:
+    """A protected-scope pause must retain every operator remediation detail."""
+
+    class _FakeGitHub:
+        def __init__(self) -> None:
+            self.bodies: list[str] = []
+
+        async def post_comment(self, **kwargs: object) -> None:
+            body = kwargs["body"]
+            assert isinstance(body, str)
+            self.bodies.append(body)
+
+    github = _FakeGitHub()
+    runner = SimpleNamespace(_deps=SimpleNamespace(gh=github))
+    violations = tuple(
+        QualityGateViolation(
+            path=f".github/workflows/quality-gate-{number}-long-diagnostic-name.yml",
+            protected_pattern=".github/workflows/",
+        )
+        for number in range(8)
+    )
+
+    await remote_repair_protected._post_protected_block_notification(
+        runner,
+        workspace_id="ws-protected-comment",
+        pr_number=42,
+        repo_url="https://github.com/dimileeh/agent-workspace-fabric",
+        pr_head_sha="a" * 40,
+        state=MonitorState(),
+        violations=violations,
+        block_epoch=1,
+    )
+
+    assert len(github.bodies) == 1
+    assert ".github/workflows/quality-gate-7-long-diagnostic-name.yml" in github.bodies[0]
+    assert "Add meaningful tests or declare explicit ownership" in github.bodies[0]
 
 
 @pytest.mark.parametrize(
@@ -306,6 +347,33 @@ async def test_rev_parse_head_strips_git_object_lookup_env(
     assert "GIT_OBJECT_DIRECTORY" not in command_runner.env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in command_runner.env
     assert command_runner.env["AWF_REV_PARSE_ENV_SENTINEL"] == "kept"
+
+
+@pytest.mark.unit
+async def test_rev_parse_head_forwards_requested_timeout(tmp_path: Path) -> None:
+    """A caller can bound a HEAD lookup before running an isolated re-ask."""
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.timeout_seconds: float | None = None
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self.timeout_seconds = timeout_seconds
+            return CommandResult(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
+
+    command_runner = _FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    result = await remote_ops._rev_parse_head(runner, tmp_path, timeout_seconds=30.0)
+
+    assert result == "a" * 40
+    assert command_runner.timeout_seconds == 30.0
 
 
 @pytest.mark.unit

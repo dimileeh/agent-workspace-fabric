@@ -43,6 +43,9 @@ services:
     {% endif %}{% if s.source_metadata %}x-awf-companion-source: {{ s.source_metadata | tojson }}
     {% endif %}networks:
       - awf_net
+    {% if s.name in clarification_model_services %}
+      - clarification_model_net
+    {% endif %}
     restart: "no"
 
   {% endfor %}
@@ -81,6 +84,192 @@ services:
           memory: {{ resources.memory_limit | tojson }}
     {% endif %}
 
+  {# awf-j2-tojson-allow: loop.index0 -- Jinja-generated numeric identifier used in shell variable names and mount paths. #}
+  {% if clarification_enabled %}
+  clarification:
+    image: {{ agent_runtime_image | tojson }}
+    {{ clarification_service_marker | tojson }}: true
+    working_dir: /workspace
+    {% if clarification_agent_environment or clarification_auth_mounts %}environment:
+      {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
+      {% endfor %}
+      {% for m in clarification_auth_mounts %}AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}: {{ m.target | replace("$", "$$") | tojson }}
+      {% endfor %}
+      {% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES: {{ clarification_external_account_subject_token_file_rewrites_json | tojson }}
+      {% endif %}
+      {% if clarification_aws_profile_path_rewrites_json != "[]" %}AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES: {{ clarification_aws_profile_path_rewrites_json | tojson }}
+      {% endif %}
+    {% endif %}{% if clarification_auth_mounts %}volumes:
+      {% for m in clarification_auth_mounts %}- {{ (m.source ~ ":/run/awf/clarification-auth/" ~ loop.index0 ~ ":ro") | tojson }}
+      {% endfor %}
+    {% endif %}{% if host_gateway_enabled -%}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    {% endif %}networks:
+      - clarification_egress_net
+    {% if clarification_model_services %}
+      - clarification_model_net
+    {% endif %}
+    profiles:
+      - awf-clarification
+    {% if clarification_auth_mounts %}entrypoint:
+      - "sh"
+      - "-ec"
+      - |
+        {% for m in clarification_auth_mounts %}mkdir -p "$(dirname "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}")"
+        if [ -d /run/awf/clarification-auth/{{ loop.index0 }} ]; then
+          mkdir -p "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
+          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
+            /home/agent/.codex) credential_files="auth.json" ;;
+            /home/agent/.claude) credential_files=".credentials.json" ;;
+            /home/agent/.config/gcloud) credential_files="application_default_credentials.json" ;;
+            /home/agent/.gemini) credential_files="oauth_creds.json" ;;
+            /home/agent/.config/opencode) credential_files="auth.json" ;;
+            /home/agent/.grok) credential_files="auth.json" ;;
+            /home/agent/.ollama) credential_files="id_ed25519 id_ed25519.pub" ;;
+            /home/agent/.aws) credential_files="credentials config" ;;
+            *)
+              cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
+              credential_files=""
+              ;;
+          esac
+          for credential_file in $credential_files; do
+            if [ -f "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ] && [ ! -L "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ]; then
+              cp -a "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/$credential_file"
+            fi
+          done
+        else
+          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
+            /home/agent/.claude.json) ;;
+            *) cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" ;;
+          esac
+        fi
+        {% endfor %}{% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}chmod u+w "$GOOGLE_APPLICATION_CREDENTIALS"
+        python - <<'PY'
+        import json
+        import os
+        import posixpath
+        import re
+        import shlex
+        from pathlib import Path
+
+        credentials_path = Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+        rewrites = dict(
+            json.loads(
+                os.environ["AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES"]
+            )
+        )
+        configuration = json.loads(credentials_path.read_text(encoding="utf-8"))
+        if isinstance(configuration, dict) and configuration.get("type") == "external_account":
+          credential_source = configuration.get("credential_source")
+          if isinstance(credential_source, dict):
+            def rewrite_path(path):
+              return rewrites.get(posixpath.normpath(path), path)
+
+            executable_path_pattern = re.compile(
+              r"(?<![^\s'\"|&;()<>=])(?:(?P<quote>['\"])(?P<quoted>/[^'\"]+)(?P=quote)|(?P<unquoted>/(?:\\.|[^\s'\"|&;()<>\\])+))(?![^\s'\"|&;()<>])"
+            )
+            defaulted_environment_path_pattern = re.compile(
+              r"(?<!\\)(?P<prefix>\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=+]))(?P<path>/[^}]+)(?P<suffix>\})"
+            )
+
+            def rewrite_executable_path(match):
+              path = match.group("quoted") or match.group("unquoted")
+              quote = match.group("quote")
+              if not quote:
+                try:
+                  (path,) = shlex.split(path)
+                except ValueError:
+                  return match.group(0)
+                rewritten_path = rewrite_path(path)
+                return match.group(0) if rewritten_path == path else shlex.quote(rewritten_path)
+              return f"{quote}{rewrite_path(path)}{quote}"
+
+            def rewrite_defaulted_environment_path(match):
+              return f"{match.group('prefix')}{rewrite_path(match.group('path'))}{match.group('suffix')}"
+
+            subject_token_file = credential_source.get("file")
+            if isinstance(subject_token_file, str):
+              credential_source["file"] = rewrite_path(subject_token_file)
+            executable = credential_source.get("executable")
+            if isinstance(executable, dict):
+              command = executable.get("command")
+              if isinstance(command, str):
+                executable["command"] = executable_path_pattern.sub(
+                  rewrite_executable_path, command
+                )
+                executable["command"] = defaulted_environment_path_pattern.sub(
+                  rewrite_defaulted_environment_path, executable["command"]
+                )
+              output_file = executable.get("output_file")
+              if isinstance(output_file, str):
+                executable["output_file"] = rewrite_path(output_file)
+            credentials_path.write_text(json.dumps(configuration), encoding="utf-8")
+        PY
+        {% endif %}{% if clarification_aws_profile_path_rewrites_json != "[]" %}python - <<'PY'
+        import json
+        import os
+        import re
+        import shlex
+        from pathlib import Path
+
+        rewrites = dict(json.loads(os.environ["AWF_CLARIFICATION_AWS_PROFILE_PATH_REWRITES"]))
+        credential_process_path_pattern = re.compile(
+          r"(?<![^\s'\"|&;()<>=])(?:(?P<quote>['\"])(?P<quoted>/[^'\"]+)(?P=quote)|(?P<unquoted>/(?:\\.|[^\s'\"|&;()<>\\])+))(?![^\s'\"|&;()<>])"
+        )
+
+        def rewrite_credential_process_path(match):
+          path = match.group("quoted") or match.group("unquoted")
+          quote = match.group("quote")
+          if not quote:
+            try:
+              (path,) = shlex.split(path)
+            except ValueError:
+              return match.group(0)
+            rewritten_path = rewrites.get(path, path)
+            return match.group(0) if rewritten_path == path else shlex.quote(rewritten_path)
+          return f"{quote}{rewrites.get(path, path)}{quote}"
+
+        def rewrite_credential_process(match):
+          return match.group("prefix") + credential_process_path_pattern.sub(
+            rewrite_credential_process_path, match.group("command")
+          )
+
+        profile_paths = (
+          Path(os.environ.get("AWS_CONFIG_FILE", "/home/agent/.aws/config")),
+          Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", "/home/agent/.aws/credentials")),
+        )
+        for profile_path in profile_paths:
+          try:
+            original_configuration = profile_path.read_text(encoding="utf-8")
+          except (OSError, UnicodeDecodeError):
+            continue
+          configuration = original_configuration
+          configuration = re.sub(
+            r"(?im)^(?P<prefix>\s*credential_process\s*=\s*)(?P<command>.*)$",
+            rewrite_credential_process,
+            configuration,
+          )
+          for source, staged in sorted(rewrites.items(), key=lambda item: len(item[0]), reverse=True):
+            configuration = configuration.replace(source, staged)
+          if configuration != original_configuration:
+            profile_path.chmod(profile_path.stat().st_mode | 0o200)
+            profile_path.write_text(configuration, encoding="utf-8")
+        PY
+        {% endif %}exec "$@"
+      - "--"
+    {% endif %}
+    command: ["sh", "-c", "sleep infinity"]
+    restart: "no"
+    {% if resources %}
+    deploy:
+      resources:
+        limits:
+          cpus: {{ resources.cpu_limit | tojson }}
+          memory: {{ resources.memory_limit | tojson }}
+    {% endif %}
+  {% endif %}
+
 {% if named_volumes %}volumes:
   {% for v in named_volumes %}{{ v | tojson }}:
     name: {{ ("awf-" ~ workspace_id ~ "-" ~ v) | tojson }}
@@ -93,3 +282,15 @@ networks:
     name: {{ ("awf-" ~ workspace_id ~ "-net") | tojson }}
     {% if network_internal %}internal: true
     {% endif %}
+  clarification_egress_net:
+    name: {{ ("awf-" ~ workspace_id ~ "-clarification-egress-net") | tojson }}
+    {% if network_internal %}internal: true
+    {% endif %}
+  {% if clarification_model_services %}
+  clarification_model_net:
+    name: {{ ("awf-" ~ workspace_id ~ "-clarification-model-net") | tojson }}
+    internal: true
+  {% endif %}
+
+{% if clarification_model_services %}x-awf-persisted-clarification-model-network-reconciled: true
+{% endif %}

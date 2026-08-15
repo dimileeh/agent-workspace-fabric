@@ -515,7 +515,9 @@ async def test_mcp_create_omits_unspecified_optional_task_fields() -> None:
             "kind": "feature_branch_pr",
             "agent": "codex",
             "owned_paths": [],
-            "auto_merge": True,
+            # auto_merge is a tri-state opt-in: omitting it (as this MCP call
+            # does) leaves the intent unset (None), so the REST payload this
+            # MCP request must align with omits it too.
             "initial_review_grace_period_seconds": None,
         },
         "workspace": {"profile_ref": "auto", "profile": None},

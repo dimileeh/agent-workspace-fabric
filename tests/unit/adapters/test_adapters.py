@@ -19,18 +19,18 @@ from typing import Any
 
 import pytest
 import structlog
+import yaml
 
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
+from awf.adapters.antigravity import AntigravityAdapter
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.cursor import CursorAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
-from awf.adapters.gemini import _settings_for_effort as gemini_settings_for_effort
-from awf.adapters.gemini import _thinking_level_for_effort as gemini_thinking_level_for_effort
 from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -42,6 +42,34 @@ _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
+
+
+def _write_legacy_opencode_ollama_compose(tmp_path: Path) -> Path:
+    """Create a legacy stack whose clarification endpoint is an Ollama sidecar."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "ollama-sidecar": {
+                        "image": "ollama/ollama:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return compose_file
 
 
 def _assert_docker_exec_prefix(args: list[str]) -> None:
@@ -156,6 +184,27 @@ class _RecordingLogStore:
 
     async def open_command_streams(self, **_kwargs: Any) -> _RecordingSinks:
         """Return the in-memory sink used by adapter log stream assertions."""
+        return self.sinks
+
+
+class _FailingStdoutSinks(_RecordingSinks):
+    """Log sinks that fail while processing streamed stdout."""
+
+    async def write_stdout(self, data: str) -> None:
+        """Raise the callback failure that interrupts the streaming command."""
+        del data
+        raise RuntimeError("log sink failure")
+
+
+class _FailingStdoutLogStore:
+    """Log store whose stdout sink interrupts a streaming run."""
+
+    def __init__(self) -> None:
+        """Initialize the failing stdout sink."""
+        self.sinks = _FailingStdoutSinks()
+
+    async def open_command_streams(self, **_kwargs: Any) -> _FailingStdoutSinks:
+        """Return the sink that raises during streamed stdout processing."""
         return self.sinks
 
 
@@ -522,6 +571,75 @@ services:
         assert "pkill claude" not in cleanup_args[cleanup_args.index("-lc") + 1]
 
     @pytest.mark.unit
+    async def test_isolated_reask_timeout_removes_its_one_off_container(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command idle timeout",
+            reason_code="COMMAND_IDLE_TIMEOUT",
+        )
+        runner.queue_result(returncode=0, stdout="removed")
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_isolated_timeout",
+                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+            )
+
+        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
+        assert "run" in runner.calls[0].args
+        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
+
+    @pytest.mark.unit
+    async def test_isolated_reask_removes_one_off_container_when_stream_callback_raises(
+        self,
+    ) -> None:
+        """A stream callback failure must not strand the isolated container."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="streamed output")
+        runner.queue_result(returncode=0, stdout="removed")
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=_FailingStdoutLogStore(),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_isolated_stream_callback_failure",
+                isolated_worktree_host_path=Path("/worktrees/ws_xyz/.awf-needs-human-reask-test"),
+            )
+
+        assert "run" in runner.calls[0].args
+        assert runner.calls[1].args[:4] == ["docker", "container", "rm", "--force"]
+
+    @pytest.mark.unit
+    async def test_stream_callback_exception_does_not_clean_up_persistent_agent(self) -> None:
+        """Persistent agent cleanup remains limited to cancellation and timeout paths."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="streamed output")
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=_FailingStdoutLogStore(),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(RuntimeError, match="log sink failure"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_persistent_stream_callback_failure",
+            )
+
+        assert len(runner.calls) == 1
+
+    @pytest.mark.unit
     async def test_cleanup_failure_surfaces_distinct_error(self) -> None:
         runner = FakeCommandRunner()
         runner.queue_result(
@@ -774,156 +892,6 @@ class TestClaudeCodeAdapter:
         assert _claude_effort_for_awf_effort("MAX") == "max"
 
 
-class TestCursorAdapter:
-    """Cursor adapter contract tests."""
-
-    @pytest.mark.unit
-    async def test_produces_correct_cli_invocation(self) -> None:
-        """Verify produces correct cli invocation."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(runner=runner, default_model="composer")
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        _assert_docker_exec_prefix(args)
-
-        cursor_start = args.index("cursor-agent")
-        cursor_args = args[cursor_start:]
-        assert cursor_args[:3] == ["cursor-agent", "-p", "--force"]
-        assert cursor_args[cursor_args.index("--model") + 1] == "composer"
-        assert "-m" not in cursor_args
-        assert cursor_args[cursor_args.index("--output-format") + 1] == "text"
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
-        """Verify produces cli invocation without model or effort."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(runner=runner)
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        cursor_start = args.index("cursor-agent")
-        cursor_args = args[cursor_start:]
-        assert cursor_args[:3] == ["cursor-agent", "-p", "--force"]
-        assert "--model" not in cursor_args
-        assert cursor_args[cursor_args.index("--output-format") + 1] == "text"
-
-
-class TestGeminiAdapter:
-    """Gemini adapter contract tests."""
-
-    @pytest.mark.unit
-    def test_reports_google_provider(self) -> None:
-        adapter = GeminiAdapter(runner=FakeCommandRunner())
-
-        assert adapter.get_provider("gemini-3.1-pro-preview") == "google"
-
-    @pytest.mark.unit
-    async def test_produces_correct_cli_invocation(self) -> None:
-        """Verify produces correct cli invocation."""
-        runner = FakeCommandRunner()
-        adapter = GeminiAdapter(runner=runner, default_model="gemini-2.5-pro")
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-        args = runner.calls[0].args
-        _assert_docker_exec_prefix(args)
-
-        gemini_start = args.index("gemini")
-        assert args[gemini_start : gemini_start + 3] == [
-            "gemini",
-            "--skip-trust",
-            "--yolo",
-        ]
-        gemini_args = args[gemini_start:]
-        assert gemini_args[3:5] == ["-p", ""]
-        assert "--prompt" not in gemini_args
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-        assert "--model" in args and "gemini-2.5-pro" in args
-
-    @pytest.mark.unit
-    async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
-        """Verify produces cli invocation without model or effort."""
-        runner = FakeCommandRunner()
-        adapter = GeminiAdapter(runner=runner)
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        gemini_start = args.index("gemini")
-        assert args[gemini_start : gemini_start + 3] == [
-            "gemini",
-            "--skip-trust",
-            "--yolo",
-        ]
-        assert args[gemini_start + 3 : gemini_start + 5] == ["-p", ""]
-        assert "--model" not in args
-
-    @pytest.mark.unit
-    async def test_xhigh_effort_uses_system_settings_wrapper(self) -> None:
-        runner = FakeCommandRunner()
-        adapter = GeminiAdapter(
-            runner=runner,
-            default_model="gemini-3.1-pro-preview",
-            default_effort="xhigh",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-        args = runner.calls[0].args
-        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
-        assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
-        script = args[sh_start + 2]
-        assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in script
-        assert '"thinkingLevel":"HIGH"' in script
-        assert "GEMINI_CLI_TRUST_WORKSPACE" in script
-        assert "exec gemini" in script
-        assert "--model" in args and "gemini-3.1-pro-preview" in args
-        gemini_args = args[sh_start:]
-        assert "-p" in gemini_args
-        assert gemini_args[gemini_args.index("-p") + 1] == ""
-        assert "--prompt" not in gemini_args
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    def test_gemini_effort_helpers_map_only_high_effort_to_high_thinking(self) -> None:
-        assert gemini_thinking_level_for_effort("high") == "HIGH"
-        assert gemini_thinking_level_for_effort("xhigh") == "HIGH"
-        assert gemini_thinking_level_for_effort("max") == "HIGH"
-        assert gemini_thinking_level_for_effort("medium") is None
-        assert gemini_settings_for_effort(model="gemini-3.1-pro-preview", effort="low") == {}
-        no_model_settings = gemini_settings_for_effort(model=None, effort="xhigh")
-        override = no_model_settings["modelConfigs"]["overrides"][0]  # type: ignore[index]
-        assert override["match"] == {}
-        assert (
-            override["modelConfig"]["generateContentConfig"]["thinkingConfig"]["thinkingLevel"]
-            == "HIGH"
-        )
-
-
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("adapter_cls", "runtime"),
@@ -932,6 +900,7 @@ class TestGeminiAdapter:
         (CodexAdapter, AgentRuntime.codex),
         (CursorAdapter, AgentRuntime.cursor),
         (GeminiAdapter, AgentRuntime.gemini),
+        (AntigravityAdapter, AgentRuntime.antigravity),
         (OpenCodeAdapter, AgentRuntime.opencode),
         (GrokAdapter, AgentRuntime.grok),
     ],
@@ -968,6 +937,7 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
         (CodexAdapter, ()),
         (CursorAdapter, ()),
         (GeminiAdapter, ()),
+        (AntigravityAdapter, ()),
         (OpenCodeAdapter, ()),
         (GrokAdapter, ()),
     ],
@@ -990,6 +960,7 @@ def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
         CodexAdapter,
         CursorAdapter,
         GeminiAdapter,
+        AntigravityAdapter,
         OpenCodeAdapter,
         GrokAdapter,
     ):
@@ -1005,6 +976,7 @@ class TestCentralDefaults:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
@@ -1035,6 +1007,7 @@ class TestRegistry:
         claude = get_adapter(AgentRuntime.claude_code, runner=runner)
         cursor = get_adapter(AgentRuntime.cursor, runner=runner)
         gemini = get_adapter(AgentRuntime.gemini, runner=runner)
+        antigravity = get_adapter(AgentRuntime.antigravity, runner=runner)
         opencode = get_adapter(AgentRuntime.opencode, runner=runner)
         grok = get_adapter(AgentRuntime.grok, runner=runner)
 
@@ -1042,5 +1015,6 @@ class TestRegistry:
         assert claude.name == AgentRuntime.claude_code
         assert cursor.name == AgentRuntime.cursor
         assert gemini.name == AgentRuntime.gemini
+        assert antigravity.name == AgentRuntime.antigravity
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok

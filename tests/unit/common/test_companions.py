@@ -5,11 +5,13 @@ from __future__ import annotations
 import pytest
 
 from awf.common.companions import (
+    ISOLATED_REASK_WORKTREE_SUFFIX,
     companion_branch_name,
     companion_name_is_git_branch_component,
     companion_volume_source_is_repo_relative,
     companion_worktree_id,
     companions_from_task_policy,
+    is_isolated_reask_worktree_id,
     parent_workspace_id_from_companion_worktree_id,
     workspace_and_companion_ids,
 )
@@ -88,6 +90,12 @@ def test_parent_workspace_id_from_companion_worktree_id(
     parent: str | None,
 ) -> None:
     assert parent_workspace_id_from_companion_worktree_id(worktree_id) == parent
+
+
+@pytest.mark.unit
+def test_isolated_reask_worktree_id_rejects_invalid_run_identifier() -> None:
+    """Temporary re-ask worktrees require a UUID run suffix."""
+    assert not is_isolated_reask_worktree_id(f"ws_123{ISOLATED_REASK_WORKTREE_SUFFIX}{'g' * 32}")
 
 
 @pytest.mark.unit

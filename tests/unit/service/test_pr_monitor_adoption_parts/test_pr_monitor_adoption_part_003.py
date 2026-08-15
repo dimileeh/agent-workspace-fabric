@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -602,3 +603,164 @@ class TestPullRequestMonitorAdoptionServicePart003:
             "existing_auto_merge": False,
             "requested_auto_merge": True,
         }
+
+    @pytest.mark.unit
+    async def test_adopt_persists_tri_state_auto_merge_intent(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An omitted auto_merge persists intent None and a provisional column
+        default of False (the resolver finalizes the flag at provision)."""
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert workspace.task_policy["auto_merge_intent"] is None
+            assert workspace.auto_merge is False
+
+    @pytest.mark.unit
+    async def test_replay_with_same_unset_intent_does_not_conflict(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Two omitted-intent adoptions compare equal on the persisted intent
+        (None == None) even though the resolved column can differ from None."""
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            replay = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+        assert replay.workspace_id == first.workspace_id
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("initial", "replay", "existing_detail", "requested_detail"),
+        [
+            (None, True, None, True),
+            (None, False, None, False),
+            (True, None, True, None),
+            (False, None, False, None),
+        ],
+    )
+    async def test_replay_with_changed_intent_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        initial: bool | None,
+        replay: bool | None,
+        existing_detail: bool | None,
+        requested_detail: bool | None,
+    ) -> None:
+        """Changing the tri-state intent (None vs True vs False) conflicts and the
+        detail reports the persisted intent, not the resolved column."""
+        fetcher = _MetadataFetcher(_metadata())
+
+        def _kwargs(value: bool | None) -> dict[str, Any]:
+            return {} if value is None else {"auto_merge": value}
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web", pr_number=277, **_kwargs(initial)
+                )
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web", pr_number=277, **_kwargs(replay)
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "existing_auto_merge": existing_detail,
+            "requested_auto_merge": requested_detail,
+        }
+
+
+def _legacy_workspace(*, auto_merge: bool | None) -> SimpleNamespace:
+    """A pre-intent-key adoption row: task_policy lacks ``auto_merge_intent``."""
+    return SimpleNamespace(auto_merge=auto_merge, task_policy={})
+
+
+def _adoption_request(*, auto_merge: bool | None) -> PullRequestMonitorAdoptionRequest:
+    kwargs: dict[str, Any] = {"repo_slug": "dimileeh/aira-web", "pr_number": 277}
+    if auto_merge is not None:
+        kwargs["auto_merge"] = auto_merge
+    return PullRequestMonitorAdoptionRequest(**kwargs)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("request_intent", [True, None])
+def test_legacy_true_column_matches_true_or_omitted(request_intent: bool | None) -> None:
+    # Regression: a legacy adoption (no intent key) with column True reconstructs
+    # the historical default True and must NOT conflict with an explicit True or an
+    # omitted replay instead of spuriously raising PR_ADOPTION_POLICY_CONFLICT.
+    legacy = _legacy_workspace(auto_merge=True)
+    request = _adoption_request(auto_merge=request_intent)
+    assert not adoption_module._adoption_auto_merge_conflicts(legacy, request)
+    assert adoption_module._adoption_auto_merge_intent(legacy) is True
+
+
+@pytest.mark.unit
+def test_legacy_false_column_matches_only_explicit_false() -> None:
+    # A legacy row with column False reconstructs intent False: matches an explicit
+    # False request but conflicts with True (an omitted replay maps to the historical
+    # default True and therefore conflicts).
+    legacy = _legacy_workspace(auto_merge=False)
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=False)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=True)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=None)
+    )
+    assert adoption_module._adoption_auto_merge_intent(legacy) is False
+
+
+@pytest.mark.unit
+def test_legacy_null_column_reconstructs_true() -> None:
+    # A legacy row with a NULL column (historical unset) reconstructs True.
+    legacy = _legacy_workspace(auto_merge=None)
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=True)
+    )
+    assert adoption_module._adoption_auto_merge_conflicts(
+        legacy, _adoption_request(auto_merge=False)
+    )
+    assert adoption_module._adoption_auto_merge_intent(legacy) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("intent", [None, True, False])
+def test_new_world_intent_compares_strictly(intent: bool | None) -> None:
+    # A new-world row (intent key present) compares the persisted intent strictly
+    # and reports it verbatim in the detail.
+    workspace = SimpleNamespace(
+        auto_merge=bool(intent),
+        task_policy={"auto_merge_intent": intent},
+    )
+    assert not adoption_module._adoption_auto_merge_conflicts(
+        workspace, _adoption_request(auto_merge=intent)
+    )
+    other = None if intent is True else True
+    assert adoption_module._adoption_auto_merge_conflicts(
+        workspace, _adoption_request(auto_merge=other)
+    )
+    assert adoption_module._adoption_auto_merge_intent(workspace) is intent

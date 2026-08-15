@@ -20,6 +20,7 @@ ProviderName = Literal[
     "codex",
     "claude_code",
     "cursor",
+    "antigravity",
     "gemini",
     "opencode",
     "grok",
@@ -31,6 +32,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "codex",
     "claude_code",
     "cursor",
+    "antigravity",
     "gemini",
     "opencode",
     "grok",
@@ -63,6 +65,7 @@ _CLAUDE_ENV_KEYS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
 _CURSOR_ENV_KEYS = ("CURSOR_API_KEY",)
+_ANTIGRAVITY_ENV_KEYS = ("ANTIGRAVITY_API_KEY",)
 _GEMINI_ENV_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -77,6 +80,7 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_CODEX_ENV_KEYS,
         *_CLAUDE_ENV_KEYS,
         *_CURSOR_ENV_KEYS,
+        *_ANTIGRAVITY_ENV_KEYS,
         *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
         *_XAI_ENV_KEYS,
@@ -125,6 +129,7 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.codex: "codex",
     AgentRuntime.claude_code: "claude_code",
     AgentRuntime.cursor: "cursor",
+    AgentRuntime.antigravity: "antigravity",
     AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
     AgentRuntime.grok: "grok",
@@ -766,6 +771,20 @@ def _check_provider_readiness(
             strict=strict,
             secrets=secrets,
         )
+    if provider == "antigravity":
+        if probe_runtime_cli:
+            return _check_antigravity_readiness(
+                settings,
+                environ=environ,
+                strict=strict,
+                run_subprocess=run_subprocess,
+                secrets=secrets,
+            )
+        return _check_antigravity(
+            environ=environ,
+            strict=strict,
+            secrets=secrets,
+        )
     if provider == "gemini":
         return _check_gemini(
             environ=environ,
@@ -813,7 +832,7 @@ def _selected_launch_probe(
 ) -> dict[str, Any]:
     if not provider_result.get("ok"):
         return {"status": "skipped"}
-    if not model and provider != "cursor":
+    if not model and provider not in {"cursor", "antigravity"}:
         return {"status": "skipped"}
     executable = _agent_runtime_cli_executable(provider)
     if executable is not None:
@@ -827,7 +846,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
+        if provider in {"codex", "claude_code", "cursor", "antigravity", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
         # Create-time admission must never block on (or perform) a pull: a
@@ -845,11 +864,24 @@ def _selected_launch_probe(
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
 
 
+def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
+    return {
+        "codex": "CODEX",
+        "claude_code": "CLAUDE",
+        "cursor": "CURSOR",
+        "antigravity": "ANTIGRAVITY",
+        "gemini": "GEMINI",
+        "opencode": "OPENCODE",
+        "grok": "GROK",
+    }.get(provider, "PROVIDER")
+
+
 def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
     return {
         "codex": "codex",
         "claude_code": "claude",
         "cursor": "cursor-agent",
+        "antigravity": "agy",
         "gemini": "gemini",
         "opencode": "opencode",
         "grok": "grok",
@@ -1065,6 +1097,8 @@ from awf.service.provider_readiness_ollama import (  # noqa: E402
 # maintainability line limit) can resolve the names they pull back from this
 # module. ``_check_provider_readiness`` above reaches them via this namespace.
 from awf.service.provider_readiness_provider_checks import (  # noqa: E402
+    _check_antigravity,
+    _check_antigravity_readiness,
     _check_claude,
     _check_codex,
     _check_cursor,

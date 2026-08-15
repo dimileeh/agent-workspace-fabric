@@ -19,7 +19,7 @@ from awf.common.ids import (
     new_stale_reason_id,
     new_validation_run_id,
 )
-from awf.db.enums import TaskClass, WorkspaceStatus
+from awf.db.enums import WORKSPACE_TEARDOWN_STATUSES, TaskClass, WorkspaceStatus
 from awf.db.models import (
     MergeCandidate,
     PolicyFinding,
@@ -337,12 +337,7 @@ class MergeCandidateRepository:
             .join(Workspace, MergeCandidate.workspace_id == Workspace.id)
             .where(
                 MergeCandidate.status == "open",
-                ~Workspace.status.in_(
-                    (
-                        WorkspaceStatus.destroying.value,
-                        WorkspaceStatus.destroyed.value,
-                    )
-                ),
+                ~Workspace.status.in_(WORKSPACE_TEARDOWN_STATUSES),
             )
             .options(
                 selectinload(MergeCandidate.attempt),

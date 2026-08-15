@@ -1025,6 +1025,49 @@ async def test_fetch_status_skips_ci_log_fetch_under_fail_fast_recheck(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("live_base_ref", "expected_drift"),
+    [("main", True), ("development", False), (None, False)],
+)
+async def test_fetch_status_stamps_base_ref_drift_against_workspace_base(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    live_base_ref: str | None,
+    expected_drift: bool,
+) -> None:
+    """A PR retargeted after provisioning must be flagged for the decision core.
+
+    ``auto_merge`` is resolved once at provision time against the workspace's
+    ``branch_base`` (``monitor.auto_merge.by_base_branch``), so a PR moved from an
+    auto-merging base onto a human-gated one would otherwise keep being driven —
+    and merged — under the stale base's policy. A forge that reports no base at
+    all is "unknown", not "changed", so it must not fabricate a block.
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
+        status=replace(_green_status(), base_ref=live_base_ref)
+    )
+
+    status = await runner._fetch_status_for_decision(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        workspace_id="ws_current",
+        base_branch="development",
+    )
+
+    assert status.base_ref_drifted is expected_drift
+
+
+@pytest.mark.unit
 async def test_fetch_status_refreshes_transport_deadline_after_base_refresh(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

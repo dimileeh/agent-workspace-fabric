@@ -52,6 +52,8 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
     WorkspaceEventListResponse,
     WorkspaceEventResponse,
+    WorkspaceOverviewBatchRequest,
+    WorkspaceOverviewBatchResponse,
     WorkspaceOverviewListResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
@@ -89,6 +91,7 @@ from awf.service.workspace_observability import (
     _decode_overview_cursor,
     _encode_overview_cursor,
     _WorkspaceOverviewCursor,
+    batch_workspace_overview_response,
     list_workspace_overview_response,
     list_workspace_stale_reasons_response,
 )
@@ -131,6 +134,7 @@ __all__ = [
     "get_workspace",
     "list_workspace_events",
     "list_workspace_overview",
+    "batch_workspace_overview",
     "list_workspace_stale_reasons",
     "list_workspaces",
     "retry_workspace",
@@ -579,6 +583,18 @@ async def list_workspace_overview(
                 "message": "Invalid workspace overview cursor.",
             },
         ) from exc
+
+
+@router.post("/overview/batch", response_model=WorkspaceOverviewBatchResponse)
+async def batch_workspace_overview(
+    payload: WorkspaceOverviewBatchRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceOverviewBatchResponse:
+    """Project overview records for a bounded set of known workspace IDs."""
+    return await batch_workspace_overview_response(
+        session,
+        workspace_ids=payload.workspace_ids,
+    )
 
 
 @router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)

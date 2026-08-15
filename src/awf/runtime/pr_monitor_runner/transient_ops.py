@@ -12,7 +12,7 @@ import os as os
 import re as re
 import time as time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from awf.common.bitbucket_client import BitbucketClientError
@@ -120,6 +120,17 @@ async def _fetch_status_for_decision(
     status = await self._deps.gh.fetch_pr_status(
         repo=repo, pr_number=pr_number, base_behind_count=base_behind, retry=retry
     )
+    # Merge policy is base-dependent: ``auto_merge`` was resolved once at
+    # provision time against ``workspace.branch_base``
+    # (``monitor.auto_merge.by_base_branch``), and every git/base operation above
+    # targets that same persisted branch. A PR retargeted on the forge after
+    # provisioning — e.g. from an auto-merging ``development`` onto a human-gated
+    # ``main`` — would otherwise be driven, and merged, under the stale branch's
+    # policy. Stamp the comparison here, the one place that both sees the live
+    # snapshot and knows the expected base, so EVERY consumer (the outer poll and
+    # the pre-merge recheck inside the merge critical section) gets it.
+    if status.base_ref is not None and status.base_ref != base_branch:
+        status = replace(status, base_ref_drifted=True)
     if status.check_state.value == "FAILURE" and retry:
         pytest_fallback_commands = await self._workspace_test_commands(workspace_id)
         failures = await self._deps.gh.fetch_failing_check_logs(
