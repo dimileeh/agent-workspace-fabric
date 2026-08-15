@@ -132,7 +132,7 @@ class ProfileRuntime(BaseModel):
                 raise ValueError("runtime.toolchains language keys must be strings")
             language = raw_language.strip().lower()
             if not _TOOLCHAIN_LANGUAGE_PATTERN.fullmatch(language):
-                raise ValueError(f"invalid toolchain language identifier: {raw_language!r}")
+                raise ValueError("invalid toolchain language identifier")
             if language in normalized:
                 raise ValueError(f"duplicate toolchain language: {language}")
             if isinstance(raw_versions, str) or not isinstance(raw_versions, (list, tuple)):
@@ -155,7 +155,7 @@ class ProfileRuntime(BaseModel):
                     raise ValueError(f"runtime.toolchains[{language!r}] versions must be strings")
                 version = raw_version.strip()
                 if not _TOOLCHAIN_VERSION_PATTERN.fullmatch(version):
-                    raise ValueError(f"invalid toolchain version for {language!r}: {raw_version!r}")
+                    raise ValueError(f"invalid toolchain version for {language!r}")
                 if version in seen:
                     continue
                 versions.append(version)
@@ -182,7 +182,7 @@ class ProfileRuntime(BaseModel):
                 raise ValueError("runtime.browsers entries must be strings")
             browser = raw_browser.lower()
             if browser not in _ALLOWED_RUNTIME_BROWSERS:
-                raise ValueError(f"invalid runtime browser: {raw_browser!r}")
+                raise ValueError("invalid runtime browser")
             if browser in seen:
                 continue
             browsers.append(browser)

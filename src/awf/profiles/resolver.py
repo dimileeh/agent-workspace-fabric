@@ -208,13 +208,15 @@ def _resolve_forge(profile_forge: ForgeKind | Literal["auto"], repo_url: str | N
 
 def _validation_error_message(exc: ValidationError) -> str:
     """Extract a short path-aware validation error message from a Pydantic error."""
+    from awf.mcp.server import _format_safe_validation_message
+
     errors = exc.errors(include_input=False)
     if not errors:
         return "schema validation failed"
     first = errors[0]
     loc = first.get("loc", ())
     path = ".".join(str(part) for part in loc) if isinstance(loc, tuple) else str(loc)
-    message = first.get("msg", "schema validation failed")
+    message = _format_safe_validation_message(first)
     return f"{path or '<profile>'}: {message}"
 
 
