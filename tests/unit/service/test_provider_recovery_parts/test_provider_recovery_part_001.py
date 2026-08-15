@@ -573,16 +573,16 @@ def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_b
         target_model="gpt-5.5",
         reason_code="PROVIDER_FALLBACK_SELECTED",
         terminal_reason=None,
-        fallback_attempt_number=1,
+        fallback_attempt_number=2,
         retry_attempt_number=0,
     )
 
-    # After running the codex fallback, fallback_attempt_number becomes 1.
+    # After running the codex fallback, fallback_attempt_number becomes 2.
     # Subsequent failure should hit max_fallback_attempts limit of 1 attempt.
     task_policy_next = {
         "provider_recovery": task_policy["provider_recovery"],
         "provider_recovery_state": {
-            "fallback_attempt_number": 1,
+            "fallback_attempt_number": 2,
         },
     }
     metadata_next = provider_recovery_metadata_from_failure(
@@ -611,7 +611,7 @@ def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_b
         target_model=None,
         reason_code="PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
         terminal_reason="PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
-        fallback_attempt_number=1,
+        fallback_attempt_number=2,
         retry_attempt_number=0,
     )
 
