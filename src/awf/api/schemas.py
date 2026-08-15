@@ -20,7 +20,6 @@ from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
-    LaunchableAgentRuntime,
     TaskClass,
     TaskKind,
     WorkspaceStatus,
@@ -119,7 +118,7 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     pr_number: int | None = Field(default=None, ge=1)
     pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
 
-    agent: LaunchableAgentRuntime = Field(default=LaunchableAgentRuntime.codex)
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"

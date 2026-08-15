@@ -29,7 +29,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
-    LaunchableAgentRuntime,
+    AgentRuntime,
 )
 from awf.mcp.server import (
     _error_result,
@@ -141,8 +141,8 @@ def register_control_tools(
             max_length=512,
             description="Full GitHub pull request URL to adopt.",
         ),
-        agent: LaunchableAgentRuntime = Field(
-            default=LaunchableAgentRuntime.codex,
+        agent: AgentRuntime = Field(
+            default=AgentRuntime.codex,
             description="Coding agent runtime used later by the PR monitor for repair work.",
         ),
         model: str | None = Field(
