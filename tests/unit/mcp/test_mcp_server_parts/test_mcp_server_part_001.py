@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -797,6 +798,42 @@ class TestToolRegistration:
         assert result.structuredContent is not None
         assert result.structuredContent["error_code"] == "PR_ALREADY_MERGED"
         assert "already merged" in result.structuredContent["message"]
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_rejects_retired_gemini_agent(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        with pytest.raises(ToolError, match="gemini"):
+            await mcp.call_tool(
+                "awf_adopt_pull_request_monitor",
+                {"repo_slug": "dimileeh/aira-web", "pr_number": 277, "agent": "gemini"},
+            )
 
     @pytest.mark.unit
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]

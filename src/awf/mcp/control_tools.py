@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -29,9 +29,10 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
-    AgentRuntime,
+    LaunchableAgentRuntime,
 )
 from awf.mcp.server import (
+    _error_result,
     _idempotency_key_error,
     _required_idempotency_key,
     _tool_error,
@@ -140,8 +141,8 @@ def register_control_tools(
             max_length=512,
             description="Full GitHub pull request URL to adopt.",
         ),
-        agent: AgentRuntime = Field(
-            default=AgentRuntime.codex,
+        agent: LaunchableAgentRuntime = Field(
+            default=LaunchableAgentRuntime.codex,
             description="Coding agent runtime used later by the PR monitor for repair work.",
         ),
         model: str | None = Field(
@@ -247,6 +248,8 @@ def register_control_tools(
             )
         except PRMonitorAdoptionError as exc:
             return _workspace_error_result(exc)
+        except ValidationError as exc:
+            return _error_result("INVALID_REQUEST", str(exc))
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_remonitor_workspace")
