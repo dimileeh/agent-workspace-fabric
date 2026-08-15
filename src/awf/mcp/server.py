@@ -31,7 +31,12 @@ from awf.api.schemas import (
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
-from awf.common.profiles import format_safe_validation_message as _format_safe_validation_message
+from awf.common.profiles import (
+    format_safe_validation_location as _format_safe_validation_location,
+)
+from awf.common.profiles import (
+    format_safe_validation_message as _format_safe_validation_message,
+)
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
@@ -268,7 +273,7 @@ def _validation_error_message(exc: ValidationError) -> str:
     formatted: list[str] = []
     for err in errors:
         loc = err.get("loc", ())
-        loc_str = ".".join(str(part) for part in loc) if isinstance(loc, tuple) else str(loc)
+        loc_str = _format_safe_validation_location(loc)
         msg = _format_safe_validation_message(err)
         if loc_str:
             formatted.append(f"{loc_str}: {msg}")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from awf.common.profiles import (
+    format_safe_validation_location,
     format_safe_validation_message,
     is_allowlisted_validation_message,
 )
@@ -71,3 +72,45 @@ def test_format_safe_validation_message_unknown_error_type() -> None:
         "msg": "Some custom error message with sensitive info",
     }
     assert format_safe_validation_message(err) == "Validation error"
+
+
+@pytest.mark.unit
+def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_segments() -> None:
+    # Empty location
+    assert format_safe_validation_location(()) == ""
+    assert format_safe_validation_location(None) == ""
+
+    # Allowlisted field names
+    assert format_safe_validation_location(("runtime", "agent_image")) == "runtime.agent_image"
+    assert (
+        format_safe_validation_location(("inline_profile", "runtime", "agent_image"))
+        == "inline_profile.runtime.agent_image"
+    )
+
+    # List indices
+    assert format_safe_validation_location(("validation_commands", 0)) == "validation_commands.0"
+    assert format_safe_validation_location(("validation_commands", "1")) == "validation_commands.1"
+
+    # Dynamic dictionary keys after mapping fields
+    assert (
+        format_safe_validation_location(("runtime", "environment", "plainsecret48729"))
+        == "runtime.environment.<key>"
+    )
+    assert format_safe_validation_location(("labels", "user_secret_key")) == "labels.<key>"
+    assert (
+        format_safe_validation_location(("runtime", "toolchains", "python", 0))
+        == "runtime.toolchains.<key>.0"
+    )
+
+    # Dynamic service names or unallowlisted field segments
+    assert (
+        format_safe_validation_location(("services", "my-custom-service", "image"))
+        == "services.<key>.image"
+    )
+    assert (
+        format_safe_validation_location(("services", "my-custom-service", "environment", "SECRET"))
+        == "services.<key>.environment.<key>"
+    )
+
+    # Unallowlisted extra field segment
+    assert format_safe_validation_location(("unknown_secret_field",)) == "<key>"

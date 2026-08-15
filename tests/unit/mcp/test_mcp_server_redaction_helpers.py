@@ -196,4 +196,22 @@ def test_validation_error_message_replaces_unallowlisted_custom_msg_with_generic
 
     msg = mcp_server_mod._validation_error_message(DummyValidationError())  # type: ignore[arg-type] # noqa: SLF001
     assert "sensitive_data_xyz" not in msg
-    assert msg == "secret_field: Value error"
+    assert msg == "<key>: Value error"
+
+
+@pytest.mark.unit
+def test_validation_error_message_sanitizes_dynamic_mapping_key_locations() -> None:
+    """Ensure dynamic dict key names in runtime.environment are sanitized in validation locations."""
+    from pydantic import ValidationError
+
+    from awf.profiles.models import ProfileRuntime
+
+    raw_secret_key = "plainsecret48729"
+
+    with pytest.raises(ValidationError) as exc_info:
+        ProfileRuntime.model_validate({"environment": {raw_secret_key: 123}})
+
+    msg = mcp_server_mod._validation_error_message(exc_info.value)  # noqa: SLF001
+    assert raw_secret_key not in msg
+    assert "123" not in msg
+    assert msg == "environment.<key>: Input should be a valid string"

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 __all__ = (
+    "format_safe_validation_location",
     "format_safe_validation_message",
     "is_allowlisted_validation_message",
 )
@@ -102,3 +103,133 @@ def format_safe_validation_message(err: Mapping[str, Any]) -> str:
         return "Assertion error"
 
     return "Validation error"
+
+
+_ALLOWLISTED_FIELD_NAMES: set[str] = {
+    "agent",
+    "agent_image",
+    "allow_hosts",
+    "artifacts",
+    "auto_merge",
+    "awf",
+    "base_branch",
+    "browsers",
+    "build_context",
+    "command",
+    "commit_message",
+    "compose_env_file",
+    "cost_per_unit",
+    "coverage",
+    "currency",
+    "custom",
+    "details",
+    "effort",
+    "egress",
+    "environment",
+    "error",
+    "execution",
+    "extra_secrets",
+    "filter",
+    "forge",
+    "healthcheck",
+    "idempotency_key",
+    "image",
+    "initial_review_grace_period_seconds",
+    "inline_profile",
+    "interval_seconds",
+    "kind",
+    "labels",
+    "limit",
+    "logs",
+    "mode",
+    "model",
+    "name",
+    "offset",
+    "operation_type",
+    "out_of_scope_change_policy",
+    "owned_paths",
+    "payload",
+    "ports",
+    "pr_number",
+    "pr_url",
+    "pricing",
+    "profile",
+    "profile_ref",
+    "pull_request_number",
+    "reason",
+    "report_path",
+    "repo_slug",
+    "repo_url",
+    "retries",
+    "runtime",
+    "security",
+    "services",
+    "settings",
+    "source",
+    "start_period_seconds",
+    "status",
+    "target_branch",
+    "target_percent",
+    "task_class",
+    "task_kind",
+    "task_prompt",
+    "task_tag",
+    "task_title",
+    "test_results",
+    "timeout_seconds",
+    "toolchain_image",
+    "toolchains",
+    "type",
+    "unit",
+    "url",
+    "validation",
+    "validation_commands",
+    "version",
+    "volumes",
+    "workspace_id",
+}
+
+_DYNAMIC_MAPPING_FIELDS: set[str] = {
+    "custom",
+    "environment",
+    "extra_env",
+    "headers",
+    "labels",
+    "toolchains",
+    "variables",
+}
+
+
+def format_safe_validation_location(loc: Any) -> str:
+    """Format a validation location tuple, replacing dynamic mapping keys or unallowlisted segments with `<key>`."""
+    if not loc:
+        return ""
+    if isinstance(loc, (str, int)):
+        loc_tuple = (loc,)
+    elif isinstance(loc, (tuple, list)):
+        loc_tuple = tuple(loc)
+    else:
+        loc_tuple = (str(loc),)
+
+    formatted: list[str] = []
+    prev_field: str | None = None
+
+    for part in loc_tuple:
+        is_int_index = isinstance(part, int) or (isinstance(part, str) and part.isdigit())
+
+        if is_int_index:
+            formatted.append(str(part))
+            prev_field = None
+        else:
+            part_str = str(part)
+            if prev_field in _DYNAMIC_MAPPING_FIELDS:
+                formatted.append("<key>")
+                prev_field = None
+            elif part_str in _ALLOWLISTED_FIELD_NAMES:
+                formatted.append(part_str)
+                prev_field = part_str
+            else:
+                formatted.append("<key>")
+                prev_field = None
+
+    return ".".join(formatted)
