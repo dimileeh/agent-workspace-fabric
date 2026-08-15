@@ -218,3 +218,19 @@ def test_provider_readiness_defensive_provider_dispatch_and_probe_fallbacks(
 
     assert probe["status"] == "unavailable"
     assert probe["reason_code"] == "PROVIDER_PROBE_UNAVAILABLE"
+
+
+@pytest.mark.unit
+def test_provider_readiness_known_secrets_includes_legacy_google_tokens(
+    tmp_path: Path,
+) -> None:
+    assert "GOOGLE_CLOUD_ACCESS_TOKEN" in provider_readiness.KNOWN_SECRET_ENV_KEYS
+    assert "GOOGLE_API_KEY" in provider_readiness.KNOWN_SECRET_ENV_KEYS
+
+    env = {
+        "GOOGLE_CLOUD_ACCESS_TOKEN": "ya29.legacy_access_token_secret",
+        "GOOGLE_API_KEY": "AIzaSyLegacy_Secret_API_Key_12345",
+    }
+    secrets = provider_readiness_helpers._secret_values(_settings(tmp_path), env)
+    assert "ya29.legacy_access_token_secret" in secrets
+    assert "AIzaSyLegacy_Secret_API_Key_12345" in secrets
