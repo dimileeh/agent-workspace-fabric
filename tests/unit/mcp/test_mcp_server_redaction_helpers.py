@@ -215,3 +215,108 @@ def test_validation_error_message_sanitizes_dynamic_mapping_key_locations() -> N
     assert raw_secret_key not in msg
     assert "123" not in msg
     assert msg == "environment.<key>: Input should be a valid string"
+
+
+@pytest.mark.unit
+def test_validation_error_message_handles_empty_errors_list() -> None:
+    """Return 'Validation error' when ValidationError errors() returns an empty list."""
+
+    class DummyEmptyValidationError:
+        def errors(
+            self, *, include_input: bool = True, include_url: bool = True
+        ) -> list[dict[str, object]]:
+            return []
+
+    msg = mcp_server_mod._validation_error_message(DummyEmptyValidationError())  # type: ignore[arg-type] # noqa: SLF001
+    assert msg == "Validation error"
+
+
+@pytest.mark.unit
+def test_validation_error_message_handles_empty_location() -> None:
+    """Format message without location prefix when loc is empty."""
+
+    class DummyNoLocValidationError:
+        def errors(
+            self, *, include_input: bool = True, include_url: bool = True
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "type": "value_error",
+                    "loc": (),
+                    "msg": "Input should be a valid string",
+                }
+            ]
+
+    msg = mcp_server_mod._validation_error_message(DummyNoLocValidationError())  # type: ignore[arg-type] # noqa: SLF001
+    assert msg == "Value error"
+
+
+@pytest.mark.unit
+def test_resolve_mcp_compose_env_secret_file_none() -> None:
+    """Return None when compose_env_file is None."""
+    assert mcp_server_mod._resolve_mcp_compose_env_secret_file(None) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_contains_secret_bytes_env_and_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detect known secret env keys and regex token patterns in content."""
+    settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=None)
+    service_settings = service_config.resolve_service_settings(settings, environ={})
+
+    monkeypatch.setenv("GITHUB_TOKEN", "my_secret_github_token_123")
+    content_env = b"data my_secret_github_token_123 data"
+    assert mcp_server_mod._contains_secret_bytes(  # noqa: SLF001
+        content_env,
+        settings,
+        service_settings=service_settings,
+        extra_secrets=(),
+    )
+
+    token_content = b"token_prefix_ghp_123456789012345678901234567890123456_suffix"
+    assert mcp_server_mod._contains_secret_bytes(  # noqa: SLF001
+        token_content,
+        settings,
+        service_settings=service_settings,
+        extra_secrets=(),
+    )
+
+
+@pytest.mark.unit
+def test_resolve_settings_default_fallback() -> None:
+    """Resolve default settings when None is passed to _resolve_settings."""
+    from awf.mcp.control_tools import _resolve_settings
+
+    resolved = _resolve_settings(None)
+    assert resolved is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_control_tools_workspace_control_error_handling() -> None:
+    """Handle WorkspaceControlError in cancel_workspace gracefully."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from mcp.types import CallToolResult
+
+    from awf.mcp.server import build_mcp_server
+    from awf.service.controls import WorkspaceControlError
+
+    service = MagicMock()
+    service.cancel_workspace = AsyncMock(
+        side_effect=WorkspaceControlError(
+            error_code="INVALID_STATE",
+            message="Control action failed",
+        )
+    )
+
+    mcp = build_mcp_server(service=service)
+
+    res = await mcp.call_tool(
+        "awf_cancel_workspace",
+        {"workspace_id": "ws-123", "reason": "testing", "idempotency_key": "ik-123"},
+    )
+    assert isinstance(res, CallToolResult)
+    assert res.isError is True
