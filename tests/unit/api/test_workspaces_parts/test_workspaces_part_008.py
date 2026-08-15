@@ -348,7 +348,7 @@ class TestCreateWorkspacePart002:
         assert isinstance(response, JSONResponse)
         assert response.status_code == 409
         body = json.loads(response.body)
-        assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+        assert body["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
     async def test_retired_gemini_fallback_idempotency_replay_returns_existing_workspace(
