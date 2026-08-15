@@ -193,23 +193,9 @@ class WorkspaceRepo(BaseModel):
 class WorkspaceProviderFallbackTarget(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    agent: LaunchableAgentRuntime
-    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
+    agent: AgentRuntime
+    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     model: Annotated[str, Field(min_length=1, max_length=128)]
-
-    @field_validator("agent", mode="before")
-    @classmethod
-    def _validate_agent(cls, value: Any) -> Any:
-        from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
-
-        raw_val = value.value if hasattr(value, "value") else value
-        if isinstance(raw_val, str) and raw_val not in {a.value for a in _LAUNCH_PROVIDER_BY_AGENT}:
-            supported = ", ".join(sorted(a.value for a in _LAUNCH_PROVIDER_BY_AGENT))
-            raise ValueError(
-                f"fallback agent runtime {raw_val!r} is retired or not launchable; "
-                f"supported fallback agents are: {supported}."
-            )
-        return value
 
 
 class WorkspaceProviderRecoveryCircuitBreakerPolicy(BaseModel):

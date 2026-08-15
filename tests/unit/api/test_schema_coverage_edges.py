@@ -840,38 +840,39 @@ def test_workspace_provider_fallback_target_accepts_launchable_agents(agent: str
 
 
 @pytest.mark.unit
-def test_workspace_provider_fallback_target_rejects_retired_gemini_agent() -> None:
-    with pytest.raises(ValidationError) as exc:
-        api_schemas.WorkspaceProviderFallbackTarget.model_validate(
-            {"agent": "gemini", "model": "gemini-2.5-pro"}
-        )
-    assert "fallback agent runtime 'gemini' is retired or not launchable" in str(exc.value)
+def test_workspace_provider_fallback_target_parses_retired_gemini_agent_for_idempotency_replay() -> (
+    None
+):
+    target = api_schemas.WorkspaceProviderFallbackTarget.model_validate(
+        {"agent": "gemini", "model": "gemini-2.5-pro"}
+    )
+    assert target.agent == api_schemas.AgentRuntime.gemini
 
 
 @pytest.mark.unit
-def test_workspace_create_request_rejects_retired_fallback_agent_at_admission() -> None:
-    with pytest.raises(ValidationError) as exc:
-        api_schemas.WorkspaceCreateRequest.model_validate(
-            {
-                "repo": {"url": "git@github.com:o/r.git", "base_branch": "main"},
-                "task": _task(
-                    provider_recovery={
-                        "fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]
-                    }
-                ),
-            }
-        )
-    assert "fallback agent runtime 'gemini' is retired or not launchable" in str(exc.value)
+def test_workspace_create_request_parses_retired_fallback_agent_for_idempotency_replay() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:o/r.git", "base_branch": "main"},
+            "task": _task(
+                provider_recovery={"fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]}
+            ),
+        }
+    )
+    assert request.task.provider_recovery is not None
+    assert request.task.provider_recovery.fallbacks[0].agent == api_schemas.AgentRuntime.gemini
 
 
 @pytest.mark.unit
-def test_workspace_provider_fallback_target_json_schema_excludes_retired_gemini() -> None:
+def test_workspace_provider_fallback_target_json_schema_includes_agent_runtime_enum() -> None:
     schema = api_schemas.WorkspaceProviderFallbackTarget.model_json_schema()
     defs = schema.get("$defs", {})
-    launchable_def = defs.get("LaunchableAgentRuntime", {})
-    enum_values = launchable_def.get("enum", [])
-    assert "gemini" not in enum_values
-    assert {"codex", "claude_code", "antigravity", "cursor", "opencode", "grok"} <= set(enum_values)
+    agent_def = defs.get("AgentRuntime", {})
+    enum_values = agent_def.get("enum", [])
+    assert "gemini" in enum_values
+    assert {"codex", "claude_code", "gemini", "antigravity", "cursor", "opencode", "grok"} <= set(
+        enum_values
+    )
 
 
 @pytest.mark.unit

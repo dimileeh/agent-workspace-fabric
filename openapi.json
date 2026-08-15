@@ -10062,7 +10062,7 @@
         "additionalProperties": false,
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/LaunchableAgentRuntime"
+            "$ref": "#/components/schemas/AgentRuntime"
           },
           "model": {
             "maxLength": 128,

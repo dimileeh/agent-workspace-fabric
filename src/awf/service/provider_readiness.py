@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -342,6 +342,32 @@ def selected_provider_readiness_preflight(
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    recovery = task_policy.get("provider_recovery") if isinstance(task_policy, Mapping) else None
+    if isinstance(recovery, Mapping):
+        raw_fallbacks = recovery.get("fallbacks")
+        if isinstance(raw_fallbacks, Sequence) and not isinstance(raw_fallbacks, str):
+            for item in raw_fallbacks:
+                if isinstance(item, Mapping):
+                    fb_agent = item.get("agent")
+                    fb_runtime = _coerce_launch_agent(fb_agent) if fb_agent is not None else None
+                    if fb_runtime is None or fb_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+                        supported = ", ".join(sorted(a.value for a in _LAUNCH_PROVIDER_BY_AGENT))
+                        raw_fb = getattr(fb_agent, "value", str(fb_agent))
+                        return _launch_preflight_payload(
+                            agent=runtime.value,
+                            provider=provider,
+                            model=identity.model,
+                            model_source=identity.model_source,
+                            provider_result=None,
+                            probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
+                            reason_code="UNSUPPORTED_AGENT_RUNTIME",
+                            message=f"fallback agent runtime {raw_fb!r} is retired or not launchable; supported fallback agents are: {supported}.",
+                            override=override,
+                            override_reason=override_reason,
+                            checked_at=checked,
+                            secrets=secrets,
+                        )
+
     if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
         # A provider-qualified non-Ollama model is served by an OpenCode cloud
         # provider, which needs an OpenCode/provider credential. With none visible
