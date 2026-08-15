@@ -9423,6 +9423,53 @@
         "title": "WorkspaceOverlapPathMatchResponse",
         "type": "object"
       },
+      "WorkspaceOverviewBatchRequest": {
+        "additionalProperties": false,
+        "description": "Bounded batch lookup for known workspace IDs (hosted projection).",
+        "properties": {
+          "workspace_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Workspace Ids",
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "workspace_ids"
+        ],
+        "title": "WorkspaceOverviewBatchRequest",
+        "type": "object"
+      },
+      "WorkspaceOverviewBatchResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceOverviewResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "missing_workspace_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Workspace Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "missing_workspace_ids"
+        ],
+        "title": "WorkspaceOverviewBatchResponse",
+        "type": "object"
+      },
       "WorkspaceOverviewListResponse": {
         "properties": {
           "cursor": {
@@ -14127,6 +14174,81 @@
           }
         ],
         "summary": "List Workspace Overview",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/v1/workspaces/overview/batch": {
+      "post": {
+        "description": "Project overview records for a bounded set of known workspace IDs.",
+        "operationId": "batch_workspace_overview_v1_workspaces_overview_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceOverviewBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceOverviewBatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Batch Workspace Overview",
         "tags": [
           "workspaces"
         ]
