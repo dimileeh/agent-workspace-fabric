@@ -561,3 +561,43 @@ async def test_retry_recovering_error_handles_missing_cooldown(
         "provider_cooldown_not_before": None,
         "reason": "auto_retry_in_flight",
     }
+
+
+async def test_retry_prunes_retired_fallbacks_from_cloned_policy(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        first.task_policy = {
+            **first.task_policy,
+            "provider_recovery": {
+                "fallbacks": [
+                    {"agent": "gemini", "model": "gemini-1.5-pro"},
+                    {"agent": "codex", "model": "gpt-5.5"},
+                ]
+            },
+        }
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            settings=settings,
+            run_subprocess=_docker_ok,
+        )
+
+    retried_policy = retry.new_workspace.task_policy
+    fallbacks = retried_policy.get("provider_recovery", {}).get("fallbacks", [])
+    assert not any(item.get("agent") == "gemini" for item in fallbacks)
+    assert any(item.get("agent") == "codex" for item in fallbacks)
+    preflight = retried_policy["provider_readiness_preflight"]
+    assert preflight["readiness_status"] == "ready"

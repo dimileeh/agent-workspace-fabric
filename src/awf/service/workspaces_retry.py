@@ -638,6 +638,34 @@ async def retry_workspace_row(
     )
 
 
+def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
+    """Prune retired or unsupported fallback entries from a cloned retry policy."""
+    recovery = policy.get("provider_recovery")
+    if not isinstance(recovery, Mapping):
+        return policy
+    raw_fallbacks = recovery.get("fallbacks")
+    if not isinstance(raw_fallbacks, Sequence) or isinstance(raw_fallbacks, str):
+        return policy
+
+    from awf.service.provider_readiness import (
+        _LAUNCH_PROVIDER_BY_AGENT,
+        _coerce_launch_agent,
+    )
+
+    pruned: list[Any] = []
+    for item in raw_fallbacks:
+        if isinstance(item, Mapping):
+            fb_agent = item.get("agent")
+            fb_runtime = _coerce_launch_agent(fb_agent) if fb_agent is not None else None
+            if fb_runtime is not None and fb_runtime in _LAUNCH_PROVIDER_BY_AGENT:
+                pruned.append(item)
+
+    updated_recovery = dict(recovery)
+    updated_recovery["fallbacks"] = pruned
+    policy["provider_recovery"] = updated_recovery
+    return policy
+
+
 def _retry_task_policy(
     source: Workspace,
     coordination_warnings: Sequence[Mapping[str, Any]],
@@ -655,7 +683,7 @@ def _retry_task_policy(
     )
     if planning_scope_context is not None and planning_scope_context.fallback_model is not None:
         policy["agent_model"] = planning_scope_context.fallback_model["model"]
-    return policy
+    return _prune_retired_fallbacks(policy)
 
 
 def _planning_scope_recovery_payload(
