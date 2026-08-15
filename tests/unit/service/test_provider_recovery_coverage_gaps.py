@@ -28,6 +28,7 @@ from awf.service.provider_recovery import (
     _record_provider_circuit_breaker,
     _retry_task_for_source,
     _select_fallback_target,
+    _select_fallback_target_with_index,
     _source_suppression_not_before,
     create_provider_recovery_attempt_row,
     decide_provider_recovery,
@@ -473,17 +474,6 @@ def test_select_fallback_target_returns_indexed_target() -> None:
     assert _select_fallback_target(policy, state) is target
 
 
-def test_select_fallback_target_counts_retired_targets_before_cursor() -> None:
-    target = FallbackTarget(agent="codex", provider="openai", model="gpt-5")
-    policy = ProviderRecoveryPolicy(
-        fallbacks=(None, target),
-        max_fallback_attempts=1,
-    )
-    state = ProviderRecoveryState(fallback_attempt_number=1)
-
-    assert _select_fallback_target(policy, state) is None
-
-
 def test_select_fallback_target_skips_retired_targets_at_or_after_cursor_for_free() -> None:
     target = FallbackTarget(agent="codex", provider="openai", model="gpt-5")
     policy = ProviderRecoveryPolicy(
@@ -493,6 +483,30 @@ def test_select_fallback_target_skips_retired_targets_at_or_after_cursor_for_fre
     state = ProviderRecoveryState(fallback_attempt_number=0)
 
     assert _select_fallback_target(policy, state) is target
+
+
+def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_retired_slot() -> None:
+    target_a = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+    target_b = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target_a, target_b),
+        max_fallback_attempts=2,
+    )
+    # Step 1: initial selection skips retired None slot at index 0 and selects target_a (index 1)
+    state0 = ProviderRecoveryState(fallback_attempt_number=0)
+    target1, idx1 = _select_fallback_target_with_index(policy, state0)
+    assert target1 == target_a
+    assert idx1 == 1
+
+    # Step 2: after target_a is selected, stored fallback_attempt_number is target_index + 1 == 2
+    state1 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1)
+    target2, idx2 = _select_fallback_target_with_index(policy, state1)
+    assert target2 == target_b
+    assert idx2 == 2
+
+    # Step 3: after target_b is selected, state has fallback_attempt_number == 3 (exceeds budget)
+    state2 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1)
+    assert _select_fallback_target(policy, state2) is None
 
 
 def test_source_suppression_returns_decision_not_before_when_set() -> None:
