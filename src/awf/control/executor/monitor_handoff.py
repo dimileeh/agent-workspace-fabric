@@ -820,15 +820,10 @@ async def _reject_unsupported_agent_runtime(
     fails fast without consuming provisioning resources or raising KeyError
     from get_adapter.
     """
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents
 
-    try:
-        agent = AgentRuntime(workspace.agent)
-    except ValueError:
-        agent = None
-
-    if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
-        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+    if not is_launchable_agent(workspace.agent):
+        supported = ", ".join(sorted(supported_launchable_agents()))
         message = (
             f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."
         )

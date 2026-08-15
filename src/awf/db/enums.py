@@ -261,21 +261,6 @@ class AgentRuntime(StrEnum):
     """xAI Grok Build CLI — ``grok -p`` with headless auto-approval flags."""
 
 
-class LaunchableAgentRuntime(StrEnum):
-    """Launchable coding CLI runtimes that can execute tasks or fallbacks inside workspaces.
-
-    Excludes retired runtimes (e.g. gemini) so OpenAPI schemas and client generators
-    only advertise active, launchable runtimes.
-    """
-
-    codex = "codex"
-    claude_code = "claude_code"
-    antigravity = "antigravity"
-    cursor = "cursor"
-    opencode = "opencode"
-    grok = "grok"
-
-
 class EgressDecision(StrEnum):
     """Per-workspace egress enforcement outcome recorded in audit evidence."""
 

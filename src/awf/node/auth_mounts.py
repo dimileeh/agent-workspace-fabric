@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os  # noqa: F401
 import shutil
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -151,6 +150,11 @@ def resolve_service_auth_mounts(
     ``AWF_HOST_HOME`` at that same absolute path inside the worker container so
     the resolver can check and copy credential files while the host Docker daemon
     can later bind-mount the same sources into the agent container.
+
+    ``host_env`` is unused: ambient host environment no longer selects auth
+    mounts (Google ADC/gcloud credentials are profile-declared, never
+    auto-mounted). The parameter is retained so the resolver seam and its many
+    call sites keep a stable signature.
     """
 
     normalized_home = host_home.expanduser()

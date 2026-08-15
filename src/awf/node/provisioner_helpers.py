@@ -280,15 +280,9 @@ async def record_stale_action_skip(
 
 def check_unsupported_agent_runtime(agent_name: str) -> str | None:
     """Return error message if agent_name is unsupported, else None."""
-    from awf.db.enums import AgentRuntime
-    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents
 
-    try:
-        agent = AgentRuntime(agent_name)
-    except ValueError:
-        agent = None
-
-    if agent is None or agent not in _LAUNCH_PROVIDER_BY_AGENT:
-        supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
+    if not is_launchable_agent(agent_name):
+        supported = ", ".join(sorted(supported_launchable_agents()))
         return f"agent runtime {agent_name!r} is not supported; supported runtimes: {supported}."
     return None

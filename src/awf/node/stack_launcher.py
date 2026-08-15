@@ -127,9 +127,6 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.ssh",
 )
 _GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
-_GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET = (
-    "/home/agent/.config/gcloud/application_default_credentials.json"
-)
 _GOOGLE_APPLICATION_CREDENTIALS_DEFAULTED_TARGET_RE = re.compile(
     r"^\$\{GOOGLE_APPLICATION_CREDENTIALS(?::-|-)(?P<target>/[^$}]+)\}$"
 )
@@ -197,39 +194,6 @@ _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES = frozenset(
         "CLAUDE_CODE_USE_VERTEX",
     }
 )
-_CLARIFICATION_GEMINI_ENV_NAMES: dict[str, frozenset[str]] = {
-    "api_key": frozenset(
-        {
-            "GEMINI_API_KEY",
-            "GEMINI_API_KEY_AUTH_MECHANISM",
-            "GOOGLE_API_KEY",
-        }
-    ),
-    "google_cloud": frozenset(
-        {
-            "GOOGLE_GENAI_USE_VERTEXAI",
-            "GOOGLE_GENAI_USE_GCA",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_CLOUD_LOCATION",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
-        }
-    ),
-    "access_token": frozenset(
-        {
-            "GOOGLE_CLOUD_ACCESS_TOKEN",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_CLOUD_LOCATION",
-        }
-    ),
-    "file": frozenset(),
-}
-_CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS: dict[str, frozenset[str]] = {
-    "api_key": frozenset(),
-    "google_cloud": frozenset({"/home/agent/.config/gcloud"}),
-    "access_token": frozenset(),
-    "file": frozenset(),
-}
 _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.codex: frozenset(
         {
@@ -244,7 +208,6 @@ _CLARIFICATION_RUNTIME_ENV_NAMES: dict[AgentRuntime, frozenset[str]] = {
     AgentRuntime.claude_code: _CLARIFICATION_CLAUDE_CODE_DIRECT_ENV_NAMES,
     AgentRuntime.cursor: frozenset({"CURSOR_API_KEY"}),
     AgentRuntime.antigravity: frozenset({"GEMINI_API_KEY"}),
-    AgentRuntime.gemini: frozenset(),
     AgentRuntime.opencode: frozenset(
         {
             "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
@@ -370,7 +333,7 @@ def _clarification_agent_environment(
     clarification_environment_names = (
         provider_environment_names | credential_process_environment_names
     )
-    if agent_runtime is AgentRuntime.gemini or (
+    if (
         agent_runtime is AgentRuntime.claude_code
         and _GOOGLE_APPLICATION_CREDENTIALS in provider_environment_names
     ):
@@ -473,21 +436,15 @@ def _clarification_model_provider_environment_names(
     """Return selected runtime env names available to a clarification re-ask.
 
     Claude Code's Bedrock and Vertex toggles select their own credentials and
-    settings rather than adding to direct Anthropic authentication. Gemini
-    similarly selects one API-key, Google Cloud, access-token, or CLI-file
-    source. All selected providers retain declared TLS trust stores. Keep every
-    other runtime's settings out of clarification.
+    settings rather than adding to direct Anthropic authentication. All
+    selected providers retain declared TLS trust stores. Keep every other
+    runtime's settings out of clarification.
     """
 
     environment_values = dict(agent_environment)
     if agent_runtime is AgentRuntime.claude_code:
         return (
             _clarification_claude_code_environment_names(environment_values)
-            | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
-        )
-    if agent_runtime is AgentRuntime.gemini:
-        return (
-            _CLARIFICATION_GEMINI_ENV_NAMES[_clarification_gemini_auth_source(environment_values)]
             | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
         )
 
@@ -568,36 +525,6 @@ def _clarification_claude_code_bedrock_environment_names(
     return _CLARIFICATION_CLAUDE_CODE_BEDROCK_REGION_ENV_NAMES | credential_names
 
 
-def _clarification_gemini_auth_source(environment_values: dict[str, str]) -> str:
-    """Return the single Gemini credential source selected for clarification."""
-
-    mechanism = compose_expand_value(
-        environment_values.get("GEMINI_API_KEY_AUTH_MECHANISM", ""), environ=os.environ
-    ).lower()
-    if mechanism in {"api", "api-key", "api_key"}:
-        return "api_key"
-    if compose_expand_value(
-        environment_values.get("GOOGLE_CLOUD_ACCESS_TOKEN", ""), environ=os.environ
-    ):
-        return "access_token"
-    if any(
-        compose_expand_value(environment_values.get(name, ""), environ=os.environ).lower()
-        in {"1", "true", "yes"}
-        for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA")
-    ):
-        return "google_cloud"
-    if any(
-        compose_expand_value(environment_values.get(name, ""), environ=os.environ)
-        for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-    ):
-        return "api_key"
-    if compose_expand_value(
-        environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS, ""), environ=os.environ
-    ):
-        return "google_cloud"
-    return "file"
-
-
 def _google_credentials_are_within_gcloud_auth_mount(google_credentials: str) -> bool:
     """Return whether a normalized Google credential path is below gcloud auth."""
 
@@ -649,9 +576,8 @@ def _clarification_resolve_google_credentials_placeholder(
     """Replace a self-referential ADC Compose value with its concrete target."""
 
     environment_values = dict(agent_environment)
-    if agent_runtime is not AgentRuntime.gemini and (
-        agent_runtime is not AgentRuntime.claude_code
-        or not _clarification_claude_code_backend_enabled(
+    if agent_runtime is not AgentRuntime.claude_code or not (
+        _clarification_claude_code_backend_enabled(
             environment_values, backend_name="CLAUDE_CODE_USE_VERTEX"
         )
     ):
@@ -955,19 +881,6 @@ def _clarification_model_provider_auth_mount_targets(
             )
         ):
             runtime_auth_mount_targets |= frozenset({"/home/agent/.aws"})
-    if agent_runtime is AgentRuntime.gemini:
-        environment_values = dict(agent_environment)
-        gemini_auth_source = _clarification_gemini_auth_source(environment_values)
-        runtime_auth_mount_targets = _CLARIFICATION_GEMINI_AUTH_MOUNT_TARGETS[gemini_auth_source]
-        google_credentials = environment_values.get(_GOOGLE_APPLICATION_CREDENTIALS)
-        if (
-            gemini_auth_source == "google_cloud"
-            and google_credentials
-            and google_credentials != _GOOGLE_APPLICATION_CREDENTIALS_DEFAULT_ADC_TARGET
-            and not _google_credentials_are_within_gcloud_auth_mount(google_credentials)
-        ):
-            # An explicit service-account file takes precedence over ADC.
-            runtime_auth_mount_targets = frozenset()
     if agent_runtime is AgentRuntime.grok and any(
         name == "XAI_API_KEY" and compose_expand_value(value, environ=os.environ)
         for name, value in agent_environment

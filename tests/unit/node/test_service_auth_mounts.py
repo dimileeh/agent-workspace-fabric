@@ -415,7 +415,7 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     def _record_chown(path: str | bytes, uid: int, gid: int) -> None:
         chowned.append((Path(path), uid, gid))
 
-    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+    monkeypatch.setattr("awf.node.auth_mounts_claude.os.chown", _record_chown)
 
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
@@ -478,7 +478,7 @@ def test_service_auth_mounts_skip_readonly_mounts_for_chown(
         del uid, gid
         chowned.append(Path(path))
 
-    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+    monkeypatch.setattr("awf.node.auth_mounts_claude.os.chown", _record_chown)
 
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
@@ -517,8 +517,8 @@ def test_chown_tree_uses_lchown_for_symlinks(
         del uid, gid
         lchowned.append(Path(path))
 
-    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
-    monkeypatch.setattr("awf.node.auth_mounts.os.lchown", _record_lchown)
+    monkeypatch.setattr("awf.node.auth_mounts_claude.os.chown", _record_chown)
+    monkeypatch.setattr("awf.node.auth_mounts_claude.os.lchown", _record_lchown)
 
     auth_mounts_mod._chown_tree(root_link, 1000, 1000)
     auth_mounts_mod._chown_tree(directory, 1000, 1000)

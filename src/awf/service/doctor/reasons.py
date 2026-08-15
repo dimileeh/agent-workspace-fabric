@@ -797,13 +797,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "",
         "",
     ),
-    "GEMINI_AUTH_OK": _ReasonText(
-        "Gemini auth is usable for agent workspaces.",
-        "No action required.",
-        "",
-        "",
-        "",
-    ),
     "OPENCODE_AUTH_OK": _ReasonText(
         "OpenCode/Ollama auth is usable for agent workspaces.",
         "No action required.",

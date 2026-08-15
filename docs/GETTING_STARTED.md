@@ -227,7 +227,7 @@ AWF_GITHUB_TOKEN=<token from gh auth token>
 OPENAI_API_KEY=<optional Codex env auth>
 ANTHROPIC_API_KEY=<optional Claude env auth>
 CURSOR_API_KEY=<optional Cursor env auth>
-GEMINI_API_KEY=<optional Gemini env auth>
+GEMINI_API_KEY=<optional Antigravity (agy) env auth>
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 COMPOSE_PROFILES=ollama-bridge
 AWF_OLLAMA_BRIDGE_BIND_ADDRESS=172.17.0.1
@@ -305,7 +305,6 @@ Local service worker-created workspace stacks map local auth into the agent
 container:
 
 - `~/.config/gh`
-- `~/.config/gcloud`
 - `~/.gitconfig`
 - `~/.ssh`
 - `~/.codex` copied into a per-workspace isolated auth directory.
@@ -416,7 +415,11 @@ Default agent models and effort are centralized in
 using `GEMINI_API_KEY` (AI Studio key). The `gemini` agent runtime and `ANTIGRAVITY_API_KEY`
 have been retired. `GOOGLE_API_KEY`-only operators must set `GEMINI_API_KEY`
 explicitly. Antigravity workspaces suppress host `~/.gemini` staging (machine-bound
-`credentials.enc` must not poison container auth).
+`credentials.enc` must not poison container auth). Ambient host ADC
+(`~/.config/gcloud`, `GOOGLE_APPLICATION_CREDENTIALS`) is no longer auto-mounted
+into workspaces — declare it in the workspace profile if an agent (e.g. Claude
+Code on Vertex) needs it; enterprise gemini-cli Vertex/GCA auth is retired with
+the gemini runtime.
 
 If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. In the workspace create

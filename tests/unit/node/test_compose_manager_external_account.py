@@ -67,7 +67,7 @@ def test_upgrade_persisted_clarification_stages_external_account_subject_token(
                     "agent": {
                         "image": "awf-agent-runtime:latest",
                         "environment": {
-                            "GOOGLE_GENAI_USE_VERTEXAI": "1",
+                            "CLAUDE_CODE_USE_VERTEX": "1",
                             "GOOGLE_APPLICATION_CREDENTIALS": adc_target,
                         },
                         "volumes": [
@@ -86,7 +86,7 @@ def test_upgrade_persisted_clarification_stages_external_account_subject_token(
         upgrade_persisted_clarification_service(
             compose_file=compose_file,
             workspace_id="ws_external_account",
-            agent_runtime=AgentRuntime.gemini,
+            agent_runtime=AgentRuntime.claude_code,
         )
         == ()
     )
@@ -95,7 +95,7 @@ def test_upgrade_persisted_clarification_stages_external_account_subject_token(
         "clarification"
     ]
     assert clarification["environment"] == {
-        "GOOGLE_GENAI_USE_VERTEXAI": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
         "GOOGLE_APPLICATION_CREDENTIALS": "/home/agent/.awf/clarification-auth/0",
         "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.awf/clarification-auth/0",
         "AWF_CLARIFICATION_AUTH_TARGET_1": "/home/agent/.awf/clarification-auth/1",

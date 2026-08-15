@@ -61,12 +61,12 @@ def test_clarification_environment_rewrites_child_first_adc_mount_to_staged_file
 
     environment = stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
         (
-            ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
             ("GOOGLE_APPLICATION_CREDENTIALS", credentials.target),
         ),
         auth_mounts=(credentials, credentials_directory),
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     )
 
     assert dict(environment)["GOOGLE_APPLICATION_CREDENTIALS"] == (
@@ -479,17 +479,6 @@ def test_clarification_inputs_retain_selected_claude_backend_credentials() -> No
                 ),
             ),
         ),
-        (
-            AgentRuntime.gemini,
-            (
-                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-                (
-                    "GOOGLE_APPLICATION_CREDENTIALS",
-                    "/home/agent/.config/gcloud/awf-service-account.json",
-                ),
-            ),
-        ),
     ),
 )
 def test_clarification_inputs_retain_gcloud_mount_for_contained_credentials(
@@ -653,280 +642,6 @@ def test_clarification_inputs_retain_direct_credentials_for_unusable_claude_stor
 
 
 @pytest.mark.unit
-def test_gemini_clarification_selects_only_its_active_credential_source() -> None:
-    """Gemini re-asks do not stage inactive Google or CLI-file credentials."""
-    api_key = AuthMount(
-        source="/host/awf/secret-leases/ws_launcher/gemini-api-key",
-        target="/run/awf/secrets/gemini-api-key",
-        mode="ro",
-    )
-    gcloud_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gcloud",
-        target="/home/agent/.config/gcloud",
-        mode="ro",
-    )
-    gemini_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gemini",
-        target="/home/agent/.gemini",
-        mode="rw",
-    )
-    application_credentials = AuthMount(
-        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
-        target="/run/awf/secrets/gcp/credentials.json",
-        mode="ro",
-    )
-    mounts = (api_key, gcloud_auth, gemini_auth, application_credentials)
-    mirror_target = "/host/awf/git/mirrors/repo.git"
-
-    api_key_environment = (
-        ("GEMINI_API_KEY_AUTH_MECHANISM", "api-key"),
-        ("GEMINI_API_KEY", api_key.target),
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", application_credentials.target),
-    )
-    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        api_key_environment,
-        auth_mounts=mounts,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        ("GEMINI_API_KEY_AUTH_MECHANISM", "api-key"),
-        ("GEMINI_API_KEY", "/home/agent/.awf/clarification-auth/0"),
-    )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        mounts,
-        agent_environment=api_key_environment,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        AuthMount(
-            source=api_key.source,
-            target="/home/agent/.awf/clarification-auth/0",
-            mode="ro",
-        ),
-    )
-
-    vertex_environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", application_credentials.target),
-    )
-    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        vertex_environment,
-        auth_mounts=mounts,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
-    )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        mounts,
-        agent_environment=vertex_environment,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        AuthMount(
-            source=application_credentials.source,
-            target="/home/agent/.awf/clarification-auth/0",
-            mode="ro",
-        ),
-    )
-
-    vertex_adc_environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-    )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        mounts,
-        agent_environment=vertex_adc_environment,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
-
-    vertex_explicit_adc_environment = vertex_adc_environment + (
-        (
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "/home/agent/.config/gcloud/application_default_credentials.json",
-        ),
-    )
-    assert (
-        stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-            vertex_explicit_adc_environment,
-            auth_mounts=mounts,
-            mirror_target=mirror_target,
-            agent_runtime=AgentRuntime.gemini,
-        )
-        == vertex_explicit_adc_environment
-    )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        mounts,
-        agent_environment=vertex_explicit_adc_environment,
-        mirror_target=mirror_target,
-        agent_runtime=AgentRuntime.gemini,
-    ) == (AuthMount(source=gcloud_auth.source, target=gcloud_auth.target, mode="ro"),)
-
-    assert (
-        stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-            mounts,
-            agent_environment=(),
-            mirror_target=mirror_target,
-            agent_runtime=AgentRuntime.gemini,
-        )
-        == ()
-    )
-    assert (
-        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
-            {"GEMINI_API_KEY": "api-key-without-selector"}
-        )
-        == "api_key"
-    )
-
-
-@pytest.mark.unit
-def test_gemini_clarification_selects_explicit_adc_without_google_cloud_toggle() -> None:
-    """An explicit Gemini ADC file takes precedence over CLI-file auth."""
-    gemini_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gemini",
-        target="/home/agent/.gemini",
-        mode="rw",
-    )
-    application_credentials = AuthMount(
-        source="/host/awf/secret-leases/ws_launcher/google-credentials.json",
-        target="/run/awf/secrets/gcp/credentials.json",
-        mode="ro",
-    )
-    environment = (("GOOGLE_APPLICATION_CREDENTIALS", application_credentials.target),)
-
-    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        environment,
-        auth_mounts=(gemini_auth, application_credentials),
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
-    ) == (("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),)
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        (gemini_auth, application_credentials),
-        agent_environment=environment,
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        AuthMount(
-            source=application_credentials.source,
-            target="/home/agent/.awf/clarification-auth/0",
-            mode="ro",
-        ),
-    )
-
-
-@pytest.mark.unit
-def test_gemini_clarification_expands_optional_api_keys_before_auth_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unset optional Compose key falls back to Gemini CLI-file auth."""
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    assert (
-        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
-            {"GEMINI_API_KEY": "${GEMINI_API_KEY:-}"}
-        )
-        == "file"
-    )
-
-
-@pytest.mark.unit
-def test_gemini_clarification_expands_auth_mechanism_before_vertex_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy host-auth API-key selection takes precedence over Vertex."""
-    monkeypatch.setenv("GEMINI_API_KEY_AUTH_MECHANISM", "api-key")
-    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-
-    assert (
-        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
-            {
-                "GEMINI_API_KEY_AUTH_MECHANISM": "${GEMINI_API_KEY_AUTH_MECHANISM}",
-                "GOOGLE_GENAI_USE_VERTEXAI": "${GOOGLE_GENAI_USE_VERTEXAI}",
-            }
-        )
-        == "api_key"
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("toggle", "enabled_value"),
-    (("GOOGLE_GENAI_USE_VERTEXAI", "true"), ("GOOGLE_GENAI_USE_GCA", "yes")),
-)
-def test_gemini_clarification_expands_optional_access_token_before_auth_selection(
-    monkeypatch: pytest.MonkeyPatch,
-    toggle: str,
-    enabled_value: str,
-) -> None:
-    """An unset optional token does not override enabled Google Cloud auth."""
-    monkeypatch.delenv("GOOGLE_CLOUD_ACCESS_TOKEN", raising=False)
-
-    assert (
-        stack_launcher_mod._clarification_gemini_auth_source(  # noqa: SLF001
-            {
-                "GOOGLE_CLOUD_ACCESS_TOKEN": "${GOOGLE_CLOUD_ACCESS_TOKEN:-}",
-                toggle: enabled_value,
-            }
-        )
-        == "google_cloud"
-    )
-
-
-@pytest.mark.unit
-def test_gemini_clarification_resolves_google_credentials_compose_placeholder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Vertex clarification stages the dynamic ADC mount behind a Compose token."""
-    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
-    gcloud_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gcloud",
-        target="/home/agent/.config/gcloud",
-        mode="ro",
-    )
-    google_credentials = AuthMount(
-        source="/host/awf/auth/ws_launcher/google-credentials.json",
-        target="/host/awf/auth/ws_launcher/google-credentials.json",
-        mode="ro",
-    )
-    environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "${GOOGLE_APPLICATION_CREDENTIALS}"),
-    )
-
-    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        environment,
-        auth_mounts=(gcloud_auth, google_credentials),
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/agent/.awf/clarification-auth/0"),
-    )
-    assert stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-        (gcloud_auth, google_credentials),
-        agent_environment=environment,
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        AuthMount(
-            source=google_credentials.source,
-            target="/home/agent/.awf/clarification-auth/0",
-            mode="ro",
-        ),
-    )
-
-
-@pytest.mark.unit
 def test_claude_vertex_clarification_resolves_google_credentials_compose_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -976,13 +691,6 @@ def test_claude_vertex_clarification_resolves_google_credentials_compose_placeho
 @pytest.mark.parametrize(
     ("agent_runtime", "environment"),
     (
-        (
-            AgentRuntime.gemini,
-            (
-                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-            ),
-        ),
         (
             AgentRuntime.claude_code,
             (
@@ -1041,13 +749,6 @@ def test_google_vertex_clarification_resolves_bare_google_credentials_placeholde
     ("agent_runtime", "environment"),
     (
         (
-            AgentRuntime.gemini,
-            (
-                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-            ),
-        ),
-        (
             AgentRuntime.claude_code,
             (
                 ("CLAUDE_CODE_USE_VERTEX", "1"),
@@ -1099,13 +800,6 @@ def test_google_vertex_clarification_does_not_select_lone_pass_through_mount_for
 @pytest.mark.parametrize(
     ("agent_runtime", "environment"),
     (
-        (
-            AgentRuntime.gemini,
-            (
-                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-            ),
-        ),
         (
             AgentRuntime.claude_code,
             (
@@ -1273,12 +967,12 @@ def test_claude_bedrock_clarification_honors_defaulted_web_identity_token_overri
     ("agent_runtime", "alias_name", "credential_name", "environment"),
     (
         (
-            AgentRuntime.gemini,
+            AgentRuntime.claude_code,
             "AWF_TEST_ADC_PATH",
             "GOOGLE_APPLICATION_CREDENTIALS",
             (
-                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
-                ("GOOGLE_CLOUD_PROJECT", "awf-project"),
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-project"),
             ),
         ),
         (
@@ -1416,45 +1110,4 @@ def test_claude_bedrock_clarification_resolves_bare_web_identity_token_from_work
             target="/home/agent/.awf/clarification-auth/0",
             mode="ro",
         ),
-    )
-
-
-@pytest.mark.unit
-def test_gemini_clarification_does_not_mount_file_auth_for_access_token() -> None:
-    """A direct Google access token is the active Gemini credential source."""
-    gcloud_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gcloud",
-        target="/home/agent/.config/gcloud",
-        mode="ro",
-    )
-    gemini_auth = AuthMount(
-        source="/host/awf/auth/ws_launcher/gemini",
-        target="/home/agent/.gemini",
-        mode="rw",
-    )
-    environment = (
-        ("GOOGLE_CLOUD_ACCESS_TOKEN", "direct-google-token"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-        ("GOOGLE_GENAI_USE_GCA", "true"),
-    )
-
-    assert stack_launcher_mod._clarification_agent_environment(  # noqa: SLF001
-        environment,
-        auth_mounts=(gcloud_auth, gemini_auth),
-        mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
-    ) == (
-        ("GOOGLE_CLOUD_ACCESS_TOKEN", "direct-google-token"),
-        ("GOOGLE_CLOUD_PROJECT", "awf-project"),
-        ("GOOGLE_CLOUD_LOCATION", "us-central1"),
-    )
-    assert (
-        stack_launcher_mod._clarification_auth_mounts(  # noqa: SLF001
-            (gcloud_auth, gemini_auth),
-            agent_environment=environment,
-            mirror_target="/host/awf/git/mirrors/repo.git",
-            agent_runtime=AgentRuntime.gemini,
-        )
-        == ()
     )
