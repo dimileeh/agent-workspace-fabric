@@ -277,7 +277,7 @@ def decide_provider_recovery(
             target_model=fallback_target.model,
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
-            fallback_attempt_number=target_index + 1,
+            fallback_attempt_number=state.fallback_attempt_number + 1,
             retry_attempt_number=0,
         )
 
@@ -935,16 +935,17 @@ def _select_fallback_target_with_index(
     policy: ProviderRecoveryPolicy,
     state: ProviderRecoveryState,
 ) -> tuple[FallbackTarget | None, int]:
-    index = state.fallback_attempt_number
-    while index < len(policy.fallbacks):
-        target = policy.fallbacks[index]
+    consumed = state.fallback_attempt_number
+    if consumed >= policy.max_fallback_attempts:
+        return None, len(policy.fallbacks)
+
+    valid_count = 0
+    for index, target in enumerate(policy.fallbacks):
         if target is not None:
-            selected_attempts = sum(1 for t in policy.fallbacks[:index] if t is not None)
-            if selected_attempts >= policy.max_fallback_attempts:
-                break
-            return target, index
-        index += 1
-    return None, index
+            valid_count += 1
+            if valid_count == consumed + 1:
+                return target, index
+    return None, len(policy.fallbacks)
 
 
 def _retry_delay_seconds(

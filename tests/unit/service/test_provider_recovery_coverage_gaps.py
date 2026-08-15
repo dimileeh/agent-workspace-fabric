@@ -498,14 +498,14 @@ def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_ret
     assert target1 == target_a
     assert idx1 == 1
 
-    # Step 2: after target_a is selected, stored fallback_attempt_number is target_index + 1 == 2
-    state1 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1)
+    # Step 2: after target_a is selected, stored fallback_attempt_number is state0.fallback_attempt_number + 1 == 1
+    state1 = ProviderRecoveryState(fallback_attempt_number=state0.fallback_attempt_number + 1)
     target2, idx2 = _select_fallback_target_with_index(policy, state1)
     assert target2 == target_b
     assert idx2 == 2
 
-    # Step 3: after target_b is selected, state has fallback_attempt_number == 3 (exceeds budget)
-    state2 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1)
+    # Step 3: after target_b is selected, state has fallback_attempt_number == 2 (exceeds budget)
+    state2 = ProviderRecoveryState(fallback_attempt_number=state1.fallback_attempt_number + 1)
     assert _select_fallback_target(policy, state2) is None
 
 
@@ -1056,3 +1056,31 @@ def test_explicit_empty_fallbacks_list_suppresses_implicit_fallback() -> None:
 
     assert decision.target_model != "gpt-4o-mini"
     assert decision.action == "terminal"
+
+
+def test_select_fallback_target_counts_launched_fallbacks_separately_from_cursor_positions() -> (
+    None
+):
+    target_codex = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+    target_claude = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target_codex, target_claude),
+        max_fallback_attempts=2,
+    )
+    # Decision 1: 0 fallbacks launched so far. Skips retired Gemini (None) at index 0, selects Codex.
+    state0 = ProviderRecoveryState(fallback_attempt_number=0)
+    target1, idx1 = _select_fallback_target_with_index(policy, state0)
+    assert target1 == target_codex
+    assert idx1 == 1
+
+    # Codex is launched -> fallback_attempt_number becomes 1.
+    # Decision 2 (Codex fails): 1 fallback launched so far. Selects Claude Code.
+    state1 = ProviderRecoveryState(fallback_attempt_number=1)
+    target2, idx2 = _select_fallback_target_with_index(policy, state1)
+    assert target2 == target_claude
+    assert idx2 == 2
+
+    # Claude Code is launched -> fallback_attempt_number becomes 2.
+    # Decision 3 (Claude Code fails): 2 fallbacks launched so far. Hits max_fallback_attempts == 2.
+    state2 = ProviderRecoveryState(fallback_attempt_number=2)
+    assert _select_fallback_target(policy, state2) is None
