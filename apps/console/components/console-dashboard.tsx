@@ -20,7 +20,8 @@ normalizeOperatorPreferences,
 } from "@/lib/operator-preferences";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
 import type {
-FailureSummaryResponse,
+  AgentRuntime,
+  FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
 Operation,
@@ -172,7 +173,7 @@ const searchParams = useSearchParams();
   }, [overview]);
 
   const availableAgents = useMemo(() => {
-    return Array.from(new Set(overview.map((w) => w.agent).filter((a): a is string => Boolean(a)))).sort();
+    return Array.from(new Set(overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a)))).sort();
   }, [overview]);
 
   useEffect(() => {
