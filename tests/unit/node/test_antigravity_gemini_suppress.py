@@ -29,7 +29,8 @@ def test_gcloud_host_credentials_mounted_and_gemini_and_adc_not_mounted(
         host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(adc_file)},
     )
 
+    sources = {m.source for m in mounts}
     targets = {m.target for m in mounts}
     assert "/home/agent/.gemini" not in targets
     assert "/home/agent/.config/gcloud" in targets
-    assert str(adc_file) not in targets
+    assert str(adc_file) not in sources

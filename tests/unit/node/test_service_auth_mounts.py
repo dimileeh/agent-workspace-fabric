@@ -544,8 +544,8 @@ def test_service_auth_mounts_do_not_include_ambient_google_application_credentia
         host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
     )
 
-    by_target = {m.target: m for m in mounts}
-    assert str(credentials) not in by_target
+    sources = {m.source for m in mounts}
+    assert str(credentials) not in sources
 
 
 @pytest.mark.unit
