@@ -529,7 +529,7 @@ def test_chown_tree_uses_lchown_for_symlinks(
 
 
 @pytest.mark.unit
-def test_service_auth_mounts_include_google_application_credentials_file(
+def test_service_auth_mounts_do_not_include_ambient_google_application_credentials(
     tmp_path: Path,
 ) -> None:
     host_home = tmp_path / "host-home"
@@ -545,8 +545,7 @@ def test_service_auth_mounts_include_google_application_credentials_file(
     )
 
     by_target = {m.target: m for m in mounts}
-    assert by_target[str(credentials)].source == str(credentials)
-    assert by_target[str(credentials)].mode == "ro"
+    assert str(credentials) not in by_target
 
 
 @pytest.mark.unit

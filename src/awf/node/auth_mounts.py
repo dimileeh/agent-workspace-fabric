@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import shutil
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -138,7 +138,7 @@ def resolve_service_auth_mounts(
     host_home: Path,
     work_dir: Path,
     workspace_id: str,
-    host_env: Mapping[str, str] | None = None,
+    host_env: Mapping[str, str] | None = None,  # noqa: ARG001
     suppressed_targets: Collection[str] = (),
     suppressed_providers: Collection[str] = (),
     workspace_owner_uid: int | None = None,
@@ -160,7 +160,6 @@ def resolve_service_auth_mounts(
     )
     base_mounts = _build_host_auth_mounts(
         normalized_home,
-        host_env=host_env,
         suppressed_targets=suppressed_target_set,
     )
     return _workspace_auth_mounts(
@@ -178,7 +177,6 @@ def resolve_service_auth_mounts(
 def _build_host_auth_mounts(
     host_home: Path,
     *,
-    host_env: Mapping[str, str] | None = None,
     suppressed_targets: Collection[str] = (),
 ) -> list[AuthMount]:
     ro_mounts = [
@@ -187,27 +185,11 @@ def _build_host_auth_mounts(
         (host_home / ".gitconfig", _GITCONFIG_TARGET, "ro"),
         (host_home / ".ssh", _SSH_TARGET, "ro"),
     ]
-    mounts = [
+    return [
         AuthMount(source=str(src), target=target, mode=mode)
         for src, target, mode in ro_mounts
         if target not in suppressed_targets and src.exists()
     ]
-
-    source_env = os.environ if host_env is None else host_env
-    google_credentials = source_env.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if google_credentials:
-        credentials_path = Path(google_credentials).expanduser()
-        credentials_target = str(credentials_path)
-        if credentials_target not in suppressed_targets and credentials_path.exists():
-            mounts.append(
-                AuthMount(
-                    source=str(credentials_path),
-                    target=credentials_target,
-                    mode="ro",
-                )
-            )
-
-    return mounts
 
 
 def _workspace_auth_mounts(
