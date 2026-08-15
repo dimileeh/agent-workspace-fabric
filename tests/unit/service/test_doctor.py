@@ -116,8 +116,8 @@ def _green_status() -> dict[str, object]:
                 "antigravity": {
                     "ok": True,
                     "status": "ok",
-                    "reason": "ANTIGRAVITY_FILE_AUTH_PRESENT",
-                    "message": "Antigravity auth files are visible.",
+                    "reason": "ANTIGRAVITY_ENV_AUTH_PRESENT",
+                    "message": "Antigravity auth is visible.",
                 },
                 "opencode": {
                     "ok": True,
