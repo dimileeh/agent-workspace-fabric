@@ -34,6 +34,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import (
     AgentRuntime,
+    LaunchableAgentRuntime,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -224,8 +225,8 @@ def register_workspace_tools(
                 "existing PR, adopt it (auto_merge defaults to false / manual)."
             ),
         ),
-        agent: AgentRuntime = Field(
-            default=AgentRuntime.codex,
+        agent: LaunchableAgentRuntime = Field(
+            default=LaunchableAgentRuntime.codex,
             description="Which coding CLI to run inside the container.",
         ),
         model: str | None = Field(

@@ -882,3 +882,19 @@ def test_pr_monitor_adoption_request_json_schema_excludes_retired_gemini() -> No
     enum_values = launchable_def.get("enum", [])
     assert "gemini" not in enum_values
     assert {"codex", "claude_code", "antigravity", "cursor", "opencode", "grok"} <= set(enum_values)
+
+
+@pytest.mark.unit
+def test_workspace_task_rejects_retired_gemini_agent() -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceTask.model_validate(_task(agent="gemini"))
+
+
+@pytest.mark.unit
+def test_workspace_task_json_schema_excludes_retired_gemini() -> None:
+    schema = api_schemas.WorkspaceTask.model_json_schema()
+    defs = schema.get("$defs", {})
+    launchable_def = defs.get("LaunchableAgentRuntime", {})
+    enum_values = launchable_def.get("enum", [])
+    assert "gemini" not in enum_values
+    assert {"codex", "claude_code", "antigravity", "cursor", "opencode", "grok"} <= set(enum_values)
