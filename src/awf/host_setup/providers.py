@@ -162,6 +162,43 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
 
 _SPEC_BY_NAME: Mapping[str, ProviderSpec] = {spec.name: spec for spec in PROVIDER_REGISTRY}
 
+_RETIRED_PROVIDER_MIGRATIONS: Mapping[str, str] = {
+    "gemini": "antigravity",
+}
+
+
+def _prune_and_migrate_provider_config(
+    providers: Mapping[str, ProviderConfig],
+) -> dict[str, ProviderConfig]:
+    """Prune retired providers and migrate legacy provider entries to canonical names."""
+    result = dict(providers)
+    for legacy_name, target_name in _RETIRED_PROVIDER_MIGRATIONS.items():
+        if legacy_name in result:
+            legacy_cfg = result.pop(legacy_name)
+            if target_name not in result:
+                result[target_name] = legacy_cfg
+    for name in list(result):
+        if name not in _SPEC_BY_NAME:
+            result.pop(name, None)
+    return result
+
+
+def _resolve_existing_provider_config(
+    providers: Mapping[str, ProviderConfig],
+    name: str,
+) -> ProviderConfig | None:
+    """Return existing ProviderConfig for `name`, checking legacy alias keys if needed."""
+    existing = providers.get(name)
+    if existing is not None:
+        return existing
+    legacy_alias = next(
+        (legacy for legacy, target in _RETIRED_PROVIDER_MIGRATIONS.items() if target == name),
+        None,
+    )
+    if legacy_alias is not None:
+        return providers.get(legacy_alias)
+    return None
+
 
 class ProviderSetupResult(BaseModel):
     """Per-provider orchestration outcome carrying only safe (non-secret) fields."""
@@ -277,7 +314,7 @@ def orchestrate_provider_setup(
         keyring=keyring_backend, env=env_backend, plain_file=plain_file_backend
     )
 
-    providers_config = dict(config.providers)
+    providers_config = _prune_and_migrate_provider_config(config.providers)
     results: list[ProviderSetupResult] = []
     # Iterate registry order (not selection order) for a deterministic summary.
     for spec in PROVIDER_REGISTRY:
@@ -513,7 +550,7 @@ def _orchestrate_agent_provider(
     else:
         env_var = _first_present(environ, spec.env_ref_vars)
         if env_var is None:
-            existing = config.providers.get(spec.name)
+            existing = _resolve_existing_provider_config(config.providers, spec.name)
             if existing is not None and existing.source != "file":
                 # The provider was configured by a prior run (e.g. keyring or
                 # plain_file) but no fresh secret/env is available to re-probe.

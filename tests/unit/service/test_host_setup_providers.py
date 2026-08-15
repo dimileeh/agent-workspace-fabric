@@ -1216,3 +1216,132 @@ def test_all_unknown_selection_does_no_targeted_work(tmp_path: Path) -> None:
         entry for entry in captured if entry.get("event") == "host_setup.unknown_providers_ignored"
     ]
     assert warnings and warnings[0]["providers"] == ["typo_provider", "another_typo"]
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_migrated_to_antigravity_during_setup(tmp_path: Path) -> None:
+    """Legacy providers.gemini entry is pruned and migrated to antigravity."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"GEMINI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    ag_config = updated_config.providers["antigravity"]
+    assert ag_config.credential_ref == "env://GEMINI_API_KEY"
+    assert ag_config.backend == "env_ref"
+    assert ag_config.status == "ready"
+
+    ag_result = summary.result_for("antigravity")
+    assert ag_result is not None
+    assert ag_result.status == "ready"
+    assert ag_result.credential_ref == "env://GEMINI_API_KEY"
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_dropped_when_antigravity_exists(tmp_path: Path) -> None:
+    """Legacy gemini entry is dropped if antigravity already exists in config."""
+    existing_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            ),
+            "antigravity": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            ),
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=existing_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(returncode=1),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_pruned_during_targeted_recheck(tmp_path: Path) -> None:
+    """Targeted recheck prunes retired gemini key while updating targeted provider."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_unknown_retired_provider_pruned_from_config(tmp_path: Path) -> None:
+    """Unregistered/unknown provider keys are pruned from persisted config."""
+    config_with_unknown = HostSetupConfig(
+        providers={
+            "legacy_unknown": ProviderConfig(
+                credential_ref="env://UNKNOWN_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=config_with_unknown,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(returncode=1),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "legacy_unknown" not in updated_config.providers
