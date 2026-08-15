@@ -3,7 +3,7 @@
 Extracted from ``provider_readiness`` to keep each first-party module under the
 maintainability line limit. Each ``_check_*`` helper inspects the credential and
 runtime-CLI signals for a single non-OpenCode provider (GitHub, Codex, Claude,
-Cursor, Gemini) and returns a ``_provider_result`` payload. They sit alongside the
+Cursor, Antigravity) and returns a ``_provider_result`` payload. They sit alongside the
 ``_check_docker_provider``/``_check_grok``/``_check_opencode`` helpers in
 ``provider_readiness_helpers`` conceptually, but depend on credential helpers,
 constants, and redaction helpers reachable through ``provider_readiness`` — all

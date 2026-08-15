@@ -223,7 +223,7 @@ convention — pg16 wants `/var/lib/postgresql/data`, pg18 wants
 You do **not** pass auth bind mounts — AWF resolves and prepares auth
 per-workspace (`src/awf/node/auth_mounts.py`):
 
-- **rw provider auth** (codex, claude, gemini, opencode, grok, ollama) is
+- **rw provider auth** (codex, claude, antigravity, opencode, grok, ollama) is
   **seeded from your host into per-workspace isolated dirs** under
   `${AWF_HOST_WORK_DIR:-~/.awf/service}/auth/<workspace_id>/<tool>/` — not bind-
   mounted live from `~`. (Claude uses an overlayfs scheme plus the single-file
@@ -256,7 +256,7 @@ AWF inherits whatever those are authenticated as.
   `$VAR` work; the first failing command stops the sequence.
 - **Agent runtime ships**: Python 3.12, Node 22, git, jq, ripgrep, tini, Docker
   CLI + Compose + Buildx, GitHub CLI, alembic/pytest/uv, **six coding CLIs**
-  (Codex, Claude Code, Cursor, Gemini, OpenCode, Grok), and the system libs
+  (Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok), and the system libs
   Playwright's chromium needs. The **browser binaries are NOT pre-installed** —
   add `npx playwright install chromium` as a validation command (~30 s). Do
   **NOT** use `--with-deps`: it tries to `su root` + `apt install`, and the
@@ -436,7 +436,7 @@ Common failure modes + fixes:
 | Companion never `service_healthy` | Wrong health URL | Curl the real service's health route on the host; fix `healthcheck_cmd` |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or didn't commit) | Widen prompt scope; check `git log base..HEAD` in the worktree |
 | `failed to parse compose.yml` | Hand-rolled compose with mixed quoting | The template uses `tojson`; declare via the profile, don't hand-roll |
-| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/gemini/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
+| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/antigravity/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
 
 ## 12 — Cleanup
 
