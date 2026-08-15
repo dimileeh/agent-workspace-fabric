@@ -163,6 +163,20 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/overview?status=monitoring_pr&agent=codex&limit=25"
 ```
 
+### Batch workspace overview (hosted projection)
+
+Bounded lookup for known workspace IDs (1–200 unique IDs). Returns overview
+items in request order for IDs that exist, plus `missing_workspace_ids` for the
+rest (also request-ordered). Reuses the same overview projection as the list
+endpoint.
+
+```bash
+curl -X POST -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_ids":["ws_a","ws_b","ws_missing"]}' \
+  "http://localhost:8000/v1/workspaces/overview/batch"
+```
+
 ### List workspaces (full detail)
 
 ```bash

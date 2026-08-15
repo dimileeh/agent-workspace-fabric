@@ -1217,6 +1217,27 @@ class WorkspaceOverviewListResponse(BaseModel):
     cursor: str | None = None
 
 
+class WorkspaceOverviewBatchRequest(BaseModel):
+    """Bounded batch lookup for known workspace IDs (hosted projection)."""
+
+    workspace_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        Field(min_length=1, max_length=200),
+    ]
+
+    @field_validator("workspace_ids")
+    @classmethod
+    def _workspace_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("workspace_ids must be unique")
+        return value
+
+
+class WorkspaceOverviewBatchResponse(BaseModel):
+    items: list[WorkspaceOverviewResponse]
+    missing_workspace_ids: list[str]
+
+
 StaleReasonStatus = Literal["active", "resolved"]
 StaleReasonCode = Literal[
     "STALE_TARGET_ADVANCED",
