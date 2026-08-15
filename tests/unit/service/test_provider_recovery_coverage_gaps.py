@@ -341,8 +341,12 @@ def test_parse_provider_recovery_policy_skips_invalid_fallback_entries() -> None
             },
         },
     )
-    assert len(parsed.fallbacks) == 1
-    only = parsed.fallbacks[0]
+    assert len(parsed.fallbacks) == 4
+    assert parsed.fallbacks[0] is None
+    assert parsed.fallbacks[1] is None
+    assert parsed.fallbacks[2] is None
+    only = parsed.fallbacks[3]
+    assert only is not None
     assert only.agent == "codex"
     assert only.model == "gpt-5"
     assert only.provider == "openai"

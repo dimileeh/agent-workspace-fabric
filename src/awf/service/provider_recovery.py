@@ -1226,10 +1226,12 @@ def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
             targets.append(None)
             continue
         if not isinstance(item, Mapping):
+            targets.append(None)
             continue
         agent = _mapping_str(item, "agent")
         model = _mapping_str(item, "model")
         if agent is None or model is None:
+            targets.append(None)
             continue
         try:
             runtime = AgentRuntime(agent)

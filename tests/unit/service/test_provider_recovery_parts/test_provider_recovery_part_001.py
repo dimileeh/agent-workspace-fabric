@@ -277,9 +277,11 @@ def test_provider_recovery_value_helpers_normalize_payloads() -> None:
         "model": "gpt-5.5",
     }
     assert inferred.to_payload() == {"agent": "codex", "model": "gpt-5.5"}
-    assert len(policy.fallbacks) == 1
-    assert policy.fallbacks[0].provider == "openai"
-    assert policy.max_fallback_attempts == 1
+    assert len(policy.fallbacks) == 3
+    assert policy.fallbacks[0] is None
+    assert policy.fallbacks[1] is None
+    assert policy.fallbacks[2] is not None and policy.fallbacks[2].provider == "openai"
+    assert policy.max_fallback_attempts == 3
     assert policy.max_same_provider_retries == 2
     assert policy.cooldown_seconds == 300
     assert policy.retry_after_cap_seconds == 120

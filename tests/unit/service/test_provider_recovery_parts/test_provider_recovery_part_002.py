@@ -594,9 +594,14 @@ def test_fallback_targets_edge_cases():
             {"model": "missing_agent"},
         ]
     )
-    assert len(targets) == 2
+    assert len(targets) == 7
     assert targets[0] is None
-    assert targets[1].agent == "codex"
+    assert targets[1] is None
+    assert targets[2] is None
+    assert targets[3] is not None and targets[3].agent == "codex"
+    assert targets[4] is None
+    assert targets[5] is None
+    assert targets[6] is None
 
     assert _fallback_targets(None) == []
     assert _fallback_targets("string") == []
