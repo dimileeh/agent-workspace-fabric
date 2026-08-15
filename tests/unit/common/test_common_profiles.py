@@ -143,5 +143,21 @@ def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_seg
         == "services.<key>.environment.<key>"
     )
 
+    # Standard nested profile fields
+    assert format_safe_validation_location(("docker", "compose_files")) == "docker.compose_files"
+    assert format_safe_validation_location(("phases", "setup", "command")) == "phases.setup.command"
+    assert (
+        format_safe_validation_location(("services", 0, "healthchecks", 0, "healthcheck_cmd"))
+        == "services.0.healthchecks.0.healthcheck_cmd"
+    )
+    assert (
+        format_safe_validation_location(("database", "alembic", "config_path"))
+        == "database.alembic.config_path"
+    )
+    assert (
+        format_safe_validation_location(("monitor", "conformance_stall", "no_output_seconds"))
+        == "monitor.conformance_stall.no_output_seconds"
+    )
+
     # Unallowlisted extra field segment
     assert format_safe_validation_location(("unknown_secret_field",)) == "<key>"
