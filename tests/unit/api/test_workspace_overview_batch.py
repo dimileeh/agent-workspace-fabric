@@ -150,3 +150,12 @@ async def test_batch_overview_requires_authorization(
         if not sent_wrong_token and default_authorization is not None:
             client.headers["Authorization"] = default_authorization
     assert response.status_code == 401, response.text
+
+
+@pytest.mark.unit
+def test_batch_overview_request_schema_publishes_unique_items() -> None:
+    """OpenAPI must advertise uniqueness; runtime still rejects duplicates."""
+    schema = WorkspaceOverviewBatchRequest.model_json_schema()["properties"]["workspace_ids"]
+    assert schema.get("uniqueItems") is True
+    with pytest.raises(ValueError, match="workspace_ids must be unique"):
+        WorkspaceOverviewBatchRequest(workspace_ids=["ws_a", "ws_a"])

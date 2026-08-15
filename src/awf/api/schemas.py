@@ -1224,7 +1224,11 @@ class WorkspaceOverviewBatchRequest(BaseModel):
 
     workspace_ids: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=128)]],
-        Field(min_length=1, max_length=200),
+        Field(
+            min_length=1,
+            max_length=200,
+            json_schema_extra={"uniqueItems": True},
+        ),
     ]
 
     @field_validator("workspace_ids")

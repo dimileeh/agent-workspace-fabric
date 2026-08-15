@@ -9436,7 +9436,8 @@
             "maxItems": 200,
             "minItems": 1,
             "title": "Workspace Ids",
-            "type": "array"
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
