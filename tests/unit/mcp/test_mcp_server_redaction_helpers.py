@@ -147,20 +147,32 @@ def test_redact_exact_secret_bytes_delegates_to_common_byte_helper(
 
 
 @pytest.mark.unit
-def test_validation_error_message_returns_allowlisted_message_for_custom_validator() -> None:
-    """Ensure custom validator error messages with arbitrary values return allowlisted messages."""
+def test_validation_error_message_strips_dynamic_toolchain_keys_and_values() -> None:
+    """Ensure custom validator error messages for toolchains strip dynamic keys and secrets."""
     from pydantic import ValidationError
 
     from awf.profiles.models import ProfileRuntime
 
-    raw_secret = "arbitrary_custom_secret_value_123"
+    raw_secret_key = "plainsecret48729"
+    raw_secret_val = "arbitrary_custom_secret_value_123"
+
+    # Test invalid version value
     with pytest.raises(ValidationError) as exc_info:
-        ProfileRuntime.model_validate({"toolchains": {"python": [raw_secret]}})
+        ProfileRuntime.model_validate({"toolchains": {raw_secret_key: [raw_secret_val]}})
 
     msg = mcp_server_mod._validation_error_message(exc_info.value)  # noqa: SLF001
-    assert raw_secret not in msg
-    assert "toolchains" in msg
-    assert "invalid toolchain version for 'python'" in msg
+    assert raw_secret_key not in msg
+    assert raw_secret_val not in msg
+    assert msg == "toolchains: Value error"
+
+    # Test wrong value type
+    with pytest.raises(ValidationError) as exc_info2:
+        ProfileRuntime.model_validate({"toolchains": {raw_secret_key: "bad"}})
+
+    msg2 = mcp_server_mod._validation_error_message(exc_info2.value)  # noqa: SLF001
+    assert raw_secret_key not in msg2
+    assert "bad" not in msg2
+    assert msg2 == "toolchains: Value error"
 
 
 @pytest.mark.unit

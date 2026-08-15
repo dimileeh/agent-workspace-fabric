@@ -19,10 +19,10 @@ def test_is_allowlisted_validation_message_static_messages() -> None:
 
 @pytest.mark.unit
 def test_is_allowlisted_validation_message_dynamic_patterns() -> None:
-    assert is_allowlisted_validation_message("invalid toolchain version for 'python'") is True
+    assert is_allowlisted_validation_message("invalid toolchain version for 'python'") is False
     assert (
         is_allowlisted_validation_message("runtime.toolchains declares unsupported versions")
-        is True
+        is False
     )
     assert (
         is_allowlisted_validation_message("profile path must be a workspace-relative path") is True
@@ -38,12 +38,12 @@ def test_format_safe_validation_message_known_type() -> None:
 
 
 @pytest.mark.unit
-def test_format_safe_validation_message_allowlisted_custom() -> None:
+def test_format_safe_validation_message_dynamic_toolchain_returns_static_value_error() -> None:
     err = {
         "type": "value_error",
         "msg": "Value error, invalid toolchain version for 'go'",
     }
-    assert format_safe_validation_message(err) == "invalid toolchain version for 'go'"
+    assert format_safe_validation_message(err) == "Value error"
 
 
 @pytest.mark.unit

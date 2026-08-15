@@ -72,12 +72,6 @@ def is_allowlisted_validation_message(msg: str) -> bool:
     """Check if a validation message is an allowlisted safe static message."""
     if msg in _ALLOWLISTED_STATIC_MESSAGES:
         return True
-    if msg.startswith("invalid toolchain version for "):
-        return True
-    if msg.startswith("runtime.toolchains") and (
-        "must" in msg or "declares" in msg or "versions" in msg
-    ):
-        return True
     return bool(
         msg.endswith(" must be a workspace-relative path")
         or msg.endswith(" must include '{workspace_id}'")
