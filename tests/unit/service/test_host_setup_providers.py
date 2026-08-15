@@ -1354,6 +1354,41 @@ def test_retired_gemini_entry_migrated_and_ready_during_targeted_recheck(tmp_pat
 
 
 @pytest.mark.unit
+def test_retired_gemini_incompatible_env_ref_degraded_during_targeted_recheck(
+    tmp_path: Path,
+) -> None:
+    """Targeted recheck degrades legacy gemini entry with incompatible env ref (e.g. GOOGLE_API_KEY)."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GOOGLE_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN, "GOOGLE_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].credential_ref == "env://GOOGLE_API_KEY"
+    assert updated_config.providers["antigravity"].status == "unavailable"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
 def test_unknown_retired_provider_pruned_from_config(tmp_path: Path) -> None:
     """Unregistered/unknown provider keys are pruned from persisted config."""
     config_with_unknown = HostSetupConfig(
