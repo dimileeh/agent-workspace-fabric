@@ -4118,7 +4118,7 @@
         "description": "Input for adopting an already-open GitHub PR into AWF monitoring.",
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime",
+            "$ref": "#/components/schemas/LaunchableAgentRuntime",
             "default": "codex"
           },
           "auto_merge": {
