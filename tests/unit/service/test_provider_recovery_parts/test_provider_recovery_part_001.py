@@ -1478,7 +1478,7 @@ async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
 
 
 @pytest.mark.unit
-def test_terminal_decision_discards_inherited_recommended_action() -> None:
+def test_unsupported_agent_runtime_discards_inherited_recommended_action() -> None:
     from awf.service.provider_recovery import (
         ProviderRecoveryDecision,
         _build_provider_recovery_state_view,
@@ -1527,3 +1527,56 @@ def test_terminal_decision_discards_inherited_recommended_action() -> None:
     assert view.action == "terminal"
     assert view.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
     assert view.recommended_action == "No further recovery possible; inspect failure details."
+
+
+@pytest.mark.unit
+def test_supported_terminal_decision_preserves_recommended_action() -> None:
+    from awf.service.provider_recovery import (
+        ProviderRecoveryDecision,
+        _build_provider_recovery_state_view,
+        _decision_payload,
+        _recovery_task_policy,
+    )
+
+    metadata = {
+        "reason_code": "PROVIDER_AUTH_FAILED",
+        "provider": "openai",
+        "model": "gpt-5",
+        "recommended_action": "Refresh provider credentials before retrying this workspace.",
+    }
+    decision = ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="PROVIDER_AUTH_FAILED",
+        terminal_reason="PROVIDER_AUTH_FAILED",
+        fallback_attempt_number=0,
+        retry_attempt_number=0,
+    )
+
+    payload = _decision_payload(decision, metadata)
+    assert (
+        payload["recommended_action"]
+        == "Refresh provider credentials before retrying this workspace."
+    )
+
+    policy = _recovery_task_policy(
+        {},
+        source_workspace_id="ws-123",
+        source_attempt=None,
+        source_canonical_attempt=None,
+        metadata=metadata,
+        decision=decision,
+    )
+    assert (
+        policy["provider_recovery_state"]["recommended_action"]
+        == "Refresh provider credentials before retrying this workspace."
+    )
+
+    view = _build_provider_recovery_state_view(payload)
+    assert view.action == "terminal"
+    assert view.reason_code == "PROVIDER_AUTH_FAILED"
+    assert view.recommended_action == "Refresh provider credentials before retrying this workspace."
