@@ -229,9 +229,10 @@ per-workspace (`src/awf/node/auth_mounts.py`):
   mounted live from `~`. (Claude uses an overlayfs scheme plus the single-file
   `/home/agent/.claude.json` mount it needs to find its own config on token
   refresh.)
-- **ro auth**: `~/.config/gh`, `~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, plus
-  `GOOGLE_APPLICATION_CREDENTIALS` if set. Cursor and Antigravity are env-key-only
-  (no mount; Antigravity uses `GEMINI_API_KEY`).
+- **ro auth**: `~/.config/gh`, `~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`. Google
+  ADC is profile-declared rather than automatically inherited (via profile secret
+  leases, §6). Cursor and Antigravity are env-key-only (no mount; Antigravity uses
+  `GEMINI_API_KEY`).
 - For anything non-default, use **profile secret leases** (§6), not raw mounts.
 
 The container user is `agent` (UID 1000); AWF chowns the per-workspace auth dirs
