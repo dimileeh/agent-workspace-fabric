@@ -32,6 +32,18 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 
+# next.config.ts derives basePath from env at `next start`; carry the same
+# public build-time path/config into the runtime image so hosted builds stay
+# consistent without requiring operators to re-supply these at launch.
+ARG NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=5000
+ARG NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH=
+ARG NEXT_PUBLIC_AWF_CONSOLE_API_BASE=/api/awf
+ARG NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE=/api/operator
+ENV NEXT_PUBLIC_AWF_CONSOLE_POLL_MS=${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS}
+ENV NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH=${NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH}
+ENV NEXT_PUBLIC_AWF_CONSOLE_API_BASE=${NEXT_PUBLIC_AWF_CONSOLE_API_BASE}
+ENV NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE=${NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE}
+
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.ts ./next.config.ts
 COPY --from=build /app/node_modules ./node_modules
