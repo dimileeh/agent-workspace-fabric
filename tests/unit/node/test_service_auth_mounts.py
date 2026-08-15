@@ -669,7 +669,12 @@ def test_chown_workspace_auth_sources_respects_exempt_sources_and_extra_paths(
     rw_dir = tmp_path / "rw"
     rw_dir.mkdir()
 
-    monkeypatch.setattr(auth_mounts_mod, "_chown_tree", lambda *_args, **_kwargs: None)
+    chowned_calls: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(
+        auth_mounts_mod,
+        "_chown_tree",
+        lambda path, uid, gid: chowned_calls.append((path, uid, gid)),
+    )
 
     # Pass exempt_sources containing exempt_dir.source so it is skipped during chown
     auth_mounts_mod._chown_workspace_auth_sources(  # noqa: SLF001
@@ -682,6 +687,11 @@ def test_chown_workspace_auth_sources_respects_exempt_sources_and_extra_paths(
         exempt_sources=frozenset([str(exempt_dir)]),
         extra_paths=[extra_dir],
     )
+
+    assert chowned_calls == [
+        (rw_dir, 1000, 1000),
+        (extra_dir, 1000, 1000),
+    ]
 
 
 @pytest.mark.unit
