@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1185,9 +1186,17 @@ class TestPullRequestMonitorAdoptionServicePart001:
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        with pytest.raises(ValidationError) as val_exc:
+            PullRequestMonitorAdoptionRequest(
+                repo_slug="acme/app",
+                pr_number=123,
+                agent=AgentRuntime.gemini,
+            )
+        assert "agent" in str(val_exc.value)
+
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(session, settings=Settings())
-            request = PullRequestMonitorAdoptionRequest(
+            request = PullRequestMonitorAdoptionRequest.model_construct(
                 repo_slug="acme/app",
                 pr_number=123,
                 agent=AgentRuntime.gemini,

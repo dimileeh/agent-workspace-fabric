@@ -119,7 +119,7 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     pr_number: int | None = Field(default=None, ge=1)
     pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
 
-    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    agent: LaunchableAgentRuntime = Field(default=LaunchableAgentRuntime.codex)
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"

@@ -33,7 +33,7 @@ from awf.common.github_client import (
 )
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_execution_policy
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -993,8 +993,9 @@ def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[
     if request.effort is not None:
         policy["agent_effort"] = request.effort
     elif request.model is not None:
-        defaults = defaults_with_model_overrides({request.agent: request.model})
-        agent_defaults = defaults.get(request.agent)
+        agent_runtime = AgentRuntime(request.agent.value)
+        defaults = defaults_with_model_overrides({agent_runtime: request.model})
+        agent_defaults = defaults.get(agent_runtime)
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
     return policy
@@ -1024,7 +1025,12 @@ def _raise_if_hosted_delegation_unconfigured(
 def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
     from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
-    if request.agent not in _LAUNCH_PROVIDER_BY_AGENT:
+    try:
+        agent_runtime = AgentRuntime(request.agent.value)
+    except ValueError:
+        agent_runtime = None
+
+    if agent_runtime is None or agent_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
         supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
         raise PRMonitorAdoptionError(
             error_code="UNSUPPORTED_AGENT_RUNTIME",
