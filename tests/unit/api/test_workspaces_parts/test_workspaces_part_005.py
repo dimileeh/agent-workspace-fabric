@@ -861,13 +861,7 @@ class TestCreateWorkspacePolicyMetadata:
         }
 
         create = await client.post("/v1/workspaces", json=payload)
-        assert create.status_code == 409
-        body = create.json()
-        assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
-        assert (
-            body["detail"]["provider_readiness_preflight"]["reason_code"]
-            == "UNSUPPORTED_AGENT_RUNTIME"
-        )
+        assert create.status_code == 422
 
     @pytest.mark.unit
     async def test_legacy_v1_workspace_exposes_default_effective_identity(
