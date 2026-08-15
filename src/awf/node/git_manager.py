@@ -37,6 +37,11 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+# Loose workspace-id character class, matching ``service/orphans.py`` so orphan
+# GC can still reclaim legacy/synthetic on-disk ids. ``re.fullmatch`` anchors it;
+# ``[A-Za-z0-9_]`` excludes ``/``, ``.`` (so ``..`` and a leading ``.`` cannot
+# appear) and null bytes — exactly the path-traversal risk at the worktree sink.
+_WORKSPACE_ID_RE = re.compile(r"ws_[A-Za-z0-9][A-Za-z0-9_]*")
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
@@ -474,6 +479,25 @@ class GitManager:
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the managed worktree path for ``workspace_id``."""
+        return self._worktree_path_for(workspace_id)
+
+    def _worktree_path_for(self, workspace_id: str) -> Path:
+        """Validate a caller-supplied workspace id and return its worktree path.
+
+        Single sink for ``self._worktrees_dir / workspace_id``. Rejects ids that
+        could escape the worktree root (``..``, ``/``, a leading ``.``, null
+        bytes, empty) so the value handed to destructive git commands is always a
+        safe single path component. Uses the same loose character class as orphan
+        GC for compatibility; never silently sanitizes a bad id — it rejects it.
+        """
+        if not _WORKSPACE_ID_RE.fullmatch(workspace_id):
+            raise GitOperationError(
+                operation="worktree.path",
+                returncode=1,
+                stdout="",
+                stderr=f"invalid workspace id for worktree path: {workspace_id!r}",
+                reason_code="GIT_WORKSPACE_ID_INVALID",
+            )
         return self._worktrees_dir / workspace_id
 
     async def ensure_mirror(self, repo_url: str) -> Path:
@@ -617,10 +641,12 @@ class GitManager:
         serialization is cheap enough for the MVP; Phase 1.5 can revisit with
         per-worktree locks if throughput becomes a concern.
         """
+        # Validate the id before any clone/fetch so a traversal-prone id fails
+        # fast, before ``ensure_mirror`` does network/disk work.
+        worktree_path = self._worktree_path_for(workspace_id)
         mirror_path = await self.ensure_mirror(repo_url)
         self._worktrees_dir.mkdir(parents=True, exist_ok=True)
 
-        worktree_path = self._worktrees_dir / workspace_id
         if worktree_path.exists():
             raise GitOperationError(
                 operation="worktree.add",
@@ -717,7 +743,7 @@ class GitManager:
 
     async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
         """Remove a worktree using an already-resolved mirror path."""
-        worktree_path = self._worktrees_dir / workspace_id
+        worktree_path = self._worktree_path_for(workspace_id)
 
         lock = self._lock_for_mirror(mirror_path)
         async with lock:
@@ -783,7 +809,7 @@ class GitManager:
         Used for event metadata + base-commit recording. The workspace ID
         uniquely identifies the worktree path, so we don't need repo_url here.
         """
-        worktree_path = self._worktrees_dir / workspace_id
+        worktree_path = self._worktree_path_for(workspace_id)
         result = await self._run(
             ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
             operation="worktree.head",

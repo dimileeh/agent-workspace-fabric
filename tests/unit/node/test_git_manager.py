@@ -875,6 +875,137 @@ class TestRemoveWorktree:
             await manager.remove_worktree(workspace_id="ws_boom", repo_url=str(origin_repo))
 
 
+_BAD_IDS = [
+    "..",  # contains ".."
+    "ws_../../etc",  # ".." + "/"
+    "ws_abc/def",  # contains "/"
+    "ws_abc\x00",  # null byte
+    ".hidden",  # leading "."
+    "",  # empty string
+]
+_BAD_ID_LABELS = ["dotdot", "dotdot-slash", "slash", "null-byte", "leading-dot", "empty"]
+
+
+class TestWorkspaceIdValidation:
+    """Defense-in-depth validation of ``workspace_id`` at the worktree-path sink.
+
+    Every method that joins a caller-supplied ``workspace_id`` onto the managed
+    worktree root routes through ``GitManager._worktree_path_for``. A traversal-
+    prone id (``..``, ``/``, leading ``.``, null byte, empty) must raise
+    ``GitOperationError`` *before* any git subprocess runs.
+    """
+
+    @staticmethod
+    def _install_run_recorder(
+        manager: GitManager, monkeypatch: pytest.MonkeyPatch
+    ) -> list[list[str]]:
+        """Patch ``manager._run`` with a recorder that never shells out to git.
+
+        Every git call in the guarded methods (including ``ensure_mirror``)
+        funnels through ``self._run``, so an empty recorder proves no git
+        subprocess ran.
+        """
+        calls: list[list[str]] = []
+
+        async def _record(args: list[str], *, operation: str) -> git_module.GitResult:
+            calls.append(args)
+            return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_run", _record)
+        return calls
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
+    def test_worktree_path_for_rejects_traversal_ids(
+        self, manager: GitManager, bad_id: str
+    ) -> None:
+        with pytest.raises(GitOperationError) as raised:
+            manager._worktree_path_for(bad_id)  # noqa: SLF001
+
+        assert raised.value.reason_code == "GIT_WORKSPACE_ID_INVALID"
+        assert raised.value.operation == "worktree.path"
+        # The rejected value is surfaced clearly (repr keeps null bytes/newlines
+        # visible) and never resolved into a traversal path that looks valid.
+        assert "invalid workspace id" in str(raised.value).lower()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
+    async def test_add_worktree_rejects_bad_id_without_running_git(
+        self, manager: GitManager, monkeypatch: pytest.MonkeyPatch, bad_id: str
+    ) -> None:
+        calls = self._install_run_recorder(manager, monkeypatch)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.add_worktree(
+                workspace_id=bad_id,
+                repo_url="https://github.com/awf/repo.git",
+                base_branch="development",
+                new_branch="awf/x",
+            )
+
+        assert raised.value.reason_code == "GIT_WORKSPACE_ID_INVALID"
+        # Validation precedes ``ensure_mirror``'s clone/fetch: no git ran.
+        assert calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
+    async def test_head_sha_rejects_bad_id_without_running_git(
+        self, manager: GitManager, monkeypatch: pytest.MonkeyPatch, bad_id: str
+    ) -> None:
+        calls = self._install_run_recorder(manager, monkeypatch)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.head_sha(workspace_id=bad_id)
+
+        assert raised.value.reason_code == "GIT_WORKSPACE_ID_INVALID"
+        assert calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
+    async def test_remove_worktree_rejects_bad_id_without_running_git(
+        self,
+        manager: GitManager,
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        bad_id: str,
+    ) -> None:
+        calls = self._install_run_recorder(manager, monkeypatch)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.remove_worktree(workspace_id=bad_id, repo_url=str(origin_repo))
+
+        assert raised.value.reason_code == "GIT_WORKSPACE_ID_INVALID"
+        # Covers the flagged ``worktree remove --force`` sink via
+        # ``remove_worktree_from_mirror``: no git ran.
+        assert calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", _BAD_IDS, ids=_BAD_ID_LABELS)
+    def test_get_worktree_path_rejects_bad_id(self, manager: GitManager, bad_id: str) -> None:
+        with pytest.raises(GitOperationError) as raised:
+            manager.get_worktree_path(bad_id)
+
+        assert raised.value.reason_code == "GIT_WORKSPACE_ID_INVALID"
+
+    @pytest.mark.unit
+    def test_worktree_path_for_accepts_realistic_id(self, manager: GitManager) -> None:
+        workspace_id = "ws_" + "0123456789abcdef01234567"  # ws_ + 24 hex
+        assert (
+            manager._worktree_path_for(workspace_id)  # noqa: SLF001
+            == manager._worktrees_dir / workspace_id
+        )
+
+    @pytest.mark.unit
+    def test_worktree_path_for_accepts_companion_style_id(self, manager: GitManager) -> None:
+        # Companion / isolated-reask worktree ids use only underscore markers,
+        # so the loose pattern keeps them compatible.
+        workspace_id = "ws_deadbeef__companion__redis"
+        assert (
+            manager._worktree_path_for(workspace_id)  # noqa: SLF001
+            == manager._worktrees_dir / workspace_id
+        )
+
+
 class TestHeadSha:
     """Tests for resolving the current HEAD SHA from a worktree."""
 
