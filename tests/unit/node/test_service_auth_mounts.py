@@ -51,8 +51,7 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     ollama_home = work_dir / "auth" / "ws_auth" / "ollama"
     assert by_target["/home/agent/.config/gh"].source == str(host_home / ".config" / "gh")
     assert by_target["/home/agent/.config/gh"].mode == "ro"
-    assert by_target["/home/agent/.config/gcloud"].source == str(host_home / ".config" / "gcloud")
-    assert by_target["/home/agent/.config/gcloud"].mode == "ro"
+    assert "/home/agent/.config/gcloud" not in by_target
     assert by_target["/home/agent/.gitconfig"].source == str(host_home / ".gitconfig")
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
     assert by_target["/home/agent/.ssh"].source == str(host_home / ".ssh")

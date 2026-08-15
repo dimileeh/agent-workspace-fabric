@@ -76,7 +76,6 @@ from awf.node.compose_manager import AuthMount
 
 _CONTAINER_HOME = "/home/agent"
 _GH_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gh"
-_GCLOUD_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gcloud"
 _GITCONFIG_TARGET = f"{_CONTAINER_HOME}/.gitconfig"
 _SSH_TARGET = f"{_CONTAINER_HOME}/.ssh"
 _CODEX_TARGET = f"{_CONTAINER_HOME}/.codex"
@@ -181,7 +180,6 @@ def _build_host_auth_mounts(
 ) -> list[AuthMount]:
     ro_mounts = [
         (host_home / ".config" / "gh", _GH_CONFIG_TARGET, "ro"),
-        (host_home / ".config" / "gcloud", _GCLOUD_CONFIG_TARGET, "ro"),
         (host_home / ".gitconfig", _GITCONFIG_TARGET, "ro"),
         (host_home / ".ssh", _SSH_TARGET, "ro"),
     ]
