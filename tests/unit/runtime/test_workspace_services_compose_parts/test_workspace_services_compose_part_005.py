@@ -506,14 +506,15 @@ def test_google_application_credentials_not_forwarded_by_legacy_host_auth() -> N
 
 
 @pytest.mark.unit
-def test_google_api_key_forwarded_by_legacy_host_auth() -> None:
-    # GOOGLE_API_KEY in AGENT_AUTH_ENV_VARS allows agent_environment_with_legacy_host_auth
-    # to forward Google API key placeholders to Compose agent containers while preserving secret redaction.
+def test_google_api_key_not_forwarded_by_legacy_host_auth() -> None:
+    # Removing GOOGLE_API_KEY from AGENT_AUTH_ENV_VARS stops
+    # agent_environment_with_legacy_host_auth from ambiently forwarding
+    # legacy Google API keys to every workspace while preserving secret redaction.
     env = agent_environment_with_legacy_host_auth(
         (),
         host_env={"GOOGLE_API_KEY": "AIzaSyLegacyKey"},
     )
 
-    assert env == (("GOOGLE_API_KEY", "${GOOGLE_API_KEY}"),)
-    assert "GOOGLE_API_KEY" in AGENT_AUTH_ENV_VARS
+    assert env == ()
+    assert "GOOGLE_API_KEY" not in AGENT_AUTH_ENV_VARS
     assert "GOOGLE_API_KEY" in _AGENT_AUTH_SECRET_ENV_VARS
