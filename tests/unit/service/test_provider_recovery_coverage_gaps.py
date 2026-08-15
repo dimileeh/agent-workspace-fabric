@@ -491,7 +491,7 @@ def test_select_fallback_target_skips_retired_targets_at_or_after_cursor_for_fre
 
 def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_retired_slot() -> None:
     target_a = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
-    target_b = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
+    target_b = FallbackTarget(agent="claude_code", provider="anthropic", model="claude-3-5-sonnet")
     policy = ProviderRecoveryPolicy(
         fallbacks=(None, target_a, target_b),
         max_fallback_attempts=2,
@@ -1028,8 +1028,9 @@ def test_explicit_fallbacks_with_retired_targets_suppresses_implicit_codex_defau
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
-    assert decision.target_model != "gpt-4o-mini"
     assert decision.action == "terminal"
+    assert decision.target_model is None
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 
 
 def test_explicit_empty_fallbacks_list_suppresses_implicit_fallback() -> None:
@@ -1058,13 +1059,16 @@ def test_explicit_empty_fallbacks_list_suppresses_implicit_fallback() -> None:
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
-    assert decision.target_model != "gpt-4o-mini"
     assert decision.action == "terminal"
+    assert decision.target_model is None
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 
 
 def test_select_fallback_target_preserves_historical_positional_cursors() -> None:
     target_codex = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
-    target_claude = FallbackTarget(agent="claude", provider="anthropic", model="claude-3-5-sonnet")
+    target_claude = FallbackTarget(
+        agent="claude_code", provider="anthropic", model="claude-3-5-sonnet"
+    )
     policy = ProviderRecoveryPolicy(
         fallbacks=(None, target_codex, target_claude),
         max_fallback_attempts=3,

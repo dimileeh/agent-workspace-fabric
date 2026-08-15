@@ -124,7 +124,7 @@ async def _seed_monitoring_provider_workspace(
         source.monitor_last_commit_sha = "b" * 40
         source.task_policy = {
             **source.task_policy,
-            "agent_model": "gemini-2.5-pro",
+            "agent_model": "gpt-5.5",
             "provider_recovery": {
                 "fallbacks": [
                     {

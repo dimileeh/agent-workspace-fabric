@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from awf.common.profiles import (
@@ -90,100 +92,75 @@ def test_format_safe_validation_message_unknown_error_type() -> None:
 
 
 @pytest.mark.unit
-def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_segments() -> None:
-    # Empty location
-    assert format_safe_validation_location(()) == ""
-    assert format_safe_validation_location(None) == ""
-
-    # Allowlisted field names
-    assert format_safe_validation_location(("runtime", "agent_image")) == "runtime.agent_image"
-    assert (
-        format_safe_validation_location(("inline_profile", "runtime", "agent_image"))
-        == "inline_profile.runtime.agent_image"
-    )
-
-    # List indices
-    assert format_safe_validation_location(("validation_commands", 0)) == "validation_commands.0"
-    assert format_safe_validation_location(("validation_commands", "1")) == "validation_commands.1"
-
-    # Dynamic dictionary keys after mapping fields
-    assert (
-        format_safe_validation_location(("runtime", "environment", "plainsecret48729"))
-        == "runtime.environment.<key>"
-    )
-    assert format_safe_validation_location(("labels", "user_secret_key")) == "labels.<key>"
-    assert (
-        format_safe_validation_location(("runtime", "toolchains", "python", 0))
-        == "runtime.toolchains.<key>.0"
-    )
-
-    # Numeric keys under dynamic mappings (must not bypass scrubbing)
-    assert (
-        format_safe_validation_location(("runtime", "environment", "8080"))
-        == "runtime.environment.<key>"
-    )
-    assert (
-        format_safe_validation_location(("runtime", "environment", 8080))
-        == "runtime.environment.<key>"
-    )
-    assert format_safe_validation_location(("labels", "12345")) == "labels.<key>"
-
-    # Dict fields: ports, by_base_branch, details
-    assert format_safe_validation_location(("ports", "8080")) == "ports.<key>"
-    assert format_safe_validation_location(("ports", 8080)) == "ports.<key>"
-    assert (
-        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "main"))
-        == "monitor.auto_merge.by_base_branch.<key>"
-    )
-    assert (
-        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "123"))
-        == "monitor.auto_merge.by_base_branch.<key>"
-    )
-    assert format_safe_validation_location(("details", "error_code")) == "details.<key>"
-
-    # Keys under dynamic mappings that collide with allowlisted field names
-    assert format_safe_validation_location(("ports", "command")) == "ports.<key>"
-    assert (
-        format_safe_validation_location(("monitor", "auto_merge", "by_base_branch", "command"))
-        == "monitor.auto_merge.by_base_branch.<key>"
-    )
-
-    # Dynamic service names or unallowlisted field segments
-    assert (
-        format_safe_validation_location(("services", "my-custom-service", "image"))
-        == "services.<key>.image"
-    )
-    assert (
-        format_safe_validation_location(("services", "my-custom-service", "environment", "SECRET"))
-        == "services.<key>.environment.<key>"
-    )
-    assert format_safe_validation_location(("services", 0, "ports", 0)) == "services.0.ports.0"
-    assert format_safe_validation_location(("services", 0, "ports", 0, 1)) == "services.0.ports.0.1"
-    assert (
-        format_safe_validation_location(("services", "my-custom-service", "ports", 0))
-        == "services.<key>.ports.0"
-    )
-
-    # Standard nested profile fields
-    assert format_safe_validation_location(("docker", "compose_files")) == "docker.compose_files"
-    assert format_safe_validation_location(("phases", "setup", "command")) == "phases.setup.command"
-    assert (
-        format_safe_validation_location(("services", 0, "healthchecks", 0, "healthcheck_cmd"))
-        == "services.0.healthchecks.0.healthcheck_cmd"
-    )
-    assert (
-        format_safe_validation_location(("database", "alembic", "config_path"))
-        == "database.alembic.config_path"
-    )
-    assert (
-        format_safe_validation_location(("monitor", "conformance_stall", "no_output_seconds"))
-        == "monitor.conformance_stall.no_output_seconds"
-    )
-
-    # Unallowlisted extra field segment
-    assert format_safe_validation_location(("unknown_secret_field",)) == "<key>"
-
-    # Single string, int, or scalar non-sequence locations
-    assert format_safe_validation_location("runtime") == "runtime"
-    assert format_safe_validation_location(42) == "42"
-    assert format_safe_validation_location(12.34) == "<key>"
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        # Empty location
+        ((), ""),
+        (None, ""),
+        # Allowlisted field names
+        (("runtime", "agent_image"), "runtime.agent_image"),
+        (("inline_profile", "runtime", "agent_image"), "inline_profile.runtime.agent_image"),
+        # List indices
+        (("validation_commands", 0), "validation_commands.0"),
+        (("validation_commands", "1"), "validation_commands.1"),
+        # Dynamic dictionary keys after mapping fields
+        (("runtime", "environment", "plainsecret48729"), "runtime.environment.<key>"),
+        (("labels", "user_secret_key"), "labels.<key>"),
+        (("runtime", "toolchains", "python", 0), "runtime.toolchains.<key>.0"),
+        # Numeric keys under dynamic mappings (must not bypass scrubbing)
+        (("runtime", "environment", "8080"), "runtime.environment.<key>"),
+        (("runtime", "environment", 8080), "runtime.environment.<key>"),
+        (("labels", "12345"), "labels.<key>"),
+        # Dict fields: ports, by_base_branch, details
+        (("ports", "8080"), "ports.<key>"),
+        (("ports", 8080), "ports.<key>"),
+        (
+            ("monitor", "auto_merge", "by_base_branch", "main"),
+            "monitor.auto_merge.by_base_branch.<key>",
+        ),
+        (
+            ("monitor", "auto_merge", "by_base_branch", "123"),
+            "monitor.auto_merge.by_base_branch.<key>",
+        ),
+        (("details", "error_code"), "details.<key>"),
+        # Keys under dynamic mappings that collide with allowlisted field names
+        (("ports", "command"), "ports.<key>"),
+        (
+            ("monitor", "auto_merge", "by_base_branch", "command"),
+            "monitor.auto_merge.by_base_branch.<key>",
+        ),
+        # Dynamic service names or unallowlisted field segments
+        (("services", "my-custom-service", "image"), "services.<key>.image"),
+        (
+            ("services", "my-custom-service", "environment", "SECRET"),
+            "services.<key>.environment.<key>",
+        ),
+        (("services", 0, "ports", 0), "services.0.ports.0"),
+        (("services", 0, "ports", 0, 1), "services.0.ports.0.1"),
+        (("services", "my-custom-service", "ports", 0), "services.<key>.ports.0"),
+        # Standard nested profile fields
+        (("docker", "compose_files"), "docker.compose_files"),
+        (("phases", "setup", "command"), "phases.setup.command"),
+        (
+            ("services", 0, "healthchecks", 0, "healthcheck_cmd"),
+            "services.0.healthchecks.0.healthcheck_cmd",
+        ),
+        (("database", "alembic", "config_path"), "database.alembic.config_path"),
+        (
+            ("monitor", "conformance_stall", "no_output_seconds"),
+            "monitor.conformance_stall.no_output_seconds",
+        ),
+        # Unallowlisted extra field segment
+        (("unknown_secret_field",), "<key>"),
+        # Single string, int, or scalar non-sequence locations
+        ("runtime", "runtime"),
+        (42, "42"),
+        (12.34, "<key>"),
+    ],
+)
+def test_format_safe_validation_location_sanitizes_dynamic_and_unallowlisted_segments(
+    location: Any,
+    expected: str,
+) -> None:
+    assert format_safe_validation_location(location) == expected

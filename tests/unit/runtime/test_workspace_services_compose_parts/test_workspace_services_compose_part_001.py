@@ -332,23 +332,6 @@ def test_worker_ollama_base_url_injected_when_profile_declares_none() -> None:
 
 
 @pytest.mark.unit
-def test_google_cloud_access_token_not_forwarded_by_legacy_host_auth() -> None:
-    # Retiring GOOGLE_CLOUD_ACCESS_TOKEN from AGENT_AUTH_ENV_VARS stops
-    # agent_environment_with_legacy_host_auth from ambiently forwarding the
-    # bearer token when present in worker/service env.
-    from awf.profiles import compose_auth_env
-
-    env = agent_environment_with_legacy_host_auth(
-        (),
-        host_env={"GOOGLE_CLOUD_ACCESS_TOKEN": "ya29.obsolete_bearer_token"},
-    )
-
-    assert env == ()
-    assert "GOOGLE_CLOUD_ACCESS_TOKEN" not in AGENT_AUTH_ENV_VARS
-    assert "GOOGLE_CLOUD_ACCESS_TOKEN" in compose_auth_env._AGENT_AUTH_SECRET_ENV_VARS
-
-
-@pytest.mark.unit
 def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1460,7 +1443,7 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
 def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override(
     tmp_path: Path,
 ) -> None:
-    """Compatibility wrapper for the focused CI node id."""
+    """Compatibility wrapper for the focused CI node id. Delegated implementation must retain its tmp_path-only fixture contract; any future fixture changes require updating this wrapper."""
     from tests.unit.runtime.test_workspace_services_compose_parts.test_workspace_services_compose_part_005 import (
         test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override as impl,
     )

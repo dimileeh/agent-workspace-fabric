@@ -818,7 +818,7 @@ class TestCreateWorkspacePolicyMetadata:
             ws = await repo.create(
                 repo_url="git@github.com:dimileeh/aira-agent.git",
                 branch_base="development",
-                task_title="default gemini model",
+                task_title="default antigravity model",
                 task_prompt="Add a one-line docstring to src/aira_agent/api/main.py.",
                 agent="antigravity",
                 test_commands=["pytest -q"],
@@ -850,7 +850,7 @@ class TestCreateWorkspacePolicyMetadata:
         self,
         client: AsyncClient,
     ) -> None:
-        payload = _v2_body(title="default gemini model")
+        payload = _v2_body(title="retired gemini runtime rejection")
         payload["task"] = {
             **payload["task"],  # type: ignore[index]
             "agent": "gemini",
@@ -862,7 +862,7 @@ class TestCreateWorkspacePolicyMetadata:
 
         create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 409
-        assert create.json()["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+        assert create.json()["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
     async def test_legacy_v1_workspace_exposes_default_effective_identity(

@@ -1,6 +1,6 @@
 """Provider recovery service-unhealthy timeout regression tests."""
 
-from __future__ import annotations
+from datetime import UTC, datetime
 
 import pytest
 
@@ -11,7 +11,14 @@ from awf.adapters.provider_failures import (
     AGENT_TIMEOUT,
     classify_provider_failure,
 )
-from awf.service.provider_recovery import provider_recovery_metadata_from_failure
+from awf.service.provider_recovery import (
+    decide_provider_recovery,
+    provider_recovery_metadata_from_failure,
+)
+from awf.service.workspaces import workspace_create_task_policy_snapshot
+from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_002 import (
+    _request,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -106,14 +113,6 @@ class TestTerminalState:
     """Prove finite termination for repeated fingerprints and exhausted fallbacks."""
 
     def test_repeated_fingerprint_three_times_is_terminal(self) -> None:
-        from datetime import UTC, datetime
-
-        from awf.service.provider_recovery import decide_provider_recovery
-        from awf.service.workspaces import workspace_create_task_policy_snapshot
-        from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_002 import (
-            _request,
-        )
-
         policy = workspace_create_task_policy_snapshot(_request())
         metadata = provider_recovery_metadata_from_failure(
             reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
@@ -145,14 +144,6 @@ class TestTerminalState:
         assert decision.terminal_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
 
     def test_exhausted_fallbacks_is_terminal(self) -> None:
-        from datetime import UTC, datetime
-
-        from awf.service.provider_recovery import decide_provider_recovery
-        from awf.service.workspaces import workspace_create_task_policy_snapshot
-        from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_002 import (
-            _request,
-        )
-
         policy = workspace_create_task_policy_snapshot(_request())
         metadata = provider_recovery_metadata_from_failure(
             reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",

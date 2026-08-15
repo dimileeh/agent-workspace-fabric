@@ -81,15 +81,6 @@ async def test_provider_recovery_preserves_source_task_tag(
 async def test_monitoring_pr_fallback_missing_monitor_metadata_creates_workspace(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from sqlalchemy import select
-
-    from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
-    from awf.db.enums import WorkspaceStatus
-    from awf.db.models import Workspace
-    from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_001 import (
-        _seed_monitoring_provider_workspace,
-    )
-
     source_id = await _seed_monitoring_provider_workspace(
         factory,
         max_same_provider_retries=0,
@@ -225,14 +216,6 @@ async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
 async def test_monitoring_pr_repeated_in_place_fingerprint_records_terminal_no_loop(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from sqlalchemy import select
-
-    from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
-    from awf.db.models import Workspace
-    from tests.unit.service.test_provider_recovery_parts.test_provider_recovery_part_001 import (
-        _seed_monitoring_provider_workspace,
-    )
-
     source_id = await _seed_monitoring_provider_workspace(
         factory,
         max_same_provider_retries=0,

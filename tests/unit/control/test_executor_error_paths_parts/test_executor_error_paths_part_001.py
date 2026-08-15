@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
+from awf.adapters.base import AgentAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -524,7 +525,7 @@ async def _seed_ready(
 
 def _provider_recovery_policy(*, max_same_provider_retries: int) -> dict[str, Any]:
     return {
-        "agent_model": "gemini-2.5-pro",
+        "agent_model": "gemini-3.1-pro-preview",
         "pr_monitor": {"review_grace_seconds": 55},
         "provider_recovery": {
             "fallbacks": [
@@ -541,6 +542,21 @@ def _provider_recovery_policy(*, max_same_provider_retries: int) -> dict[str, An
             "retry_after_cap_seconds": 300,
         },
     }
+
+
+class _StderrClassifyingAntigravityAdapter(AgentAdapter):
+    runtime = AgentRuntime.antigravity
+
+    @property
+    def name(self) -> AgentRuntime:
+        return AgentRuntime.antigravity
+
+    def get_provider(self, model: str | None) -> str:
+        return "google"
+
+    def _cli_args(self, *, model: str | None) -> list[str]:
+        del model
+        return ["antigravity", "run"]
 
 
 def _provider_recovery_resolved_profile() -> dict[str, Any]:
@@ -736,20 +752,6 @@ class TestUnexpectedErrorDuringAgentRun:
         from awf.adapters import base as adapter_base
         from awf.db.enums import AgentRuntime, FailureReason
 
-        class _StderrClassifyingAntigravityAdapter(adapter_base.AgentAdapter):
-            runtime = AgentRuntime.antigravity
-
-            @property
-            def name(self) -> AgentRuntime:
-                return AgentRuntime.antigravity
-
-            def get_provider(self, model: str | None) -> str:
-                return "google"
-
-            def _cli_args(self, *, model: str | None) -> list[str]:
-                del model
-                return ["antigravity", "run"]
-
         monkeypatch.setitem(
             adapter_base._REGISTRY,
             AgentRuntime.antigravity,
@@ -838,7 +840,7 @@ class TestUnexpectedErrorDuringAgentRun:
             assert recovery["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
             assert recovery["failure_type"] == "quota"
             assert recovery["provider"] == "google"
-            assert recovery["model"] == "gemini-2.5-pro"
+            assert recovery["model"] == "gemini-3.1-pro-preview"
             assert recovery["retryable"] is True
             assert recovery["retry_after_seconds"] == 90
             assert recovery["cooldown_seconds"] == 90
@@ -847,7 +849,7 @@ class TestUnexpectedErrorDuringAgentRun:
                 "Retry after provider cooldown or dispatch an approved fallback model."
             )
             assert (
-                "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro"
+                "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-3.1-pro-preview"
                 in (recovery["failure_fingerprint"])
             )
 
@@ -923,20 +925,6 @@ class TestUnexpectedErrorDuringAgentRun:
         # workspace is created (the single CLEAN attempt id is the point of #612).
         from awf.adapters import base as adapter_base
         from awf.db.enums import AgentRuntime
-
-        class _StderrClassifyingAntigravityAdapter(adapter_base.AgentAdapter):
-            runtime = AgentRuntime.antigravity
-
-            @property
-            def name(self) -> AgentRuntime:
-                return AgentRuntime.antigravity
-
-            def get_provider(self, model: str | None) -> str:
-                return "google"
-
-            def _cli_args(self, *, model: str | None) -> list[str]:
-                del model
-                return ["antigravity", "run"]
 
         monkeypatch.setitem(
             adapter_base._REGISTRY,
