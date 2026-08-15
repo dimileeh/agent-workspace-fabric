@@ -1235,6 +1235,9 @@ def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
     from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
     for item in raw:
+        if item is None:
+            targets.append(None)
+            continue
         if not isinstance(item, Mapping):
             continue
         agent = _mapping_str(item, "agent")

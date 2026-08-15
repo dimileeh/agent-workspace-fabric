@@ -597,7 +597,10 @@ async def test_retry_prunes_retired_fallbacks_from_cloned_policy(
 
     retried_policy = retry.new_workspace.task_policy
     fallbacks = retried_policy.get("provider_recovery", {}).get("fallbacks", [])
-    assert not any(item.get("agent") == "gemini" for item in fallbacks)
-    assert any(item.get("agent") == "codex" for item in fallbacks)
+    assert len(fallbacks) == 2
+    assert fallbacks[0] is None
+    assert isinstance(fallbacks[1], dict) and fallbacks[1].get("agent") == "codex"
+    assert not any(isinstance(item, dict) and item.get("agent") == "gemini" for item in fallbacks)
+    assert any(isinstance(item, dict) and item.get("agent") == "codex" for item in fallbacks)
     preflight = retried_policy["provider_readiness_preflight"]
     assert preflight["readiness_status"] == "ready"

@@ -639,7 +639,8 @@ async def retry_workspace_row(
 
 
 def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
-    """Prune retired or unsupported fallback entries from a cloned retry policy."""
+    """Prune retired or unsupported fallback entries from a cloned retry policy,
+    replacing retired slots with None placeholders to preserve fallback attempt indexes."""
     recovery = policy.get("provider_recovery")
     if not isinstance(recovery, Mapping):
         return policy
@@ -659,6 +660,10 @@ def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
             fb_runtime = _coerce_launch_agent(fb_agent) if fb_agent is not None else None
             if fb_runtime is not None and fb_runtime in _LAUNCH_PROVIDER_BY_AGENT:
                 pruned.append(item)
+            else:
+                pruned.append(None)
+        else:
+            pruned.append(None)
 
     updated_recovery = dict(recovery)
     updated_recovery["fallbacks"] = pruned
