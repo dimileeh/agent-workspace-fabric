@@ -1113,7 +1113,9 @@ def _recovery_task_policy(
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
-        "recommended_action": _metadata_str(metadata, "recommended_action"),
+        "recommended_action": (
+            None if decision.action == "terminal" else _metadata_str(metadata, "recommended_action")
+        ),
     }
     state_not_before = decision.not_before if not_before is None else not_before
     if state_not_before is not None:
@@ -1156,6 +1158,8 @@ def _decision_payload(
         "retry_attempt_number": decision.retry_attempt_number,
         "terminal_reason": decision.terminal_reason,
     }
+    if decision.action == "terminal":
+        payload.pop("recommended_action", None)
     state_not_before = decision.not_before if not_before is None else not_before
     if state_not_before is not None:
         payload["not_before"] = state_not_before.isoformat()
@@ -1409,8 +1413,8 @@ def _build_provider_recovery_state_view(
     source_attempt_id = _mapping_str(recovery, "source_attempt_id") or _mapping_str(
         payload_map, "source_attempt_id"
     )
-    recommended_action = _mapping_str(
-        recovery, "recommended_action"
+    recommended_action = (
+        _mapping_str(recovery, "recommended_action") if action != "terminal" else None
     ) or _recommended_action_for_action(action)
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
