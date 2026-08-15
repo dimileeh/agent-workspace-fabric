@@ -1012,3 +1012,5 @@ class TestRegistry:
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok
         assert AgentRuntime.gemini not in DEFAULT_AGENT_DEFAULTS
+        with pytest.raises(KeyError):
+            get_adapter(AgentRuntime.gemini, runner=runner)
