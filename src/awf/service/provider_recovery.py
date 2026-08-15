@@ -939,7 +939,11 @@ def _select_fallback_target_with_index(
     while index < len(policy.fallbacks):
         target = policy.fallbacks[index]
         if target is not None:
-            selected_attempts = sum(1 for t in policy.fallbacks[:index] if t is not None)
+            selected_attempts = sum(
+                1
+                for i in range(index)
+                if i < state.fallback_attempt_number or policy.fallbacks[i] is not None
+            )
             if selected_attempts >= policy.max_fallback_attempts:
                 break
             return target, index
