@@ -196,6 +196,19 @@ class WorkspaceProviderFallbackTarget(BaseModel):
     provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
     model: Annotated[str, Field(min_length=1, max_length=128)]
 
+    @field_validator("agent")
+    @classmethod
+    def _validate_agent(cls, value: AgentRuntime) -> AgentRuntime:
+        from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+
+        if value not in _LAUNCH_PROVIDER_BY_AGENT:
+            supported = ", ".join(sorted(a.value for a in _LAUNCH_PROVIDER_BY_AGENT))
+            raise ValueError(
+                f"fallback agent runtime {value.value!r} is retired or not launchable; "
+                f"supported fallback agents are: {supported}."
+            )
+        return value
+
 
 class WorkspaceProviderRecoveryCircuitBreakerPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")

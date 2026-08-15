@@ -825,3 +825,40 @@ def test_workspace_reason_compatibility_request_keeps_normal_reason_body() -> No
     )
 
     assert request.reason == "operator requested"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "agent",
+    ["codex", "claude_code", "cursor", "antigravity", "opencode", "grok"],
+)
+def test_workspace_provider_fallback_target_accepts_launchable_agents(agent: str) -> None:
+    target = api_schemas.WorkspaceProviderFallbackTarget.model_validate(
+        {"agent": agent, "model": "gpt-5.5"}
+    )
+    assert target.agent == agent
+
+
+@pytest.mark.unit
+def test_workspace_provider_fallback_target_rejects_retired_gemini_agent() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceProviderFallbackTarget.model_validate(
+            {"agent": "gemini", "model": "gemini-2.5-pro"}
+        )
+    assert "fallback agent runtime 'gemini' is retired or not launchable" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_workspace_create_request_rejects_retired_fallback_agent_at_admission() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:o/r.git", "base_branch": "main"},
+                "task": _task(
+                    provider_recovery={
+                        "fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]
+                    }
+                ),
+            }
+        )
+    assert "fallback agent runtime 'gemini' is retired or not launchable" in str(exc.value)
