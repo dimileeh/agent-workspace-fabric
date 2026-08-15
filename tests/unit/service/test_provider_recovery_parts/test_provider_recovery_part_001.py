@@ -503,7 +503,7 @@ def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchab
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     task_policy = {
         "provider_recovery": {
-            "fallbacks": [{"agent": "antigravity", "model": "gemini-2.5-pro"}],
+            "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
         }
     }
     metadata = provider_recovery_metadata_from_failure(
@@ -528,7 +528,7 @@ def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchab
         not_before=None,
         target_agent="antigravity",
         target_provider="antigravity",
-        target_model="gemini-2.5-pro",
+        target_model="gemini-3.1-pro-preview",
         reason_code="PROVIDER_FALLBACK_SELECTED",
         terminal_reason=None,
         fallback_attempt_number=1,
