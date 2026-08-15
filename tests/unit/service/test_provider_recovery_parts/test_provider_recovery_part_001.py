@@ -535,6 +535,87 @@ def test_decide_provider_recovery_unsupported_agent_runtime_recovers_to_launchab
     )
 
 
+def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_budget() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-2.5-pro"},
+                {"agent": "codex", "model": "gpt-5.5"},
+            ],
+            "max_fallback_attempts": 1,
+            "max_same_provider_retries": 0,
+        }
+    }
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        message="MODEL_CAPACITY_EXHAUSTED",
+        details={"provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy,
+    )
+    assert metadata is not None
+    assert metadata["fallback_allowed"] is True
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="fallback",
+        retryable=True,
+        not_before=None,
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.5",
+        reason_code="PROVIDER_FALLBACK_SELECTED",
+        terminal_reason=None,
+        fallback_attempt_number=2,
+        retry_attempt_number=0,
+    )
+
+    # After running the codex fallback, fallback_attempt_number becomes 2.
+    # Subsequent failure should hit max_fallback_attempts limit of 1 attempt.
+    task_policy_next = {
+        "provider_recovery": task_policy["provider_recovery"],
+        "provider_recovery_state": {
+            "fallback_attempt_number": 2,
+        },
+    }
+    metadata_next = provider_recovery_metadata_from_failure(
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        message="MODEL_CAPACITY_EXHAUSTED",
+        details={"provider": "openai", "model": "gpt-5.5"},
+        task_policy=task_policy_next,
+    )
+    assert metadata_next is not None
+    assert metadata_next["fallback_allowed"] is False
+
+    decision_next = decide_provider_recovery(
+        metadata_next,
+        task_policy=task_policy_next,
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+
+    assert decision_next == ProviderRecoveryDecision(
+        action="terminal",
+        retryable=False,
+        not_before=None,
+        target_agent=None,
+        target_provider=None,
+        target_model=None,
+        reason_code="PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+        terminal_reason="PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+        fallback_attempt_number=2,
+        retry_attempt_number=0,
+    )
+
+
 def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
     now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
     metadata = provider_recovery_metadata_from_failure(

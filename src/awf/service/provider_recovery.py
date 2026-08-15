@@ -168,13 +168,7 @@ def provider_recovery_metadata_from_failure(
         False
         if auth_failure
         else (
-            any(
-                target is not None
-                for target in policy.fallbacks[
-                    state.fallback_attempt_number : policy.max_fallback_attempts
-                ]
-            )
-            and bool(metadata.get("retryable"))
+            _select_fallback_target(policy, state) is not None and bool(metadata.get("retryable"))
         )
     )
     metadata["recommended_action"] = _metadata_recommended_action(metadata)
@@ -930,9 +924,12 @@ def _select_fallback_target_with_index(
     state: ProviderRecoveryState,
 ) -> tuple[FallbackTarget | None, int]:
     index = state.fallback_attempt_number
-    while index < policy.max_fallback_attempts and index < len(policy.fallbacks):
+    while index < len(policy.fallbacks):
         target = policy.fallbacks[index]
         if target is not None:
+            selected_attempts = sum(1 for t in policy.fallbacks[:index] if t is not None)
+            if selected_attempts >= policy.max_fallback_attempts:
+                break
             return target, index
         index += 1
     return None, index
