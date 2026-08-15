@@ -78,6 +78,7 @@ class FallbackTarget:
 @dataclass(frozen=True)
 class ProviderRecoveryPolicy:
     fallbacks: tuple[FallbackTarget | None, ...] = ()
+    has_explicit_fallbacks: bool = False
     max_fallback_attempts: int = 0
     max_same_provider_retries: int = 1
     cooldown_seconds: int = 300
@@ -85,6 +86,10 @@ class ProviderRecoveryPolicy:
     retry_after_cap_seconds: int = 3600
     circuit_breaker_failure_threshold: int = 2
     circuit_breaker_cooldown_seconds: int = 900
+
+    def __post_init__(self) -> None:
+        if self.fallbacks and not self.has_explicit_fallbacks:
+            object.__setattr__(self, "has_explicit_fallbacks", True)
 
 
 @dataclass(frozen=True)
@@ -305,7 +310,7 @@ def _default_capacity_fallback_target(
     current_model: str | None,
     default_model: str | None,
 ) -> FallbackTarget | None:
-    if any(target is not None for target in policy.fallbacks):
+    if policy.has_explicit_fallbacks or any(target is not None for target in policy.fallbacks):
         return None
     if state.fallback_attempt_number > 0:
         return None
@@ -794,13 +799,20 @@ def parse_provider_recovery_policy(
 ) -> ProviderRecoveryPolicy:
     raw = task_policy.get(PROVIDER_RECOVERY_POLICY_KEY) if task_policy else None
     policy = raw if isinstance(raw, Mapping) else {}
-    fallbacks = tuple(_fallback_targets(policy.get("fallbacks")))
+    raw_fallbacks = policy.get("fallbacks")
+    has_explicit_fallbacks = (
+        "fallbacks" in policy
+        and isinstance(raw_fallbacks, Sequence)
+        and not isinstance(raw_fallbacks, str)
+    )
+    fallbacks = tuple(_fallback_targets(raw_fallbacks))
     max_fallback_attempts = _nonnegative_int(
         policy.get("max_fallback_attempts"),
         default=len(fallbacks),
     )
     return ProviderRecoveryPolicy(
         fallbacks=fallbacks,
+        has_explicit_fallbacks=has_explicit_fallbacks,
         max_fallback_attempts=max_fallback_attempts,
         max_same_provider_retries=_nonnegative_int(
             policy.get("max_same_provider_retries"),

@@ -956,3 +956,67 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         )
     # No new requested events were added past the seeded one
     assert len(requested_events) == 1
+
+
+def test_explicit_fallbacks_with_retired_targets_suppresses_implicit_codex_default_fallback() -> (
+    None
+):
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+            ],
+        }
+    }
+    policy = parse_provider_recovery_policy(task_policy)
+    assert policy.has_explicit_fallbacks is True
+    assert policy.fallbacks == (None,)
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        effective_default_model="gpt-4o-mini",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.target_model != "gpt-4o-mini"
+    assert decision.action == "terminal"
+
+
+def test_explicit_empty_fallbacks_list_suppresses_implicit_fallback() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "fallbacks": [],
+        }
+    }
+    policy = parse_provider_recovery_policy(task_policy)
+    assert policy.has_explicit_fallbacks is True
+    assert policy.fallbacks == ()
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        effective_default_model="gpt-4o-mini",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.target_model != "gpt-4o-mini"
+    assert decision.action == "terminal"
