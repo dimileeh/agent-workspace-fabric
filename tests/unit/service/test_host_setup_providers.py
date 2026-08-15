@@ -1378,3 +1378,34 @@ def test_unknown_retired_provider_pruned_from_config(tmp_path: Path) -> None:
     )
 
     assert "legacy_unknown" not in updated_config.providers
+
+
+@pytest.mark.unit
+def test_unselected_unknown_provider_preserved_during_targeted_recheck(tmp_path: Path) -> None:
+    """Unregistered or extension provider keys are preserved in config during targeted rechecks."""
+    config_with_unknown = HostSetupConfig(
+        providers={
+            "future_extension": ProviderConfig(
+                credential_ref="env://FUTURE_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=config_with_unknown,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "future_extension" in updated_config.providers
+    assert updated_config.providers["future_extension"].credential_ref == "env://FUTURE_KEY"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
