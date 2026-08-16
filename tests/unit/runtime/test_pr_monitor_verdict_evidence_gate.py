@@ -58,9 +58,10 @@ def _evidence_runner(
     async def _adapter_run(**_kwargs: object) -> AgentRunResult:
         if returncode != 0:
             from awf.adapters.base import AgentRunError
+            from awf.db.enums import AgentRuntime
 
             raise AgentRunError(
-                agent="fake",
+                agent=AgentRuntime.claude_code,
                 result=CommandResult(returncode=returncode, stdout=stdout, stderr="fail"),
                 reason_code="AGENT_CLI_FAILED",
             )
@@ -148,6 +149,55 @@ async def test_explicit_fixed_without_head_advance_stays_unresolved() -> None:
 
     assert result.verdict == "needs_human"
     assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_operator_hint_fixed_without_head_advance_is_accepted() -> None:
+    """Operator hints may complete GitHub-side work without a commit."""
+    start = "a" * 40
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: replied on GitHub only",
+        dirty=False,
+        heads=[start],
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_operator_hint_no_code",
+        prompt="p",
+        commit_message="fix: address operator hint",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+        require_fix_evidence=False,
+    )
+
+    assert result.verdict == "fix_committed"
+    assert result.reason == "replied on GitHub only"
+
+
+@pytest.mark.unit
+async def test_operator_hint_fixed_without_evidence_still_agent_failed_on_cli_error() -> None:
+    start = "a" * 40
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=False,
+        heads=[start],
+        returncode=1,
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_operator_hint_cli_fail",
+        prompt="p",
+        commit_message="fix: address operator hint",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+        require_fix_evidence=False,
+    )
+
+    assert result.verdict == "agent_failed"
 
 
 @pytest.mark.unit

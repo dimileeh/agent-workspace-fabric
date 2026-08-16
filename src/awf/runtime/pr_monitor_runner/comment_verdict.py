@@ -140,8 +140,14 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_ref: str | None = None,
     isolated_worktree_source_mirror: Path | None = None,
     read_only: bool = False,
+    require_fix_evidence: bool = True,
 ) -> VerdictResult:
-    """Run the monitor agent and parse its verdict without losing reason details."""
+    """Run the monitor agent and parse its verdict without losing reason details.
+
+    ``require_fix_evidence`` (default True) enforces per-item HEAD/dirty
+    evidence for FIXED claims. Operator hints pass False so GitHub-side /
+    no-code directives can complete without a local commit.
+    """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
     result_stdout = ""
@@ -356,6 +362,10 @@ async def _invoke_cli_for_verdict_result(
             return parsed
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
+        if not require_fix_evidence:
+            # Operator hints may finish with only GitHub-side work; the prompt
+            # documents FIXED without a code change for that path.
+            return parsed
         reason = redact_audit_text("fixed_without_head_advance")
         return VerdictResult(verdict="needs_human", reason=reason or "fixed_without_head_advance")
     if cli_failed:

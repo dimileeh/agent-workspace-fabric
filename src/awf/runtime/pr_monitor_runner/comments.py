@@ -1387,6 +1387,7 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_ref: str | None = None,
     isolated_worktree_source_mirror: Path | None = None,
     read_only: bool = False,
+    require_fix_evidence: bool = True,
 ) -> VerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -1405,6 +1406,7 @@ async def _invoke_cli_for_verdict_result(
         isolated_worktree_ref=isolated_worktree_ref,
         isolated_worktree_source_mirror=isolated_worktree_source_mirror,
         read_only=read_only,
+        require_fix_evidence=require_fix_evidence,
     )
 
 
