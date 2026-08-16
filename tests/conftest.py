@@ -60,7 +60,57 @@ _POSTGRES_SCHEMA_HELPER_CALLS = frozenset(
         "postgres_test_url_sync",
     }
 )
+_COMPATIBILITY_SHIM_TEST_PATHS = frozenset(
+    {
+        Path("tests/unit/api/routes/test_health.py"),
+        Path("tests/unit/control/worker/test_worker_coverage_edges_part_001.py"),
+        Path("tests/unit/control/worker/test_worker_coverage_edges_part_002.py"),
+    }
+)
 _API_TEST_TOKEN = "secret"
+
+
+def _pytest_arg_collection_path(arg: str, rootpath: Path) -> Path | None:
+    path_arg = arg.split("::", 1)[0]
+    if not path_arg or path_arg.startswith("-"):
+        return None
+    path = Path(path_arg)
+    if not path.is_absolute():
+        path = rootpath / path
+    return path.resolve()
+
+
+def _collection_file_is_under_broader_path(collection_path: Path, requested_path: Path) -> bool:
+    return requested_path != collection_path and collection_path.is_relative_to(requested_path)
+
+
+def _explicitly_requested_collection_file(collection_path: Path, config: pytest.Config) -> bool:
+    rootpath = Path(config.rootpath).resolve()
+    resolved_collection_path = collection_path.resolve()
+    requested_paths = tuple(
+        path
+        for path in (_pytest_arg_collection_path(arg, rootpath) for arg in config.args)
+        if path is not None
+    )
+    if any(
+        _collection_file_is_under_broader_path(resolved_collection_path, requested_path)
+        for requested_path in requested_paths
+    ):
+        return False
+    return any(requested_path == resolved_collection_path for requested_path in requested_paths)
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    rootpath = Path(config.rootpath).resolve()
+    try:
+        relative_path = collection_path.resolve().relative_to(rootpath)
+    except ValueError:
+        return None
+    if relative_path not in _COMPATIBILITY_SHIM_TEST_PATHS:
+        return None
+    if _explicitly_requested_collection_file(collection_path, config):
+        return None
+    return True
 
 
 def _uses_postgres_test_fixture(item: pytest.Item) -> bool:

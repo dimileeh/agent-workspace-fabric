@@ -818,6 +818,186 @@ def test_service_logs_default_subprocess_runner_executes_command() -> None:
 
 
 @pytest.mark.unit
+def test_service_logs_follow_runner_check_raises_for_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify checked streaming commands raise after streams drain cleanly."""
+
+    class _BlockingEmptySource:
+        def __init__(self) -> None:
+            self.release = threading.Event()
+
+        def __iter__(self) -> _BlockingEmptySource:
+            return self
+
+        def __next__(self) -> str:
+            self.release.wait(timeout=1.0)
+            raise StopIteration
+
+    class _FollowProcess:
+        def __init__(self, stdout: _BlockingEmptySource) -> None:
+            self.stdout = stdout
+            self.stderr = io.StringIO("")
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 17
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    stdout = _BlockingEmptySource()
+    processes: list[_FollowProcess] = []
+
+    def _popen(args: list[str], **kwargs: object) -> _FollowProcess:
+        assert args == ["docker", "compose", "logs"]
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        assert kwargs["text"] is True
+        process = _FollowProcess(stdout)
+        processes.append(process)
+        return process
+
+    original_join = threading.Thread.join
+
+    def _join_releasing_stream(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        if getattr(thread, "_target", None) is logs_mod._stream_redacted_pipe:  # noqa: SLF001
+            stdout.release.set()
+        return original_join(thread, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(threading.Thread, "join", _join_releasing_stream)
+    monkeypatch.setattr(logs_mod, "_STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS", 0.001)
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run_subprocess(
+            ["docker", "compose", "logs"],
+            check=True,
+            capture_output=False,
+            text=True,
+        )
+
+    assert exc_info.value.returncode == 17
+    assert exc_info.value.cmd == ["docker", "compose", "logs"]
+    assert len(processes) == 1
+    assert processes[0].terminated is False
+    assert processes[0].killed is False
+
+
+@pytest.mark.unit
+def test_stream_redacted_pipe_none_source_skips_callbacks() -> None:
+    sink = io.StringIO()
+
+    def _unexpected_callback() -> None:
+        raise AssertionError("source=None should not touch stream callbacks")
+
+    logs_mod._stream_redacted_pipe(  # noqa: SLF001
+        None,
+        sink,
+        extra_secrets=(),
+        on_broken_pipe=_unexpected_callback,
+        on_write_start=_unexpected_callback,
+        on_write_end=_unexpected_callback,
+    )
+
+    assert sink.getvalue() == ""
+
+
+@pytest.mark.unit
+def test_stream_redacted_pipe_pending_final_write_failure_closes_source() -> None:
+    events: list[str] = []
+
+    class _Source:
+        def __iter__(self) -> object:
+            return iter(["API_KEY="])
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _FailingSink:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        def write(self, text: str) -> int:
+            del text
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise AssertionError("write failure should skip flush")
+
+    def _on_broken_pipe() -> None:
+        events.append("broken")
+
+    def _on_write_start() -> None:
+        events.append("start")
+
+    def _on_write_end() -> None:
+        events.append("end")
+
+    sink = _FailingSink()
+
+    logs_mod._stream_redacted_pipe(  # noqa: SLF001
+        _Source(),  # type: ignore[arg-type]
+        sink,  # type: ignore[arg-type]
+        extra_secrets=(),
+        on_broken_pipe=_on_broken_pipe,
+        on_write_start=_on_write_start,
+        on_write_end=_on_write_end,
+    )
+
+    assert sink.chunks == []
+    assert events == ["start", "end", "close", "broken"]
+
+
+@pytest.mark.unit
+def test_stream_redacted_pipe_iterator_broken_pipe_closes_source() -> None:
+    events: list[str] = []
+
+    class _Source:
+        def __iter__(self) -> _Source:
+            return self
+
+        def __next__(self) -> str:
+            raise BrokenPipeError
+
+        def close(self) -> None:
+            events.append("close")
+
+    def _on_broken_pipe() -> None:
+        events.append("broken")
+
+    def _unexpected_write_callback() -> None:
+        raise AssertionError("iterator BrokenPipeError should not write downstream")
+
+    logs_mod._stream_redacted_pipe(  # noqa: SLF001
+        _Source(),  # type: ignore[arg-type]
+        io.StringIO(),
+        extra_secrets=(),
+        on_broken_pipe=_on_broken_pipe,
+        on_write_start=_unexpected_write_callback,
+        on_write_end=_unexpected_write_callback,
+    )
+
+    assert events == ["close", "broken"]
+
+
+@pytest.mark.unit
+def test_pending_pem_assignment_prefix_length_holds_secret_key_suffix() -> None:
+    assert logs_mod._pending_pem_assignment_prefix_length("prefix API_KEY=") == len(  # noqa: SLF001
+        "API_KEY="
+    )
+    assert logs_mod._pending_pem_assignment_prefix_length("prefix ordinary text") == 0  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_service_logs_default_follow_runner_redacts_streamed_output(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
