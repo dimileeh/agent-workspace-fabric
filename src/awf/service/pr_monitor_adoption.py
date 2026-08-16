@@ -47,6 +47,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import resolve_session_dialect_name
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.profiles.models import normalize_inline_profile_snapshot
 from awf.runtime.hosted_delegation import (
@@ -880,9 +881,18 @@ async def _adoption_owns_task_identity(
     ``idempotency_key`` was null causes ``TaskRepository._reuse_or_conflict`` to
     stamp the adoption key onto that shared row. Ownership therefore requires
     both a matching key and no attempt from any other workspace.
+
+    Lock the task row before probing attempts so a concurrent join that already
+    selected this task (but has not committed its ``TaskAttempt``) serializes
+    with supersession instead of racing an unlocked existence query.
     """
     if task.idempotency_key != adoption_idempotency_key:
         return False
+    if resolve_session_dialect_name(session, None) == "postgresql":
+        await session.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+        locked = await session.get(Task, task.id)
+        if locked is None or locked.idempotency_key != adoption_idempotency_key:
+            return False
     stmt = (
         select(TaskAttempt.id)
         .where(

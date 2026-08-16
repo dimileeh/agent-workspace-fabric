@@ -152,14 +152,22 @@ class TaskRepository:
         external_id: str | None,
         idempotency_key: str | None,
     ) -> Task | None:
+        # Hold the task row until commit so terminal re-adoption ownership
+        # checks serialize with in-flight joins that have not yet flushed a
+        # TaskAttempt (see _adoption_owns_task_identity).
+        for_update = resolve_session_dialect_name(self._session, None) == "postgresql"
         if external_id is not None:
             stmt = select(Task).where(Task.external_id == external_id)
+            if for_update:
+                stmt = stmt.with_for_update()
             existing = (await self._session.execute(stmt)).scalar_one_or_none()
             if existing is not None:
                 return existing
 
         if idempotency_key is not None:
             stmt = select(Task).where(Task.idempotency_key == idempotency_key)
+            if for_update:
+                stmt = stmt.with_for_update()
             return (await self._session.execute(stmt)).scalar_one_or_none()
 
         return None
