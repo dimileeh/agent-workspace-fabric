@@ -106,7 +106,7 @@ async def run_validation_and_fix_cycle(
     compose_file: Path,
     base_commit: str,
     expected_branch: str,
-    adapter: AgentAdapter,
+    adapter: AgentAdapter | None,
     run_model: str | None = None,
     default_model: str | None = None,
     baseline_coverage: ValidationCoverageResult | None,
@@ -1040,6 +1040,8 @@ async def run_validation_and_fix_cycle(
                 _fix_prompt: str = fix_prompt,
                 _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
             ) -> AgentRunResult:
+                if adapter is None:
+                    raise RuntimeError("No agent adapter available for validation fix pass")
                 return await adapter.run(
                     compose_project=compose_project,
                     compose_file=compose_file,

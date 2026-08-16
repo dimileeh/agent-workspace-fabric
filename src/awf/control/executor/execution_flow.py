@@ -163,7 +163,21 @@ async def execute(
     ):
         return
 
-    if await self._reject_unsupported_agent_runtime(
+    # When the PR monitor's RECOVERY_DISPATCH path delivered this
+    # workspace, the executor must NOT re-run planning, the agent
+    # CLI, or any post-agent commit hooks — those would rewrite the
+    # plan artifact and re-implement the feature mid-merge. Recovery
+    # only re-runs validation against the already-pushed work.
+    recovery = _get_active_recovery_payload(ws)
+    if recovery is None:
+        guard_result = await self._block_open_pr_reexecution_without_recovery(
+            workspace_id=workspace_id,
+        )
+        if guard_result.blocked:
+            return
+        recovery = guard_result.recovery
+
+    if recovery is None and await self._reject_unsupported_agent_runtime(
         workspace_id=workspace_id,
         workspace=ws,
     ):
@@ -183,20 +197,6 @@ async def execute(
             reason_code=forge_error.reason_code,
         )
         return
-
-    # When the PR monitor's RECOVERY_DISPATCH path delivered this
-    # workspace, the executor must NOT re-run planning, the agent
-    # CLI, or any post-agent commit hooks — those would rewrite the
-    # plan artifact and re-implement the feature mid-merge. Recovery
-    # only re-runs validation against the already-pushed work.
-    recovery = _get_active_recovery_payload(ws)
-    if recovery is None:
-        guard_result = await self._block_open_pr_reexecution_without_recovery(
-            workspace_id=workspace_id,
-        )
-        if guard_result.blocked:
-            return
-        recovery = guard_result.recovery
 
     if recovery is None and await self._dispatch_non_feature_task_kind(
         workspace_id=workspace_id,
@@ -305,35 +305,40 @@ async def execute(
         )
 
     try:
-        agent = AgentRuntime(ws.agent)
-        defaults = self._defaults_for(agent)
-        adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
-        run_model = _agent_run_model_for_workspace(ws)
-        adapter = get_adapter(
-            agent,
-            runner=self._runner,
-            defaults=adapter_defaults,
-            log_store=self._log_store,
-            agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
-            agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
-            usage_sampler=self._usage_sampler,
-            runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
-        )
-        # Ignore checkout-local agent scratch dirs before validation cleanliness
-        # can treat them as dirty worktree state.
-        await apply_agent_scratch_excludes(
-            run_git=lambda args: self._runner.run(
-                [
-                    "git",
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                    *args,
-                ]
-            ),
-            worktree_path=worktree_path,
-            scratch_paths=adapter.runtime_scratch_paths,
-        )
+        try:
+            agent = AgentRuntime(ws.agent)
+            defaults = self._defaults_for(agent)
+            adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
+            run_model = _agent_run_model_for_workspace(ws)
+            adapter = get_adapter(
+                agent,
+                runner=self._runner,
+                defaults=adapter_defaults,
+                log_store=self._log_store,
+                agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
+                agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
+                usage_sampler=self._usage_sampler,
+                runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
+            )
+            # Ignore checkout-local agent scratch dirs before validation cleanliness
+            # can treat them as dirty worktree state.
+            await apply_agent_scratch_excludes(
+                run_git=lambda args: self._runner.run(
+                    [
+                        "git",
+                        *git_safe_directory_config_args(worktree_path),
+                        "-C",
+                        str(worktree_path),
+                        *args,
+                    ]
+                ),
+                worktree_path=worktree_path,
+                scratch_paths=adapter.runtime_scratch_paths,
+            )
+        except Exception:
+            if recovery is None:
+                raise
+            adapter = None
         profile = _profile_for_workspace(
             ws,
             worktree_path=worktree_path,
@@ -613,6 +618,7 @@ async def execute(
                 failure_stage="before agent launch"
             ):
                 return
+            assert adapter is not None
             try:
                 (
                     agent_service_recovered,
@@ -795,7 +801,7 @@ async def execute(
         )
     ):
         return
-    if adapter is None:
+    if recovery is None and adapter is None:
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
