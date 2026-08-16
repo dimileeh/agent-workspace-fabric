@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig
@@ -62,11 +63,17 @@ def build_release_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     workspace_runtime_context: str = "",
+    workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
+    delete_source_branch_on_merge: bool = True,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
     release PRs — the single divergence from a feature PR is
-    ``auto_merge=False``."""
+    ``auto_merge=False``.
+
+    ``delete_source_branch_on_merge`` is accepted for signature parity with
+    ``build_feature_pr_monitor`` (the worker passes the same kwargs to either
+    builder) but is inert here: the release/manual variant never merges."""
     return PullRequestMonitorRunner(
         session_factory=session_factory,
         runner=runner,
@@ -74,6 +81,7 @@ def build_release_pr_monitor(
         gh=gh,
         monitor_config=MonitorConfig(
             auto_merge=False,  # the point of this whole module
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             require_ci=require_ci,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
@@ -94,6 +102,7 @@ def build_release_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         workspace_runtime_context=workspace_runtime_context,
+        workspace_profile=workspace_profile,
         provider_recovery_default_model=provider_recovery_default_model,
     )
 
@@ -121,11 +130,16 @@ def build_feature_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     workspace_runtime_context: str = "",
+    workspace_profile: WorkspaceProfile | None = None,
     provider_recovery_default_model: str | None = None,
+    delete_source_branch_on_merge: bool = True,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` for feature→development
     work. ``auto_merge=True``; on green gates the monitor squash-merges
-    and deletes the branch."""
+    and, when ``delete_source_branch_on_merge`` is True (the feature-branch
+    default), deletes the PR head branch. The worker passes it False for a
+    ``sync_release_pr`` workspace so the long-lived release source branch
+    survives the merge (PRRT_kwDOSJAM6s6U3YAS)."""
     return PullRequestMonitorRunner(
         session_factory=session_factory,
         runner=runner,
@@ -133,6 +147,7 @@ def build_feature_pr_monitor(
         gh=gh,
         monitor_config=MonitorConfig(
             auto_merge=True,
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             require_ci=require_ci,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
@@ -153,5 +168,6 @@ def build_feature_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         workspace_runtime_context=workspace_runtime_context,
+        workspace_profile=workspace_profile,
         provider_recovery_default_model=provider_recovery_default_model,
     )

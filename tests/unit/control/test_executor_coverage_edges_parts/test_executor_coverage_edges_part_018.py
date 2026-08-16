@@ -1,0 +1,213 @@
+"""Hosted PR adoption validation/conformance edge coverage tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from awf.adapters.base import AgentRunResult
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor.types import _PlanningValidationHandoff
+from awf.profiles.models import WorkspaceProfile
+from awf.runtime.planning import (
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    PlanConformanceReport,
+    PlanConformanceStatus,
+)
+from awf.runtime.validation import ValidationResult
+from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
+from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverage_edges_part_003 import (
+    _command_result,
+)
+
+
+@pytest.mark.unit
+async def test_hosted_post_validation_conformance_receives_pr_identity_and_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted adopted-PR conformance must run against the hosted PR checkout."""
+    profile = WorkspaceProfile.model_validate(
+        {"name": "hosted-conformance", "planning": {"required": True}}
+    )
+    initial_head = "c" * 40
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "hosted-conformance"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Hosted conformance",
+        task_prompt="implement the plan",
+        agent="codex",
+        owned_paths=("src/awf",),
+        id="ws_hosted_conformance",
+        task_tag=None,
+        task_policy={
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+                "pr_url": "https://github.com/example/repo/pull/764",
+                "pr_number": 764,
+                "base_ref": "main",
+                "head_ref": "awf/pr-764",
+                "head_repo_url": "https://github.com/fork/repo.git",
+                "head_sha": initial_head,
+            }
+        },
+        repo_url="https://github.com/example/repo.git",
+        pr_url="https://github.com/example/repo/pull/764",
+        pr_number=764,
+        branch_base="main",
+        remote_push_branch="awf/pr-764",
+        monitor_last_commit_sha=initial_head,
+    )
+
+    class _UnexpectedLocalValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise AssertionError("hosted PR adoption must use the hosted validator")
+
+    class _HostedValidation:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+            self.calls.append(kwargs)
+            return ValidationResult(commands=[_command_result(tmp_path, returncode=0)])
+
+    class _ConformanceAdapter:
+        is_hosted = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def run(self, **kwargs: object) -> AgentRunResult:
+            self.calls.append(kwargs)
+            return AgentRunResult(
+                returncode=0,
+                stdout='{"status":"satisfied","summary":"hosted PR validated","gaps":[]}',
+                stderr="",
+            )
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # after conformance changed paths
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(returncode=1, stderr="error: path not tracked")  # report restore
+    executor = WorkspaceExecutor(
+        session_factory=object(),  # type: ignore[arg-type]
+        runner=runner,
+        compose=object(),  # type: ignore[arg-type]
+        validation=object(),  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+    executor._transition_if_current = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._recheck_status = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._capture_workspace_head_sha = AsyncMock(return_value=initial_head)  # type: ignore[method-assign]
+    executor._start_validation_run = AsyncMock(return_value="vr-hosted-conformance")  # type: ignore[method-assign]
+    executor._finish_validation_run = AsyncMock()  # type: ignore[method-assign]
+    executor._finish_pending_validate_operations = AsyncMock()  # type: ignore[method-assign]
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    executor._finish_validation_callback_if_terminal = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._update_subphase = AsyncMock()  # type: ignore[method-assign]
+    executor._validation = _UnexpectedLocalValidation()  # type: ignore[assignment]
+    executor._hosted_validation = _HostedValidation()  # type: ignore[attr-defined]
+    executor._validation_run_evidence_for_conformance = AsyncMock(return_value="VALIDATION_OK")  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    executor._capture_post_validation_conformance_scope_baseline = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(
+            before_compare=set(),
+            before_compare_head="validated-head",
+            before_dirty_digests={},
+        )
+    )
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=False,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref=initial_head,
+            )
+        ),
+    )
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run hosted AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_hosted_conformance.md"),
+        report_path=Path("docs/awf-plans/ws_hosted_conformance.conformance.json"),
+        iteration=0,
+        max_iterations=1,
+    )
+    adapter = _ConformanceAdapter()
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_hosted_conformance",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_hosted_conformance",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=handoff,
+        recovery={"source": "hosted_pr_adoption", "recovery_mode": "validate_only"},
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert len(adapter.calls) == 1
+    conformance_kwargs = adapter.calls[0]
+    assert conformance_kwargs["profile"] is profile
+    hosted_pr_identity = conformance_kwargs["hosted_pr_identity"]
+    assert isinstance(hosted_pr_identity, dict)
+    assert hosted_pr_identity["head_ref"] == "awf/pr-764"
+    assert hosted_pr_identity["expected_head_sha"] == initial_head
+    assert executor._hosted_validation.calls[0]["pr_identity"]["expected_head_sha"] == initial_head

@@ -16,13 +16,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import execution_flow as execution_flow_module
-from awf.control.executor.execution_flow import _validate_only_recovery_target_head_sha
+from awf.control.executor.recovery_payloads import _validate_only_recovery_target_head_sha
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -525,7 +526,7 @@ async def test_validate_only_recovery_target_head_update_failure_is_non_fatal(
                 ),
             )
         )
-        raise RuntimeError("target-head metadata store unavailable")
+        raise SQLAlchemyError("target-head metadata store unavailable")
 
     monkeypatch.setattr(
         executor,

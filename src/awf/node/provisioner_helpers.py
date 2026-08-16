@@ -23,13 +23,25 @@ async def _reconcile_active_reservation_for_profile(
     workspace_id: str,
     node_id: str,
     profile: WorkspaceProfile,
+    local_dind_slots: int | None = None,
+    zero_local_capacity: bool = False,
 ) -> None:
     """Update the active resource reservation to match the resolved profile."""
     reservation = await ResourceReservationRepository(session).active_for_workspace(workspace_id)
     if reservation is None:
         return
+    if zero_local_capacity:
+        reservation.node_id = node_id
+        reservation.steady_cpu = 0.0
+        reservation.steady_memory_gb = 0.0
+        reservation.peak_cpu = 0.0
+        reservation.peak_memory_gb = 0.0
+        reservation.dind_slots = 0
+        return
+    if local_dind_slots is None:
+        local_dind_slots = 1 if profile.docker.mode.value == "dind" else 0
     reservation.node_id = node_id
-    reservation.dind_slots = 1 if profile.docker.mode.value == "dind" else 0
+    reservation.dind_slots = local_dind_slots
 
 
 def _stack_secret_lease_mount_metadata(
@@ -131,6 +143,23 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
     """Return the remote push branch for sync tasks, or None for normal workspaces."""
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
+
+
+def _provision_profile_auto_merge_is_trusted(ws: Workspace, profile: WorkspaceProfile) -> bool:
+    """Whether the resolved profile may authorize auto-merge via its own config.
+
+    Adopting a feature PR checks out the PR head (``refs/pull/<n>/head``), so a
+    ``monitor.auto_merge`` block read from that checkout's ``.awf/workspace.yml``
+    (profile ``source`` ``repo:<path>``) is controlled by the — possibly external —
+    PR author. Honouring it would let a PR enable its own auto-merge once the
+    remaining gates pass, contradicting "AWF owns merge safety" (AGENTS.md). Such a
+    config is untrusted: only an explicit operator intent may enable auto-merge for
+    it. An operator-supplied inline profile and every non-adoption task kind resolve
+    from a trusted source, so their ``monitor.auto_merge`` config is honoured.
+    """
+    if ws.task_kind != "sync_feature_pr":
+        return True
+    return not (profile.source or "").startswith("repo:")
 
 
 def _release_sync_source_branch(ws: Workspace) -> str | None:

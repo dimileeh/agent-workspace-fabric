@@ -12,6 +12,7 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import validation_fix_helpers as executor_validation_fix_helpers
 from awf.control.executor.agent_service_recovery import AGENT_SERVICE_RECOVERY_ABORTED
 from awf.control.executor.constants import (
     POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
@@ -180,6 +181,80 @@ async def _run_cycle(
         or AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
         resume_disable_fix_passes=resume_disable_fix_passes,
     )
+
+
+@pytest.mark.unit
+async def test_hosted_validation_missing_runner_fails_with_structured_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted PR adoption must fail explicitly when no hosted validator is wired."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-hosted-missing-validator"})
+    workspace = _workspace("ws_hosted_missing_validator", pr_url="https://github.com/x/y/pull/7")
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+            "base_ref": "main",
+            "head_ref": "awf/hosted-missing-validator",
+            "head_sha": "d" * 40,
+            "pr_number": 7,
+            "pr_url": "https://github.com/x/y/pull/7",
+        }
+    }
+    workspace.repo_url = "git@github.com:x/y.git"
+    workspace.remote_push_branch = "awf/hosted-missing-validator"
+    workspace.pr_number = 7
+    workspace.branch_base = "main"
+    workspace.monitor_last_commit_sha = None
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _UnexpectedLocalValidation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise AssertionError("hosted validation must not fall back to local validation")
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-hosted-missing-validator"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=_UnexpectedLocalValidation(),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result.stop
+    executor._update_subphase.assert_not_awaited()
+    executor._finish_validation_run.assert_awaited_once_with(
+        "vr-hosted-missing-validator",
+        status="failed",
+        reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+    )
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
+    assert (
+        finish_kwargs["error_message"]
+        == "hosted PR adoption validation failed: no hosted validation runner configured"
+    )
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert mark_kwargs["reason_code"] == "VALIDATION_INFRASTRUCTURE_ERROR"
+    assert mark_kwargs["message"] == finish_kwargs["error_message"]
 
 
 @pytest.mark.unit
@@ -1105,6 +1180,14 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     workspace = _workspace("ws_conf_fix_loop")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    post_fix_handoff = AsyncMock(
+        wraps=executor_validation_fix_helpers.check_post_fix_worktree_clean
+    )
+    monkeypatch.setattr(
+        executor_validation_fix_helpers,
+        "check_post_fix_worktree_clean",
+        post_fix_handoff,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -1169,6 +1252,7 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     assert conformance_check.await_count == 2
     # The conformance fix pass re-invoked the agent exactly once between checks.
     assert adapter.run.await_count == 1
+    post_fix_handoff.assert_awaited_once()
 
 
 @pytest.mark.unit

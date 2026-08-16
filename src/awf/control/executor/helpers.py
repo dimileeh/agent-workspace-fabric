@@ -33,7 +33,7 @@ from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
 )
-from awf.common.workspace_policy import release_sync_source_branch
+from awf.common.workspace_policy import pr_adoption_is_hosted, release_sync_source_branch
 from awf.control.executor.constants import (
     _DEFAULT_RELEASE_SYNC_TARGET_BRANCH,
     _EXCEPTION_TRACEBACK_LIMIT,
@@ -219,10 +219,11 @@ def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
         missing.append(
             f"remote_push_branch (task_kind={ws.task_kind}, branch_name={ws.branch_name!r})"
         )
-    if not ws.compose_project_name:
-        missing.append("compose_project_name")
-    if not ws.compose_file_path:
-        missing.append("compose_file_path")
+    if not pr_adoption_is_hosted(ws.task_policy):
+        if not ws.compose_project_name:
+            missing.append("compose_project_name")
+        if not ws.compose_file_path:
+            missing.append("compose_file_path")
     return missing
 
 
@@ -414,7 +415,7 @@ def _profile_for_workspace(
     first-write-wins semantics.
     """
     if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
             profile,
             planning_max_iterations_default,
@@ -449,7 +450,7 @@ def _realign_profile_from_resolved_profile_snapshot(
     if snapshot is None:
         return None
     ws.resolved_profile = snapshot
-    profile = WorkspaceProfile.model_validate(snapshot)
+    profile = WorkspaceProfile.model_validate_persisted(snapshot)
     return _profile_with_planning_iteration_default(
         profile,
         planning_max_iterations_default,
@@ -610,7 +611,7 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
-        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
         coverage_count = 1 if _should_run_local_coverage(profile) else 0
         return (
             len(profile.phases.post_agent)

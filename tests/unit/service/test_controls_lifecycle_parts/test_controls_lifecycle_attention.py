@@ -10,6 +10,12 @@ monitor resume clear — otherwise the workspace row stays stuck with
 ``attention_required=true`` after the operator has already acted (live
 awf-cloud PR231/PR208). A future genuine ``NotifyHuman`` may set a new episode
 later via the monitor; that path is unchanged.
+
+Terminal exits (cancel / stop / force-destroy) from ``monitoring_pr`` must also
+clear the monitoring-source episode: they leave ``monitoring_pr`` without going
+through remonitor/guide, and previously left ``awaiting_human_since`` persisted
+with no ``workspace.attention_cleared`` for callback subscribers
+(PRRT_kwDOSJAM6s6XYW1j).
 """
 
 from __future__ import annotations
@@ -20,15 +26,21 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.attention_events import (
+    ATTENTION_CLEARED_EVENT_TYPE,
+    ATTENTION_SOURCE_MONITORING_PR,
+)
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY
 from tests.postgres import postgres_test_session
 from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
+    RecordingCleaner,
     _events,
     _operations,
     _service,
     _workspace_with_candidate,
+    compose_down_succeeded_result,
 )
 
 
@@ -187,3 +199,139 @@ async def test_guide_no_attention_episode_is_unchanged(session: AsyncSession) ->
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since is None
     assert workspace.awaiting_human_reason is None
+
+
+def _monitoring_attention_cleared(events: list) -> list:
+    return [
+        e
+        for e in events
+        if e.event_type == ATTENTION_CLEARED_EVENT_TYPE
+        and (e.payload or {}).get("source") == ATTENTION_SOURCE_MONITORING_PR
+    ]
+
+
+@pytest.mark.unit
+async def test_cancel_monitoring_pr_clears_persisted_human_attention(
+    session: AsyncSession,
+) -> None:
+    """Cancel from monitoring_pr with HUMAN_WAIT must clear monitoring attention.
+
+    Operator cancel transitions monitoring_pr→cancelled without remonitor/guide;
+    leaving awaiting_human_since set strands callback subscribers with a
+    permanently active monitoring attention episode (PRRT_kwDOSJAM6s6XYW1j).
+    """
+    workspace, _candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="cancel clears monitoring attention",
+    )
+    await _persist_human_wait_episode(session, workspace.id)
+    await session.refresh(workspace)
+    assert workspace.awaiting_human_since is not None
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator abandoned HUMAN_WAIT",
+        stop_stack=False,
+        idempotency_key="cancel-clears-monitoring-attention",
+        expected_version=workspace.version,
+    )
+    await session.refresh(workspace)
+    events = await _events(session, workspace.id)
+
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None
+    cleared = _monitoring_attention_cleared(events)
+    assert len(cleared) == 1
+
+
+@pytest.mark.unit
+async def test_stop_monitoring_pr_clears_persisted_human_attention(
+    session: AsyncSession,
+) -> None:
+    """Stop from monitoring_pr with HUMAN_WAIT must clear monitoring attention."""
+    workspace, _candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="stop clears monitoring attention",
+    )
+    await _persist_human_wait_episode(session, workspace.id)
+    await session.refresh(workspace)
+    assert workspace.awaiting_human_since is not None
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.stop_workspace(
+        workspace.id,
+        reason="halt HUMAN_WAIT monitor",
+        idempotency_key="stop-clears-monitoring-attention",
+        expected_version=workspace.version,
+    )
+    await session.refresh(workspace)
+
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None
+    assert len(_monitoring_attention_cleared(await _events(session, workspace.id))) == 1
+
+
+@pytest.mark.unit
+async def test_destroy_monitoring_pr_with_force_clears_persisted_human_attention(
+    session: AsyncSession,
+) -> None:
+    """Forced destroy from monitoring_pr with HUMAN_WAIT must clear attention."""
+    workspace, _candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="destroy clears monitoring attention",
+    )
+    await _persist_human_wait_episode(session, workspace.id)
+    await session.refresh(workspace)
+    assert workspace.awaiting_human_since is not None
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+        idempotency_key="destroy-clears-monitoring-attention",
+        expected_version=workspace.version,
+    )
+    await session.refresh(workspace)
+
+    assert workspace.status == WorkspaceStatus.destroyed.value
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None
+    assert len(_monitoring_attention_cleared(await _events(session, workspace.id))) == 1
+
+
+@pytest.mark.unit
+async def test_cancel_monitoring_pr_without_episode_emits_no_attention_cleared(
+    session: AsyncSession,
+) -> None:
+    """Cancel with no HUMAN_WAIT episode must not emit monitoring attention_cleared."""
+    workspace, _candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="cancel no monitoring episode",
+    )
+    await session.refresh(workspace)
+    assert workspace.awaiting_human_since is None
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="cancel without episode",
+        stop_stack=False,
+        idempotency_key="cancel-no-monitoring-episode",
+        expected_version=workspace.version,
+    )
+    await session.refresh(workspace)
+
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert workspace.awaiting_human_since is None
+    assert _monitoring_attention_cleared(await _events(session, workspace.id)) == []

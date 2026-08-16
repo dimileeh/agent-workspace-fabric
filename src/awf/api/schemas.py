@@ -14,7 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
+from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
@@ -48,10 +50,7 @@ OperationResponse = _schemas_operations.OperationResponse
 log_stream_ids = _schemas_operations.log_stream_ids
 merge_log_stream_ref_value = _schemas_operations.merge_log_stream_ref_value
 
-# Leaf request/response schemas live in ``awf.api.schemas_responses`` to keep
-# this module under the maintainability line limit. Re-exported here so
-# ``from awf.api.schemas import X`` keeps working for the REST app and the MCP
-# server (definitions are relocated, not changed).
+# Leaf schemas live in ``schemas_responses``; PR monitor request contracts stay canonical here.
 CallbackSubscriptionCreateRequest = _schemas_responses.CallbackSubscriptionCreateRequest
 CallbackSubscriptionResponse = _schemas_responses.CallbackSubscriptionResponse
 CallbackSubscriptionListResponse = _schemas_responses.CallbackSubscriptionListResponse
@@ -76,11 +75,124 @@ ServiceGCRequest = _schemas_responses.ServiceGCRequest
 ServiceGCResponse = _schemas_responses.ServiceGCResponse
 ServiceGCWorkerReclaim = _schemas_responses.ServiceGCWorkerReclaim
 
+# Workspace log/artifact/validation-provenance leaf read models live in
+# ``schemas_workspace_io``; re-export so ``awf.api.schemas`` stays the single
+# import surface for REST + MCP.
+WorkspaceLogStreamResponse = _schemas_workspace_io.WorkspaceLogStreamResponse
+WorkspaceLogListResponse = _schemas_workspace_io.WorkspaceLogListResponse
+WorkspaceLogReadResponse = _schemas_workspace_io.WorkspaceLogReadResponse
+WorkspaceArtifactResponse = _schemas_workspace_io.WorkspaceArtifactResponse
+WorkspaceArtifactListResponse = _schemas_workspace_io.WorkspaceArtifactListResponse
+WorkspaceArtifactReadResponse = _schemas_workspace_io.WorkspaceArtifactReadResponse
+ValidationProvenanceItemResponse = _schemas_workspace_io.ValidationProvenanceItemResponse
+ValidationProvenanceListResponse = _schemas_workspace_io.ValidationProvenanceListResponse
+
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
 PUBLIC_DIRECT_CREATE_TASK_KINDS = _schemas_operations.PUBLIC_DIRECT_CREATE_TASK_KINDS
+
+
+class PullRequestMonitorExecutionPolicy(BaseModel):
+    """Execution placement policy for adopted PR monitor repair/validation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: Literal["local", "hosted"] = Field(
+        default="local",
+        description=(
+            "Where Core should run PR-monitor repair and post-repair validation. "
+            "'local' preserves Docker Compose execution; 'hosted' requires "
+            "configured hosted delegation and never starts local Compose."
+        ),
+    )
+
+
+class PullRequestMonitorAdoptionRequest(BaseModel):
+    """Input for adopting an already-open GitHub PR into AWF monitoring."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    pr_number: int | None = Field(default=None, ge=1)
+    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
+    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
+    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
+    profile: WorkspaceProfile | None = None
+    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent for the adopted PR. True/False set it "
+            "explicitly; omit (null) to fall through to the repo profile "
+            "(monitor.auto_merge) and the uniform default (off). When resolved "
+            "off the monitor reports readiness without merging (manual gate)."
+        ),
+    )
+    execution: PullRequestMonitorExecutionPolicy = Field(
+        default_factory=PullRequestMonitorExecutionPolicy,
+        description=(
+            "Explicit PR monitor execution policy. Hosted mode is never inferred "
+            "from environment or Docker availability."
+        ),
+    )
+    initial_review_grace_period_seconds: float | None = Field(default=None, ge=0, le=86400)
+    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    task_prompt: Annotated[str | None, Field(default=None, min_length=1, max_length=16384)] = None
+    task_tag: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional issue/task key linked into the PR title and "
+                "AWF-authored monitor commits. Accepts a Jira issue key "
+                "(PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare "
+                "keys; bracketed [PROJ-T123] is accepted and normalized, but "
+                "bare is recommended because [ is a shell glob character."
+            ),
+        ),
+    ] = None
+    external_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create. Omit to use the "
+                "generated repo/PR adoption identity. Changing this on a live "
+                "adoption returns PR_ADOPTION_POLICY_CONFLICT; an id owned by "
+                "another task scope returns TASK_EXTERNAL_ID_CONFLICT."
+            ),
+        ),
+    ] = None
+    task_class: TaskClass | None = Field(
+        default=None,
+        description=(
+            "Optional task class for scheduling and policy parity with workspace "
+            "create. Omit to leave unset. Changing this on a live adoption returns "
+            "PR_ADOPTION_POLICY_CONFLICT."
+        ),
+    )
+    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
+
+    @field_validator("task_tag")
+    @classmethod
+    def _validate_task_tag(cls, value: str | None) -> str | None:
+        """Normalize and validate an optional task tag; ``None`` when absent."""
+        return validate_task_tag(value)
+
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -174,7 +286,15 @@ class WorkspaceTask(BaseModel):
     human_boost: int = Field(default=0, ge=0, le=5)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     out_of_scope_changes: OutOfScopeChangePolicy | None = None
-    auto_merge: bool = True
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state auto-merge intent. True/False set it explicitly; omit "
+            "(null) to fall through to the repo profile (monitor.auto_merge) and "
+            "the uniform default (off). When resolved off the monitor reports "
+            "readiness without merging (manual gate)."
+        ),
+    )
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -196,6 +316,12 @@ class WorkspaceTask(BaseModel):
         """
         return validate_task_tag(value)
 
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
+
     @field_validator("kind")
     @classmethod
     def _validate_kind(cls, value: str) -> str:
@@ -211,7 +337,8 @@ class WorkspaceTask(BaseModel):
         if value == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             raise ValueError(
                 "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-                "release/manual PR via PR adoption with auto_merge=false instead."
+                "release/manual PR via PR adoption instead (auto_merge defaults to "
+                "false, giving the manual/no-auto-merge gate)."
             )
         if value == TaskKind.sync_feature_pr.value:
             raise ValueError(
@@ -379,63 +506,6 @@ class WorkspaceCreateRequest(BaseModel):
         return self.workspace.profile_ref == _LEGACY_DATABASE_PROFILE_REF
 
 
-class PullRequestMonitorAdoptionRequest(BaseModel):
-    """Input for adopting an already-open GitHub PR into AWF monitoring."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
-    pr_number: int | None = Field(default=None, ge=1)
-    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-
-    agent: AgentRuntime = Field(default=AgentRuntime.codex)
-    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
-    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
-    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
-    profile: WorkspaceProfile | None = None
-    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
-    auto_merge: bool = True
-    initial_review_grace_period_seconds: float | None = Field(
-        default=None,
-        ge=0,
-        le=86400,
-    )
-    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
-    task_prompt: Annotated[
-        str | None,
-        Field(default=None, min_length=1, max_length=16384),
-    ] = None
-    task_tag: Annotated[
-        str | None,
-        Field(
-            default=None,
-            max_length=64,
-            description=(
-                "Optional issue/task key linked into the PR title and "
-                "AWF-authored monitor commits. Accepts a Jira issue key "
-                "(PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare "
-                "keys; bracketed [PROJ-T123] is accepted and normalized, but "
-                "bare is recommended because [ is a shell glob character."
-            ),
-        ),
-    ] = None
-    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
-
-    @field_validator("task_tag")
-    @classmethod
-    def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize and validate an optional task tag; ``None`` when absent.
-
-        Accepts a Jira issue key (``PROJ-123``) or an Aira task entity key
-        (``PROJ-T123``). Pass bare keys (``AIRA-T299``); bracketed
-        ``[AIRA-T299]`` is accepted and normalized, but bare is recommended
-        because ``[`` is a shell glob character. Entity keys appear bracketed
-        on AWF monitor commits; Jira keys are bare.
-        """
-        return validate_task_tag(value)
-
-
 class PullRequestMonitorAdoptionResponse(BaseModel):
     """Response for the supported existing-PR adoption flow."""
 
@@ -454,7 +524,18 @@ class PullRequestMonitorAdoptionResponse(BaseModel):
     base_ref: str
     head_sha: str | None = None
     base_sha: str | None = None
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        default=None,
+        description=(
+            "Resolved auto-merge policy for the adopted PR, or null when it is not "
+            "yet resolved. An adoption that omits an explicit intent falls through "
+            "to the repo profile (monitor.auto_merge), which is only materialized "
+            "at provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect monitor_policy.auto_merge_intent and "
+            "monitor_policy.auto_merge_resolved to distinguish intent from the "
+            "resolved policy."
+        ),
+    )
     monitor_policy: dict[str, Any] = Field(default_factory=dict)
     attached_existing: bool
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
@@ -873,7 +954,16 @@ class WorkspaceResponse(BaseModel):
     task_class: TaskClass | None
     owned_paths: list[str]
     task_policy: dict[str, Any] = Field(default_factory=dict)
-    auto_merge: bool
+    auto_merge: bool | None = Field(
+        description=(
+            "Resolved auto-merge policy, or null when it is not yet resolved. A "
+            "create/adopt that omits an explicit intent falls through to the repo "
+            "profile (monitor.auto_merge), which is only materialized at "
+            "provisioning; until then the value is null (unresolved), never a "
+            "provisional false. Inspect task_policy.auto_merge_intent for the raw "
+            "tri-state intent."
+        ),
+    )
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime
@@ -1162,6 +1252,33 @@ class WorkspaceOverviewListResponse(BaseModel):
     cursor: str | None = None
 
 
+class WorkspaceOverviewBatchRequest(BaseModel):
+    """Bounded batch lookup for known workspace IDs (hosted projection)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    workspace_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        Field(
+            min_length=1,
+            max_length=200,
+            json_schema_extra={"uniqueItems": True},
+        ),
+    ]
+
+    @field_validator("workspace_ids")
+    @classmethod
+    def _workspace_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("workspace_ids must be unique")
+        return value
+
+
+class WorkspaceOverviewBatchResponse(BaseModel):
+    items: list[WorkspaceOverviewResponse]
+    missing_workspace_ids: list[str]
+
+
 StaleReasonStatus = Literal["active", "resolved"]
 StaleReasonCode = Literal[
     "STALE_TARGET_ADVANCED",
@@ -1374,121 +1491,6 @@ class WorkspaceRuntimeResponse(BaseModel):
     reason: str | None = None
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
-
-
-class WorkspaceLogStreamResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    stream_id: str
-    source: str
-    name: str
-    kind: str
-    path: str
-    byte_count: int
-    line_count: int
-    opened_at: datetime
-    closed_at: datetime | None
-
-
-class WorkspaceLogListResponse(BaseModel):
-    items: list[WorkspaceLogStreamResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
-
-
-class WorkspaceLogReadResponse(BaseModel):
-    stream_id: str
-    offset: int
-    next_offset: int
-    eof: bool
-    data: str
-
-
-class WorkspaceArtifactResponse(BaseModel):
-    artifact_id: str
-    workspace_id: str
-    name: str
-    relative_path: str
-    path: str
-    kind: str
-    size_bytes: int
-    modified_at: datetime
-
-
-class WorkspaceArtifactListResponse(BaseModel):
-    items: list[WorkspaceArtifactResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
-
-
-class WorkspaceArtifactReadResponse(BaseModel):
-    """Bounded artifact bytes + metadata returned by ``awf_read_workspace_artifact``."""
-
-    workspace_id: str
-    relative_path: str
-    name: str
-    content_type: str
-    size_bytes: int
-    content: str
-    """Base64-encoded artifact bytes (standard alphabet, no line breaks)."""
-
-
-class ValidationProvenanceItemResponse(BaseModel):
-    validation_run_id: str | None = None
-    workspace_id: str
-    attempt_id: str | None = None
-    tier: ValidationTier | None = None
-    command_set_hash: str | None = None
-    phase: str
-    command_index: int
-    command: str | None
-    stream_ids: dict[str, str | None]
-    stdout_byte_count: int
-    stdout_line_count: int
-    stderr_byte_count: int
-    stderr_line_count: int
-    opened_at: datetime
-    closed_at: datetime | None
-    status: ValidationProvenanceStatus
-    reason_code: str | None = None
-    base_commit: str | None
-    base_sha: str | None = None
-    workspace_head_sha: str | None = None
-    branch_name: str | None
-    target_branch: str | None = None
-    target_head_sha: str | None = None
-    current_target_head_sha: str | None = None
-    profile_name: str | None = None
-    profile_version: int | None = None
-    profile_source: str | None = None
-    resolved_profile_digest: str | None = None
-    environment_identity_digest: str | None = None
-    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
-    identity_source: ValidationIdentitySource = "legacy_fallback"
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
-    fresh_for_target: bool | None = None
-    retry_count: int = 0
-    coverage_percent: float | None = None
-    coverage_minimum_percent: float | None = None
-    coverage_status: str | None = None
-    coverage_reason_code: str | None = None
-    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
-    failing_test_node_ids: list[str] = Field(default_factory=list)
-    failing_test_evidence: list[str] = Field(default_factory=list)
-
-
-class ValidationProvenanceListResponse(BaseModel):
-    items: list[ValidationProvenanceItemResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = 50
-    cursor: str | None = None
 
 
 _merge_log_stream_ref_value = merge_log_stream_ref_value

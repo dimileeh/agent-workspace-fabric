@@ -25,11 +25,22 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         {WorkspaceStatus.provisioning, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
     ),
     WorkspaceStatus.provisioning: frozenset(
-        {WorkspaceStatus.ready, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+        {
+            WorkspaceStatus.ready,
+            # Hosted PR-adoption restart salvage can attach an already-open PR
+            # monitor before a local Compose runtime ever exists.
+            WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
     ),
     WorkspaceStatus.ready: frozenset(
         {
             WorkspaceStatus.running,
+            # Hosted PR-adoption restart salvage can attach an already-open PR
+            # monitor from ready when the executor claim was stranded before a
+            # local runtime was ever launched.
+            WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
             WorkspaceStatus.destroying,

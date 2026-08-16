@@ -181,6 +181,7 @@ async def _seed_monitoring_workspace(
     remote_push_branch: str | None = None,
     task_kind: str = "feature_branch_pr",
     task_policy: dict[str, object] | None = None,
+    auto_merge: bool = True,
 ) -> str:
     """Insert a workspace already in ``monitoring_pr`` state.
 
@@ -221,6 +222,7 @@ async def _seed_monitoring_workspace(
         ws.compose_project_name = f"awf_{ws.id}"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
         ws.pr_number = pr_number
+        ws.auto_merge = auto_merge
         # Walk requested → provisioning → ready → running → validating → pushing → monitoring_pr
         for target in (
             WorkspaceStatus.provisioning,
@@ -535,7 +537,7 @@ class TestNotifyHumanVariant:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        ws_id = await _seed_monitoring_workspace(factory)
+        ws_id = await _seed_monitoring_workspace(factory, auto_merge=False)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state
@@ -1048,6 +1050,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit
         cmd.queue_result(returncode=0)  # git push (sync_base)
+        cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
         # Outer iter 2: clean → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>

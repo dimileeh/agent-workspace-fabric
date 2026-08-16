@@ -46,6 +46,9 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--model" in visible_help
     assert "--effort" in visible_help
     assert "--owned-path" in visible_help
+    assert "--execution" in visible_help
+    assert "--external-id" in visible_help
+    assert "--task-class" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -138,7 +141,9 @@ class TestWorkspaceCreate:
         assert body["validation"]["commands"] == ["pytest -q", "ruff check ."]
         assert body["workspace"]["profile_ref"] == "aira"
         assert body["task"]["agent"] == "codex"
-        assert body["task"]["auto_merge"] is True
+        # Omitting --auto-merge sends the tri-state unset (null); the repo/profile
+        # default (off) is resolved at provision, not forced on at the CLI.
+        assert body["task"]["auto_merge"] is None
         assert body["task"]["initial_review_grace_period_seconds"] is None
         assert body["repo"]["base_branch"] == "development"
 
@@ -356,6 +361,30 @@ class TestWorkspaceCreate:
         body = mock.call_args.kwargs["json"]
         assert body["task"]["auto_merge"] is False
         assert body["task"]["initial_review_grace_period_seconds"] == 0
+
+    @pytest.mark.unit
+    def test_explicit_auto_merge_flag_sends_true(self) -> None:
+        """--auto-merge sends the explicit True intent in the request body."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_am"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Auto merge",
+                    "--prompt",
+                    "Open a PR and auto-merge on green.",
+                    "--auto-merge",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["auto_merge"] is True
 
     @pytest.mark.unit
     def test_initial_review_grace_period_rejects_values_above_one_day(self) -> None:

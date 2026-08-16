@@ -741,7 +741,7 @@ async def test_execute_ci_fix_workflow_scope_push_failure_is_terminal(
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
-    assert "`workflow` scope for .github/workflows/publish.yml" in body
+    assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
 
 
 @pytest.mark.unit

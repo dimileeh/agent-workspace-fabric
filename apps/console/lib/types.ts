@@ -14,7 +14,14 @@ export type WorkspaceStatus =
   | "destroying"
   | "destroyed";
 
-export type AgentRuntime = "codex" | "claude_code" | "gemini" | "opencode";
+export type AgentRuntime =
+  | "codex"
+  | "claude_code"
+  | "cursor"
+  | "antigravity"
+  | "gemini"
+  | "opencode"
+  | "grok";
 
 export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
 export type NetworkPosture = "offline" | "restricted" | "open";
@@ -508,7 +515,9 @@ export interface Workspace {
   task_class: string | null;
   owned_paths: string[];
   task_policy: Record<string, unknown>;
-  auto_merge: boolean;
+  // Null while the auto-merge policy is still unresolved (a create/adopt with no
+  // explicit intent, before provisioning materializes the profile).
+  auto_merge: boolean | null;
   initial_review_grace_period_seconds: number | null;
   agent: AgentRuntime;
   agent_model: string | null;

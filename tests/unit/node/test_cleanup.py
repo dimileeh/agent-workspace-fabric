@@ -80,6 +80,28 @@ class TestCleanup:
         )
 
     @pytest.mark.unit
+    async def test_skip_compose_omits_all_compose_operations(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+    ) -> None:
+        git, compose, wc = cleaner
+
+        result = await wc.cleanup(
+            workspace_id="ws_hosted",
+            repo_url="git@x:y.git",
+            skip_compose=True,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        assert result.steps[0].name == "compose_down"
+        assert result.steps[0].status == "skipped"
+        compose.down.assert_not_awaited()
+        compose.down_project.assert_not_awaited()
+        compose.remove_project_by_label.assert_not_awaited()
+        git.remove_worktree.assert_not_awaited()
+
+    @pytest.mark.unit
     async def test_cleanup_removes_companion_worktrees_with_primary(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

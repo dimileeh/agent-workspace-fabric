@@ -20,6 +20,7 @@ Generic AWF core behaviour — no hard-coded repositories or branch names.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -46,6 +47,12 @@ NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 # ``gh pr view`` and parses github.com-only PR URLs. Mirrors
 # ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
 RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+# A reused PR body whose AWF merge-policy markers form anything other than a single,
+# correctly ordered start→end pair (orphan marker, reversed order, or duplicate
+# blocks). Reconciling such a layout by pairing the first start with the first end
+# would splice across intervening human-authored content and delete it, so we fail
+# closed and surface the tangle to a human instead.
+RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE = "RELEASE_SYNC_POLICY_MARKERS_MALFORMED"
 _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES = 3
 
 SleepFn = Callable[[float], Awaitable[None]]
@@ -324,6 +331,25 @@ async def find_or_create_release_pr(
     if existing_number is not None:
         pr_number = existing_number
         created = False
+        # A reused open PR skips ``_create_release_pr_with_redundancy`` — the only
+        # creator that applies ``body`` — so its description can still advertise a
+        # stale merge policy (e.g. the "human-gated" manual text from an earlier
+        # ``auto_merge=false`` open) that contradicts the now-resolved
+        # ``auto_merge`` the attached monitor enforces. But the reused PR may be a
+        # manually authored release PR carrying human release notes and checklists,
+        # so overwriting the whole body would silently destroy that context on every
+        # sync. Fetch the current body and reconcile *only* AWF's marker-delimited
+        # merge-policy section, preserving everything else; skip the edit when the
+        # body already matches so a no-op sync makes no write. Release-PR sync is
+        # GitHub-only (``ensure_release_sync_forge_supported`` above), so ``gh`` is a
+        # ``GitHubClient`` whose read/edit map to reason-coded failures.
+        assert isinstance(gh, GitHubClient)
+        existing_body = await gh.fetch_pull_request_body(repo=repo, pr_number=pr_number)
+        reconciled_body = reconcile_release_pr_body(
+            existing_body=existing_body, generated_body=body
+        )
+        if reconciled_body != existing_body:
+            await gh.update_pull_request_body(repo=repo, pr_number=pr_number, body=reconciled_body)
     else:
         pr_number, created = await _create_release_pr_with_redundancy(
             runner=runner,
@@ -402,10 +428,229 @@ def release_pr_title(*, source_branch: str, target_branch: str) -> str:
     return f"Release: merge {source_branch} into {target_branch}"
 
 
-def release_pr_body(*, source_branch: str, target_branch: str) -> str:
+# HTML-comment fences (invisible in rendered Markdown) that delimit the single
+# AWF-managed merge-policy paragraph inside a release PR body. Reconciling a
+# reused PR rewrites *only* the text between these markers, so human-authored
+# release notes and checklists elsewhere in the description survive every sync.
+_MANAGED_POLICY_START = "<!-- AWF:release-merge-policy:start -->"
+_MANAGED_POLICY_END = "<!-- AWF:release-merge-policy:end -->"
+
+
+def _release_merge_policy_text(*, auto_merge: bool) -> str:
+    """The bare AWF-managed merge-policy paragraph (no marker fences)."""
+
+    if auto_merge:
+        # Mirror the monitor selection in ``worker._pr_monitor_factory``: a resolved
+        # ``auto_merge=True`` release-sync workspace runs the feature monitor and
+        # squash-merges into the release target on green, so the body must not claim
+        # the merge stays human-gated.
+        return (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
     return (
-        f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
         "Opened by the `sync_release_pr` task kind and monitored with "
         "release/manual behavior (auto-merge disabled). Merging into the "
         "release target stays human-gated."
     )
+
+
+def _release_merge_policy_section(*, auto_merge: bool) -> str:
+    """The marker-delimited AWF-managed merge-policy block for a release PR."""
+
+    text = _release_merge_policy_text(auto_merge=auto_merge)
+    return f"{_MANAGED_POLICY_START}\n{text}\n{_MANAGED_POLICY_END}"
+
+
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
+
+
+def _fence_closes(line: str, *, fence: str) -> bool:
+    """Whether ``line`` closes a code fence opened with ``fence``."""
+
+    return re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line) is not None
+
+
+def _advance_html_comment_state(line: str, *, in_comment: bool) -> bool:
+    """Whether an HTML comment is still open after consuming ``line``."""
+
+    index = 0
+    while True:
+        if in_comment:
+            close = line.find("-->", index)
+            if close == -1:
+                return True
+            in_comment = False
+            index = close + len("-->")
+        else:
+            opening = line.find("<!--", index)
+            if opening == -1:
+                return False
+            in_comment = True
+            index = opening + len("<!--")
+
+
+def _strip_legacy_policy_paragraph(body: str) -> str:
+    """Remove a pre-marker AWF-generated merge-policy paragraph from ``body``.
+
+    A release PR opened before the managed markers existed carries the old
+    *unfenced* generated paragraph — either the "human-gated" manual text or the
+    "auto-merge enabled" text — with no fences for
+    :func:`_extract_managed_policy_section` to find. Left in place, the marker-only
+    reconciliation would append the fresh section beside the stale paragraph,
+    yielding a PR that simultaneously claims manual and automatic merge. Delete the
+    exact generated paragraph text (both variants) while preserving surrounding
+    human-authored content.
+
+    Only a *standalone* occurrence — the paragraph alone on its own line, outside
+    any container — is AWF-authored output. A human release note may quote the same
+    sentences blockquoted, inside a list item, or embedded mid-line with commentary
+    around it; it may also quote the old body verbatim in a fenced code block or
+    park it in an HTML comment, where the paragraph does sit alone at column zero.
+    An unrestricted replace would silently delete that human text (and leave a
+    dangling bullet or a gutted code block), so the match is anchored to whole
+    lines *and* skipped inside fenced code blocks and HTML comments.
+    """
+
+    legacy_paragraphs = {
+        _release_merge_policy_text(auto_merge=auto_merge) for auto_merge in (False, True)
+    }
+    kept: list[str] = []
+    fence: str | None = None
+    in_comment = False
+    for raw_line in body.split("\n"):
+        # Match on the newline-free line but keep ``raw_line`` for the output: GitHub
+        # returns a description saved through its web UI with CRLF endings, and a
+        # retained "\r" would defeat every comparison below.
+        line = raw_line.removesuffix("\r")
+        if in_comment:
+            in_comment = _advance_html_comment_state(line, in_comment=True)
+        elif fence is not None:
+            if _fence_closes(line, fence=fence):
+                fence = None
+        elif (opened := _FENCE_OPEN_RE.match(line)) is not None:
+            fence = opened.group("fence")
+        elif line.rstrip(" \t") in legacy_paragraphs:
+            # Blank the line rather than dropping it, so the surrounding paragraph
+            # spacing a human wrote around the stale text is left untouched.
+            kept.append("")
+            continue
+        else:
+            in_comment = _advance_html_comment_state(line, in_comment=False)
+        kept.append(raw_line)
+    return "\n".join(kept)
+
+
+def _managed_marker_offsets(body: str) -> tuple[list[int], list[int]]:
+    """Offsets of the live start/end managed markers in ``body``.
+
+    Only markers at the top level are AWF's own output, which emits each marker
+    alone on its own unindented line. A human may paste a whole managed block into
+    a fenced example ("AWF renders this block:"), quote one in a blockquote or list
+    item, or park one in an HTML comment; those markers are illustrative text.
+    Counting them would let reconciliation rewrite the bytes inside the human's
+    quote — leaving the real description with no policy statement — or read a lone
+    example beside the live block as a duplicate layout and wedge every later sync.
+    So the match is anchored to whole lines, like
+    :func:`_strip_legacy_policy_paragraph`, *and* skipped inside the same fenced
+    code blocks and HTML comments.
+    """
+
+    starts: list[int] = []
+    ends: list[int] = []
+    offset = 0
+    fence: str | None = None
+    in_comment = False
+    for raw_line in body.split("\n"):
+        # Match on the newline-free line but count offsets over ``raw_line``: a body
+        # saved through GitHub's web UI comes back with CRLF endings, and a retained
+        # "\r" would hide the live markers (reconciliation would then append a second
+        # managed block) while the offsets must still address the original bytes.
+        line = raw_line.removesuffix("\r")
+        if in_comment:
+            in_comment = _advance_html_comment_state(line, in_comment=True)
+        elif fence is not None:
+            if _fence_closes(line, fence=fence):
+                fence = None
+        elif (opened := _FENCE_OPEN_RE.match(line)) is not None:
+            fence = opened.group("fence")
+        else:
+            own_line = line.rstrip(" \t")
+            if own_line == _MANAGED_POLICY_START:
+                starts.append(offset)
+            elif own_line == _MANAGED_POLICY_END:
+                ends.append(offset)
+            in_comment = _advance_html_comment_state(line, in_comment=False)
+        offset += len(raw_line) + 1
+    return starts, ends
+
+
+def _extract_managed_policy_section(body: str) -> str | None:
+    """Return the marker-delimited managed section of ``body``, or ``None``."""
+
+    start = body.find(_MANAGED_POLICY_START)
+    end = body.find(_MANAGED_POLICY_END)
+    if start == -1 or end == -1 or end < start:
+        return None
+    return body[start : end + len(_MANAGED_POLICY_END)]
+
+
+def reconcile_release_pr_body(*, existing_body: str, generated_body: str) -> str:
+    """Splice AWF's managed merge-policy section into a reused PR's description.
+
+    ``generated_body`` is the freshly rendered :func:`release_pr_body` (intro +
+    managed policy section). For a *reused* PR — which may be a manually authored
+    release PR carrying human release notes, checklists, and other context — we
+    must not overwrite the whole description. Preserve ``existing_body`` verbatim
+    and only replace the marker-delimited AWF policy block in place (inserting it
+    at the end when absent), so the reused PR advertises the merge policy the
+    attached monitor now enforces without destroying human-authored content.
+
+    Markers are located with :func:`_managed_marker_offsets`, so a pair a human
+    quoted inside a fenced example, a blockquote, or an HTML comment is never
+    mistaken for the live managed section.
+
+    When the markers are absent, ``existing_body`` may still carry a pre-marker
+    AWF-generated policy paragraph (a PR opened before the fences existed); strip
+    that stale paragraph before appending the fresh section so the reused PR never
+    claims both manual and automatic merge.
+    """
+
+    section = _extract_managed_policy_section(generated_body)
+    if section is None:
+        # Defensive: a body without managed markers can't be reconciled section-wise.
+        # Never seen in practice (``release_pr_body`` always emits them); fall back to
+        # the generated body rather than silently dropping the policy statement.
+        return generated_body
+    starts, ends = _managed_marker_offsets(existing_body)
+    if starts or ends:
+        # A managed block is (partially) present. Only an unambiguous, correctly
+        # ordered single pair is safe to splice in place: pairing the first start
+        # with the first end across an orphan marker or a duplicate block would
+        # delete every byte in between — including human-authored release notes.
+        # Fail closed on any malformed or duplicate layout so a human untangles the
+        # markers rather than AWF silently destroying content on the next sync.
+        if len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0]:
+            start, end = starts[0], ends[0]
+            return existing_body[:start] + section + existing_body[end + len(_MANAGED_POLICY_END) :]
+        raise ReleasePrSyncError(
+            reason_code=RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE,
+            message=(
+                "Reused release PR body has a malformed AWF merge-policy marker layout; "
+                "refusing to reconcile to avoid deleting human-authored content."
+            ),
+            detail={
+                "start_marker_count": len(starts),
+                "end_marker_count": len(ends),
+            },
+        )
+    stripped = _strip_legacy_policy_paragraph(existing_body).rstrip()
+    if not stripped:
+        return section
+    return f"{stripped}\n\n{section}"
+
+
+def release_pr_body(*, source_branch: str, target_branch: str, auto_merge: bool = False) -> str:
+    intro = f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
+    return intro + _release_merge_policy_section(auto_merge=auto_merge)

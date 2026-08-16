@@ -789,6 +789,7 @@ def test_service_status_provider_warnings_do_not_fail_by_default(tmp_path: Path)
         "codex",
         "claude_code",
         "cursor",
+        "antigravity",
         "gemini",
         "opencode",
         "grok",

@@ -18,7 +18,7 @@
 
 **AWF is an industrial workspace fabric for AI coding agents.**
 
-It gives Codex, Claude Code, Gemini, and future coding agents a repeatable way
+It gives Codex, Claude Code, Antigravity, and future coding agents a repeatable way
 to work like disciplined software contributors: each task gets an isolated
 workspace, a clean checkout, declared services, validation, PR creation, PR
 review monitoring, comment-fix loops, merge gates, artifacts, events, and
@@ -95,13 +95,15 @@ Implemented now:
 - SQLAlchemy control-plane models for workspaces, operations, and events.
 - Profile-driven workspace resolution.
 - Per-workspace Docker Compose stack generation.
-- Codex, Claude Code, Cursor, Gemini, OpenCode, and Grok adapters.
+- Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode, and Grok adapters.
 - Central default model/effort map for agent adapters.
 - AWF-owned Plan -> Execute -> Compare lifecycle policy.
 - Generic phase-based validation.
 - Git worktree provisioning.
 - PR creation.
-- Feature PR monitor with automated comment handling and auto-merge.
+- Feature PR monitor with automated comment handling and opt-in auto-merge
+  (`auto_merge` defaults to off; enable per task with `--auto-merge` or per repo
+  under `monitor.auto_merge` in `workspace.yml`).
 - Release/sync PR monitor variants that keep workspaces alive until human merge.
 - Post-merge target-branch reconciliation for Python/Alembic multi-head repair.
 - Initial PR review grace period before auto-merge.

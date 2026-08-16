@@ -21,7 +21,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -42,6 +44,11 @@ class DockerMode(StrEnum):
 # the host the agent reaches via ``DOCKER_HOST=tcp://docker:2375``, so a
 # profile-declared service of the same name would shadow the managed daemon.
 _MANAGED_DIND_SERVICE_NAME = "docker"
+
+# Compose service name AWF reserves for the managed clarification agent. Stack
+# launches always include this service, so user-declared services with this name
+# would duplicate the rendered Compose key.
+MANAGED_CLARIFICATION_SERVICE_NAME = "clarification"
 
 
 class EndpointVisibility(StrEnum):
@@ -501,11 +508,29 @@ class ProfileValidation(BaseModel):
     retry_budget: int = Field(default=0, ge=0, le=10)
 
 
+class ProfileAutoMerge(BaseModel):
+    """Repo-level auto-merge configuration under ``monitor.auto_merge``.
+
+    ``default`` is the repo-global auto-merge stance; ``by_base_branch`` overrides
+    it per PR base/target branch (exact match). Both feed the shared
+    ``resolve_auto_merge`` precedence chain, below a per-task ``--auto-merge``
+    intent. Omitting the block entirely resolves to ``DEFAULT_AUTO_MERGE``
+    (off). Values are ``StrictBool`` so a non-bool (``"yes"``, ``1``) is rejected
+    loudly at profile load rather than silently coerced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    default: StrictBool = Field(default=False)
+    by_base_branch: dict[str, StrictBool] = Field(default_factory=dict)
+
+
 class ProfileMonitor(BaseModel):
     """PR monitor policy supplied by the workspace profile."""
 
     model_config = ConfigDict(extra="forbid")
 
+    auto_merge: ProfileAutoMerge = Field(default_factory=ProfileAutoMerge)
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
     non_check_reviewer_settle_seconds: float = Field(default=900.0, ge=0, le=86400)
     require_ci: bool = Field(default=True)
@@ -917,15 +942,26 @@ class WorkspaceProfile(BaseModel):
     ports: dict[str, str] = Field(default_factory=dict)
     app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
 
+    @classmethod
+    def model_validate_persisted(cls, value: object) -> WorkspaceProfile:
+        """Validate a stored snapshot while allowing grandfathered service names.
+
+        ``clarification`` became reserved after resolved profiles were already
+        persisted. Only database snapshot consumers use this entry point; new
+        profile requests continue to use the normal strict validation path.
+        """
+        return cls.model_validate(value, context={"allow_legacy_clarification_service": True})
+
     @model_validator(mode="after")
-    def _validate_service_names(self) -> WorkspaceProfile:
+    def _validate_service_names(self, info: ValidationInfo) -> WorkspaceProfile:
         """Reject ambiguous service names before they reach Compose rendering.
 
         Each service becomes a top-level key in the generated Compose file, so two
         entries sharing a name would emit duplicate keys (Compose rejects the file
-        or one definition silently shadows the other). In ``dind`` mode AWF also
-        prepends its own managed ``docker`` daemon; a profile-declared ``docker``
-        service would collide with it and leave the agent's
+        or one definition silently shadows the other). AWF also reserves
+        ``clarification`` for its managed clarification agent. In ``dind`` mode
+        AWF prepends its own managed ``docker`` daemon; a profile-declared
+        ``docker`` service would collide with it and leave the agent's
         ``DOCKER_HOST=tcp://docker:2375`` pointing at the wrong container.
         """
         seen: set[str] = set()
@@ -933,6 +969,15 @@ class WorkspaceProfile(BaseModel):
             if service.name in seen:
                 raise ValueError(f"duplicate service name: {service.name}")
             seen.add(service.name)
+        allows_legacy_clarification_service = (
+            isinstance(info.context, Mapping)
+            and info.context.get("allow_legacy_clarification_service") is True
+        )
+        if MANAGED_CLARIFICATION_SERVICE_NAME in seen and not allows_legacy_clarification_service:
+            raise ValueError(
+                f"service name {MANAGED_CLARIFICATION_SERVICE_NAME!r} is reserved for the "
+                "managed clarification service"
+            )
         if self.docker.mode == DockerMode.dind and _MANAGED_DIND_SERVICE_NAME in seen:
             raise ValueError(
                 f"service name {_MANAGED_DIND_SERVICE_NAME!r} is reserved for the "
@@ -1013,10 +1058,14 @@ def normalize_inline_profile_snapshot(
     added after some inline-profile workspaces were persisted, so their stored
     ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
     dumps the ``600.0`` default. Backfill a missing value there too so legacy
-    inline-profile replays stay idempotent. ``runtime.browsers`` was added later
-    with an empty-list default, so missing values in legacy ``runtime`` sub-dicts
-    are backfilled the same way. Returns a shallow copy; the input is never
-    mutated (nested sub-dicts are copied only when backfilled).
+    inline-profile replays stay idempotent. The ``monitor.auto_merge`` block (the
+    unified auto-merge setting) was added the same way, so a legacy ``monitor``
+    sub-dict lacks it while a fresh replay now dumps the defaulted block; backfill
+    the default dump so pre-``auto_merge`` snapshots stay idempotent instead of
+    raising a spurious conflict. ``runtime.browsers`` was added later with an
+    empty-list default, so missing values in legacy ``runtime`` sub-dicts are
+    backfilled the same way. Returns a shallow copy; the input is never mutated
+    (nested sub-dicts are copied only when backfilled).
     """
     if profile is None:
         return None
@@ -1024,13 +1073,18 @@ def normalize_inline_profile_snapshot(
     if "forge" not in result:
         result["forge"] = "auto"
     monitor = result.get("monitor")
-    if isinstance(monitor, dict) and "awaiting_required_checks_grace_seconds" not in monitor:
-        result["monitor"] = {
-            **monitor,
-            "awaiting_required_checks_grace_seconds": (
+    if isinstance(monitor, dict):
+        monitor_backfills: dict[str, Any] = {}
+        if "awaiting_required_checks_grace_seconds" not in monitor:
+            monitor_backfills["awaiting_required_checks_grace_seconds"] = (
                 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
-            ),
-        }
+            )
+        if "auto_merge" not in monitor:
+            # Fresh dump of the current default so retuning the block keeps legacy
+            # replays idempotent; built per call so the nested dict is never shared.
+            monitor_backfills["auto_merge"] = ProfileAutoMerge().model_dump()
+        if monitor_backfills:
+            result["monitor"] = {**monitor, **monitor_backfills}
     runtime = result.get("runtime")
     if isinstance(runtime, dict) and "browsers" not in runtime:
         result["runtime"] = {**runtime, "browsers": []}

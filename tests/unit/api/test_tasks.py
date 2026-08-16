@@ -152,7 +152,7 @@ class TestTaskList:
         items_by_workspace = {item["workspace_id"]: item for item in response.json()["items"]}
         legacy = items_by_workspace[legacy_workspace_id]
         attempt = items_by_workspace[attempt_workspace_id]
-        assert legacy["agent_model"] == "gpt-5.5"
+        assert legacy["agent_model"] == "gpt-5.6-sol"
         assert legacy["agent_effort"] == "xhigh"
         assert legacy["agent_model_source"] == "default"
         assert legacy["agent_effort_source"] == "default"
@@ -322,6 +322,11 @@ class TestTaskList:
             workspace.base_commit = "a" * 40
             workspace.pr_url = "https://github.com/example/console/pull/41"
             workspace.pr_number = 41
+            # ``candidate.ready`` now requires the workspace to opt into
+            # auto-merge; this test asserts the canonical candidate is
+            # merge-ready, so seed the opt-in intent (a False/unset workspace is
+            # manual-merge-required, not ready).
+            workspace.auto_merge = True
             await repo.transition(
                 workspace,
                 to=WorkspaceStatus.monitoring_pr,

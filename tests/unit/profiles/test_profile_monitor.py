@@ -130,3 +130,75 @@ def test_profile_schema_rejects_awaiting_required_checks_grace_seconds_above_864
                 "monitor": {"awaiting_required_checks_grace_seconds": 86401},
             }
         )
+
+
+@pytest.mark.unit
+def test_profile_monitor_auto_merge_defaults_off() -> None:
+    # Omitting the block resolves to the uniform default (off).
+    profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
+    assert profile.monitor.auto_merge.default is False
+    assert profile.monitor.auto_merge.by_base_branch == {}
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_structured_auto_merge_block() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {
+                "auto_merge": {
+                    "default": True,
+                    "by_base_branch": {"development": True, "main": False},
+                }
+            },
+        }
+    )
+    assert profile.monitor.auto_merge.default is True
+    assert profile.monitor.auto_merge.by_base_branch == {"development": True, "main": False}
+
+
+@pytest.mark.unit
+def test_profile_monitor_auto_merge_round_trips() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {"auto_merge": {"default": True, "by_base_branch": {"main": False}}},
+        }
+    )
+    dumped = profile.model_dump(mode="json", by_alias=True)
+    restored = WorkspaceProfile.model_validate(dumped)
+    assert restored.monitor.auto_merge.default is True
+    assert restored.monitor.auto_merge.by_base_branch == {"main": False}
+
+
+@pytest.mark.unit
+def test_profile_monitor_auto_merge_rejects_non_bool_by_base_branch() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "python-explicit",
+                "monitor": {"auto_merge": {"by_base_branch": {"main": "yes"}}},
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_monitor_auto_merge_rejects_non_bool_default() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "python-explicit",
+                "monitor": {"auto_merge": {"default": "yes"}},
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_monitor_auto_merge_forbids_extra_keys() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "python-explicit",
+                "monitor": {"auto_merge": {"unknown": True}},
+            }
+        )

@@ -32,7 +32,12 @@ from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
 )
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import (
+    MERGE_QUEUE_EXCLUDED_STATUSES,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import (
     MergeCandidate,
     Operation,
@@ -406,7 +411,7 @@ def _item_from_legacy_workspace(
         owned_paths=list(workspace.owned_paths),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
-        merged_at=_legacy_workspace_merged_at(workspace),
+        merged_at=None,
         last_event=(
             WorkspaceEventResponse.model_validate(latest_event)
             if latest_event is not None
@@ -436,20 +441,6 @@ def _row_workspace(row: MergeCandidate | Workspace) -> Workspace:
 
 def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
-
-
-def _legacy_workspace_merged_at(workspace: Workspace) -> datetime | None:
-    completed_events = [
-        event.occurred_at
-        for event in workspace.events
-        if event.event_type == "workspace.state_changed"
-        and event.new_state == WorkspaceStatus.completed.value
-    ]
-    if completed_events:
-        return max(completed_events)
-    if WorkspaceStatus(workspace.status) == WorkspaceStatus.completed:
-        return workspace.updated_at
-    return None
 
 
 def _queue_blocker_response(blocker: MergeQueueBlocker) -> MergeQueueBlockerResponse:
@@ -537,9 +528,7 @@ def _merge_blocker_reason_from_workspace(
         return "manual_merge_required", None
     if workspace_status == WorkspaceStatus.pushing:
         return "waiting_for_monitor", None
-    if workspace_status == WorkspaceStatus.completed:
-        return "completed", None
-    if workspace_status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
+    if workspace.status in MERGE_QUEUE_EXCLUDED_STATUSES:
         return "failed_or_cancelled", None
     return "workspace_not_terminal", None
 

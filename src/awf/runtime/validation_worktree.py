@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.owned_paths import is_under_internal_plan_artifact_dir
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.git_porcelain import (
     changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
@@ -248,6 +249,7 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
             "HEAD",
         ],
         capture_output=True,
+        env=git_env_without_object_lookup_overrides(),
     )
     if result.returncode != 0:
         stderr = (
@@ -299,6 +301,7 @@ def _ignored_paths(worktree_path: Path, paths: tuple[str, ...]) -> frozenset[str
         ],
         input=("\0".join(paths) + "\0").encode("utf-8", errors="surrogateescape"),
         capture_output=True,
+        env=git_env_without_object_lookup_overrides(),
     )
     stdout = (
         result.stdout.decode("utf-8", errors="surrogateescape")

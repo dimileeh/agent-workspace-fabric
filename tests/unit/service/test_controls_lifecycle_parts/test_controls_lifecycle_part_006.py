@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     has_terminal_runtime_released_event,
@@ -41,6 +42,15 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 def _release_events(events: list) -> list:
     return [e for e in events if e.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE]
+
+
+def _mark_hosted_pr_adoption(workspace: object) -> None:
+    workspace.compose_project_name = None
+    workspace.task_policy = {
+        "pr_adoption": {
+            "execution": {"mode": "hosted"},
+        }
+    }
 
 
 @pytest.mark.unit
@@ -180,6 +190,57 @@ async def test_stop_already_terminal_workspace_is_idempotent(
     assert operations[0].status == OperationStatus.succeeded.value
     assert any(e.event_type == "workspace.stack_stopped" for e in events)
     assert await has_terminal_runtime_released_event(session, workspace.id) is True
+
+
+@pytest.mark.unit
+async def test_stop_hosted_pr_adoption_skips_compose_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    compose_file_path = workspace.compose_file_path
+    assert compose_file_path is not None
+    _mark_hosted_pr_adoption(workspace)
+    await session.flush()
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.stop_workspace(workspace.id, reason="halt")
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert len(cleaner.calls) == 1
+    call = cleaner.calls[0]
+    assert call.skip_compose is True
+    assert call.compose_project_name is None
+    assert str(call.compose_file_path) == compose_file_path
+    assert call.remove_worktree is False
+
+
+@pytest.mark.unit
+async def test_destroy_hosted_pr_adoption_skips_compose_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    compose_file_path = workspace.compose_file_path
+    assert compose_file_path is not None
+    _mark_hosted_pr_adoption(workspace)
+    await session.flush()
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert len(cleaner.calls) == 1
+    call = cleaner.calls[0]
+    assert call.skip_compose is True
+    assert call.compose_project_name is None
+    assert str(call.compose_file_path) == compose_file_path
+    assert call.remove_worktree is True
 
 
 @pytest.mark.unit
@@ -537,3 +598,106 @@ async def test_destroy_blocked_workspace_with_force_routes_through_cancelled(
     assert response.status == WorkspaceStatus.destroyed
     assert workspace.status == WorkspaceStatus.destroyed.value
     assert len(cleaner.calls) == 1
+
+
+async def _seed_blocked_attention(session: AsyncSession) -> Workspace:
+    """Blocked workspace with durable protected-gate attention fields set."""
+    workspace = await _workspace(session, status=WorkspaceStatus.blocked)
+    workspace.block_reason_code = "QUALITY_GATE_POLICY_CHANGED"
+    workspace.block_type = "protected_quality_gate"
+    await session.flush()
+    return workspace
+
+
+def _blocked_attention_cleared(events: list) -> list:
+    from awf.common.attention_events import (
+        ATTENTION_CLEARED_EVENT_TYPE,
+        ATTENTION_SOURCE_BLOCKED,
+    )
+
+    return [
+        e
+        for e in events
+        if e.event_type == ATTENTION_CLEARED_EVENT_TYPE
+        and (e.payload or {}).get("source") == ATTENTION_SOURCE_BLOCKED
+    ]
+
+
+@pytest.mark.unit
+async def test_cancel_blocked_workspace_emits_attention_cleared(
+    session: AsyncSession,
+) -> None:
+    """Operator cancel from blocked must clear the blocked attention episode.
+
+    Claim-resume and monitor-origin guide already emit attention_cleared; cancel
+    transitions blocked→cancelled directly and previously left callback
+    subscribers with a permanently active attention episode.
+    """
+    workspace = await _seed_blocked_attention(session)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator abandoned blocked pause",
+        stop_stack=False,
+    )
+
+    cleared = _blocked_attention_cleared(await _events(session, workspace.id))
+    assert len(cleared) == 1
+    assert cleared[0].payload["block_reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert cleared[0].payload["block_type"] == "protected_quality_gate"
+
+
+@pytest.mark.unit
+async def test_stop_blocked_workspace_emits_attention_cleared(
+    session: AsyncSession,
+) -> None:
+    """Stop from blocked routes through cancelled and must clear blocked attention."""
+    workspace = await _seed_blocked_attention(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.stop_workspace(workspace.id, reason="halt blocked pause")
+
+    cleared = _blocked_attention_cleared(await _events(session, workspace.id))
+    assert len(cleared) == 1
+    assert cleared[0].payload["block_reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert cleared[0].payload["block_type"] == "protected_quality_gate"
+
+
+@pytest.mark.unit
+async def test_destroy_blocked_workspace_with_force_emits_attention_cleared(
+    session: AsyncSession,
+) -> None:
+    """Forced destroy from blocked routes through cancelled and must clear attention."""
+    workspace = await _seed_blocked_attention(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    cleared = _blocked_attention_cleared(await _events(session, workspace.id))
+    assert len(cleared) == 1
+    assert cleared[0].payload["block_reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+
+
+@pytest.mark.unit
+async def test_cancel_non_blocked_workspace_does_not_emit_blocked_attention_cleared(
+    session: AsyncSession,
+) -> None:
+    """Cancel from a non-blocked status must not emit blocked-source attention_cleared."""
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="normal cancel",
+        stop_stack=False,
+    )
+
+    assert _blocked_attention_cleared(await _events(session, workspace.id)) == []

@@ -23,6 +23,7 @@ from awf.api.schemas import (
     WorkspaceRuntimeHealthResponse,
 )
 from awf.common.audit import redact_audit_value
+from awf.common.auto_merge import reported_auto_merge
 from awf.common.redaction import redact_secrets
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import (
@@ -192,6 +193,11 @@ def workspace_response(
     computed_fields["failure_details"] = workspace_failure_details_payload(workspace)
     computed_fields["coordination_warnings"] = coordination_warnings_from_task_policy(
         workspace.task_policy
+    )
+    computed_fields["auto_merge"] = reported_auto_merge(
+        str(workspace.status),
+        workspace.task_policy,
+        workspace.auto_merge,
     )
     computed_fields["secret_leases"] = [
         workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)

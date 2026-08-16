@@ -96,6 +96,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
 
@@ -464,6 +465,7 @@ async def _post_protected_block_notification(
                 pr_number=pr_number,
                 head_sha=pr_head_sha,
                 blocker_reason=blocker_reason,
+                preserve_full_blocker_reason=True,
             ),
         )
     except ForgeClientError as exc:
@@ -921,6 +923,7 @@ async def _repair_protected_scope_changes_before_commit(
 
     await _repair_recovery_mirror_hooks_path()
     agent_run_err = None
+    command_evidence: list[str] = []
     try:
         await self._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
@@ -928,10 +931,14 @@ async def _repair_protected_scope_changes_before_commit(
             compose_file=compose_file,
             prompt=prompt,
             log_source="recovery",
+            command_evidence=command_evidence,
             operation_start_head=pre_repair_head,
+            state=state,
         )
     except AgentRunError as exc:
         agent_run_err = exc
+    except _MonitorPolicyBlockedError:
+        raise
     except (
         ProviderRecoveryRetryError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,

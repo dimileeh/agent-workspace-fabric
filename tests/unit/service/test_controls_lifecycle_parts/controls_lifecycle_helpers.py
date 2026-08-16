@@ -97,6 +97,7 @@ class CleanupCall:
     worktree_host_path: Path | None
     remove_volumes: bool
     remove_worktree: bool
+    skip_compose: bool = False
 
 
 @dataclass
@@ -116,6 +117,7 @@ class RecordingCleaner:
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
+        skip_compose: bool = False,
     ) -> list[str] | WorkspaceCleanupResult:
         _ = companion_worktrees
         self.calls.append(
@@ -127,6 +129,7 @@ class RecordingCleaner:
                 worktree_host_path=worktree_host_path,
                 remove_volumes=remove_volumes,
                 remove_worktree=remove_worktree,
+                skip_compose=skip_compose,
             )
         )
         if self.result is not None:
@@ -150,6 +153,7 @@ class StaleCallbackCleaner(RecordingCleaner):
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
+        skip_compose: bool = False,
     ) -> list[str]:
         result = await super().cleanup(
             workspace_id=workspace_id,
@@ -160,6 +164,7 @@ class StaleCallbackCleaner(RecordingCleaner):
             worktree_host_path=worktree_host_path,
             remove_volumes=remove_volumes,
             remove_worktree=remove_worktree,
+            skip_compose=skip_compose,
         )
         assert self.session is not None
         await self.session.execute(
