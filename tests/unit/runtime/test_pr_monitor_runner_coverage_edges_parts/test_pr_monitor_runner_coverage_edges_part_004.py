@@ -764,11 +764,19 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
 
 
 @pytest.mark.unit
-async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committed(
+async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agent_failed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Hosted terminal-head sync must not resolve FIXED after a nonzero CLI exit.
+
+    Fail-closed contract: syncing a forward terminal SHA and seeing
+    ``AWF-VERDICT: FIXED`` in stdout still yields ``agent_failed`` when the
+    hosted adapter raised ``AgentRunError`` (bounded ``AGENT_CLI_FAILED`` /
+    nonzero returncode). Sync state may advance for recovery evidence, but the
+    thread must not be treated as ``fix_committed``.
+    """
     cmd = FakeCommandRunner()
     operation_start_head = "a" * 40
     terminal_head_sha = "b" * 40
@@ -821,11 +829,15 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
         operation_start_head=operation_start_head,
     )
 
-    assert result.verdict == "fix_committed"
-    assert result.reason == "hosted repair committed"
+    assert result.verdict == "agent_failed"
+    # Nonzero hosted failure must not carry the FIXED reason through as resolution.
+    assert result.reason is None
+    assert result.verdict != "fix_committed"
+    # Hosted terminal-head synchronization / advance evidence is still recorded.
     assert state.last_push_sha == terminal_head_sha
     assert state.hosted_terminal_head_advanced
     assert sync_calls
+    assert sync_calls[0]["operation_start_head"] == operation_start_head
     assert any(
         call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
     )
