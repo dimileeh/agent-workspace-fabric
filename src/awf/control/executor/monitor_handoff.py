@@ -27,6 +27,7 @@ from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
+    _MONITOR_ONLY_TASK_KINDS,
     _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
     _SUPPORTED_TASK_KINDS,
     _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
@@ -815,8 +816,12 @@ async def _reject_unsupported_agent_runtime(
     Runs unconditionally before agent setup or dispatch so an already-queued
     row with a historical or unknown agent runtime (such as retired Gemini)
     fails fast without consuming provisioning resources or raising KeyError
-    from get_adapter.
+    from get_adapter. Monitor-only task kinds (sync_feature_pr, sync_release_pr)
+    do not use the coding runtime during standard execution and bypass this gate.
     """
+    if workspace.task_kind in _MONITOR_ONLY_TASK_KINDS:
+        return False
+
     from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents
     from awf.service.provider_recovery import has_approved_launchable_fallback
 

@@ -569,3 +569,66 @@ class TestFailureHandlingEdgesPart006:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_kind", ["sync_feature_pr", "sync_release_pr"])
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_provisioning_allows_unsupported_agent_runtime_for_monitor_only_task_kinds(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        task_kind: str,
+        agent: str,
+    ) -> None:
+        """Monitor-only task kinds (sync_feature_pr, sync_release_pr) do not use
+        the coding runtime during provisioning and must bypass the runtime gate.
+        """
+        git_called = False
+
+        class _MockGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                nonlocal git_called
+                git_called = True
+                from awf.node.git_manager import WorktreeLayout
+
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="awf/test",
+                )
+
+            async def head_sha(self, *args: Any, **kwargs: Any) -> str:
+                return "sha"
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_MockGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        task_policy: dict[str, Any] = {}
+        if task_kind == "sync_feature_pr":
+            task_policy["pr_adoption"] = {
+                "head_ref": "feature-branch",
+                "pr_number": 42,
+            }
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent=agent,
+                test_commands=[],
+                task_kind=task_kind,
+                task_policy=task_policy,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert git_called is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value

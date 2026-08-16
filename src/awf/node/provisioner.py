@@ -1147,7 +1147,14 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         workspace: Workspace,
         execution_claim_epoch: int | None = None,
     ) -> bool:
-        """Fail fast unsupported agent runtimes before provisioning; return True if rejected."""
+        """Fail fast unsupported agent runtimes before provisioning; return True if rejected.
+
+        Monitor-only task kinds (sync_feature_pr, sync_release_pr) do not use
+        the coding runtime during provisioning or initial monitor handoff and
+        bypass this gate.
+        """
+        if workspace.task_kind in ("sync_feature_pr", "sync_release_pr"):
+            return False
         message = _provisioner_helpers.check_unsupported_agent_runtime(workspace.agent)
         if message is not None:
             from awf.service.provider_recovery import has_approved_launchable_fallback

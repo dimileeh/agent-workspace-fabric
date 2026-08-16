@@ -729,3 +729,43 @@ class TestTaskKindFailFast:
             op = await OperationRepository(s).get(op_id)
             assert op is not None
             assert op.error_code != "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_kind", ["sync_feature_pr", "sync_release_pr"])
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_execute_allows_unsupported_agent_runtime_for_monitor_only_task_kinds(
+        self,
+        task_kind: str,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Monitor-only task kinds (sync_feature_pr, sync_release_pr) bypass the agent
+        runtime gate in execute().
+        """
+        ws_id = await _seed_ready(
+            factory,
+            task_kind=task_kind,
+            agent=agent,
+        )
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            rejected = await executor._reject_unsupported_agent_runtime(
+                workspace_id=ws_id,
+                workspace=ws,
+            )
+            assert rejected is False
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert not [
+                event for event in ws.events if event.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+            ]
