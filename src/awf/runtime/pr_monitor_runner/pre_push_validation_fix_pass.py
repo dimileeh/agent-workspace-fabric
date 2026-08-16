@@ -201,6 +201,105 @@ def _merge_file_result_matches_head(
     return stdout == head_raw.decode("utf-8")
 
 
+def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
+    """Return True when ``prefix`` ends inside an open comment/string/#if region.
+
+    Suffix (prepend) salvage retention must reject tips that place the salvage
+    under an unterminated ``/*``, triple-quoted string, or ``#if`` / ``#ifdef`` /
+    ``#ifndef`` — those keep a line-aligned suffix while disabling the fix
+    (PRRT_kwDOSJAM6s6ZpaIn). Closed wrappers and plain header lines return False.
+    """
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    if_depth = 0
+    at_line_start = True
+    i = 0
+    n = len(prefix)
+    while i < n:
+        ch = prefix[i]
+        if in_block_comment:
+            if ch == "*" and i + 1 < n and prefix[i + 1] == "/":
+                in_block_comment = False
+                i += 2
+                at_line_start = False
+                continue
+            if ch == "\n":
+                at_line_start = True
+            i += 1
+            continue
+        if in_triple_double:
+            if prefix.startswith('"""', i):
+                in_triple_double = False
+                i += 3
+                at_line_start = False
+                continue
+            if ch == "\n":
+                at_line_start = True
+            i += 1
+            continue
+        if in_triple_single:
+            if prefix.startswith("'''", i):
+                in_triple_single = False
+                i += 3
+                at_line_start = False
+                continue
+            if ch == "\n":
+                at_line_start = True
+            i += 1
+            continue
+        if prefix.startswith("/*", i):
+            in_block_comment = True
+            i += 2
+            at_line_start = False
+            continue
+        if prefix.startswith('"""', i):
+            in_triple_double = True
+            i += 3
+            at_line_start = False
+            continue
+        if prefix.startswith("'''", i):
+            in_triple_single = True
+            i += 3
+            at_line_start = False
+            continue
+        if at_line_start and ch == "#":
+            # Skip whitespace between ``#`` and the directive keyword.
+            j = i + 1
+            while j < n and prefix[j] in " \t":
+                j += 1
+            rest = prefix[j:]
+            # Check longer ``ifdef`` / ``ifndef`` / ``endif`` before bare ``if``.
+            for keyword, depth_delta in (
+                ("ifdef", 1),
+                ("ifndef", 1),
+                ("endif", -1),
+                ("if", 1),
+            ):
+                if not rest.startswith(keyword):
+                    continue
+                after = j + len(keyword)
+                if after < n and (prefix[after].isalnum() or prefix[after] == "_"):
+                    continue
+                if depth_delta < 0:
+                    if_depth = max(0, if_depth + depth_delta)
+                else:
+                    if_depth += depth_delta
+                break
+            # Consume through end of line (directive body ignored).
+            while i < n and prefix[i] != "\n":
+                i += 1
+            continue
+        if ch == "\n":
+            at_line_start = True
+            i += 1
+            continue
+        if not ch.isspace():
+            at_line_start = False
+        i += 1
+    return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
+
+
 def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     """Return True when an added salvage blob remains applied in ``head_blob``.
 
@@ -214,6 +313,8 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     Retain only a line-boundary-aligned **prefix** (append / exact) or **suffix**
     (prepend): the match must start at file start or after a newline, and if the
     salvage lacks a trailing newline it must end at EOF or before a newline.
+    Suffix retention additionally rejects a prepend that leaves an open block
+    comment, triple-quoted string, or ``#if`` region (PRRT_kwDOSJAM6s6ZpaIn).
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
@@ -234,9 +335,12 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     # Append / exact: salvage remains a line-aligned prefix of the tip.
     if _line_aligned_at(0):
         return True
-    # Prepend: salvage remains a line-aligned suffix (not already covered above).
+    # Prepend: salvage remains a line-aligned suffix (not already covered above),
+    # and the prepended prefix must not leave an open disabling context.
     suffix_idx = len(head_blob) - len(commit_blob)
-    return suffix_idx > 0 and _line_aligned_at(suffix_idx)
+    if suffix_idx <= 0 or not _line_aligned_at(suffix_idx):
+        return False
+    return not _prefix_leaves_open_disabling_context(head_blob[:suffix_idx])
 
 
 async def _commit_changes_present_in_head(
@@ -261,7 +365,8 @@ async def _commit_changes_present_in_head(
     3-way model; retain when the salvage blob remains a line-boundary-aligned
     prefix or suffix of the tip blob so append/prepend keep evidence while
     mid-line modifications, mid-file disabling wrappers (``#if 0`` / comments /
-    strings), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
+    strings), prepended unterminated wrappers that leave salvage as a suffix
+    (PRRT_kwDOSJAM6s6ZpaIn), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
     PRRT_kwDOSJAM6s6Zm6F1, PRRT_kwDOSJAM6s6ZpQKt). ``baseline``
     defaults to the tip's
     first parent; callers that retain a failed-run tip must pass the invocation
@@ -372,9 +477,10 @@ async def _commit_changes_present_in_head(
             # Addition without a baseline blob: later tips may append/prepend
             # while leaving the added bytes intact (OID changes). Exact OID is
             # sufficient but not required — require line-boundary-aligned
-            # prefix or suffix retention of the salvage blob
+            # prefix or suffix retention of the salvage blob; suffix also
+            # rejects open disabling wrappers
             # (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1,
-            # PRRT_kwDOSJAM6s6ZpQKt).
+            # PRRT_kwDOSJAM6s6ZpQKt, PRRT_kwDOSJAM6s6ZpaIn).
             head_raw = await _blob_raw(head_oid)
             commit_raw = await _blob_raw(commit_oid)
             if head_raw is None or commit_raw is None:
