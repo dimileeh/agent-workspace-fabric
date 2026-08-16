@@ -553,12 +553,70 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_ignores_same_line_html_declaration(self) -> None:
-        stdout = (
-            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
-            "<!DOCTYPE html AWF-VERDICT: FALSE POSITIVE: example>\n"
-        )
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "<!DOCTYPE html AWF-VERDICT: FALSE POSITIVE: example>\n"
+            ),
+            (
+                # Blockquote prefix on a same-line declaration must still detect
+                # the real ``>`` closer after peeling container depth
+                # (PRRT_kwDOSJAM6s6ZnUwf).
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <!DOCTYPE html AWF-VERDICT: FALSE POSITIVE: example>\n"
+            ),
+        ],
+        ids=["same_line_html_declaration", "blockquote_same_line_html_declaration"],
+    )
+    def test_private_awf_verdict_ignores_same_line_html_declaration(
+        self,
+        stdout: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
 
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "- <!DOCTYPE\n"
+                "  AWF-VERDICT: FALSE POSITIVE: example\n"
+                "  >\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <!DOCTYPE\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> >\n"
+            ),
+            (
+                # Opener-line blockquote `>` must not count as the type-4 closer
+                # (same-line skip). A bare ``>`` continuation is empty quote
+                # content, not a declaration end — leave the region open so a
+                # later FIXED cannot override NEEDS_HUMAN (PRRT_kwDOSJAM6s6ZnUwf).
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <!DOCTYPE\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">\n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+        ],
+        ids=[
+            "list_html_declaration",
+            "blockquote_html_declaration",
+            "blockquote_html_declaration_trailing_fixed",
+        ],
+    )
+    def test_private_awf_verdict_ignores_list_blockquote_nested_html_declaration(
+        self,
+        stdout: str,
+    ) -> None:
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"

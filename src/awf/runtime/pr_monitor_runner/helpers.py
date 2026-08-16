@@ -469,9 +469,53 @@ def _html_declaration_opens(line: str) -> bool:
     return _HTML_DECLARATION_OPEN.match(_normalize_markdown_fence_line(line)) is not None
 
 
-def _html_declaration_closes(line: str) -> bool:
-    """Return whether ``line`` contains a declaration closer (``>``)."""
-    return _HTML_DECLARATION_CLOSE.search(line) is not None
+def _markdown_blockquote_container_depth(line: str) -> int:
+    """Count leading blockquote markers after indent and list containers.
+
+    Used so type-4 declaration closers can ignore container ``>`` prefixes on
+    ``> <!DOCTYPE`` / ``>> <!DOCTYPE`` openers without treating those markers
+    as the CommonMark end (PRRT_kwDOSJAM6s6ZnUwf). List markers may sit before
+    or between quote levels (``- >`` / ``> -``).
+    """
+    rest = line.lstrip(" \t")
+    depth = 0
+    while True:
+        bq = re.match(r"^>[ \t]?", rest)
+        if bq is not None:
+            depth += 1
+            rest = rest[bq.end() :]
+            continue
+        lst = _MARKDOWN_LIST_PREFIX.match(rest)
+        if lst is not None:
+            rest = rest[lst.end() :]
+            continue
+        return depth
+
+
+def _html_declaration_closes(line: str, *, blockquote_depth: int = 0) -> bool:
+    """Return whether ``line`` contains a declaration closer (``>``).
+
+    Top-level declarations end on any raw ``>`` (CommonMark type 4). When the
+    opener was blockquote-nested, peel exactly ``blockquote_depth`` single
+    ``>`` container markers (and intervening list markers) before testing so
+    the opener's own ``>`` / continuation prefixes are not false closers
+    (PRRT_kwDOSJAM6s6ZnUwf). Do not use full blockquote-prefix stripping —
+    ``> >`` must leave a residual ``>`` as the real closer.
+    """
+    rest = line.lstrip(" \t")
+    remaining = blockquote_depth
+    while remaining > 0:
+        bq = re.match(r"^>[ \t]?", rest)
+        if bq is not None:
+            rest = rest[bq.end() :]
+            remaining -= 1
+            continue
+        lst = _MARKDOWN_LIST_PREFIX.match(rest)
+        if lst is not None:
+            rest = rest[lst.end() :]
+            continue
+        break
+    return _HTML_DECLARATION_CLOSE.search(rest) is not None
 
 
 def _html_cdata_opens(line: str) -> bool:
@@ -564,6 +608,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_comment = False
     html_pi = False
     html_declaration = False
+    html_declaration_blockquote_depth = 0
     html_cdata = False
     for line in stdout.splitlines():
         if fence is not None:
@@ -586,8 +631,9 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 html_pi = False
             continue
         if html_declaration:
-            if _html_declaration_closes(line):
+            if _html_declaration_closes(line, blockquote_depth=html_declaration_blockquote_depth):
                 html_declaration = False
+                html_declaration_blockquote_depth = 0
             continue
         if html_cdata:
             if _html_cdata_closes(line):
@@ -616,8 +662,12 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             continue
         if _html_declaration_opens(line):
             # Same-line ``<!DOCTYPE …>`` is an example wrapper — skip it.
-            if not _html_declaration_closes(line):
+            # Peel opener blockquote depth so ``> <!DOCTYPE`` is not a false
+            # same-line closer (PRRT_kwDOSJAM6s6ZnUwf).
+            decl_bq_depth = _markdown_blockquote_container_depth(line)
+            if not _html_declaration_closes(line, blockquote_depth=decl_bq_depth):
                 html_declaration = True
+                html_declaration_blockquote_depth = decl_bq_depth
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
