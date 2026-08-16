@@ -96,6 +96,9 @@ async def test_fetch_pr_status_open_clean() -> None:
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert status.number == 42
+    assert status.head_ref == "feature/head"
+    # Destination branch feeds the monitor's retargeted-PR (base drift) gate.
+    assert status.base_ref == "development"
     assert status.head_sha == _HEAD
     assert status.check_state == CheckState.SUCCESS
     assert status.mergeable == MergeableState.MERGEABLE

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import inspect, select
@@ -17,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine
+from awf.db.session import make_engine, make_session_factory
 from tests.postgres import (
     postgres_alembic_subprocess_lock,
     postgres_empty_test_url,
+    postgres_test_engine,
     postgres_test_session,
 )
 
@@ -217,6 +221,292 @@ class TestTaskAttemptRepository:
 
         assert excinfo.value.external_id == "WAVE-1"
         assert "already belongs to a different task scope" in str(excinfo.value)
+
+    @pytest.mark.unit
+    async def test_create_or_get_rejects_external_id_mismatch_via_idempotency_fallback(
+        self, session: AsyncSession
+    ) -> None:
+        """Stamped-key lookup must not reuse a task that already has another ID.
+
+        After a null-key join stamps an idempotency key onto a shared task, a
+        later create_or_get with a different explicit external_id misses by ID
+        but hits by key. Reusing that row would leave the caller with a new
+        workspace ID wired to a task that still holds the old external_id.
+        """
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+
+        repo = TaskRepository(session)
+
+        first = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="Source prompt",
+            external_id="TICKET-OLD",
+            idempotency_key=None,
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+        stamped = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="Adoption join",
+            external_id="TICKET-OLD",
+            idempotency_key="adopt:example/app#1",
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+        assert stamped.id == first.id
+        assert stamped.idempotency_key == "adopt:example/app#1"
+
+        with pytest.raises(TaskExternalIdConflictError) as excinfo:
+            await repo.create_or_get(
+                repo_url="git@github.com:example/app.git",
+                base_branch="development",
+                title="Shared title",
+                prompt="Re-adopt with new ID",
+                external_id="TICKET-NEW",
+                idempotency_key="adopt:example/app#1",
+                task_class="refactor_task",
+                owned_paths=["src/awf/**"],
+            )
+
+        assert excinfo.value.external_id == "TICKET-NEW"
+        reloaded = await repo.get(first.id)
+        assert reloaded is not None
+        assert reloaded.external_id == "TICKET-OLD"
+        assert reloaded.idempotency_key == "adopt:example/app#1"
+
+    @pytest.mark.unit
+    async def test_create_or_get_recovers_external_id_uniqueness_race_same_scope(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missed TOCTOU find must join the winner instead of leaking IntegrityError."""
+        from awf.db.repositories import TaskRepository
+        from awf.db.repositories.task_repo import TaskRepository as TaskRepoImpl
+
+        repo = TaskRepository(session)
+        first = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="First prompt",
+            external_id="RACE-SAME",
+            idempotency_key="race-same-first",
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+        await session.flush()
+
+        original_find = TaskRepoImpl._find_reusable
+        calls = {"n": 0}
+
+        async def miss_then_find(
+            self: TaskRepoImpl,
+            *,
+            external_id: str | None,
+            idempotency_key: str | None,
+        ) -> object | None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return await original_find(
+                self,
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+            )
+
+        monkeypatch.setattr(TaskRepoImpl, "_find_reusable", miss_then_find)
+
+        second = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="Second prompt",
+            external_id="RACE-SAME",
+            idempotency_key="race-same-second",
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+
+        assert second.id == first.id
+        assert calls["n"] >= 2
+
+    @pytest.mark.unit
+    async def test_create_or_get_recovers_external_id_uniqueness_race_scope_conflict(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missed TOCTOU find with different scope must raise TaskExternalIdConflictError."""
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+        from awf.db.repositories.task_repo import TaskRepository as TaskRepoImpl
+
+        repo = TaskRepository(session)
+        await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Owner title",
+            prompt="First prompt",
+            external_id="RACE-CONFLICT",
+            idempotency_key="race-conflict-first",
+            task_class="docs_task",
+            owned_paths=["docs/**"],
+        )
+        await session.flush()
+
+        original_find = TaskRepoImpl._find_reusable
+        calls = {"n": 0}
+
+        async def miss_then_find(
+            self: TaskRepoImpl,
+            *,
+            external_id: str | None,
+            idempotency_key: str | None,
+        ) -> object | None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return await original_find(
+                self,
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+            )
+
+        monkeypatch.setattr(TaskRepoImpl, "_find_reusable", miss_then_find)
+
+        with pytest.raises(TaskExternalIdConflictError) as excinfo:
+            await repo.create_or_get(
+                repo_url="git@github.com:other/app.git",
+                base_branch="main",
+                title="Different title",
+                prompt="Second prompt",
+                external_id="RACE-CONFLICT",
+                idempotency_key="race-conflict-second",
+                task_class="docs_task",
+                owned_paths=["docs/**"],
+            )
+
+        assert excinfo.value.external_id == "RACE-CONFLICT"
+        assert calls["n"] >= 2
+
+    @pytest.mark.unit
+    async def test_create_or_get_reraises_integrity_error_when_winner_missing(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unexpected IntegrityError without a reusable winner must propagate."""
+        from awf.db.repositories.task_repo import TaskRepository as TaskRepoImpl
+
+        repo = TaskRepoImpl(session)
+        monkeypatch.setattr(
+            TaskRepoImpl,
+            "_find_reusable",
+            AsyncMock(return_value=None),
+        )
+
+        class _FailingNested:
+            async def __aenter__(self) -> Any:
+                raise IntegrityError("INSERT", {}, Exception("unique"))
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+        monkeypatch.setattr(session, "begin_nested", lambda: _FailingNested())
+
+        with pytest.raises(IntegrityError):
+            await repo.create_or_get(
+                repo_url="git@github.com:example/app.git",
+                base_branch="development",
+                title="orphan race",
+                prompt="prompt",
+                external_id="RACE-ORPHAN",
+                idempotency_key="race-orphan",
+                task_class=None,
+                owned_paths=[],
+            )
+
+    @pytest.mark.unit
+    async def test_concurrent_create_or_get_same_external_id_joins_one_task(self) -> None:
+        """Distinct sessions racing the same external_id must converge on one task."""
+        from awf.db.repositories import TaskRepository
+
+        async with postgres_test_engine() as engine:
+            factory = make_session_factory(engine)
+
+            async def _create_once(*, idempotency_key: str) -> str:
+                async with factory() as session, session.begin():
+                    task = await TaskRepository(session).create_or_get(
+                        repo_url="git@github.com:example/app.git",
+                        base_branch="development",
+                        title="Concurrent title",
+                        prompt="prompt",
+                        external_id="RACE-CONCURRENT",
+                        idempotency_key=idempotency_key,
+                        task_class="refactor_task",
+                        owned_paths=["src/awf/**"],
+                    )
+                    return task.id
+
+            first_id, second_id = await asyncio.gather(
+                _create_once(idempotency_key="race-concurrent-a"),
+                _create_once(idempotency_key="race-concurrent-b"),
+            )
+
+        assert first_id == second_id
+
+    @pytest.mark.unit
+    async def test_concurrent_create_or_get_same_external_id_scope_conflict(self) -> None:
+        """Concurrent different-scope claims must surface TaskExternalIdConflictError."""
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+
+        async with postgres_test_engine() as engine:
+            factory = make_session_factory(engine)
+
+            async def _create_once(
+                *,
+                repo_url: str,
+                title: str,
+                idempotency_key: str,
+            ) -> str:
+                async with factory() as session, session.begin():
+                    task = await TaskRepository(session).create_or_get(
+                        repo_url=repo_url,
+                        base_branch="development",
+                        title=title,
+                        prompt="prompt",
+                        external_id="RACE-CONCURRENT-SCOPE",
+                        idempotency_key=idempotency_key,
+                        task_class="docs_task",
+                        owned_paths=["docs/**"],
+                    )
+                    return task.id
+
+            results = await asyncio.gather(
+                _create_once(
+                    repo_url="git@github.com:example/app.git",
+                    title="Owner A",
+                    idempotency_key="race-scope-a",
+                ),
+                _create_once(
+                    repo_url="git@github.com:other/app.git",
+                    title="Owner B",
+                    idempotency_key="race-scope-b",
+                ),
+                return_exceptions=True,
+            )
+
+        successes = [result for result in results if isinstance(result, str)]
+        conflicts = [
+            result for result in results if isinstance(result, TaskExternalIdConflictError)
+        ]
+        assert len(successes) == 1
+        assert len(conflicts) == 1
+        assert conflicts[0].external_id == "RACE-CONCURRENT-SCOPE"
 
     @pytest.mark.unit
     async def test_attempt_numbers_increment_for_same_task(

@@ -324,25 +324,6 @@ async def test_workspace_without_candidate_has_no_merge_queue_blockers(
 
 @pytest.mark.unit
 def test_merge_queue_response_helpers_cover_legacy_and_advisory_edges() -> None:
-    now = datetime(2026, 4, 29, 16, 0, tzinfo=UTC)
-    workspace = SimpleNamespace(
-        events=[
-            SimpleNamespace(
-                event_type="workspace.state_changed",
-                new_state=WorkspaceStatus.completed.value,
-                occurred_at=now - timedelta(minutes=1),
-            ),
-            SimpleNamespace(
-                event_type="workspace.state_changed",
-                new_state=WorkspaceStatus.completed.value,
-                occurred_at=now,
-            ),
-        ],
-        status=WorkspaceStatus.completed.value,
-        updated_at=now + timedelta(minutes=1),
-    )
-    assert merge_queue._legacy_workspace_merged_at(workspace) == now
-
     candidate = SimpleNamespace(
         completed=False,
         failed_or_cancelled=False,
@@ -360,6 +341,44 @@ def test_merge_queue_response_helpers_cover_legacy_and_advisory_edges() -> None:
         policy_findings=[],
         queue_blockers=[],
     ) == ("workspace_not_terminal", None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "auto_merge", "expected_reason"),
+    [
+        (WorkspaceStatus.monitoring_pr, True, "ready_to_merge_or_waiting_for_github"),
+        (WorkspaceStatus.monitoring_pr, False, "manual_merge_required"),
+        (WorkspaceStatus.pushing, True, "waiting_for_monitor"),
+        (WorkspaceStatus.completed, True, "failed_or_cancelled"),
+        (WorkspaceStatus.failed, True, "failed_or_cancelled"),
+        (WorkspaceStatus.cancelled, True, "failed_or_cancelled"),
+        (WorkspaceStatus.destroying, True, "failed_or_cancelled"),
+        (WorkspaceStatus.destroyed, True, "failed_or_cancelled"),
+        (WorkspaceStatus.requested, True, "workspace_not_terminal"),
+        (WorkspaceStatus.provisioning, True, "workspace_not_terminal"),
+        (WorkspaceStatus.blocked, True, "workspace_not_terminal"),
+        (WorkspaceStatus.recovering, True, "workspace_not_terminal"),
+        (WorkspaceStatus.ready, True, "workspace_not_terminal"),
+        (WorkspaceStatus.running, True, "workspace_not_terminal"),
+        (WorkspaceStatus.validating, True, "workspace_not_terminal"),
+    ],
+)
+def test_merge_blocker_reason_from_workspace_covers_excluded_and_active_statuses(
+    status: WorkspaceStatus,
+    auto_merge: bool,
+    expected_reason: str,
+) -> None:
+    """G7: excluded statuses map to failed_or_cancelled; never workspace_not_terminal."""
+    from awf.db.enums import MERGE_QUEUE_EXCLUDED_STATUSES
+
+    workspace = SimpleNamespace(status=status.value, auto_merge=auto_merge)
+    reason, action = merge_queue._merge_blocker_reason_from_workspace(workspace)
+    assert reason == expected_reason
+    assert action is None
+    if status.value in MERGE_QUEUE_EXCLUDED_STATUSES:
+        assert reason == "failed_or_cancelled"
+        assert reason != "workspace_not_terminal"
 
 
 @pytest.mark.unit

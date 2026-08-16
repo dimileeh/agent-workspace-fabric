@@ -510,6 +510,36 @@ class Settings(BaseSettings):
             "Default: 3600 seconds."
         ),
     )
+    hosted_delegation_base_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description=(
+            "Optional hosting control-plane base URL for explicit hosted PR "
+            "monitor adoption. Hosted mode is unavailable when unset."
+        ),
+    )
+    hosted_delegation_bearer_token: str | None = Field(
+        default=None,
+        max_length=8192,
+        description=(
+            "Bearer token value for hosted delegation. Prefer "
+            "hosted_delegation_bearer_token_env in shared deployments."
+        ),
+    )
+    hosted_delegation_bearer_token_env: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description=(
+            "Environment variable name containing the hosted delegation bearer "
+            "token. The value is resolved at runtime and never serialized."
+        ),
+    )
+    hosted_delegation_poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
+    hosted_delegation_operation_timeout_seconds: float = Field(default=7200.0, gt=0, le=86400)
+    hosted_delegation_request_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    hosted_delegation_cancel_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    hosted_delegation_max_output_bytes: int = Field(default=1_000_000, gt=0, le=20_000_000)
     planning_max_iterations_default: int = Field(
         default=3,
         ge=0,
@@ -576,6 +606,38 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_local_capacity_values_are_unset(cls, value: Any) -> Any:
         """Treat blank optional capacity values from environment variables as unset."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @field_validator("hosted_delegation_base_url", mode="before")
+    @classmethod
+    def _normalize_hosted_delegation_base_url(cls, value: Any) -> Any:
+        """Treat blank hosted delegation URLs as unset and require HTTPS."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return None
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("hosted_delegation_base_url must be an HTTPS URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("hosted_delegation_base_url must not include credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("hosted_delegation_base_url must not include query or fragment")
+        return normalized
+
+    @field_validator(
+        "hosted_delegation_bearer_token",
+        "hosted_delegation_bearer_token_env",
+        mode="before",
+    )
+    @classmethod
+    def _empty_hosted_delegation_values_are_unset(cls, value: Any) -> Any:
+        """Treat blank optional hosted delegation settings as unset."""
         if isinstance(value, str) and value.strip() == "":
             return None
         return value

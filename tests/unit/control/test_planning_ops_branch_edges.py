@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import structlog
 
+from awf.adapters.base import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import planning_conformance as planning_conformance
@@ -481,14 +482,14 @@ class _ReportWritingAdapter:
         self._content = content
         self.prompts: list[str] = []
 
-    async def run(self, **kwargs: object) -> SimpleNamespace:
+    async def run(self, **kwargs: object) -> AgentRunResult:
         prompt = kwargs.get("prompt")
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
         self._report_abs_path.parent.mkdir(parents=True, exist_ok=True)
         self._report_abs_path.write_text(self._content, encoding="utf-8")
         # Empty stdout so the on-disk fresh report is the source of truth.
-        return SimpleNamespace(stdout="", stderr="")
+        return AgentRunResult(returncode=0, stdout="", stderr="")
 
 
 def _executor_with_runner(runner: FakeCommandRunner, tmp_path: Path) -> WorkspaceExecutor:
@@ -816,12 +817,12 @@ class _PlanningAdapter:
         self.stdout_values = list(stdout_values)
         self.prompts: list[str] = []
 
-    async def run(self, **kwargs: object) -> SimpleNamespace:
+    async def run(self, **kwargs: object) -> AgentRunResult:
         prompt = kwargs.get("prompt")
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
         stdout = self.stdout_values.pop(0) if self.stdout_values else ""
-        return SimpleNamespace(stdout=stdout, stderr="")
+        return AgentRunResult(returncode=0, stdout=stdout, stderr="")
 
 
 @pytest.mark.unit

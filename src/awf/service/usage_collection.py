@@ -24,7 +24,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from awf.adapters.usage import UsageSampleContext, UsageSampler
+from awf.adapters.usage import (
+    IsolatedUsageSampleContext,
+    UsageSampleContext,
+    UsageSampler,
+)
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -33,8 +37,10 @@ from awf.common.commands import (
 )
 from awf.common.compose_exec import (
     TrackedComposeExec,
+    TrackedIsolatedComposeRun,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
@@ -109,6 +115,26 @@ def _is_missing_binary(result: CommandResult) -> bool:
     return "command not found" in result.stderr.lower()
 
 
+def _normalize_ccusage_command_result(
+    result: CommandResult,
+    *,
+    timeout_exit_code: bool = False,
+) -> tuple[NormalizedUsage | None, str | None, str | None]:
+    """Classify and normalize a ccusage command result retained by the worker."""
+    if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+        return None, REASON_TIMEOUT, None
+    # ``timeout`` runs inside isolated clarification containers so a ccusage
+    # process cannot outlive the worker's command timeout. GNU timeout reports
+    # its own expiry as 124, without a runner reason code.
+    if timeout_exit_code and result.returncode == 124:
+        return None, REASON_TIMEOUT, None
+    if not result.ok:
+        failure_reason = REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
+        return None, failure_reason, None
+    usage, reason = normalize_ccusage_json(result.stdout)
+    return usage, reason, None if usage is None else usage.model
+
+
 class CcusageCollector(UsageSampler):
     """Samples ccusage usage inside the agent container every ``interval`` seconds."""
 
@@ -159,6 +185,45 @@ class CcusageCollector(UsageSampler):
         ctx._task = asyncio.create_task(ctx._run_loop())
         return ctx
 
+    async def start_isolated(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        cli_args: list[str],
+    ) -> IsolatedUsageSampleContext:
+        """Capture a one-off clarification container's usage before it is removed."""
+
+        source = provider_ccusage_source(provider)
+        prior_snapshot: UsageSnapshot | None = None
+        try:
+            prior_snapshot = await asyncio.to_thread(
+                read_latest_usage_snapshot,
+                workspace_id,
+                work_dir=self._work_dir,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.isolated_setup_error",
+                workspace_id=workspace_id,
+                exc_info=True,
+            )
+        return _IsolatedCcusageSampleContext(
+            collector=self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            provider=provider,
+            source=source,
+            accumulated_usage_at_run_start=snapshot_usage_metrics(prior_snapshot),
+            prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
+            cli_args=cli_args,
+        )
+
 
 class _CcusageSampleContext(UsageSampleContext):
     """Per-run sampling handle returned by ``CcusageCollector.start``."""
@@ -174,6 +239,7 @@ class _CcusageSampleContext(UsageSampleContext):
         source: str | None,
         accumulated_usage_at_run_start: NormalizedUsage | None,
         prior_ccusage_source: str | None,
+        empty_baseline_is_zero: bool = False,
     ) -> None:
         self._collector = collector
         self._compose_project = compose_project
@@ -183,6 +249,7 @@ class _CcusageSampleContext(UsageSampleContext):
         self._source = source
         self._accumulated_usage_at_run_start = accumulated_usage_at_run_start
         self._prior_ccusage_source = prior_ccusage_source
+        self._empty_baseline_is_zero = empty_baseline_is_zero
         self._latest_accumulated_usage = accumulated_usage_at_run_start
         self._baseline: NormalizedUsage | None = None
         # Set when baseline capture failed (vs. a fresh, legitimately empty one).
@@ -196,15 +263,23 @@ class _CcusageSampleContext(UsageSampleContext):
         self._pending_write: asyncio.Task[Path] | None = None
 
     async def finalize(self, *, status: str) -> None:
+        """Persist the final usage sample and stop periodic collection."""
         if self._finalized:
             return
         self._finalized = True
         final_task = asyncio.create_task(self._finalize_inner(status))
         # Shield the final sample so it still completes if the agent run is being
-        # cancelled (the await below may be cancelled repeatedly).
+        # cancelled (the await below may be cancelled repeatedly). Preserve a
+        # consumed cancellation and re-raise it after the final sample lands so
+        # callers still stop their shutdown flow.
+        cancelled_error: asyncio.CancelledError | None = None
         while not final_task.done():
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await asyncio.shield(final_task)
+            except asyncio.CancelledError as exc:
+                cancelled_error = exc
+        if cancelled_error is not None:
+            raise cancelled_error
 
     async def _finalize_inner(self, status: str) -> None:
         await self._cancel_loop()
@@ -287,6 +362,7 @@ class _CcusageSampleContext(UsageSampleContext):
             self._baseline = usage
         elif (
             reason == REASON_NO_RECORDS
+            and not self._empty_baseline_is_zero
             and self._accumulated_usage_at_run_start is not None
             and self._prior_ccusage_source == self._source
         ):
@@ -539,17 +615,11 @@ class _CcusageSampleContext(UsageSampleContext):
         )
         if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
             await self._cleanup_timed_out_invocation(invocation)
-            return None, REASON_TIMEOUT, None
-        if not result.ok:
-            failure_reason = (
-                REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
-            )
-            return None, failure_reason, None
-        usage, reason = normalize_ccusage_json(result.stdout)
-        model = usage.model if usage is not None else None
-        return usage, reason, model
+        return _normalize_ccusage_command_result(result)
 
-    async def _cleanup_timed_out_invocation(self, invocation: TrackedComposeExec) -> None:
+    async def _cleanup_timed_out_invocation(
+        self, invocation: TrackedComposeExec | TrackedIsolatedComposeRun
+    ) -> None:
         # On timeout, run_streaming kills the local compose client, but per the
         # build_tracked_compose_exec contract that does not prove the in-container
         # ccusage process tree is gone. Run targeted cleanup for this invocation so
@@ -573,3 +643,150 @@ class _CcusageSampleContext(UsageSampleContext):
                 invocation_id=invocation.invocation_id,
                 exc_info=True,
             )
+
+
+class _IsolatedCcusageSampleContext(_CcusageSampleContext):
+    """Imports ccusage readings collected inside isolated clarification containers."""
+
+    def __init__(
+        self,
+        *,
+        collector: CcusageCollector,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        source: str | None,
+        accumulated_usage_at_run_start: NormalizedUsage | None,
+        prior_ccusage_source: str | None,
+        cli_args: list[str],
+    ) -> None:
+        """Initialize isolated capture state around the inherited usage context."""
+        super().__init__(
+            collector=collector,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            provider=provider,
+            source=source,
+            accumulated_usage_at_run_start=accumulated_usage_at_run_start,
+            prior_ccusage_source=prior_ccusage_source,
+            # The clarification container has a deliberately fresh auth/home
+            # state, so no records is its true zero baseline even when the
+            # workspace has a same-source usage snapshot from a repair run.
+            empty_baseline_is_zero=True,
+        )
+        self._agent_cli_args = list(cli_args)
+        # These results arrive over the worker's docker/compose client and are
+        # retained only in the control-plane process. The clarification agent
+        # never receives a writable evidence mount it could replace or link.
+        self._capture_results: dict[str, CommandResult] = {}
+        self._capture_sample = "baseline"
+        self._baseline_captured_before_agent = False
+
+    @property
+    def baseline_cli_args(self) -> list[str] | None:
+        """Return the standalone pre-agent baseline capture command."""
+
+        if self._source is None:
+            return None
+        return _isolated_ccusage_cli_args(
+            source=str(self._source),
+            timeout_seconds=self._collector._command_timeout_seconds,
+        )
+
+    async def capture_baseline_before_agent(self, *, invocation: TrackedIsolatedComposeRun) -> None:
+        """Run and import the isolated baseline before the agent watchdog starts."""
+
+        if self.baseline_cli_args is None:
+            return
+        try:
+            result = await self._collector._runner.run_streaming(
+                invocation.args,
+                wall_timeout_seconds=self._collector._command_timeout_seconds,
+                idle_timeout_seconds=self._collector._command_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            await cleanup_compose_exec_invocation_after_cancellation(
+                self._collector._runner,
+                invocation,
+                workspace_id=self._workspace_id,
+            )
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.isolated_baseline_error",
+                workspace_id=self._workspace_id,
+                exc_info=True,
+            )
+        else:
+            self._capture_results["baseline"] = result
+            if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+                await self._cleanup_timed_out_invocation(invocation)
+        self._capture_sample = "baseline"
+        await self._capture_baseline()
+        self._baseline_captured_before_agent = True
+
+    @property
+    def cli_args(self) -> list[str]:
+        """Return the direct agent CLI for separate watchdog execution."""
+
+        return list(self._agent_cli_args)
+
+    @property
+    def volume_binds(self) -> tuple[tuple[Path, str], ...]:
+        """Usage capture does not expose an agent-writable host mount."""
+
+        return ()
+
+    async def capture_final_before_cleanup(self, *, container_name: str) -> None:
+        """Write a final sample before a timed-out re-ask is force-removed."""
+        if self._source is None:
+            return
+        result = await self._collector._runner.run_streaming(
+            [
+                "docker",
+                "exec",
+                container_name,
+                *_isolated_ccusage_cli_args(
+                    source=str(self._source),
+                    timeout_seconds=self._collector._command_timeout_seconds,
+                ),
+            ],
+            wall_timeout_seconds=self._collector._command_timeout_seconds,
+            idle_timeout_seconds=self._collector._command_timeout_seconds,
+        )
+        self._capture_results["final"] = result
+
+    async def _finalize_inner(self, status: str) -> None:
+        """Collect the final reading retained by the control plane."""
+        if self._source is None:
+            await self._safe_sample(phase="final", run_status=status)
+            return
+        if not self._baseline_captured_before_agent:
+            self._capture_sample = "baseline"
+            await self._capture_baseline()
+        self._capture_sample = "final"
+        await self._safe_sample(phase="final", run_status=status)
+
+    async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
+        """Read the currently selected ccusage sample from the isolated capture."""
+        result = self._capture_results.get(self._capture_sample)
+        if result is None:
+            return None, REASON_COMMAND_FAILED, None
+        return _normalize_ccusage_command_result(result, timeout_exit_code=True)
+
+
+def _isolated_ccusage_cli_args(*, source: str, timeout_seconds: float) -> list[str]:
+    """Return the bounded ccusage argv used by isolated worker commands."""
+    return [
+        "timeout",
+        f"{timeout_seconds}s",
+        "ccusage",
+        source,
+        "daily",
+        "--json",
+        "--offline",
+        "--config",
+        _CCUSAGE_NEUTRAL_CONFIG_PATH,
+    ]

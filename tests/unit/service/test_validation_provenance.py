@@ -22,3 +22,19 @@ def test_validation_provenance_command_lookup_uses_request_validation_commands()
         ("validate", 1): "pytest -q",
         ("validate", 2): "ruff check",
     }
+
+
+@pytest.mark.unit
+def test_validation_provenance_accepts_legacy_persisted_clarification_service() -> None:
+    workspace = SimpleNamespace(
+        resolved_profile={
+            "name": "legacy",
+            "services": [{"name": "clarification", "image": "example:latest"}],
+        },
+        test_commands=[],
+    )
+
+    profile = validation_service._resolved_profile(workspace)
+
+    assert profile is not None
+    assert profile.services[0].name == "clarification"

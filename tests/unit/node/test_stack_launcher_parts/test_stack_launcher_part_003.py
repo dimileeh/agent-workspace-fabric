@@ -471,6 +471,94 @@ async def test_compose_stack_launcher_propagates_auth_resolution_errors() -> Non
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted render-only stacks preserve file-auth targets without local sources."""
+    hosted_adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+    core_adc_target = "/core/adc/should-not-leak.json"
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", core_adc_target)
+    compose = _RecordingCompose()
+    auth_mount_resolver = _FailingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = _layout()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "runtime": {
+                "environment": {
+                    "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+                },
+            },
+            "secrets": [
+                {
+                    "name": "openai",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "env/OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert auth_mount_resolver.workspace_ids == []
+    assert compose.specs == []
+    assert len(compose.render_specs) == 1
+    auth_mounts = compose.render_specs[0].auth_mounts
+    assert auth_mounts[0] == AuthMount(
+        source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"
+    )
+    targets = tuple(mount.target for mount in auth_mounts)
+    assert len(targets) == len(set(targets))
+    for target in (
+        "/home/agent/.config/gh",
+        "/home/agent/.codex",
+        "/home/agent/.claude",
+        "/home/agent/.ssh",
+        hosted_adc_target,
+    ):
+        assert target in targets
+    assert core_adc_target not in targets
+    placeholder_sources = [
+        mount.source for mount in auth_mounts if mount.target != str(layout.mirror_path)
+    ]
+    assert placeholder_sources
+    assert all(
+        source.startswith("/run/awf/hosted-auth-placeholders/") for source in placeholder_sources
+    )
+    rendered_blob = "\x00".join(
+        f"{mount.source}:{mount.target}:{mount.mode}" for mount in auth_mounts
+    )
+    assert "/host/home" not in rendered_blob
+    assert "/host/work/auth" not in rendered_blob
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "OPENAI_API_KEY",
+        "/home/agent/.config/gh",
+    ]
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -527,4 +615,5 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
         "profile_services": (),
         "companions": (),
         "docker_mode": request.profile.docker.mode,
+        "clarification_enabled": True,
     }

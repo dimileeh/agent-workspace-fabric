@@ -59,6 +59,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         log_store: LogStore | None = None,
         usage_sampler: UsageSampler | None = None,
         agent_runtime_executor: AgentRuntimeExecutor | None = None,
+        hosted_validation: Any | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -95,6 +96,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._log_store = log_store
         self._usage_sampler = usage_sampler
         self._agent_runtime_executor = agent_runtime_executor
+        self._hosted_validation = hosted_validation
 
     async def execute(
         self: Any,

@@ -22,6 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.common.attention_events import (
+    ATTENTION_CLEARED_EVENT_TYPE,
+    ATTENTION_SOURCE_MONITORING_PR,
+)
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -426,6 +430,75 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
     assert len(state_events) == 1
     assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
     assert state_events[0].new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_recovery_dispatch_clears_human_wait_before_ready_transition(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Xd2rU: validation-recovery dispatch must clear HUMAN_WAIT.
+
+    An ``auto_merge=false`` workspace can already carry a HUMAN_WAIT episode from
+    a prior manual-ready poll. ``loop._execute`` skips its general attention clear
+    for both ``NotifyHuman`` and ``Merge``, so when a later poll requires
+    validation recovery the recovery-dispatch transaction in
+    ``_handle_merge_gate_blocker`` must clear the episode (fenced
+    ``clear_workspace_attention`` + ``workspace.attention_cleared``) before
+    ``monitoring_pr`` → ``ready``. Otherwise attention columns survive and stale
+    "awaiting human" resurfaces once recovery returns the workspace to
+    ``monitoring_pr``.
+    """
+    pr_number = 81
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id, auto_merge=False)
+
+    episode_start = datetime(2026, 8, 8, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        await repo.set_workspace_attention(
+            workspace_id,
+            reason="prior manual-ready HUMAN_WAIT",
+            now=episode_start,
+        )
+        await session.commit()
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        assert workspace.awaiting_human_since == episode_start
+        assert workspace.awaiting_human_reason == "prior manual-ready HUMAN_WAIT"
+
+    terminal = await _dispatch_merge_recovery(
+        factory=factory,
+        tmp_path=tmp_path,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+
+    assert terminal is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.ready.value
+        assert workspace.awaiting_human_since is None
+        assert workspace.awaiting_human_reason is None
+        cleared = [
+            event
+            for event in workspace.events
+            if event.event_type == ATTENTION_CLEARED_EVENT_TYPE
+            and (event.payload or {}).get("source") == ATTENTION_SOURCE_MONITORING_PR
+        ]
+        recovery_events = [
+            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
+        ]
+    assert len(cleared) == 1
+    assert (cleared[0].payload or {}).get("reason") == "prior manual-ready HUMAN_WAIT"
+    assert len(recovery_events) == 1
 
 
 @pytest.mark.unit

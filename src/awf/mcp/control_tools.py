@@ -24,11 +24,13 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorExecutionPolicy,
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
     AgentRuntime,
+    TaskClass,
 )
 from awf.mcp.server import (
     _idempotency_key_error,
@@ -172,9 +174,21 @@ def register_control_tools(
                 "protected files when review or CI repair is expected to touch them."
             ),
         ),
-        auto_merge: bool = Field(
-            default=True,
-            description="Whether AWF may merge the adopted PR once monitor gates are green.",
+        auto_merge: bool | None = Field(
+            default=None,
+            description=(
+                "Tri-state auto-merge intent for the adopted PR. True/False set it "
+                "explicitly; omit (null) to use the repo/profile default (off "
+                "unless the profile's monitor.auto_merge enables it). Off means the "
+                "monitor reports readiness without merging."
+            ),
+        ),
+        execution: PullRequestMonitorExecutionPolicy = Field(
+            default_factory=PullRequestMonitorExecutionPolicy,
+            description=(
+                "Execution placement for PR monitor repair and validation. Hosted "
+                "mode requires configured hosted delegation."
+            ),
         ),
         initial_review_grace_period_seconds: float | None = Field(
             default=None,
@@ -203,6 +217,18 @@ def register_control_tools(
                 "accepted. Entity keys appear bracketed on AWF monitor commits."
             ),
         ),
+        external_id: str | None = Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create."
+            ),
+        ),
+        task_class: TaskClass | None = Field(
+            default=None,
+            description="Optional task class for scheduling and policy parity.",
+        ),
         reason: str | None = Field(
             default=None,
             max_length=512,
@@ -224,10 +250,13 @@ def register_control_tools(
                     profile=profile,
                     owned_paths=owned_paths,
                     auto_merge=auto_merge,
+                    execution=execution,
                     initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
                     task_title=task_title,
                     task_prompt=task_prompt,
                     task_tag=task_tag,
+                    external_id=external_id,
+                    task_class=task_class,
                     reason=reason,
                 )
             )

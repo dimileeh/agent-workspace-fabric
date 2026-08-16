@@ -368,12 +368,20 @@ async def _run_baseline_coverage_preflight(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    worktree_path: Path | None = None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> ValidationCoverageResult | None:
     """Run the baseline coverage preflight check before agent work begins.
 
     Skips when the profile sets ``baseline_coverage`` to ``"skip"`` or
     when no coverage command is configured. Returns ``None`` on skip;
     logs and returns the result even if below threshold.
+
+    ``coverage_runner`` and ``coverage_run_kwargs`` let hosted PR adoption
+    delegate the command with its PR identity. ``worktree_path`` is forwarded
+    so repo-relative profile ``env_file`` entries resolve from the checkout
+    (same as phases and final coverage), not from the generated Compose directory.
     """
     coverage = profile.validation.coverage
     if profile.validation.strategy.baseline_coverage == "skip":
@@ -385,12 +393,16 @@ async def _run_baseline_coverage_preflight(
         return None
     if coverage.command is None:
         return None
-    result = await executor._validation.run_profile_coverage(
+    runner = coverage_runner or executor._validation
+    run_kwargs = dict(coverage_run_kwargs or {})
+    run_kwargs["worktree_path"] = worktree_path
+    result = await runner.run_profile_coverage(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
         phase="baseline_coverage",
+        **run_kwargs,
     )
     if result is not None and not result.ok:
         _log.info(
@@ -412,6 +424,8 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
     """Run the final coverage quality gate after validation.
 
@@ -462,7 +476,8 @@ async def _run_final_coverage_gate(
                     source_run_id=reusable.id,
                 )
 
-    result = await executor._validation.run_profile_coverage(
+    runner = coverage_runner or executor._validation
+    result = await runner.run_profile_coverage(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
@@ -472,6 +487,7 @@ async def _run_final_coverage_gate(
             workspace_id,
             profile=profile,
         ),
+        **dict(coverage_run_kwargs or {}),
     )
     return _CoverageEvidenceResult(
         coverage=result,

@@ -364,3 +364,39 @@ async def test_stale_active_execution_can_fail_ignores_salvage_for_other_status(
             compose_project_name=f"awf_{workspace_id}",
         )
     )
+
+
+@pytest.mark.unit
+async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression coverage for stale active execution can fail rejects preserved runtime."""
+    workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
+    worker = _worker(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.execution_claimed_by = "stale-worker"
+        ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=30)
+        await repo.add_event(
+            ws,
+            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+            payload={"workspace_status": WorkspaceStatus.running.value},
+        )
+        await repo.add_event(
+            ws,
+            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+            payload={"workspace_status": WorkspaceStatus.running.value},
+        )
+        await session.commit()
+
+    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_{workspace_id}",
+        )
+    )

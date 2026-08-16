@@ -29,6 +29,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -423,7 +424,10 @@ class TestPullRequestMonitorAdoptionServicePart002:
         assert fresh.auto_merge is True
         assert fresh.monitor_policy == {
             "auto_merge": True,
+            "auto_merge_intent": True,
+            "auto_merge_resolved": True,
             "initial_review_grace_period_seconds": 13.0,
+            "execution": {"mode": "local"},
         }
 
         async with factory() as session:
@@ -1093,7 +1097,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
             return _metadata(number=pr_number)
 
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "fetch_pull_request_adoption_metadata",
             _fake_fetch,
         )
@@ -1136,6 +1140,9 @@ class TestPullRequestMonitorAdoptionServicePart002:
         # The default fetcher fails closed for non-GitHub forges (Line 564), so the
         # public contract must declare that error code too.
         assert "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY" in contract_codes
+        # Explicit external-ID occupancy and superseded-slot exhaustion raise
+        # TASK_EXTERNAL_ID_CONFLICT; capability registry + MCP parity list it.
+        assert "TASK_EXTERNAL_ID_CONFLICT" in contract_codes
 
     @pytest.mark.unit
     def test_inline_profile_name_handles_missing_profile(self) -> None:
@@ -1186,6 +1193,34 @@ class TestPullRequestMonitorAdoptionServicePart002:
                     task_external_id="pr-adopt-external",
                     idempotency_key=None,
                     task_policy={},
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id="pr-adopt-external",
+                    idempotency_key=None,
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": 100,
+                        }
+                    },
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id="pr-adopt-external",
+                    idempotency_key=None,
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": 277,
+                        }
+                    },
                 ),
                 True,
             ),

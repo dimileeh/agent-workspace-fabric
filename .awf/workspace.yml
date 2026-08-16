@@ -35,6 +35,12 @@ awf:
     non_check_reviewer_logins:
       - greptile-apps
       - chatgpt-codex-connector
+    # AGENTS.md "AWF Dogfood Rules": AWF work targeting a non-`main` branch must
+    # auto-merge by default. auto_merge now defaults off everywhere, so restore
+    # the required dogfood default via a per-base-branch override (main stays off).
+    auto_merge:
+      by_base_branch:
+        development: true
   validation:
     requested_tier: 1
     strategy:

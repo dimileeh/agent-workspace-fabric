@@ -7,19 +7,25 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     CheckTiming,
     MonitorState,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import MonitorRunnerConfig
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _as_utc,
     _collect_defer_items,
     _is_pending_check,
+    _needs_human_reason_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
+    _sync_needs_human_reason,
 )
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -63,6 +69,30 @@ class TestCollectDeferItems:
         assert humans[0]["id"] == "T2"
 
     @pytest.mark.unit
+    def test_bot_originated_thread_with_human_reply_stays_in_human_bucket(self) -> None:
+        thread = ReviewThread(
+            thread_id="T-mixed",
+            path="src/monitor.py",
+            line=42,
+            body_excerpt="bot report",
+            author="reviewer-bot[bot]",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="C-bot", body="bot report", author="reviewer-bot[bot]"
+                ),
+                ReviewThreadComment(comment_id="C-human", body="please defer", author="dimileeh"),
+            ),
+        )
+        state = MonitorState(threads_addressed_ids={"T-mixed": "defer"})
+
+        bots, humans = _collect_defer_items(_status(inline=(thread,)), state)
+
+        assert bots == []
+        assert len(humans) == 1
+        assert humans[0]["id"] == "T-mixed"
+        assert humans[0]["is_bot"] is False
+
+    @pytest.mark.unit
     def test_non_deferred_items_are_excluded(self) -> None:
         t = ReviewThread(
             thread_id="T3",
@@ -73,6 +103,95 @@ class TestCollectDeferItems:
         )
         state = MonitorState(threads_addressed_ids={"T3": "fix_committed"})
         bots, humans = _collect_defer_items(_status(inline=(t,)), state)
+        assert bots == []
+        assert humans == []
+
+    @pytest.mark.unit
+    def test_blocking_outdated_threads_are_collected_for_human_notification(self) -> None:
+        agent_reason = "a maintainer must choose the retry policy"
+        permanent_failure = ReviewThread(
+            thread_id="T-outdated-permanent",
+            path="src/permanent.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        requeued = ReviewThread(
+            thread_id="T-outdated-requeued",
+            path="src/requeued.py",
+            line=2,
+            body_excerpt="resolution requeued",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        fresh_feedback = ReviewThread(
+            thread_id="T-outdated-fresh",
+            path="src/fresh.py",
+            line=3,
+            body_excerpt="new reviewer feedback",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                permanent_failure.thread_id: "needs_human",
+                _needs_human_reason_state_key(permanent_failure.thread_id): agent_reason,
+                _outdated_resolve_requeued_key(requeued.thread_id): "requeued",
+                fresh_feedback.thread_id: "fix_committed",
+                _review_thread_body_state_key(fresh_feedback.thread_id): "stale-body-hash",
+            }
+        )
+
+        bots, humans = _collect_defer_items(
+            replace(
+                _status(),
+                outdated_unresolved_inline_threads=(
+                    permanent_failure,
+                    requeued,
+                    fresh_feedback,
+                ),
+            ),
+            state,
+        )
+
+        assert bots == []
+        assert [item["id"] for item in humans] == [
+            permanent_failure.thread_id,
+            requeued.thread_id,
+            fresh_feedback.thread_id,
+        ]
+        assert [item["verdict"] for item in humans] == [
+            "needs_human",
+            "awaiting_retry",
+            "new_feedback",
+        ]
+        # Keep an actual agent reason separate from the AWF state that blocks
+        # the other two threads; those states are not agent escalations.
+        assert [item["agent_verdict_reason"] for item in humans] == [agent_reason, None, None]
+        assert [item["awf_blocker_reason"] for item in humans] == [
+            "AWF could not resolve this outdated thread and needs human input",
+            "AWF could not yet resolve this outdated thread and will retry before merging",
+            "new feedback was added to this outdated thread after AWF addressed it",
+        ]
+
+    @pytest.mark.unit
+    def test_outdated_thread_without_blocking_state_is_omitted_from_notification(self) -> None:
+        """An obsolete thread without a pending condition does not notify a human."""
+        obsolete_thread = ReviewThread(
+            thread_id="T-outdated-obsolete",
+            path="src/obsolete.py",
+            line=9,
+            body_excerpt="already resolved",
+            author="dimileeh",
+            is_outdated=True,
+        )
+
+        bots, humans = _collect_defer_items(
+            replace(_status(), outdated_unresolved_inline_threads=(obsolete_thread,)),
+            MonitorState(),
+        )
+
         assert bots == []
         assert humans == []
 
@@ -97,11 +216,38 @@ class TestCollectDeferItems:
             author="greptile-apps[bot]",
         )
         state = MonitorState(threads_addressed_ids={"C1": "defer"})
+        _sync_needs_human_reason(
+            state,
+            c.comment_id,
+            VerdictResult(verdict="defer", reason="needs product decision"),
+        )
+
         bots, humans = _collect_defer_items(_status(reviews=(c,)), state)
+
         assert len(bots) == 1
         assert bots[0]["kind"] == "review"
         assert bots[0]["id"] == "C1"
+        assert bots[0]["agent_verdict_reason"] == "needs product decision"
+        assert (
+            state.threads_addressed_ids[_needs_human_reason_state_key(c.comment_id)]
+            == "needs product decision"
+        )
         assert humans == []
+
+    @pytest.mark.unit
+    def test_sync_needs_human_reason_bounds_large_reason_before_persistence(self) -> None:
+        state = MonitorState()
+
+        _sync_needs_human_reason(
+            state,
+            "C-large-reason",
+            VerdictResult(verdict="needs_human", reason="x" * 10_000),
+        )
+
+        assert (
+            state.threads_addressed_ids[_needs_human_reason_state_key("C-large-reason")]
+            == f"{'x' * 499}…"
+        )
 
 
 class TestRunnerConfigShape:

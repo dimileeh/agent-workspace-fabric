@@ -529,6 +529,7 @@ def test_decide_provider_recovery_non_retryable():
 
 def test_provider_for_agent_model():
     assert provider_for_agent_model("gemini", None) == "google"
+    assert provider_for_agent_model("antigravity", None) == "antigravity"
     assert provider_for_agent_model("codex", None) == "openai"
     assert provider_for_agent_model("claude_code", None) == "anthropic"
     assert provider_for_agent_model("opencode", None) == "opencode"

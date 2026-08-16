@@ -10,6 +10,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunError
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
@@ -35,6 +36,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     _review_thread_body_state_key,
 )
+from awf.runtime.pr_monitor_runner import agent_service_recovery
 from awf.runtime.pr_monitor_runner.helpers import (
     _review_comment_body_state_key,
     _target_reconcile_failure_payload,
@@ -317,7 +319,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
-    assert "`workflow` scope for .github/workflows/publish.yml" in body
+    assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
 
 
 @pytest.mark.unit
@@ -741,6 +743,70 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     )
 
     assert verdict == "agent_failed"
+    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    operation_start_head = "a" * 40
+    terminal_head_sha = "b" * 40
+    adapter = FakeAdapter(runtime_executor=object())
+    adapter.queue(
+        exc=AgentRunError(
+            agent=adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout="AWF-VERDICT: FIXED: hosted repair committed\n",
+                stderr="provider exited non-zero after push",
+            ),
+            reason_code="AGENT_CLI_FAILED",
+            details={"terminal_head_sha": terminal_head_sha},
+        )
+    )
+    workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    sync_calls: list[dict[str, object]] = []
+
+    async def _sync_terminal_head(*_args: object, **kwargs: object) -> str:
+        sync_calls.append(kwargs)
+        assert kwargs["operation_start_head"] == operation_start_head
+        return terminal_head_sha
+
+    monkeypatch.setattr(
+        agent_service_recovery,
+        "_sync_hosted_worktree_to_terminal_head",
+        _sync_terminal_head,
+    )
+    state = MonitorState(last_push_sha=operation_start_head)
+
+    result = await runner._invoke_cli_for_verdict_result(
+        workspace_id=workspace_id,
+        prompt="fix it",
+        commit_message="fix: review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.verdict == "fix_committed"
+    assert result.reason == "hosted repair committed"
+    assert state.last_push_sha == terminal_head_sha
+    assert state.hosted_terminal_head_advanced
+    assert sync_calls
     assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
 
 

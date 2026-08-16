@@ -169,6 +169,9 @@ class WorkerDelegatesMixin:
     _record_db_connection_closed_event = _recovery._record_db_connection_closed_event
     _list_stale_active_execution_candidates = _recovery._list_stale_active_execution_candidates
     _recover_stale_active_execution = _recovery._recover_stale_active_execution
+    _recover_hosted_pr_adoption_active_execution = (
+        _recovery._recover_hosted_pr_adoption_active_execution
+    )
     _stale_active_candidate_is_current = _recovery._stale_active_candidate_is_current
     _candidate_has_claim = _recovery._candidate_has_claim
     _has_preserved_active_recovery_evidence = _recovery._has_preserved_active_recovery_evidence

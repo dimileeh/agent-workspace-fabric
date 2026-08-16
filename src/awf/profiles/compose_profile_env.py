@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
@@ -14,6 +14,7 @@ from awf.profiles.compose_env import (
     _compose_resolve_value,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
+    _hosted_env_secret_alias_source_name,
 )
 from awf.profiles.compose_postgres_env import (
     compose_postgres_service_hostnames,
@@ -100,6 +101,8 @@ def literal_profile_env_from_compose(
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
             continue
+        if _hosted_env_secret_alias_source_name(raw) is not None:
+            continue
         if compose_module._is_git_config_protocol_key(key):
             continue
         if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
@@ -179,12 +182,18 @@ def _local_postgres_database_url_without_tracked_password(
 
 
 def _url_component_variants(component: str) -> tuple[str, ...]:
+    """Raw plus percent- and form-decoded variants for secret scanning.
+
+    ``unquote`` alone leaves form-urlencoded ``+`` as ``+``, so bearer/PEM
+    checks that require whitespace would miss ``Bearer+token`` style values.
+    """
     if not component:
         return ()
-    decoded = unquote(component)
-    if decoded == component:
-        return (component,)
-    return (component, decoded)
+    variants: list[str] = [component]
+    for decoded in (unquote(component), unquote_plus(component)):
+        if decoded not in variants:
+            variants.append(decoded)
+    return tuple(variants)
 
 
 def _is_local_postgres_database_url_env_name(key: str) -> bool:

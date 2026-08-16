@@ -19,7 +19,15 @@ from awf.profiles.models import WorkspaceProfile
 class _RecordingCompose:
     def __init__(self) -> None:
         self.specs: list[WorkspaceComposeSpec] = []
+        self.render_specs: list[WorkspaceComposeSpec] = []
         self.waits: list[bool] = []
+
+    def render(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
+        self.render_specs.append(spec)
+        return ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_launcher"),
+            compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
 
     async def up(
         self,
