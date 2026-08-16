@@ -628,7 +628,9 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     so cancellation during post-commit ownership repair has the same gap unless
     salvage is retained before propagating (PRRT_kwDOSJAM6s6Zmn1b). Without
     retaining evidence from that exception path, a later no-change FIXED at the
-    tip becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT).
+    tip becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT). Cancellation
+    must also persist salvage to the DB so a worker reload does not drop the keys
+    (PRRT_kwDOSJAM6s6ZmsZQ).
     """
     import asyncio
 
@@ -659,6 +661,7 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     workspace_id = "ws_salvage_sink_raise"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
+    persisted_snapshots: list[dict[str, str]] = []
 
     failed_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: claimed before sink raised",
@@ -670,6 +673,11 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
         commit_dirty_raises=sink_exc,
     )
     failed_runner._worktrees_root = tmp_path
+
+    async def _persist_state(_workspace_id: str, persisted: MonitorState) -> None:
+        persisted_snapshots.append(dict(persisted.threads_addressed_ids))
+
+    failed_runner._persist_state = _persist_state
 
     with pytest.raises(type(sink_exc)):
         await comments._invoke_cli_for_verdict_result(
@@ -687,6 +695,17 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
     assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+    if sink_kind == "cancelled_after_commit":
+        # Cancellation must flush salvage before re-raise; Exception paths rely on
+        # the outer loop / provider-error handler to persist.
+        assert persisted_snapshots
+        assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+        assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+        assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+        # Simulate worker reload: drop in-memory keys and restore from the durable
+        # snapshot that cancellation persisted.
+        state = MonitorState()
+        state.threads_addressed_ids.update(persisted_snapshots[-1])
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after sink raise",
@@ -723,7 +742,9 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
 
     On Python 3.11+, catching ``CancelledError`` leaves cancellation pending, so
     a naive post-sink ``await`` would re-raise before salvage is recorded. Shield
-    HEAD capture + retention, then propagate cancellation (PRRT_kwDOSJAM6s6Zmn1b).
+    HEAD capture + retention + ``_persist_state``, then propagate cancellation
+    (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ). Assert durability via a
+    simulated DB reload — in-memory-only keys would vanish after restart.
     """
     import asyncio
 
@@ -740,6 +761,7 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     workspace_id = "ws_salvage_sink_task_cancel"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
+    persisted_snapshots: list[dict[str, str]] = []
 
     entered_sink = asyncio.Event()
     runner = _evidence_runner(
@@ -759,7 +781,11 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
         await asyncio.Event().wait()
         return True
 
+    async def _persist_state(_workspace_id: str, persisted: MonitorState) -> None:
+        persisted_snapshots.append(dict(persisted.threads_addressed_ids))
+
     runner._commit_dirty_worktree = _commit_dirty_worktree_then_hang
+    runner._persist_state = _persist_state
 
     task = asyncio.create_task(
         comments._invoke_cli_for_verdict_result(
@@ -780,9 +806,19 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
-    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
-    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+    assert persisted_snapshots
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+
+    # Worker restart: discard the live object and reload from the durable snapshot.
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after sink cancel",
@@ -799,15 +835,15 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
         commit_message="fix: x",
         compose_project="proj",
         compose_file=Path("compose.yml"),
-        state=state,
+        state=reloaded,
         operation_start_head=salvaged,
         evidence_item_id=item_id,
         evidence_body_hash=body_hash,
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after sink cancel"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
 
 
 @pytest.mark.unit

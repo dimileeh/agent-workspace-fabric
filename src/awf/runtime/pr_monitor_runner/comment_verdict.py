@@ -133,6 +133,7 @@ async def _evaluate_local_head_advance(
 async def _retain_failed_run_salvage_despite_cancellation(
     runner: PullRequestMonitorRunner,
     *,
+    workspace_id: str,
     worktree_path: Path,
     item_start_head: str | None,
     state: MonitorState | None,
@@ -146,11 +147,12 @@ async def _retain_failed_run_salvage_despite_cancellation(
     ``asyncio.CancelledError`` bypasses ``except Exception`` around the dirty
     commit sink. On Python 3.11+, catching cancellation leaves it pending, so a
     direct post-sink await would re-raise before salvage is recorded. Shield the
-    evaluate+retain work so a later no-change FIXED at the tip does not become
-    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zmn1b).
+    evaluate+retain+persist work so a later no-change FIXED at the tip does not
+    become ``fixed_without_head_advance`` after a worker reload
+    (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ).
     """
 
-    async def _capture_and_retain() -> None:
+    async def _capture_retain_and_persist() -> None:
         item_end_head, local_head_advanced, _, _ = await _evaluate_local_head_advance(
             runner,
             worktree_path=worktree_path,
@@ -167,8 +169,15 @@ async def _retain_failed_run_salvage_despite_cancellation(
             result_stdout=result_stdout,
             retain_for_failed_run=True,
         )
+        # In-memory keys alone are lost when the monitor reloads from the DB after
+        # cancellation (worker restart / new cycle). Persist cancellation-safely
+        # before the caller re-raises (PRRT_kwDOSJAM6s6ZmsZQ).
+        if state is not None:
+            persist = getattr(runner, "_persist_state", None)
+            if callable(persist):
+                await persist(workspace_id, state)
 
-    retain_task = asyncio.create_task(_capture_and_retain())
+    retain_task = asyncio.create_task(_capture_retain_and_persist())
     while True:
         try:
             await asyncio.shield(retain_task)
@@ -490,6 +499,7 @@ async def _invoke_cli_for_verdict_result(
             except asyncio.CancelledError:
                 await _retain_failed_run_salvage_despite_cancellation(
                     runner,
+                    workspace_id=workspace_id,
                     worktree_path=worktree_path,
                     item_start_head=item_start_head,
                     state=state,
@@ -548,6 +558,7 @@ async def _invoke_cli_for_verdict_result(
         except asyncio.CancelledError:
             await _retain_failed_run_salvage_despite_cancellation(
                 runner,
+                workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 item_start_head=item_start_head,
                 state=state,
