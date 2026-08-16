@@ -274,6 +274,16 @@ _HTML_CODE_BLOCK_OPEN = re.compile(
 # ``<pre>`` / fences so ``- <!--`` / ``> <!--`` still enter comment mode.
 _HTML_COMMENT_OPEN = re.compile(r"^ {0,3}<!--")
 _HTML_COMMENT_CLOSE = re.compile(r"-->")
+# CommonMark HTML blocks type 3–5 (processing instruction / declaration /
+# CDATA). Same shield as comments: agents paste example markers inside
+# ``<?…?>``, ``<!Letter…>``, and ``<![CDATA[…]]>``; without tracking them a
+# clean marker overrides an earlier hard block (PRRT_kwDOSJAM6s6ZnSrG).
+_HTML_PROCESSING_INSTRUCTION_OPEN = re.compile(r"^ {0,3}<\?")
+_HTML_PROCESSING_INSTRUCTION_CLOSE = re.compile(r"\?>")
+_HTML_DECLARATION_OPEN = re.compile(r"^ {0,3}<![A-Za-z]")
+_HTML_DECLARATION_CLOSE = re.compile(r">")
+_HTML_CDATA_OPEN = re.compile(r"^ {0,3}<!\[CDATA\[")
+_HTML_CDATA_CLOSE = re.compile(r"\]\]>")
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -328,10 +338,11 @@ def _normalize_markdown_fence_line(line: str) -> str:
     """Strip container indent, blockquotes, and list markers for open matching.
 
     List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` /
-    ``- <pre>`` / ``- <!--`` are not top-level fence, HTML-code, or HTML-comment
-    lines, and continuation content is often only two-space indented (so it
-    misses the indented-code check). Normalize before matching so those regions
-    stay shielded from verdict selection. Closers must not use this helper —
+    ``- <pre>`` / ``- <!--`` / ``- <?`` / ``- <![CDATA[`` are not top-level
+    fence, HTML-code, HTML-comment, or type-3–5 raw-HTML lines, and
+    continuation content is often only two-space indented (so it misses the
+    indented-code check). Normalize before matching so those regions stay
+    shielded from verdict selection. Closers must not use this helper —
     peeling a list or blockquote marker would treat ``- ``` `` / ``> ``` ``
     inside a top-level fence as a closer.
     """
@@ -434,6 +445,49 @@ def _html_comment_closes(line: str) -> bool:
     return _HTML_COMMENT_CLOSE.search(line) is not None
 
 
+def _html_processing_instruction_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark HTML processing instruction.
+
+    Normalize list/blockquote containers first so ``- <?`` / ``> <?`` enter
+    shielding (PRRT_kwDOSJAM6s6ZnSrG).
+    """
+    return _HTML_PROCESSING_INSTRUCTION_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_processing_instruction_closes(line: str) -> bool:
+    """Return whether ``line`` contains a processing-instruction closer (``?>``)."""
+    return _HTML_PROCESSING_INSTRUCTION_CLOSE.search(line) is not None
+
+
+def _html_declaration_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark HTML declaration block.
+
+    Type 4 starts with ``<!`` followed by an ASCII letter (e.g. ``<!DOCTYPE``).
+    Comments (``<!--``) and CDATA (``<![CDATA[``) are matched separately.
+    Normalize list/blockquote containers first (PRRT_kwDOSJAM6s6ZnSrG).
+    """
+    return _HTML_DECLARATION_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_declaration_closes(line: str) -> bool:
+    """Return whether ``line`` contains a declaration closer (``>``)."""
+    return _HTML_DECLARATION_CLOSE.search(line) is not None
+
+
+def _html_cdata_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark HTML CDATA block.
+
+    Normalize list/blockquote containers first so ``- <![CDATA[`` /
+    ``> <![CDATA[`` enter shielding (PRRT_kwDOSJAM6s6ZnSrG).
+    """
+    return _HTML_CDATA_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_cdata_closes(line: str) -> bool:
+    """Return whether ``line`` contains a CDATA closer (``]]>``)."""
+    return _HTML_CDATA_CLOSE.search(line) is not None
+
+
 def _markdown_fence_closes(
     line: str,
     *,
@@ -493,19 +547,24 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
     tab), raw HTML type-1 / example code blocks (``pre`` / ``code`` /
     ``script`` / ``style`` / ``textarea``, including list- and
-    blockquote-nested openers), and HTML comment blocks (``<!-- … -->``,
-    including nested openers) so quoted example markers cannot override an
-    authoritative unfenced verdict. Same-line wrapped fences
-    (`` ```verdict``` ``) are still yielded so ``_CODE_FORMATTED_VERDICT_LINE``
-    can accept them; same-line HTML wrappers and comments are skipped entirely.
-    Unclosed fences, HTML code blocks, or HTML comments shield every
-    subsequent line.
+    blockquote-nested openers), HTML comment blocks (``<!-- … -->``,
+    including nested openers), and CommonMark type-3–5 raw HTML blocks
+    (processing instruction ``<?…?>``, declaration ``<!Letter…>``, CDATA
+    ``<![CDATA[…]]>``, including nested openers) so quoted example markers
+    cannot override an authoritative unfenced verdict. Same-line wrapped
+    fences (`` ```verdict``` ``) are still yielded so
+    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them; same-line HTML wrappers
+    and comments are skipped entirely. Unclosed fences, HTML code blocks,
+    HTML comments, or type-3–5 raw HTML blocks shield every subsequent line.
     """
     fence: str | None = None
     fence_container_indent = 0
     fence_blockquote_container = False
     html_tag: str | None = None
     html_comment = False
+    html_pi = False
+    html_declaration = False
+    html_cdata = False
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(
@@ -522,6 +581,18 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             if _html_comment_closes(line):
                 html_comment = False
             continue
+        if html_pi:
+            if _html_processing_instruction_closes(line):
+                html_pi = False
+            continue
+        if html_declaration:
+            if _html_declaration_closes(line):
+                html_declaration = False
+            continue
+        if html_cdata:
+            if _html_cdata_closes(line):
+                html_cdata = False
+            continue
         if html_tag is not None:
             if _html_code_block_closes(line, html_tag):
                 html_tag = None
@@ -532,6 +603,21 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             # Same-line ``<!-- … -->`` is an example wrapper — skip it.
             if not _html_comment_closes(line):
                 html_comment = True
+            continue
+        if _html_processing_instruction_opens(line):
+            # Same-line ``<?…?>`` is an example wrapper — skip it.
+            if not _html_processing_instruction_closes(line):
+                html_pi = True
+            continue
+        if _html_cdata_opens(line):
+            # Same-line ``<![CDATA[…]]>`` is an example wrapper — skip it.
+            if not _html_cdata_closes(line):
+                html_cdata = True
+            continue
+        if _html_declaration_opens(line):
+            # Same-line ``<!DOCTYPE …>`` is an example wrapper — skip it.
+            if not _html_declaration_closes(line):
+                html_declaration = True
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
@@ -620,10 +706,11 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     last_awf_mention_recognized = False
     saw_awf_mention = False
-    # Skip fenced, indented, raw HTML type-1/example code, and HTML comment
-    # regions so quoted example verdicts cannot override an authoritative
-    # unfenced marker (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH /
-    # PRRT_kwDOSJAM6s6ZnEAt / PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP).
+    # Skip fenced, indented, raw HTML type-1/example code, HTML comment, and
+    # CommonMark type-3–5 (PI / declaration / CDATA) regions so quoted example
+    # verdicts cannot override an authoritative unfenced marker
+    # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
+    # PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP / PRRT_kwDOSJAM6s6ZnSrG).
     for stripped in _iter_non_fenced_verdict_lines(stdout):
         for verdict_line in _verdict_line_candidates(stripped):
             # Multiple markers on one line are separate verdict units — do not
