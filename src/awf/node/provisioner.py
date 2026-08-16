@@ -114,31 +114,13 @@ _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
 
 _MAX_REVOKE_EVENTS: Final = 3
-"""Maximum revoke events before escalation.
-
-When ``_launch_lost_to_terminal_cleanup`` records this many lifetime-total
-``terminal_runtime_release_revoked`` events (orphan container stop failures),
-an additional escalation event is recorded to surface the problem to an
-operator.  The counter is intentionally lifetime-total rather than
-consecutive: a workspace that has needed repeated orphan-stop intervention is
-worth surfacing even if cleanup eventually succeeded between failures.  The
-revoke event itself is always recorded regardless of the cap so that the
-workspace remains effectively unreleased (ports stay blocked) in the
-``terminal_runtime_effectively_released_expr`` check.  Without the revoke
-event, the latest event would remain ``terminal_runtime_released``, falsely
-marking the workspace as released even though orphan containers still hold
-host ports.
-"""
+"""Maximum lifetime-total revoke events before recording an operator escalation event."""
 
 _ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
 """Maximum time to spend stopping orphan containers after launch races cleanup."""
 
 _EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
-"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
-
-Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; the
-string is the end-to-end contract shared with the worker's
-``EXECUTION_CLAIM_FENCED`` constant."""
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch."""
 
 _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 """Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""

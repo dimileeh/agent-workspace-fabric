@@ -127,15 +127,7 @@ async def run_validation_and_fix_cycle(
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
-    ``resume_disable_fix_passes`` marks a blocked-resume with active operator
-    grants — both an approve-and-keep grant resume (agent skipped, kept verbatim)
-    and a combined directive+grant resume (directive agent ran, grants still
-    active). A validation fix pass re-invokes the coding adapter, which would both
-    spend tokens and — while grants are active — potentially rewrite a granted
-    protected file and have the new violation suppressed by the same single-use
-    grant. So grant-bearing resumes run validation with zero fix passes: a failure
-    marks the workspace FAILED for operator triage instead of firing a fix pass.
-    This mirrors the pre-commit repair gate (PRRT_kwDOSJAM6s6J5SDf).
+    Grant-bearing resumes run with zero fix passes to prevent rewriting granted files.
     """
     if run_model is None:
         run_model = default_model
@@ -242,15 +234,9 @@ async def run_validation_and_fix_cycle(
         else 0
     )
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
-    # The loop always exits via ``break`` (validation+conformance success) or a
-    # terminal ``return`` (budget exhausted / hard failure); the per-category
-    # budgets guarantee the final attempt hits one of those paths, so the
-    # ``range`` is never exhausted by natural fall-through to the trailing
-    # ``return`` below. The fall-through branch is kept as a defensive backstop.
+    # Loop exits via break or terminal return; per-category budgets guarantee
+    # the final attempt hits one of those paths.
     for pass_number in range(max_validation_attempts):  # pragma: no branch
-        # This loop covers the initial validation plus any validation or
-        # post-validation conformance fix prompts. The per-category
-        # counters below enforce their separate budgets.
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,
@@ -802,12 +788,8 @@ async def run_validation_and_fix_cycle(
                     )
                     # Recovery skips feature execution; retrying this
                     # conformance miss would only rerun validation.
-                    # ``resume_disable_fix_passes`` (a grant-bearing resume) must
-                    # likewise never fire a conformance fix pass: re-invoking the
-                    # agent while operator grants are active could rewrite a
-                    # granted protected file and have the new violation suppressed
-                    # by the same single-use grant. Mark FAILED for operator
-                    # triage instead (mirrors the zeroed validation-fix budget).
+                    # Grant-bearing resumes (resume_disable_fix_passes) never fire a conformance
+                    # fix pass; mark FAILED for operator triage instead.
                     if (
                         conformance_report_cleanup_failed
                         or recovery is not None

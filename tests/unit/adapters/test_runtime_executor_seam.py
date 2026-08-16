@@ -1,21 +1,7 @@
 """Cloud-neutral runtime execution seam tests.
 
-These guard the adapter dispatch between the default tracked
-``docker compose exec`` path (when ``runtime_executor is None``) and an
-injected ``AgentRuntimeExecutor`` (hosted path). They assert:
-
-- Default Compose command construction is unchanged (regression guard).
-- The injected executor is called for ``adapter.run`` and receives the
-  prompt via ``prompt_stdin`` (bytes), not argv; ``cli_args`` excludes the
-  prompt; ``env_passthrough_names`` carries names only, no values.
-- Hosted result maps to ``AgentRunResult``; non-zero raises
-  ``AgentRunError`` with the same provider-failure classification reason
-  codes (timeout → ``AGENT_TIMEOUT``, auth → ``AGENT_AUTH_FAILED``).
-- Secret values are never present in the request, argv, stdin, or captured
-  logs.
-- Usage sampling is skipped on the hosted path (the hosted executor owns
-  its own runtime; sampling via ``docker compose exec`` is invalid there),
-  while log-store streaming still runs.
+Guards adapter dispatch between default tracked compose exec and injected AgentRuntimeExecutor,
+verifying command construction, prompt delivery via stdin, result mapping, secret masking, and log streaming.
 """
 
 from __future__ import annotations
@@ -1286,10 +1272,7 @@ class TestRuntimeExecutorSeam:
         async def _failing_build_request(*_args: Any, **_kwargs: Any) -> Any:
             raise RuntimeError("helper failure during request construction")
 
-        monkeypatch.setattr(
-            "awf.adapters.base.build_hosted_exec_request",
-            _failing_build_request,
-        )
+        monkeypatch.setattr("awf.adapters.base.build_hosted_exec_request", _failing_build_request)
 
         class _DummyExecutor:
             async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
