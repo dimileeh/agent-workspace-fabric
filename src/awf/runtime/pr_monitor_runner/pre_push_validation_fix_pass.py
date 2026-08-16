@@ -273,14 +273,15 @@ async def _commit_changes_present_in_head(
         )
         return result.stdout.strip() if result.ok else ""
 
-    async def _tree_entry_at(ref: str, path: str) -> str:
+    async def _tree_entry_at(ref: str, path: str) -> str | None:
         # Compare mode + type + object id. Missing path → empty token so absence
-        # compares equal across refs. ``ls-tree`` lines are
-        # ``<mode> SP <type> SP <object> TAB <file>``; keep metadata only.
-        # Diff-derived paths are literal filenames; without ``--literal-pathspecs``
-        # a name like ``:(literal)foo`` is pathspec magic and resolves to ``foo``,
-        # so a tip that reverts the magic path while leaving ``foo`` unchanged
-        # falsely retains salvage (PRRT_kwDOSJAM6s6ZmirW).
+        # compares equal across refs. Lookup failure → ``None`` so callers fail
+        # closed instead of treating errors as absence (PRRT_kwDOSJAM6s6ZoduB).
+        # ``ls-tree`` lines are ``<mode> SP <type> SP <object> TAB <file>``; keep
+        # metadata only. Diff-derived paths are literal filenames; without
+        # ``--literal-pathspecs`` a name like ``:(literal)foo`` is pathspec magic
+        # and resolves to ``foo``, so a tip that reverts the magic path while
+        # leaving ``foo`` unchanged falsely retains salvage (PRRT_kwDOSJAM6s6ZmirW).
         result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
@@ -293,14 +294,16 @@ async def _commit_changes_present_in_head(
             ),
             env=git_env,
         )
-        entry = result.stdout.strip() if result.ok else ""
+        if not result.ok:
+            return None
+        entry = result.stdout.strip()
         if not entry:
             return ""
         raw = entry.split("\0", 1)[0].strip()
         if not raw:
             return ""
-        meta, _sep, _name = raw.partition("\t")
-        return meta
+        meta_token: str = raw.partition("\t")[0]
+        return meta_token
 
     async def _blob_raw(oid: str) -> bytes | None:
         result = await self._deps.runner.run(
@@ -500,9 +503,13 @@ async def _commit_changes_present_in_head(
         # commit+head is retained salvage only when the baseline still had a
         # concrete entry; bogus/C-quoted paths miss baseline and commit alike;
         # any re-add at head fails closed (PRRT_kwDOSJAM6s6ZmEAd / ZmEG6).
+        # Lookup errors (``None``) also fail closed — never treat a failed
+        # ``ls-tree`` as genuine absence (PRRT_kwDOSJAM6s6ZoduB).
         parent_entry = await _tree_entry_at(parent, path)
         commit_entry = await _tree_entry_at(commit_sha, path)
         head_entry = await _tree_entry_at(head_sha, path)
+        if parent_entry is None or commit_entry is None or head_entry is None:
+            return False
         if not commit_entry:
             if not parent_entry or head_entry:
                 return False

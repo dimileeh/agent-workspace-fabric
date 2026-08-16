@@ -748,6 +748,56 @@ async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_fail_closed_on_ls_tree_lookup_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Deletion salvage must not retain when HEAD ls-tree errors.
+
+    Salvage deleted a path (parent entry present, salvage tip empty). Mapping a
+    nonzero HEAD ``ls-tree`` to the same empty token as genuine absence would
+    accept retained deletion even if the descendant re-added the file
+    (PRRT_kwDOSJAM6s6ZoduB).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    commit = "1" * 40
+    head = "2" * 40
+    commit_tree = "a" * 40
+    head_tree = "b" * 40
+    parent = "3" * 40
+    parent_tree = "c" * 40
+    path = "gone.txt"
+    parent_entry = f"100644 blob {'d' * 40}\t{path}"
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{commit_tree}\n")  # commit^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{head_tree}\n")  # head^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{parent}\n")  # commit^
+    cmd.queue_result(returncode=0, stdout=f"{parent_tree}\n")  # parent^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{path}\0")  # diff-tree -z
+    cmd.queue_result(returncode=0, stdout=f"{parent_entry}\0")  # ls-tree parent
+    cmd.queue_result(returncode=0, stdout="")  # ls-tree commit (deleted)
+    cmd.queue_result(returncode=128, stdout="", stderr="fatal: not a tree object")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit=commit,
+        head=head,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_symlink_kind_swap(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
