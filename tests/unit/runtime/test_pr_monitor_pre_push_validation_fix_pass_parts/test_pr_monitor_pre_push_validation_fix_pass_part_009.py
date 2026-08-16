@@ -315,6 +315,34 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9\n",
     )
+    # Same-signature redefinition reuses the salvage opener line text. A set
+    # difference of tip vs salvage lines drops that duplicate opener from
+    # tip-only extras, so the append looks non-superseding while merge-file
+    # still matches HEAD — unlike the added-blob path, which keeps the literal
+    # suffix (PRRT_kwDOSJAM6s6ZqDij).
+    parent_def = "x = 1\n"
+    commit_def = "x = 1\ndef guard():\n    return True\n"
+    head_redef = "x = 1\ndef guard():\n    return True\ndef guard():\n    return False\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_def, commit_blob=commit_def) == {
+        "guard"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_def,
+        commit_blob=commit_def,
+        head_blob=head_redef,
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\nclass Guard:\n    ok = True\n",
+        head_blob=("x = 1\nclass Guard:\n    ok = True\nclass Guard:\n    ok = False\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\nfunction guard() {\n  return true;\n}\n",
+        head_blob=(
+            "x = 1\nfunction guard() {\n  return true;\n}\nfunction guard() {\n  return false;\n}\n"
+        ),
+    )
 
 
 @pytest.mark.unit

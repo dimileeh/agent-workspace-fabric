@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -299,8 +300,16 @@ def _tip_extra_can_supersede_modified_salvage(
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:
         return False
-    commit_lines = set(commit_blob.splitlines())
-    extra_lines = [line for line in head_blob.splitlines() if line not in commit_lines]
+    # Multiset difference (not set): a same-signature redefinition reuses the
+    # salvage opener line text, so set membership would drop the duplicate
+    # binding from tip-only extras and miss supersession (PRRT_kwDOSJAM6s6ZqDij).
+    remaining = Counter(commit_blob.splitlines())
+    extra_lines: list[str] = []
+    for line in head_blob.splitlines():
+        if remaining[line] > 0:
+            remaining[line] -= 1
+        else:
+            extra_lines.append(line)
     if not extra_lines:
         return False
     return bool(changed & _binding_names("\n".join(extra_lines) + "\n"))
