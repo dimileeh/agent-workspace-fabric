@@ -398,10 +398,10 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
 @pytest.mark.parametrize(
     ("agent", "model"),
     [
-        (AgentRuntime.codex, "gpt-5.5"),
+        (AgentRuntime.codex, "gpt-5.6-sol"),
         (AgentRuntime.cursor, "sonnet-4-thinking"),
         (AgentRuntime.antigravity, "gemini-3.1-pro-preview"),
-        (AgentRuntime.claude_code, "claude-opus-4-8"),
+        (AgentRuntime.claude_code, "claude-opus-5"),
         (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
     ],
 )
@@ -448,7 +448,7 @@ def test_effective_agent_identity_ignores_blank_or_malformed_model_policy(
         task_policy=task_policy,
     )
 
-    assert identity.model == "gpt-5.5"
+    assert identity.model == "gpt-5.6-sol"
     assert identity.model_source == "default"
     assert identity.effort == "xhigh"
 
@@ -473,7 +473,7 @@ def test_effective_agent_identity_prefers_explicit_effort_policy() -> None:
         task_policy={"agent_effort": "max"},
     )
 
-    assert identity.model == "claude-opus-4-8"
+    assert identity.model == "claude-opus-5"
     assert identity.model_source == "default"
     assert identity.effort == "max"
     assert identity.effort_source == "task_policy"

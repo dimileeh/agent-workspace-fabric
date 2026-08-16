@@ -288,7 +288,7 @@ agent on the initial diff):
 ```bash
 awf workspace adopt-pr \
   --pr-url https://github.com/owner/repo/pull/123 \
-  --agent claude_code --model claude-opus-4-8 --effort high \
+  --agent claude_code --effort high \
   --auto-merge \
   --owned-path '.github/workflows/**' --owned-path 'pyproject.toml'
 ```

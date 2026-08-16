@@ -656,26 +656,27 @@ def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
 
 def test_codex_default_capacity_does_not_fallback_to_itself() -> None:
     now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    default_model = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model
     metadata = provider_recovery_metadata_from_failure(
         reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
         message="MODEL_CAPACITY_EXHAUSTED Please try again later.",
-        details={"provider": "openai", "model": "gpt-5.5"},
+        details={"provider": "openai", "model": default_model},
         task_policy={},
     )
     assert metadata is not None
 
     decision = decide_provider_recovery(
         metadata,
-        task_policy={"agent_model": "gpt-5.5"},
+        task_policy={"agent_model": default_model},
         current_agent="codex",
-        current_model="gpt-5.5",
+        current_model=default_model,
         now=now,
     )
 
     assert decision.action == "retry"
     assert decision.target_agent == "codex"
     assert decision.target_provider == "openai"
-    assert decision.target_model == "gpt-5.5"
+    assert decision.target_model == default_model
     assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
 
 

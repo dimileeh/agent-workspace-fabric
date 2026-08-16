@@ -67,7 +67,7 @@ async def test_create_blocks_provider_readiness_before_rows(
 
     preflight = exc_info.value.detail["provider_readiness_preflight"]
     assert preflight["provider"] == "codex"
-    assert preflight["model"] == "gpt-5.5"
+    assert preflight["model"] == "gpt-5.6-sol"
     assert preflight["reason_code"] == "CODEX_AUTH_MISSING"
     assert preflight["blocks_launch"] is True
     assert workspaces == []
@@ -383,7 +383,7 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
     preflight = retried.task_policy["provider_readiness_preflight"]
     assert preflight["source_workspace_id"] == first.id
     assert preflight["provider"] == "codex"
-    assert preflight["model"] == "gpt-5.5"
+    assert preflight["model"] == "gpt-5.6-sol"
     assert preflight["override_used"] is True
     assert preflight["override_reason"] == "retry after local auth repair"
 

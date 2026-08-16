@@ -968,8 +968,8 @@ class TestCentralDefaults:
 
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-8"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.6-sol"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
@@ -986,7 +986,7 @@ class TestCentralDefaults:
             defaults=DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex],
         )
 
-        assert codex._default_model == "gpt-5.5"
+        assert codex._default_model == "gpt-5.6-sol"
         assert codex._default_effort == "xhigh"
 
 
