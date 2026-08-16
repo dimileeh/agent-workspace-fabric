@@ -200,6 +200,22 @@ class TestParseVerdict:
             r"AWF-VERDICT: FIXED: \&lt;one-sentence summary\&gt;",
             r"AWF-VERDICT: DEFER: \&lt;what to track\&gt;",
             r"AWF-VERDICT: FALSE POSITIVE: \&amp;lt;reason\&amp;gt;",
+            # Safe whole-reason inline HTML wrappers must peel when the
+            # enclosed text is placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ).
+            "AWF-VERDICT: FALSE POSITIVE: <em>&lt;reason&gt;</em>",
+            "AWF-VERDICT: FALSE POSITIVE: <em><reason></em>",
+            "AWF-VERDICT: FALSE POSITIVE: <em>&lt;one-sentence justification&gt;</em>",
+            "AWF-VERDICT: FALSE POSITIVE: <strong>&lt;reason&gt;</strong>",
+            "AWF-VERDICT: FALSE POSITIVE: <strong><one-sentence justification></strong>",
+            "AWF-VERDICT: FALSE POSITIVE: <span>&lt;one-sentence justification&gt;</span>",
+            "AWF-VERDICT: FALSE POSITIVE: <span><reason></span>",
+            "AWF-VERDICT: FALSE POSITIVE: <EM>&lt;reason&gt;</EM>",
+            "AWF-VERDICT: FALSE POSITIVE: <em class='x'>&lt;reason&gt;</em>",
+            "AWF-VERDICT: FALSE POSITIVE: <em>`&lt;reason&gt;`</em>",
+            "AWF-VERDICT: FALSE POSITIVE: <strong>**<reason>**</strong>",
+            "AWF-VERDICT: FIXED: <em>&lt;one-sentence summary&gt;</em>",
+            "AWF-VERDICT: FIXED: <span>&lt;one-sentence summary&gt;</span>",
+            "AWF-VERDICT: DEFER: <em>&lt;what to track&gt;</em>",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
@@ -217,7 +233,9 @@ class TestParseVerdict:
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
         # CommonMark backslash escapes (``\<reason\>``) likewise
         # (PRRT_kwDOSJAM6s6ZpA-z). Mixed HTML + backslash layers must decode
-        # successively (PRRT_kwDOSJAM6s6ZpHXM).
+        # successively (PRRT_kwDOSJAM6s6ZpHXM). Safe inline HTML wrappers
+        # (``<em>`` / ``<strong>`` / ``<span>``) peel the same way when
+        # placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -334,6 +352,19 @@ class TestParseVerdict:
             (
                 "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate][details]",
                 "![stale review boilerplate][details]",
+            ),
+            # Safe inline HTML around real prose is not peeled (PRRT_kwDOSJAM6s6ZpdhJ).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: <em>stale review boilerplate</em>",
+                "<em>stale review boilerplate</em>",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: <strong>stale review boilerplate</strong>",
+                "<strong>stale review boilerplate</strong>",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: <span>stale review boilerplate</span>",
+                "<span>stale review boilerplate</span>",
             ),
         ],
     )

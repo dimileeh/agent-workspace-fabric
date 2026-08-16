@@ -101,6 +101,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER as _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_INLINE_HTML_WRAPPER as _VERDICT_REASON_INLINE_HTML_WRAPPER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_INLINE_QUOTE_WRAPPER as _VERDICT_REASON_INLINE_QUOTE_WRAPPER,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -192,6 +195,7 @@ __all__ = (
     "_CODE_FORMATTED_VERDICT_LINE",
     "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
     "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
+    "_VERDICT_REASON_INLINE_HTML_WRAPPER",
     "_VERDICT_REASON_PYTHON_DUNDER",
     "_MARKDOWN_FENCE_OPEN",
     "_MARKDOWN_INDENTED_CODE_LINE",
@@ -559,19 +563,20 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
 
 
 def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
-    """Peel balanced outer quote/backtick/strong/strike/link wrappers from a reason.
+    """Peel balanced outer quote/backtick/strong/strike/link/HTML wrappers from a reason.
 
     Agents often echo prompt placeholders inside inline code, quotes,
-    Markdown strong/emphasis/strikethrough markers, Markdown links, or
-    Markdown images
+    Markdown strong/emphasis/strikethrough markers, Markdown links,
+    Markdown images, or safe inline HTML wrappers
     (`` `<one-sentence justification>` `` / ``"<…>"`` / ``**<…>**`` /
     ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_`` /
     ``[<…>](https://example.com)`` / ``![<…>](https://example.com)`` /
-    ``[<…>][ref]`` / ``[<…>][]``). Those wrappers must not defeat whole-reason
-    placeholder detection
+    ``[<…>][ref]`` / ``[<…>][]`` / ``<em>&lt;…&gt;</em>`` /
+    ``<strong>…</strong>`` / ``<span>…</span>``). Those wrappers must not
+    defeat whole-reason placeholder detection
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
     PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
-    PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL).
+    PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL, PRRT_kwDOSJAM6s6ZpdhJ).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -605,6 +610,17 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
                 cleaned = normalized_inner
                 continue
             cleaned = inner
+            continue
+        html_match = _VERDICT_REASON_INLINE_HTML_WRAPPER.fullmatch(cleaned)
+        if html_match is not None:
+            # Safe inline HTML (em/strong/span): peel only when placeholder-
+            # shaped so rich-text template echoes fail closed while real
+            # HTML-wrapped justifications remain usable (PRRT_kwDOSJAM6s6ZpdhJ).
+            inner = html_match.group("inner").strip()
+            normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
+            if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
+                break
+            cleaned = normalized_inner
             continue
         link_label = _verdict_reason_inline_link_label(cleaned)
         if link_label is not None:

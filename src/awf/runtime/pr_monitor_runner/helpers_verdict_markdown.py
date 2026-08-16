@@ -9,6 +9,7 @@ __all__ = (
     "_CODE_FORMATTED_VERDICT_LINE",
     "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
     "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
+    "_VERDICT_REASON_INLINE_HTML_WRAPPER",
     "_VERDICT_REASON_PYTHON_DUNDER",
     "_MARKDOWN_FENCE_OPEN",
     "_MARKDOWN_INDENTED_CODE_LINE",
@@ -123,6 +124,16 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r"\*\s*(?P<em_star>.*?)\s*\*|"
     r"_\s*(?P<em_under>.*?)\s*_"
     r")$"
+)
+# Balanced safe inline HTML wrappers around a reason (``<em>…</em>``,
+# ``<strong>…</strong>``, ``<span>…</span>``, optional attributes, case-
+# insensitive). Peeled only when the enclosed value is placeholder-shaped —
+# same gate as single emphasis / Markdown links — so rich-text echoes of
+# ``<em>&lt;reason&gt;</em>`` fail closed while real HTML-wrapped prose stays
+# usable (PRRT_kwDOSJAM6s6ZpdhJ).
+_VERDICT_REASON_INLINE_HTML_WRAPPER = re.compile(
+    r"^<(?P<tag>em|strong|span)(?:\s[^>]*)?\s*>\s*(?P<inner>.*?)\s*</(?P=tag)\s*>$",
+    re.IGNORECASE,
 )
 # Whole-reason Markdown links (``[<…>](https://example.com)``) and images
 # (``![<…>](https://example.com)``), plus reference-style forms
