@@ -253,15 +253,17 @@ _MARKDOWN_FENCE_OPEN = re.compile(
 # Unconditional ``str.strip`` would promote example markers inside these
 # regions to authoritative finals.
 _MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
-# Raw Markdown HTML code regions (``<pre>`` / ``<code>``). Agents quote
-# example verdicts inside these; they are not fenced or indented code, so the
-# line iterator must track them or an example can override an earlier hard
-# block (PRRT_kwDOSJAM6s6ZnEAt). CommonMark HTML block type-1 style: optional
-# 0–3 spaces, then the tag name followed by whitespace, ``>``, or EOL.
-# Open matching peels list/blockquote containers first (same as fences) so
-# ``- <pre>`` / ``> <code>`` still enter HTML mode (PRRT_kwDOSJAM6s6ZnHBW).
+# Raw Markdown HTML code regions. Agents quote example verdicts inside these;
+# they are not fenced or indented code, so the line iterator must track them
+# or an example can override an earlier hard block (PRRT_kwDOSJAM6s6ZnEAt).
+# CommonMark HTML block type 1 covers ``pre`` / ``script`` / ``style`` /
+# ``textarea``; ``code`` is tracked the same way for agent example wrappers
+# (PRRT_kwDOSJAM6s6ZnQhP). Opener: optional 0–3 spaces, then the tag name
+# followed by whitespace, ``>``, or EOL. Open matching peels list/blockquote
+# containers first (same as fences) so ``- <pre>`` / ``> <code>`` still enter
+# HTML mode (PRRT_kwDOSJAM6s6ZnHBW).
 _HTML_CODE_BLOCK_OPEN = re.compile(
-    r"^ {0,3}<(?P<tag>pre|code)(?=[\s>]|$)",
+    r"^ {0,3}<(?P<tag>pre|code|script|style|textarea)(?=[\s>]|$)",
     re.IGNORECASE,
 )
 # CommonMark HTML comment blocks (type 2): optional 0–3 spaces then ``<!--``,
@@ -397,12 +399,13 @@ def _markdown_fence_open_marker(line: str) -> str | None:
 
 
 def _html_code_block_open_tag(line: str) -> str | None:
-    """Return ``pre``/``code`` when ``line`` opens a raw HTML code block.
+    """Return a type-1 / example HTML tag when ``line`` opens a raw code block.
 
-    Normalize list/blockquote containers first (same as fence openers) so
-    ``- <pre>`` / ``> <code>`` enter HTML shielding; otherwise lightly
-    indented example markers inside override an earlier hard block
-    (PRRT_kwDOSJAM6s6ZnHBW).
+    Recognizes CommonMark type-1 tags (``pre`` / ``script`` / ``style`` /
+    ``textarea``) plus ``code`` example wrappers. Normalize list/blockquote
+    containers first (same as fence openers) so ``- <pre>`` / ``> <code>``
+    enter HTML shielding; otherwise lightly indented example markers inside
+    override an earlier hard block (PRRT_kwDOSJAM6s6ZnHBW).
     """
     opened = _HTML_CODE_BLOCK_OPEN.match(_normalize_markdown_fence_line(line))
     if opened is None:
@@ -488,7 +491,8 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     Skips multiline fenced blocks (including list- and blockquote-nested
     openers after normalizing container prefixes), CommonMark indented-code
     lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
-    tab), raw HTML ``<pre>`` / ``<code>`` blocks (including list- and
+    tab), raw HTML type-1 / example code blocks (``pre`` / ``code`` /
+    ``script`` / ``style`` / ``textarea``, including list- and
     blockquote-nested openers), and HTML comment blocks (``<!-- … -->``,
     including nested openers) so quoted example markers cannot override an
     authoritative unfenced verdict. Same-line wrapped fences
@@ -531,8 +535,8 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
-            # Same-line ``<pre>…</pre>`` / ``<code>…</code>`` is an example
-            # wrapper, not an accepted formatted-verdict form — skip it.
+            # Same-line ``<pre>…</pre>`` / ``<script>…</script>`` (etc.) is an
+            # example wrapper, not an accepted formatted-verdict form — skip it.
             if not _html_code_block_closes(line, opened_html):
                 html_tag = opened_html
             continue
@@ -616,10 +620,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     last_awf_mention_recognized = False
     saw_awf_mention = False
-    # Skip fenced, indented, raw HTML <pre>/<code>, and HTML comment regions so
-    # quoted example verdicts cannot override an authoritative unfenced marker
-    # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
-    # PRRT_kwDOSJAM6s6ZnN2F).
+    # Skip fenced, indented, raw HTML type-1/example code, and HTML comment
+    # regions so quoted example verdicts cannot override an authoritative
+    # unfenced marker (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH /
+    # PRRT_kwDOSJAM6s6ZnEAt / PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP).
     for stripped in _iter_non_fenced_verdict_lines(stdout):
         for verdict_line in _verdict_line_candidates(stripped):
             # Multiple markers on one line are separate verdict units — do not

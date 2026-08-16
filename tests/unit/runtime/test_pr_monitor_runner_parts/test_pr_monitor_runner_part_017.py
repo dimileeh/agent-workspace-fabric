@@ -321,6 +321,43 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "tag",
+        ["script", "style", "textarea"],
+        ids=["html_script", "html_style", "html_textarea"],
+    )
+    def test_private_awf_verdict_ignores_markers_inside_html_type1_raw_blocks(
+        self,
+        tag: str,
+    ) -> None:
+        # CommonMark type-1 HTML blocks also include script/style/textarea.
+        # Without tracking them, an example inside overrides NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZnQhP).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            f"<{tag}>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            f"</{tag}>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_same_line_html_script_wrapper(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<script>AWF-VERDICT: FALSE POSITIVE: example</script>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_markers_inside_html_comment(self) -> None:
         # HTML comments are not <pre>/<code>; without shielding, a clean
         # marker line inside <!-- … --> overrides an earlier NEEDS_HUMAN
