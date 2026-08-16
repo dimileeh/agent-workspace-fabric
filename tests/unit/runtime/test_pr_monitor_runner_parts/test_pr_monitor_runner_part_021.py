@@ -145,6 +145,13 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: `&lt;reason&gt;`",
             "AWF-VERDICT: FIXED: &lt;one-sentence summary&gt;",
             "AWF-VERDICT: DEFER: &lt;what to track&gt;",
+            # Nested HTML entity escapes still decode to a placeholder
+            # (PRRT_kwDOSJAM6s6Zo4bG).
+            "AWF-VERDICT: FALSE POSITIVE: &amp;lt;reason&amp;gt;",
+            "AWF-VERDICT: FALSE POSITIVE: &amp;amp;lt;one-sentence justification&amp;amp;gt;",
+            "AWF-VERDICT: FALSE POSITIVE: &amp;amp;amp;lt;reason&amp;amp;amp;gt;",
+            "AWF-VERDICT: FIXED: &amp;lt;one-sentence summary&amp;gt;",
+            "AWF-VERDICT: DEFER: &amp;lt;what to track&amp;gt;",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
@@ -155,7 +162,7 @@ class TestParseVerdict:
         # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are
         # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S).
         # HTML entity-escaped whole-reason echoes must also fail closed
-        # (PRRT_kwDOSJAM6s6Zoyj2).
+        # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -187,15 +194,30 @@ class TestParseVerdict:
         assert result.reason == "stale review boilerplate"
 
     @pytest.mark.unit
-    def test_private_awf_entity_escaped_mid_reason_tag_still_usable(self) -> None:
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            (
+                "AWF-VERDICT: FALSE POSITIVE: added the &lt;summary&gt; section",
+                "added the &lt;summary&gt; section",
+            ),
+            # Nested escapes still leave mid-reason prose usable after bounded
+            # decode for the anchored placeholder check (PRRT_kwDOSJAM6s6Zo4bG).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: added the &amp;lt;summary&amp;gt; section",
+                "added the &amp;lt;summary&amp;gt; section",
+            ),
+        ],
+    )
+    def test_private_awf_entity_escaped_mid_reason_tag_still_usable(
+        self, stdout: str, expected_reason: str
+    ) -> None:
         # Anchored placeholder detection must not treat mid-reason entity-escaped
         # tags as whole-reason template echoes (PRRT_kwDOSJAM6s6Zoyj2).
-        result = _parse_verdict_result(
-            "AWF-VERDICT: FALSE POSITIVE: added the &lt;summary&gt; section"
-        )
+        result = _parse_verdict_result(stdout)
 
         assert result.verdict == "false_positive"
-        assert result.reason == "added the &lt;summary&gt; section"
+        assert result.reason == expected_reason
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

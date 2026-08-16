@@ -428,9 +428,10 @@ def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
     shaped tags that continue with real prose (no absorbed marker) stay usable.
 
     HTML entity-escaped whole-reason echoes (``&lt;reason&gt;``, numeric
-    ``&#60;…&#62;``) are decoded only for this anchored check so escaped
-    template paste cannot resolve as a substantive reason, while mid-reason
-    prose containing entity-escaped tags stays usable (PRRT_kwDOSJAM6s6Zoyj2).
+    ``&#60;…&#62;``, and nested ``&amp;lt;…&amp;gt;``) are decoded only for
+    this anchored check so escaped template paste cannot resolve as a
+    substantive reason, while mid-reason prose containing entity-escaped tags
+    stays usable (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG).
 
     Callers must pass text that has already been through
     ``_normalize_verdict_reason_inline_formatting`` (or an equivalent peel) so
@@ -448,17 +449,33 @@ def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
     return bool(prefix) and _text_matches_verdict_reason_template_placeholder(prefix)
 
 
+# Bound nested ``html.unescape`` so ``&amp;lt;reason&amp;gt;`` reaches
+# ``<reason>`` without unbounded loops on adversarial entity chains.
+_VERDICT_REASON_HTML_UNESCAPE_MAX_PASSES = 4
+
+
+def _html_unescape_to_stable(text: str) -> str:
+    """Decode HTML entities until stable or the pass bound is hit."""
+    decoded = text
+    for _ in range(_VERDICT_REASON_HTML_UNESCAPE_MAX_PASSES):
+        nxt = html.unescape(decoded)
+        if nxt == decoded:
+            return decoded
+        decoded = nxt
+    return decoded
+
+
 def _text_matches_verdict_reason_template_placeholder(text: str) -> bool:
     """Return whether ``text`` matches the anchored template-placeholder pattern.
 
-    Tries the raw text first, then an HTML-entity-decoded copy so
-    ``&lt;reason&gt;`` / ``&#60;reason&#62;`` whole-reason echoes fail closed
-    without loosening the anchored match for mid-reason prose
-    (PRRT_kwDOSJAM6s6Zoyj2).
+    Tries the raw text first, then a bounded HTML-entity-decoded copy so
+    ``&lt;reason&gt;`` / ``&#60;reason&#62;`` / nested ``&amp;lt;…&amp;gt;``
+    whole-reason echoes fail closed without loosening the anchored match for
+    mid-reason prose (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG).
     """
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(text):
         return True
-    decoded = html.unescape(text)
+    decoded = _html_unescape_to_stable(text)
     return decoded != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded) is not None
 
 
