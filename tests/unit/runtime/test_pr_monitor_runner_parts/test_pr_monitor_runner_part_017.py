@@ -679,6 +679,33 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
+            "**AWF-VERDICT: NEEDS_HUMAN: unsure**",
+            "__AWF-VERDICT: NEEDS_HUMAN: unsure__",
+            "*AWF-VERDICT: NEEDS_HUMAN: unsure*",
+            "_AWF-VERDICT: NEEDS_HUMAN: unsure_",
+            "***AWF-VERDICT: SHIPPED: done***",
+            # Nested Markdown + emphasis must strip repeatedly.
+            "> **AWF-VERDICT: NEEDS_HUMAN: unsure**",
+            "- **AWF-VERDICT: SHIPPED: done**",
+            "**Final answer: AWF-VERDICT: NEEDS_HUMAN: unsure**",
+        ],
+    )
+    def test_private_awf_verdict_emphasis_wrapped_final_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # Markdown emphasis wrappers leave a leading ``**`` / ``*`` so a
+        # start-only attempt check ignores the marker and an earlier
+        # resolvable verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmLYh).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_multiline_list_option_items_fail_closed(self) -> None:
         # Same-line mid-prose option lists already keep NEEDS_HUMAN; multiline
         # ``- AWF-VERDICT:`` option items must not select the last list entry
