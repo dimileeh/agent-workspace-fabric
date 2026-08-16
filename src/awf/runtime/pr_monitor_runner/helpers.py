@@ -309,6 +309,20 @@ def _normalize_markdown_fence_line(line: str) -> str:
     return _MARKDOWN_LIST_PREFIX.sub("", line.lstrip(" \t"), count=1)
 
 
+def _markdown_fence_list_container_indent(line: str) -> int:
+    """Column width of leading indent plus list marker on a fence opener.
+
+    ``10. ```text`` → 4; ``- ```text`` → 2; top-level fences → 0. Closers for
+    list-nested openers may carry this indent plus CommonMark's optional 0–3
+    spaces relative to the container (PRRT_kwDOSJAM6s6ZmsZS).
+    """
+    leading_ws = len(line) - len(line.lstrip(" \t"))
+    list_match = _MARKDOWN_LIST_PREFIX.match(line.lstrip(" \t"))
+    if list_match is None:
+        return 0
+    return leading_ws + list_match.end()
+
+
 def _markdown_fence_open_marker(line: str) -> str | None:
     """Return the fence marker that opens a multiline code fence on ``line``."""
     opened = _MARKDOWN_FENCE_OPEN.match(_normalize_markdown_fence_line(line))
@@ -317,20 +331,25 @@ def _markdown_fence_open_marker(line: str) -> str | None:
     return opened.group("fence") or opened.group("fence_tilde")
 
 
-def _markdown_fence_closes(line: str, *, fence: str) -> bool:
+def _markdown_fence_closes(line: str, *, fence: str, container_indent: int = 0) -> bool:
     """Return whether ``line`` closes a code fence opened with ``fence``.
 
-    CommonMark allows at most three leading spaces on a closing fence. Do not
-    peel list markers: a line like ``- ``` `` inside an open fence is fence
-    content, not a closer. Do not unrestricted-lstrip: four-space-indented
-    content that looks like a fence must stay inside the open region.
+    CommonMark allows at most three leading spaces on a closing fence relative
+    to the opener's list container. Do not peel list markers: a line like
+    ``- ``` `` inside an open fence is fence content, not a closer. Do not
+    unrestricted-lstrip: four-space-indented content under a top-level opener
+    (container_indent 0) that looks like a fence must stay inside the open
+    region.
     """
-    # List-continuation closers (``  ``` ``) and CommonMark's optional 0–3
-    # space indent are matched explicitly — unlimited strip would treat
+    # List-nested closers (``    ``` `` under ``10. ```text``) need the
+    # container indent; absolute 0–3 alone never closes them
+    # (PRRT_kwDOSJAM6s6ZmsZS). Unlimited strip would still treat top-level
     # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
+    min_indent = container_indent
+    max_indent = container_indent + 3
     return (
         re.match(
-            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
+            rf"^ {{{min_indent},{max_indent}}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
             line,
         )
         is not None
@@ -349,16 +368,19 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     can accept them. Unclosed fences shield every subsequent line.
     """
     fence: str | None = None
+    fence_container_indent = 0
     for line in stdout.splitlines():
         if fence is not None:
-            if _markdown_fence_closes(line, fence=fence):
+            if _markdown_fence_closes(line, fence=fence, container_indent=fence_container_indent):
                 fence = None
+                fence_container_indent = 0
             continue
         if _MARKDOWN_INDENTED_CODE_LINE.match(line):
             continue
         opened = _markdown_fence_open_marker(line)
         if opened is not None:
             fence = opened
+            fence_container_indent = _markdown_fence_list_container_indent(line)
             continue
         yield line.strip()
 

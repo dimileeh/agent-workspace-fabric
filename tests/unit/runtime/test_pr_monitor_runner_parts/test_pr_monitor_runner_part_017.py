@@ -391,6 +391,25 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ordered_list_fence_closer_uses_container_indent(
+        self,
+    ) -> None:
+        # Ordered-list openers (``10. ```text``) put continuation at column 4.
+        # Absolute 0–3 closer matching never closes that fence, so a following
+        # top-level FIXED is shielded as fenced content (PRRT_kwDOSJAM6s6ZmsZS).
+        stdout = (
+            "10. ```text\n"
+            "    AWF-VERDICT: FALSE POSITIVE: example\n"
+            "    ```\n"
+            "AWF-VERDICT: FIXED: closed ordered-list fence\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "closed ordered-list fence"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_list_prefix_inside_fence_does_not_close(self) -> None:
         # Closer matching must not peel list markers: ``- ``` `` inside a
         # top-level fence is content, not a closer. Treating it as one ends the
