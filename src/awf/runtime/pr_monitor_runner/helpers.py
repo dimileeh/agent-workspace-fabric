@@ -363,10 +363,13 @@ _MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
-# CommonMark blockquote fence closers allow ``0 .. container_indent+3`` spaces
-# before ``>`` (see ``_markdown_fence_closes``): absolute `` {0,3}`` misses
+# CommonMark blockquote fence closers peel exactly the opener's blockquote
+# depth (see ``_markdown_fence_closes``): unrestricted ``>+`` would treat
+# nested ``>> ``` `` as a closer for a depth-1 opener (PRRT_kwDOSJAM6s6Zn213).
+# Leading spaces before ``>`` allow ``0 .. container_indent+3`` so
 # list+blockquote continuations such as ``    > ``` `` under ``10. > ```text``
-# (PRRT_kwDOSJAM6s6ZnHH2), while still matching plain ``> ``` `` (PRRT_kwDOSJAM6s6ZnAyG).
+# match (PRRT_kwDOSJAM6s6ZnHH2), while still matching plain ``> ``` ``
+# (PRRT_kwDOSJAM6s6ZnAyG).
 
 
 def _normalize_markdown_fence_line(line: str) -> str:
@@ -421,19 +424,6 @@ def _markdown_fence_list_container_indent(line: str) -> int:
     if had_blockquote:
         return list_width
     return leading_ws + list_width
-
-
-def _markdown_fence_opened_in_blockquote(line: str) -> bool:
-    """Return whether a fence opener carries a Markdown blockquote container."""
-    rest = line.lstrip(" \t")
-    while True:
-        bq = _MARKDOWN_BLOCKQUOTE_PREFIX.match(rest)
-        if bq is not None:
-            return True
-        lst = _MARKDOWN_LIST_PREFIX.match(rest)
-        if lst is None:
-            return False
-        rest = rest[lst.end() :]
 
 
 def _markdown_fence_open_marker(line: str) -> str | None:
@@ -507,10 +497,12 @@ def _html_declaration_opens(line: str) -> bool:
 def _markdown_blockquote_container_depth(line: str) -> int:
     """Count leading blockquote markers after indent and list containers.
 
-    Used so type-4 declaration closers can ignore container ``>`` prefixes on
-    ``> <!DOCTYPE`` / ``>> <!DOCTYPE`` openers without treating those markers
-    as the CommonMark end (PRRT_kwDOSJAM6s6ZnUwf). List markers may sit before
-    or between quote levels (``- >`` / ``> -``).
+    Used so type-4 declaration closers, type-6/7 blank terminators, and
+    Markdown fence closers can ignore container ``>`` prefixes on
+    ``> <!DOCTYPE`` / ``>> <!DOCTYPE`` / ``> ``` `` / ``>> ``` `` openers
+    without treating those markers as the CommonMark end
+    (PRRT_kwDOSJAM6s6ZnUwf / PRRT_kwDOSJAM6s6Zn213). List markers may sit
+    before or between quote levels (``- >`` / ``> -``).
     """
     rest = line.lstrip(" \t")
     depth = 0
@@ -622,7 +614,7 @@ def _markdown_fence_closes(
     *,
     fence: str,
     container_indent: int = 0,
-    blockquote_container: bool = False,
+    blockquote_depth: int = 0,
 ) -> bool:
     """Return whether ``line`` closes a code fence opened with ``fence``.
 
@@ -631,13 +623,16 @@ def _markdown_fence_closes(
     ``- ``` `` inside an open fence is fence content, not a closer. Do not
     unrestricted-lstrip: four-space-indented content under a top-level opener
     (container_indent 0) that looks like a fence must stay inside the open
-    region. Blockquote-opened fences strip a matching ``>`` container before
-    the indent check; top-level fences must not peel ``>`` (PRRT_kwDOSJAM6s6ZnAyG).
-    Before that strip, allow ``0 .. container_indent+3`` spaces ahead of ``>``
-    so ordered-list+blockquote continuations (``    > ``` `` under
-    ``10. > ```text``) match (PRRT_kwDOSJAM6s6ZnHH2). After that strip, allow
-    indent ``0 .. container_indent+3`` so a normal ``> ``` `` closer still
-    matches list+blockquote openers whose list width was recorded as
+    region. Blockquote-opened fences peel exactly ``blockquote_depth`` single
+    ``>`` container markers (and intervening list markers) before the indent
+    check — unrestricted ``>+`` would treat nested ``>> ``` `` as a closer for
+    a depth-1 opener (PRRT_kwDOSJAM6s6Zn213). Top-level fences must not peel
+    ``>`` (PRRT_kwDOSJAM6s6ZnAyG). Before that strip, allow
+    ``0 .. container_indent+3`` spaces ahead of ``>`` so ordered-list+blockquote
+    continuations (``    > ``` `` under ``10. > ```text``) match
+    (PRRT_kwDOSJAM6s6ZnHH2). After that strip, allow indent
+    ``0 .. container_indent+3`` so a normal ``> ``` `` closer still matches
+    list+blockquote openers whose list width was recorded as
     ``container_indent`` (PRRT_kwDOSJAM6s6ZnDm7).
     """
     # List-nested closers (``    ``` `` under ``10. ```text``) need the
@@ -645,13 +640,26 @@ def _markdown_fence_closes(
     # (PRRT_kwDOSJAM6s6ZmsZS). Unlimited strip would still treat top-level
     # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
     candidate = line
-    if blockquote_container:
+    if blockquote_depth > 0:
         # Absolute `` {0,3}`` before ``>`` misses list-continuation closers
         # such as ``    > ``` `` when ``container_indent`` is 4.
-        bq = re.match(rf"^ {{{0},{container_indent + 3}}}(?:>[ \t]?)+", line)
-        if bq is None:
+        lead = re.match(rf"^ {{{0},{container_indent + 3}}}", line)
+        if lead is None:  # pragma: no cover - `` {0,N}`` always matches
             return False
-        candidate = line[bq.end() :]
+        rest = line[lead.end() :]
+        remaining = blockquote_depth
+        while remaining > 0:
+            bq = re.match(r"^>[ \t]?", rest)
+            if bq is not None:
+                rest = rest[bq.end() :]
+                remaining -= 1
+                continue
+            lst = _MARKDOWN_LIST_PREFIX.match(rest)
+            if lst is not None:
+                rest = rest[lst.end() :]
+                continue
+            return False
+        candidate = rest
         # ``>`` peel removes the column occupied by list markers that sat
         # inside/after the quote (``- > ``` `` / ``> - ``` ``). Requiring
         # ``container_indent`` spaces on the residual would reject ``> ``` ``.
@@ -691,7 +699,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     """
     fence: str | None = None
     fence_container_indent = 0
-    fence_blockquote_container = False
+    fence_blockquote_depth = 0
     html_tag: str | None = None
     html_comment = False
     html_pi = False
@@ -706,11 +714,11 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 line,
                 fence=fence,
                 container_indent=fence_container_indent,
-                blockquote_container=fence_blockquote_container,
+                blockquote_depth=fence_blockquote_depth,
             ):
                 fence = None
                 fence_container_indent = 0
-                fence_blockquote_container = False
+                fence_blockquote_depth = 0
             continue
         if html_comment:
             if _html_comment_closes(line):
@@ -788,7 +796,9 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
         if opened is not None:
             fence = opened
             fence_container_indent = _markdown_fence_list_container_indent(line)
-            fence_blockquote_container = _markdown_fence_opened_in_blockquote(line)
+            # Track opener depth so closers peel exactly that many ``>``
+            # markers (PRRT_kwDOSJAM6s6Zn213).
+            fence_blockquote_depth = _markdown_blockquote_container_depth(line)
             continue
         yield line.strip()
 

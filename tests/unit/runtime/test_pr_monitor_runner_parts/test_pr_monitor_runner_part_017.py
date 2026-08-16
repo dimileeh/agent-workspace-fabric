@@ -1190,6 +1190,48 @@ class TestParseVerdict:
         assert result.reason == "done"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_deeper_nested_blockquote_fence_does_not_close(
+        self,
+    ) -> None:
+        # Fence closers must peel exactly the opener's blockquote depth. A
+        # depth-1 opener (``> ```text``) must not treat nested ``>> ``` `` as a
+        # closer — unrestricted ``>+`` peel ends the shield early and exposes a
+        # following ``> AWF-VERDICT:`` example as a later attempt over FIXED
+        # (PRRT_kwDOSJAM6s6Zn213).
+        stdout = (
+            "AWF-VERDICT: FIXED: done\n"
+            "> ```text\n"
+            "> earlier FIXED example stays shielded\n"
+            ">> ```\n"
+            "> AWF-VERDICT: NEEDS_HUMAN: nested quote example\n"
+            "> ```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "done"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_depth_two_blockquote_fence_closes_exact(
+        self,
+    ) -> None:
+        # Depth-2 openers (``>> ```text``) must still close on a matching
+        # ``>> ``` `` after exact-depth peel (PRRT_kwDOSJAM6s6Zn213).
+        stdout = (
+            "AWF-VERDICT: FIXED: earlier\n"
+            ">> ```text\n"
+            ">> AWF-VERDICT: FALSE POSITIVE: example\n"
+            ">> ```\n"
+            "AWF-VERDICT: NEEDS_HUMAN: later authoritative\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "later authoritative"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "stdout",
         [
