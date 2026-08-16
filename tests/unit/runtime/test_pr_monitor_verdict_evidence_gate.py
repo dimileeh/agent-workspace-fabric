@@ -1037,6 +1037,164 @@ async def test_salvage_retained_when_agent_cancelled_after_self_commit(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "guard_exc_kind",
+    [
+        "provider_recovery_retry",
+        "service_recovery_superseded",
+        "ownership_repair_failed",
+    ],
+)
+async def test_salvage_retained_when_service_recovery_guard_exits_after_self_commit(
+    tmp_path: Path,
+    guard_exc_kind: str,
+) -> None:
+    """Service-recovery guard exits after self-commit must retain salvage.
+
+    When the agent self-commits then times out, service recovery can restart and
+    subsequently raise ``ProviderRecoveryRetryError``,
+    ``_MonitorAgentServiceRecoverySupersededError``, or an ownership error from
+    pre-launch guards. Those used bare re-raise paths so only cancellation
+    reached salvage capture; the next monitor starts at the committed HEAD
+    without persisted evidence and a no-change FIXED becomes
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zm0PB). Capture and persist
+    any HEAD advance before propagating these exits.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import (
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+    )
+
+    guard_exc: BaseException
+    if guard_exc_kind == "provider_recovery_retry":
+        guard_exc = ProviderRecoveryRetryError("provider recovery retry after self-commit")
+    elif guard_exc_kind == "service_recovery_superseded":
+        guard_exc = _MonitorAgentServiceRecoverySupersededError(
+            "service recovery superseded after self-commit"
+        )
+    else:
+        guard_exc = _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = f"PRRT_salvage_recovery_guard_{guard_exc_kind}"
+    body_hash = f"feedback_body_hash_recovery_guard_{guard_exc_kind}"
+    workspace_id = f"ws_salvage_recovery_guard_{guard_exc_kind}"
+    earlier_unconfirmed = f"PRRT_earlier_unconfirmed_recovery_guard_{guard_exc_kind}"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _service_recovery_after_self_commit(**_kwargs: object) -> AgentRunResult:
+        # Agent already advanced HEAD; recovery/pre-launch guard then exits.
+        raise guard_exc
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_must_not_run(**_kwargs: object) -> bool:
+        raise AssertionError("recovery guard exit must not reach dirty-commit sink")
+
+    runner._run_monitor_agent_with_service_recovery = _service_recovery_after_self_commit
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    runner._commit_dirty_worktree = _commit_dirty_must_not_run
+
+    with pytest.raises(type(guard_exc)):
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after recovery guard exit",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after recovery guard exit"
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_salvage_persisted_when_agent_raises_unexpected_after_self_commit(
     tmp_path: Path,
 ) -> None:

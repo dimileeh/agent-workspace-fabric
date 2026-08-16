@@ -142,7 +142,7 @@ async def _retain_failed_run_salvage_despite_cancellation(
     isolated_worktree_host_path: Path | None,
     result_stdout: str,
 ) -> None:
-    """Capture post-cancel HEAD and retain salvage while cancellation is pending.
+    """Capture post-exit HEAD and retain salvage while an abort is pending.
 
     ``asyncio.CancelledError`` bypasses ``except Exception`` around the agent
     invocation and the dirty commit sink. On Python 3.11+, catching cancellation
@@ -151,6 +151,12 @@ async def _retain_failed_run_salvage_despite_cancellation(
     no-change FIXED at the tip does not become ``fixed_without_head_advance``
     after a worker reload (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ,
     PRRT_kwDOSJAM6s6ZmviO — agent self-commit then cancel before the sink).
+
+    The same retain+persist path is used when service-recovery / pre-launch
+    guards raise ``ProviderRecoveryRetryError``,
+    ``_MonitorAgentServiceRecoverySupersededError``, or ownership/mirror/head
+    errors after a self-commit (PRRT_kwDOSJAM6s6Zm0PB) — those used bare re-raise
+    and stranded salvage the same way.
 
     Persist ONLY the item's ``__salvaged_fix_*`` keys (merged onto DB state) —
     never full ``_persist_state``, which would flush mid-burst unconfirmed
@@ -454,15 +460,29 @@ async def _invoke_cli_for_verdict_result(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
-    except (ProviderRecoveryRetryError, _MonitorAgentServiceRecoverySupersededError):
-        raise
-    except _MonitorAgentServiceRecoveryFailedError:
-        raise
     except (
+        ProviderRecoveryRetryError,
+        _MonitorAgentServiceRecoverySupersededError,
+        _MonitorAgentServiceRecoveryFailedError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
         _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
     ):
+        # Agent may have self-committed before service-recovery / pre-launch
+        # guards exit. Bare re-raise previously skipped salvage so a later
+        # no-change FIXED at the tip became fixed_without_head_advance
+        # (PRRT_kwDOSJAM6s6Zm0PB). Retain+persist HEAD advance like CancelledError.
+        await _retain_failed_run_salvage_despite_cancellation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+        )
         raise
     except Exception:
         if mirror_path is not None:
