@@ -237,10 +237,13 @@ _VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
 # Balanced Markdown strong wrappers around a reason (``**<…>**``, ``__<…>__``).
 # Same peel loop as ticks/quotes so template-placeholder echoes still fail
 # closed (PRRT_kwDOSJAM6s6ZoAz9). Single ``*`` / ``_`` emphasis is intentionally
-# not peeled — it collides with snake_case / underscored identifiers.
+# not peeled — it collides with snake_case / underscored identifiers. Whole-reason
+# Python dunders (``__init__``, ``__name__``) also match ``__…__``; those are
+# skipped in the peel loop (PRRT_kwDOSJAM6s6ZoC7B).
 _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r"^(?:\*\*\s*(?P<strong_star>.*?)\s*\*\*|__\s*(?P<strong_under>.*?)\s*__)$"
 )
+_VERDICT_REASON_PYTHON_DUNDER = re.compile(r"^__[A-Za-z_][A-Za-z0-9_]*__$")
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
 # contain backticks (so same-line wraps like `` ```verdict``` `` are not
 # openers). Tilde info strings may include ``~`` (e.g. ``~~~ lang~option``).
@@ -1049,6 +1052,12 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
             continue
         emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
         if emphasis_match is not None:
+            # Underscore strong collides with Python dunders; keep those intact.
+            if (
+                emphasis_match.group("strong_under") is not None
+                and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
+            ):
+                break
             cleaned = next(g for g in emphasis_match.groups() if g is not None).strip()
             continue
         break

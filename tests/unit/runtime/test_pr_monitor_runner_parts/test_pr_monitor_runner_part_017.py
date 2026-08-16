@@ -1565,6 +1565,28 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         ("stdout", "expected_reason"),
         [
+            ("AWF-VERDICT: FALSE POSITIVE: __init__", "__init__"),
+            ("AWF-VERDICT: FALSE POSITIVE: __name__", "__name__"),
+            ("AWF-VERDICT: FALSE POSITIVE: `__init__`", "__init__"),
+            ("AWF-VERDICT: FIXED: __all__", "__all__"),
+        ],
+    )
+    def test_private_awf_python_dunder_reason_not_peeled(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        # Whole-reason Python dunders must not be treated as Markdown ``__…__``
+        # strong wrappers (PRRT_kwDOSJAM6s6ZoC7B).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict in {"false_positive", "fix_committed"}
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
             (
                 "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification> "
                 "AWF-VERDICT: FIXED: cited",
