@@ -275,6 +275,66 @@ class TestParseVerdict:
         assert result.reason == "verdict_placeholder_echo"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            (
+                "AWF-VERDICT: FALSE POSITIVE: prior rationale\n"
+                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: DEFER: track follow-up separately\n"
+                "AWF-VERDICT: DEFER: <what to track>",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FIXED: committed a regression test\n"
+                "AWF-VERDICT: FIXED: <one-sentence summary>",
+                "fixed_placeholder_echo",
+            ),
+        ],
+    )
+    def test_private_awf_same_label_earlier_reason_does_not_rescue_final_placeholder(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        # A reasoned same-label line must not be reused when the final AWF line is
+        # only a template-placeholder echo — that would still resolve/defer contrary
+        # to fail-closed grammar (#822 PRRT_kwDOSJAM6s6ZlCOG).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    def test_private_awf_same_label_empty_final_still_reuses_earlier_reason(self) -> None:
+        # Genuine empty finals (not placeholders) still reuse an earlier same-label
+        # reason; only template echoes skip that fallback.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: prior rationale\nAWF-VERDICT: FALSE POSITIVE:"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "prior rationale"
+
+    @pytest.mark.unit
+    def test_private_awf_fixed_placeholder_after_same_label_still_preserves_hard_block(
+        self,
+    ) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer review required\n"
+            "AWF-VERDICT: FIXED: committed a regression test\n"
+            "AWF-VERDICT: FIXED: <one-sentence summary>"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer review required"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_placeholder_only_fail_closed(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: <one-sentence summary>")
 

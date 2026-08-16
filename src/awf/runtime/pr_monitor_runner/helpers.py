@@ -275,7 +275,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # NEEDS_HUMAN lines are collected only as hard-block fallbacks when an AWF
     # FIXED line has no usable reason — never as a standalone selected verdict.
     # When multiple AWF verdicts are present, the final AWF line wins. If that
-    # line omits a reason, preserve an earlier reason for the same verdict.
+    # line omits a reason (and is not a template placeholder), preserve an
+    # earlier reason for the same verdict. A final resolvable placeholder echo
+    # must not reuse an earlier same-label reason — that would still resolve or
+    # defer contrary to fail-closed grammar.
     # Sanitized non-blocking placeholders (for example
     # ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back only to an
     # earlier reasoned hard block (needs_human/defer) or a bare blocking
@@ -310,17 +313,22 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         latest = awf_verdicts[-1]
         if latest.reason is None:
             latest_verdict = latest.verdict
-            for parsed in reversed(awf_verdicts[:-1]):
-                if parsed.verdict == latest_verdict and parsed.reason is not None:
-                    return parsed
+            # Check the final raw reason before same-label reuse: a template
+            # placeholder must not inherit an earlier reasoned same-label verdict
+            # (that would still resolve/defer, contrary to fail-closed grammar).
+            final_is_resolvable_placeholder = (
+                latest_verdict in _RESOLVABLE_PLACEHOLDER_LABELS
+                and _last_awf_resolvable_reason_is_placeholder(stdout, verdict=latest_verdict)
+            )
+            if not final_is_resolvable_placeholder:
+                for parsed in reversed(awf_verdicts[:-1]):
+                    if parsed.verdict == latest_verdict and parsed.reason is not None:
+                        return parsed
             # Template-placeholder echoes (reason sanitized to None) fail closed for
             # every resolvable verdict. FIXED placeholders may still fall back to an
             # earlier reasoned hard block (#676); FALSE POSITIVE / DEFER placeholders
             # never resolve on their own.
-            if (
-                latest_verdict in _RESOLVABLE_PLACEHOLDER_LABELS
-                and _last_awf_resolvable_reason_is_placeholder(stdout, verdict=latest_verdict)
-            ):
+            if final_is_resolvable_placeholder:
                 if latest_verdict == "fix_committed":
                     for parsed in reversed(awf_verdicts[:-1]):
                         if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
