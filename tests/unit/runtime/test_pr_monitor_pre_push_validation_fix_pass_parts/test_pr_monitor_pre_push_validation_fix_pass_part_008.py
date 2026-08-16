@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -23,6 +25,35 @@ from tests.unit.runtime.test_pr_monitor_pre_push_validation import _mark_git_wor
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _init_repo_with_lateral_tip(tmp_path: Path) -> tuple[Path, str, str]:
+    """Return ``(repo, ancestor_sha, lateral_sha)`` where lateral is not a descendant."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    _git(repo, "config", "advice.graftFileDeprecated", "false")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "ancestor")
+    ancestor = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "--orphan", "lateral", "-q")
+    (repo / "c.txt").write_text("c\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-qm", "lateral tip")
+    lateral = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    return repo, ancestor, lateral
 
 
 @pytest.mark.unit
@@ -85,10 +116,10 @@ async def test_head_descends_from_disables_replace_and_graft_overrides(
 ) -> None:
     """Ancestry proof must ignore refs/replace and other mutable parent overrides.
 
-    Regression for PRRT_kwDOSJAM6s6ZlE3n: ``git merge-base --is-ancestor`` honors
-    replace refs and graft/replace-base env, so a lateral/older tip can be made to
-    look like a forward descendant and satisfy FIXED evidence. Disable replacements
-    and strip those overrides for the check.
+    Regression for PRRT_kwDOSJAM6s6ZlE3n / Bugbot graft fallback: merely popping
+    ``GIT_GRAFT_FILE`` falls back to ``$GIT_DIR/info/grafts``. Force-disable the
+    default graft source via the OS null device, keep replace objects off, and
+    strip replace-base / object-lookup overrides.
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
@@ -126,7 +157,54 @@ async def test_head_descends_from_disables_replace_and_graft_overrides(
     assert "--is-ancestor" in call.args
     assert call.env is not None
     assert call.env.get("GIT_NO_REPLACE_OBJECTS") == "1"
-    assert "GIT_GRAFT_FILE" not in call.env
+    assert call.env.get("GIT_GRAFT_FILE") == os.devnull
     assert "GIT_REPLACE_REF_BASE" not in call.env
     assert "GIT_OBJECT_DIRECTORY" not in call.env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+
+@pytest.mark.unit
+async def test_head_descends_from_rejects_replace_and_default_info_graft_forgery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-repo proof: refs/replace and default info/grafts cannot fake ancestry."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    monkeypatch.delenv("GIT_GRAFT_FILE", raising=False)
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+
+    repo, ancestor, lateral = _init_repo_with_lateral_tip(tmp_path)
+    # Plant default info/grafts that would make lateral appear descended from ancestor.
+    info_dir = repo / ".git" / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    (info_dir / "grafts").write_text(f"{lateral} {ancestor}\n", encoding="utf-8")
+    # Also plant a replace ref with the same forged parentage.
+    tree = _git(repo, "rev-parse", f"{lateral}^{{tree}}").stdout.strip()
+    forged = _git(repo, "commit-tree", tree, "-p", ancestor, "-m", "forged").stdout.strip()
+    _git(repo, "update-ref", f"refs/replace/{lateral}", forged)
+
+    # Unhardened git would accept the forged parentage.
+    forged_check = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, lateral],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert forged_check.returncode == 0
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._head_descends_from(
+        runner,
+        worktree_path=repo,
+        ancestor=ancestor,
+        descendant=lateral,
+    )

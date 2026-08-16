@@ -7,6 +7,7 @@ parent module re-exports these symbols to preserve its existing public surface.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -133,13 +134,16 @@ async def _head_descends_from(
     the pre-fix commit rather than moving it sideways or backward.
 
     Replace refs (``refs/replace/*``), ``GIT_REPLACE_REF_BASE``, and
-    ``GIT_GRAFT_FILE`` can rewrite apparent parentage, so a lateral or older tip
-    could otherwise satisfy FIXED / fix-pass ancestry. Disable replacements and
-    strip those mutable ancestry overrides for this merge-safety check.
+    ``GIT_GRAFT_FILE`` / default ``$GIT_DIR/info/grafts`` can rewrite apparent
+    parentage, so a lateral or older tip could otherwise satisfy FIXED /
+    fix-pass ancestry. Disable replacements, point ``GIT_GRAFT_FILE`` at the OS
+    null device (merely unsetting falls back to ``info/grafts``), and strip
+    replace-base / object-lookup overrides for this merge-safety check.
     """
     git_env = git_env_without_object_lookup_overrides()
-    git_env.pop("GIT_GRAFT_FILE", None)
     git_env.pop("GIT_REPLACE_REF_BASE", None)
+    # Unset falls back to $GIT_DIR/info/grafts; force-disable the default source.
+    git_env["GIT_GRAFT_FILE"] = os.devnull
     git_env["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = await self._deps.runner.run(
         git_worktree_command(
