@@ -564,6 +564,117 @@ async def test_record_heartbeat_preserves_newest_conflicting_write() -> None:
 
 
 @pytest.mark.unit
+async def test_fallback_record_heartbeat_updates_existing_row_without_insert() -> None:
+    """The manual-fallback path returns the conditional-UPDATE result directly.
+
+    When a row already exists with an *older* ``last_heartbeat_at``, the initial
+    conditional UPDATE matches and refreshes it, so ``record_heartbeat`` returns
+    that updated row without ever reaching the INSERT / conflict-recovery branch.
+    Pinning this keeps the ``heartbeat is not None`` early-return covered on the
+    manual dialect deterministically rather than through the concurrent race.
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        worker_id = "worker_fallback_update_existing_row"
+        started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+        older_heartbeat_at = started_at + timedelta(seconds=1)
+        newer_heartbeat_at = started_at + timedelta(seconds=5)
+        seeded_at = datetime(2026, 6, 4, 8, 5, tzinfo=UTC)
+
+        async with factory() as session, session.begin():
+            session.add(
+                WorkerHeartbeat(
+                    worker_id=worker_id,
+                    node_id="node-old",
+                    started_at=started_at,
+                    last_heartbeat_at=older_heartbeat_at,
+                    poll_interval_seconds=5.0,
+                    created_at=seeded_at,
+                    updated_at=seeded_at,
+                )
+            )
+
+        async with factory() as session, session.begin():
+            heartbeat = await WorkerHeartbeatRepository(
+                session,
+                dialect_name="unsupported",
+            ).record_heartbeat(
+                worker_id=worker_id,
+                node_id="node-new",
+                started_at=started_at,
+                last_heartbeat_at=newer_heartbeat_at,
+                poll_interval_seconds=7.0,
+            )
+
+    assert heartbeat.worker_id == worker_id
+    assert heartbeat.node_id == "node-new"
+    assert heartbeat.last_heartbeat_at == newer_heartbeat_at
+    assert heartbeat.poll_interval_seconds == 7.0
+
+
+@pytest.mark.unit
+async def test_fallback_record_heartbeat_recovers_from_insert_conflict_with_newer_row() -> None:
+    """The manual-fallback insert conflict path must resolve to the persisted row.
+
+    On a dialect without native upsert support, ``record_heartbeat`` first runs a
+    conditional UPDATE and, when that matches nothing, INSERTs inside a SAVEPOINT.
+    If a row for the worker already exists with a *newer* ``last_heartbeat_at``
+    than the incoming (older) write, the conditional UPDATE matches nothing, the
+    INSERT hits the primary-key conflict, and the ``except IntegrityError``
+    recovery must re-resolve and return the persisted newer row — never raise and
+    never downgrade it. This pins that recovery branch deterministically instead
+    of relying on the timing-sensitive concurrent-writer race above.
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        worker_id = "worker_fallback_insert_conflict_newer_row"
+        started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+        newer_heartbeat_at = started_at + timedelta(seconds=5)
+        older_heartbeat_at = started_at + timedelta(seconds=1)
+        seeded_at = datetime(2026, 6, 4, 8, 5, tzinfo=UTC)
+
+        # Seed the newer row the conflicting older write must not overwrite.
+        async with factory() as session, session.begin():
+            session.add(
+                WorkerHeartbeat(
+                    worker_id=worker_id,
+                    node_id="node-newer",
+                    started_at=started_at,
+                    last_heartbeat_at=newer_heartbeat_at,
+                    poll_interval_seconds=6.0,
+                    created_at=seeded_at,
+                    updated_at=seeded_at,
+                )
+            )
+
+        # ``dialect_name="unsupported"`` forces the manual insert path; the older
+        # heartbeat's conditional UPDATE matches nothing, so the INSERT conflicts
+        # on the primary key and the fallback recovers the persisted newer row.
+        async with factory() as session, session.begin():
+            heartbeat = await WorkerHeartbeatRepository(
+                session,
+                dialect_name="unsupported",
+            ).record_heartbeat(
+                worker_id=worker_id,
+                node_id="node-older",
+                started_at=started_at,
+                last_heartbeat_at=older_heartbeat_at,
+                poll_interval_seconds=5.0,
+            )
+
+        async with factory() as session:
+            persisted = await WorkerHeartbeatRepository(session).get(worker_id=worker_id)
+
+    assert heartbeat.worker_id == worker_id
+    assert heartbeat.node_id == "node-newer"
+    assert heartbeat.last_heartbeat_at == newer_heartbeat_at
+    assert heartbeat.poll_interval_seconds == 6.0
+    assert persisted is not None
+    assert persisted.node_id == "node-newer"
+    assert persisted.last_heartbeat_at == newer_heartbeat_at
+
+
+@pytest.mark.unit
 async def test_prune_stale_deletes_bounded_old_rows_and_preserves_fresh() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
@@ -629,3 +740,37 @@ async def test_prune_stale_deletes_bounded_old_rows_and_preserves_fresh() -> Non
     assert worker_ids_after_first_prune == {"worker-fresh", "worker-stale-b"}
     assert second_pruned == 1
     assert remaining_worker_ids == {"worker-fresh"}
+
+
+@pytest.mark.unit
+async def test_prune_stale_with_nonpositive_limit_is_a_noop() -> None:
+    """A non-positive prune limit deletes nothing and issues no DELETE.
+
+    ``prune_stale`` guards on ``limit <= 0`` before building the bounded delete,
+    so a caller passing ``0`` (or a negative bound) is a no-op that returns 0 and
+    leaves stale rows intact — never an unbounded delete.
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        cutoff = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+
+        async with factory() as session, session.begin():
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id="worker-stale-noop",
+                node_id="node-a",
+                started_at=cutoff - timedelta(days=3),
+                last_heartbeat_at=cutoff - timedelta(days=2),
+                poll_interval_seconds=5.0,
+            )
+
+        async with factory() as session, session.begin():
+            repo = WorkerHeartbeatRepository(session)
+            pruned_zero = await repo.prune_stale(before=cutoff, limit=0)
+            pruned_negative = await repo.prune_stale(before=cutoff, limit=-5)
+
+        async with factory() as session:
+            survivor = await WorkerHeartbeatRepository(session).get(worker_id="worker-stale-noop")
+
+    assert pruned_zero == 0
+    assert pruned_negative == 0
+    assert survivor is not None

@@ -223,7 +223,9 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
             pytest.fail(msg)
         pytest.skip(msg)
 
-    workspace_id = f"test_agent_git_{os.getpid()}"
+    # ``GitManager`` now validates ``workspace_id`` at the worktree-path sink
+    # (must match ``ws_[A-Za-z0-9][A-Za-z0-9_]*``), so use a realistic id.
+    workspace_id = f"ws_agent_git_{os.getpid()}"
     origin_repo = tmp_path / "origin"
     _seed_origin_repo(origin_repo)
 
