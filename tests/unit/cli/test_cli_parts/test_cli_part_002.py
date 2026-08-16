@@ -55,26 +55,6 @@ def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
 
 
-def _assert_current_first_path_guidance(stdout: str) -> None:
-    visible_help = " ".join(click.unstyle(stdout).split()).lower()
-    stale_help = visible_help.replace("`", "")
-    assert "current runnable first path" in visible_help
-    assert "awf service bootstrap" in visible_help
-    assert "awf init <path>" in visible_help
-    assert "recommended first path is awf setup" not in stale_help
-    assert "awf setup, then awf start" not in stale_help
-
-
-def _assert_control_headers(
-    headers: dict[str, str],
-    *,
-    idempotency_key: str,
-    if_match: str,
-) -> None:
-    assert headers["Idempotency-Key"] == idempotency_key
-    assert headers["If-Match"] == if_match
-
-
 class TestWorkspaceAdoptPr:
     @pytest.mark.unit
     def test_posts_adoption_request_with_api_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
