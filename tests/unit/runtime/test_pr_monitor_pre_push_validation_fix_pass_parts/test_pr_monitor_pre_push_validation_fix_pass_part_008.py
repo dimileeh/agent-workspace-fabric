@@ -949,6 +949,78 @@ async def test_commit_changes_present_in_head_rejects_newline_pathname_overwrite
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_pathspec_magic_filename_revert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Diff-derived paths must use ``--literal-pathspecs`` for ``ls-tree``.
+
+    A legal filename such as ``:(literal)foo`` is pathspec magic without the
+    global option: ``ls-tree`` reads ``foo`` instead. After reverting the
+    magic-named file while leaving ``foo`` unchanged, baseline/salvage/HEAD
+    lookups all return ``foo``'s identical entry, so salvage falsely retains
+    (PRRT_kwDOSJAM6s6ZmirW).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-qm", "base")
+
+    magic_name = ":(literal)foo"
+    (repo / magic_name).write_text("magic-salvage\n", encoding="utf-8")
+    (repo / "foo").write_text("normal\n", encoding="utf-8")
+    _git(repo, "--literal-pathspecs", "add", "-A")
+    _git(repo, "commit", "-qm", "salvage magic pathname and foo")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: later tip keeps the magic path while adding an unrelated file.
+    (repo / "later.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-qm", "unrelated while magic salvage preserved")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Revert only the magic-named path; leave ``foo`` byte-identical so a
+    # non-literal ls-tree would still see matching foo entries.
+    _git(repo, "--literal-pathspecs", "rm", "-f", "--", magic_name)
+    (repo / "other.txt").write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-qm", "revert magic pathname leave foo")
+    reverted = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=reverted,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_accepts_preserved_deletion(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

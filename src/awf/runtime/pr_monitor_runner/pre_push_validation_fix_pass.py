@@ -262,9 +262,14 @@ async def _commit_changes_present_in_head(
         # Compare mode + type + object id. Missing path → empty token so absence
         # compares equal across refs. ``ls-tree`` lines are
         # ``<mode> SP <type> SP <object> TAB <file>``; keep metadata only.
+        # Diff-derived paths are literal filenames; without ``--literal-pathspecs``
+        # a name like ``:(literal)foo`` is pathspec magic and resolves to ``foo``,
+        # so a tip that reverts the magic path while leaving ``foo`` unchanged
+        # falsely retains salvage (PRRT_kwDOSJAM6s6ZmirW).
         result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
+                "--literal-pathspecs",
                 "ls-tree",
                 "-z",
                 ref,
