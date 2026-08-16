@@ -1484,10 +1484,10 @@ def test_unselected_unknown_provider_preserved_during_targeted_recheck(tmp_path:
 
 
 @pytest.mark.unit
-def test_existing_antigravity_keyring_degraded_without_gemini_api_key(
+def test_existing_antigravity_keyring_preserved_without_gemini_api_key(
     tmp_path: Path,
 ) -> None:
-    """Existing canonical antigravity keyring entry is degraded when GEMINI_API_KEY is missing."""
+    """Existing canonical antigravity keyring entry is preserved when GEMINI_API_KEY is not in env."""
     config = HostSetupConfig(
         providers={
             "antigravity": ProviderConfig(
@@ -1512,7 +1512,7 @@ def test_existing_antigravity_keyring_degraded_without_gemini_api_key(
     assert summary.mode == "targeted_recheck"
     assert "antigravity" in updated_config.providers
     assert updated_config.providers["antigravity"].backend == "keyring"
-    assert updated_config.providers["antigravity"].status == "unavailable"
+    assert updated_config.providers["antigravity"].status == "ready"
 
 
 @pytest.mark.unit

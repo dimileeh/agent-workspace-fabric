@@ -176,10 +176,12 @@ def _prune_and_migrate_provider_config(
     """Prune retired providers and migrate legacy provider entries to canonical names."""
     result = dict(providers)
     for legacy_name, target_name in _RETIRED_PROVIDER_MIGRATIONS.items():
+        migrated_legacy_cfg: ProviderConfig | None = None
         if legacy_name in result:
             legacy_cfg = result.pop(legacy_name)
             if target_name not in result:
                 result[target_name] = legacy_cfg
+                migrated_legacy_cfg = legacy_cfg
         if target_name in result:
             spec = _SPEC_BY_NAME.get(target_name)
             if spec is not None:
@@ -192,9 +194,10 @@ def _prune_and_migrate_provider_config(
                         and _first_present(environ, spec.env_ref_vars) is None
                     ):
                         target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
-                else:
+                        result[target_name] = target_cfg
+                elif migrated_legacy_cfg is not None:
                     target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
-                result[target_name] = target_cfg
+                    result[target_name] = target_cfg
     if not is_targeted:
         for name in list(result):
             if name not in _SPEC_BY_NAME:
