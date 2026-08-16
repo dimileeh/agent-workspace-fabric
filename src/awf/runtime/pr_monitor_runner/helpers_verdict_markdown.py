@@ -596,14 +596,20 @@ def _html_type7_may_start_at(lines: Sequence[str], idx: int) -> bool:
     """Return whether a type-7 HTML block may start at ``lines[idx]``.
 
     CommonMark type 7 cannot interrupt a paragraph, so the opener must be at
-    document start or immediately preceded by a blank line. Without this gate,
-    ``<span>`` / ``</span>`` / custom tags after a non-blank ``FIXED`` line
-    enter blank-terminated shielding and suppress a later ``NEEDS_HUMAN``
-    (PRRT_kwDOSJAM6s6ZqS4U). Type 6 may still interrupt and is not gated here.
+    document start or immediately preceded by a blank line. Blockquote content
+    blanks (``>`` / ``>   ``) also end paragraphs — reuse the same peeling
+    type-6/7 termination already accepts via ``_html_blank_terminated_block_closes``
+    at the prior line's blockquote depth (PRRT_kwDOSJAM6s6ZqYPp). Without that,
+    a type-7 opener after ``>`` is refused and example markers stay visible,
+    overriding an earlier ``NEEDS_HUMAN``. Type 6 may still interrupt and is
+    not gated here.
     """
     if idx <= 0:
         return True
-    return _HTML_BLANK_LINE.match(lines[idx - 1]) is not None
+    prev = lines[idx - 1]
+    return _html_blank_terminated_block_closes(
+        prev, blockquote_depth=_markdown_blockquote_container_depth(prev)
+    )
 
 
 def _html_complete_code_opens(line: str) -> bool:

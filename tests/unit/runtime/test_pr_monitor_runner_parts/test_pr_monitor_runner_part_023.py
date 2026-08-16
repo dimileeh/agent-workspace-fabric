@@ -125,6 +125,63 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> prior text\n"
+                ">\n"
+                "<span>\n"
+                "AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> prior text\n"
+                ">   \n"
+                "<span>\n"
+                "AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> prior text\n"
+                ">\n"
+                "> <span>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> prior text\n"
+                ">   \n"
+                "> <custom-example>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+        ],
+        ids=[
+            "gt_blank_toplevel_span",
+            "gt_spaces_blank_toplevel_span",
+            "gt_blank_bq_span",
+            "gt_spaces_blank_bq_custom",
+        ],
+    )
+    def test_private_awf_verdict_type7_after_blockquote_blank_shields(
+        self,
+        stdout: str,
+    ) -> None:
+        # Blockquote content blanks end paragraphs the same way plain blanks
+        # do. Type-7 start must accept ``>`` / ``>   `` or an example FALSE
+        # POSITIVE after the opener overrides NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZqYPp).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "closer",
         ["</pre>", "</code>", "</script>", "</style>", "</textarea>"],
         ids=["close_pre", "close_code", "close_script", "close_style", "close_textarea"],
