@@ -1019,10 +1019,15 @@ class TestRegistry:
         assert gemini.name == AgentRuntime.gemini
         assert gemini.name_str == "gemini"
 
+        assert gemini.get_provider("model") == "unsupported"
+        assert gemini._cli_args(model="model") == []
+
         unknown = get_adapter("unknown_custom_runtime", runner=runner)
         assert isinstance(unknown, RetiredAgentAdapter)
         assert unknown.name == "unknown_custom_runtime"
         assert unknown.name_str == "unknown_custom_runtime"
+        assert unknown.get_provider(None) == "unsupported"
+        assert unknown._cli_args(model=None) == []
 
     @pytest.mark.asyncio
     @pytest.mark.unit
@@ -1046,3 +1051,19 @@ class TestRegistry:
         assert exc_info.value.agent == "unknown_custom_runtime"
         assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
         assert exc_info.value.details == {"agent": "unknown_custom_runtime"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_run_agent_cli_non_streaming_without_sinks(self) -> None:
+        """_run_agent_cli non-streaming path works cleanly without sinks (workspace_id=None)."""
+        runner = FakeCommandRunner()
+        runner.queue_result(stdout="cli stdout", stderr="cli stderr")
+        adapter = OpenCodeAdapter(runner=runner)
+        res = await adapter.run(
+            compose_project="awf_ws_test",
+            compose_file=Path("/tmp/compose.yml"),
+            prompt="hello",
+            workspace_id=None,
+        )
+        assert res.stdout == "cli stdout"
+        assert res.stderr == "cli stderr"
