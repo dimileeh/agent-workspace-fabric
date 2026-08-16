@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -155,18 +156,32 @@ async def _run_fix_cycle(
         ]
 
     async def _current_item_operation_start_head() -> str:
+        # Fail closed when the live per-item HEAD cannot be verified. Reusing the
+        # cycle-start SHA after a prior item advanced HEAD would let a later
+        # no-change FIXED inherit that earlier commit as false fix evidence
+        # (PRRT_kwDOSJAM6s6ZoHvG). ``git cat-file -e`` does not distinguish
+        # absence from command failure, so both count as unverifiable. A missing
+        # worktree still falls back to the cycle-start SHA (already established
+        # by ``_repair_operation_start_head_result``) because there is no live
+        # HEAD to probe.
         if not worktree_path.exists():
             return cast(str, operation_start_head)
         current_head = cast(str | None, await self._rev_parse_head(worktree_path))
         if not current_head:
-            return cast(str, operation_start_head)
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                "per-item HEAD unavailable: rev-parse failed",
+            )
         current_head_ok = await self._deps.runner.run(
             git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}"),
             env=git_env_without_object_lookup_overrides(),
         )
         if current_head_ok.ok:
             return current_head
-        return cast(str, operation_start_head)
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "per-item HEAD unavailable: commit object probe failed",
+        )
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.

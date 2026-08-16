@@ -1157,7 +1157,10 @@ async def test_run_fix_cycle_resolves_task_tag_once_for_multiple_items(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    # No worktree directory: per-item HEAD probing falls back to the cycle-start
+    # SHA (already established by ``_repair_operation_start_head_result``). That
+    # keeps this regression focused on task-tag threading rather than the
+    # fail-closed probe path covered elsewhere (PRRT_kwDOSJAM6s6ZoHvG).
 
     async def _commit_dirty(**_kwargs: object) -> bool:
         # Item-scoped FIXED evidence for this task-tag regression (no real git).

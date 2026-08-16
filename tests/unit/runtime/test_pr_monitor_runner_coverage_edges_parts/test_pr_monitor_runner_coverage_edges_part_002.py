@@ -1203,11 +1203,18 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_head_object_mi
 
 
 @pytest.mark.unit
-async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
+async def test_fix_cycle_fails_closed_when_per_item_head_object_is_poisoned(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Unverifiable per-item HEAD must abort, not reuse cycle-start SHA.
+
+    After item 1 advances HEAD, a failed cat-file probe for item 2 must not
+    fall back to the repair-cycle start SHA — that would let a later no-change
+    FIXED inherit the prior item's commit as false fix evidence
+    (PRRT_kwDOSJAM6s6ZoHvG).
+    """
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     cmd = FakeCommandRunner()
@@ -1286,7 +1293,7 @@ async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
     monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
     monkeypatch.setattr(runner._deps.gh, "resolve_thread", _resolve_thread)
 
-    await runner._run_fix_cycle(
+    result = await runner._run_fix_cycle(
         workspace_id="ws_poisoned_head",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
@@ -1299,7 +1306,13 @@ async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert operation_start_heads == ["start", "start"]
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert "commit object probe failed" in result.stderr
+    # First item got a verified start; second item aborted before address.
+    assert operation_start_heads == ["start"]
     cat_file_calls = [call for call in cmd.calls if call.args[-3:-1] == ["cat-file", "-e"]]
     assert [call.args[-1] for call in cat_file_calls] == [
         "start^{commit}",
@@ -1308,6 +1321,82 @@ async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
     assert all(call.env is not None for call in cat_file_calls)
     assert all("GIT_OBJECT_DIRECTORY" not in call.env for call in cat_file_calls)
     assert all("GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env for call in cat_file_calls)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_fails_closed_when_per_item_rev_parse_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty rev-parse after a prior item must not reuse cycle-start as item start."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # cat-file start^{commit} for item 1
+    worktrees_root = tmp_path / "worktrees"
+    worktree_path = worktrees_root / "ws_rev_parse_fail"
+    worktree_path.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    threads = (
+        ReviewThread(
+            thread_id="T_first",
+            path="src/foo.py",
+            line=12,
+            body_excerpt="please adjust this first",
+            author="reviewer",
+        ),
+        ReviewThread(
+            thread_id="T_second",
+            path="src/foo.py",
+            line=13,
+            body_excerpt="please adjust this second",
+            author="reviewer",
+        ),
+    )
+    operation_start_heads: list[str | None] = []
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return ("start", None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    current_heads = iter(("start", None))
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return next(current_heads)
+
+    async def _address(**kwargs: object) -> str:
+        operation_start_heads.append(cast(str | None, kwargs["operation_start_head"]))
+        return "false_positive"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_rev_parse_fail",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="start",
+        initial_threads=threads,
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_rev_parse_fail",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert "rev-parse failed" in result.stderr
+    assert operation_start_heads == ["start"]
 
 
 @pytest.mark.unit
