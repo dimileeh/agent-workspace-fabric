@@ -1096,6 +1096,155 @@ async def test_unexpected_exception_salvage_persist_shielded_from_cancellation(
 
 
 @pytest.mark.unit
+async def test_unexpected_exception_head_evaluate_shielded_from_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid HEAD probe on unexpected Exception must still retain salvage.
+
+    After self-commit (or dirty sink), the unexpected ``except Exception`` path
+    probes HEAD then retain+persists. An unshielded await lets CancelledError
+    escape from inside that handler — sibling ``except CancelledError`` cannot
+    catch it — so restart has the tip but no item-bound salvage and a no-change
+    FIXED becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zo8Dt). Probe,
+    retain, and selective persist must use the cancellation-safe helper.
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6Zo8Dt"
+    body_hash = "feedback_body_hash_unexpected_evaluate_cancel"
+    workspace_id = "ws_unexpected_evaluate_cancel"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_unexpected_evaluate_cancel"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    entered_evaluate = asyncio.Event()
+    release_evaluate = asyncio.Event()
+
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _agent_self_commits_then_crashes(**_kwargs: object) -> AgentRunResult:
+        raise RuntimeError("adapter crashed after self-commit")
+
+    rev_parse_calls = 0
+
+    async def _rev_parse_head_hangs_on_unexpected_probe(_worktree_path: Path) -> str | None:
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        entered_evaluate.set()
+        await release_evaluate.wait()
+        return salvaged
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_clean(**_kwargs: object) -> bool:
+        return False
+
+    runner._deps = SimpleNamespace(adapter=SimpleNamespace(run=_agent_self_commits_then_crashes))
+    runner._rev_parse_head = _rev_parse_head_hangs_on_unexpected_probe
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    runner._commit_dirty_worktree = _commit_dirty_clean
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_evaluate.wait()
+    task.cancel()
+    release_evaluate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert rev_parse_calls >= 1
+    assert persisted_snapshots, "unexpected-Exception HEAD probe cancel must durable-write salvage"
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after unexpected evaluate cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after unexpected evaluate cancel"
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
 async def test_commit_sink_error_salvage_persist_shielded_from_cancellation(
     tmp_path: Path,
 ) -> None:

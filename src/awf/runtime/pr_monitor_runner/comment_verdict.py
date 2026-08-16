@@ -574,6 +574,11 @@ async def _invoke_cli_for_verdict_result(
         # or triggers a worker reload — persist only ``__salvaged_fix_*`` keys
         # before re-raising (same selective merge as CancelledError;
         # PRRT_kwDOSJAM6s6Zmzxr).
+        # Probe/retain/persist must run through the cancellation-safe helper:
+        # CancelledError from an unshielded await inside this ``except Exception``
+        # escapes the handler (sibling CancelledError clauses cannot catch it),
+        # stranding HEAD advance without item-bound salvage
+        # (PRRT_kwDOSJAM6s6Zo8Dt).
         unexpected_sink_error: BaseException | None = None
         if commit_dirty_changes:
             try:
@@ -602,29 +607,17 @@ async def _invoke_cli_for_verdict_result(
                     result_stdout=result_stdout,
                 )
                 raise
-        unexpected_end_head, unexpected_local_advanced, _, _ = await _evaluate_local_head_advance(
+        await _retain_failed_run_salvage_despite_cancellation(
             runner,
+            workspace_id=workspace_id,
             worktree_path=worktree_path,
             item_start_head=item_start_head,
-        )
-        _retain_or_clear_failed_run_salvage(
             state=state,
             salvage_item_id=salvage_item_id,
             salvage_body_hash=salvage_body_hash,
-            local_head_advanced=unexpected_local_advanced,
-            item_end_head=unexpected_end_head,
-            item_start_head=item_start_head,
             isolated_worktree_host_path=isolated_worktree_host_path,
             result_stdout=result_stdout,
-            retain_for_failed_run=True,
         )
-        if state is not None and salvage_item_id is not None:
-            await _await_failed_run_salvage_persist_shielded(
-                runner,
-                workspace_id,
-                state,
-                salvage_item_id=salvage_item_id,
-            )
         if unexpected_sink_error is not None:
             raise unexpected_sink_error from None
         raise
