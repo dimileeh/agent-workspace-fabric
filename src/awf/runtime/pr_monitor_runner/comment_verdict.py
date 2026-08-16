@@ -55,6 +55,7 @@ _FAIL_CLOSED_VERDICT_REASONS = frozenset(
         "unrecognized_or_markerless_verdict",
         "garbled_verdict_marker",
         "fixed_placeholder_echo",
+        "verdict_placeholder_echo",
     }
 )
 
@@ -315,11 +316,24 @@ async def _invoke_cli_for_verdict_result(
     if callable(rev_parse_end) and worktree_path.exists():
         item_end_head = await rev_parse_end(worktree_path)
 
-    local_head_advanced = (
+    local_head_advanced = False
+    if (
         item_start_head is not None
         and item_end_head is not None
         and item_end_head.lower() != item_start_head.lower()
-    )
+    ):
+        # SHA inequality alone accepts resets/checkouts to older tips. Require a
+        # forward-only ancestor relationship when the runner can verify it;
+        # otherwise fail closed and rely on dirty-commit / hosted evidence.
+        descends = getattr(runner, "_head_descends_from", None)
+        if callable(descends) and worktree_path.exists():
+            local_head_advanced = bool(
+                await descends(
+                    worktree_path=worktree_path,
+                    ancestor=item_start_head,
+                    descendant=item_end_head,
+                )
+            )
     hosted_head_advanced = bool(state is not None and state.hosted_terminal_head_advanced)
     # Dirty commit attributable to this invocation is also item-scoped evidence when
     # HEAD comparison is unavailable (stub runners / missing worktree).

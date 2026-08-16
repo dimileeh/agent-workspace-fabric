@@ -47,6 +47,7 @@ def _evidence_runner(
     dirty: bool,
     heads: list[str | None] | None = None,
     returncode: int = 0,
+    head_descends: bool | None = None,
 ) -> SimpleNamespace:
     """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
     head_iter = iter(heads or [])
@@ -74,6 +75,17 @@ def _evidence_runner(
         except StopIteration:
             return heads[-1] if heads else None
 
+    async def _head_descends_from(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        if head_descends is not None:
+            return head_descends
+        return ancestor.lower() != descendant.lower()
+
     async def _handle_provider_agent_run_error(
         _workspace_id: str,
         _exc: object,
@@ -87,6 +99,7 @@ def _evidence_runner(
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _rev_parse_head=_rev_parse_head,
+        _head_descends_from=_head_descends_from,
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -126,6 +139,66 @@ async def test_explicit_fixed_without_head_advance_stays_unresolved() -> None:
     result = await comments._invoke_cli_for_verdict_result(
         runner,
         workspace_id="ws_fixed_no_change",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_fixed_claim_with_forward_head_advance_is_fix_committed(
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    end = "b" * 40
+    workspace_id = "ws_fixed_forward"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: agent committed locally",
+        dirty=False,
+        heads=[end],
+        head_descends=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "fix_committed"
+    assert result.reason == "agent committed locally"
+
+
+@pytest.mark.unit
+async def test_fixed_claim_with_backward_head_move_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    start = "b" * 40
+    older = "a" * 40
+    workspace_id = "ws_fixed_backward"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reset to older tip",
+        dirty=False,
+        heads=[older],
+        head_descends=False,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
         prompt="p",
         commit_message="fix: x",
         compose_project="proj",

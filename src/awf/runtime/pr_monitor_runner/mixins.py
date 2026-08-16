@@ -16,6 +16,9 @@ from awf.runtime.pr_monitor_runner import operations as _operations
 from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import outdated_resolution as _outdated_resolution
 from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass as _pre_push_validation_fix_pass,
+)
 from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
@@ -107,6 +110,7 @@ class RunnerDelegatesMixin:
     _run_pre_push_validation_with_fix_passes = (
         _pre_push_validation._run_pre_push_validation_with_fix_passes
     )
+    _head_descends_from = _pre_push_validation_fix_pass._head_descends_from
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log
