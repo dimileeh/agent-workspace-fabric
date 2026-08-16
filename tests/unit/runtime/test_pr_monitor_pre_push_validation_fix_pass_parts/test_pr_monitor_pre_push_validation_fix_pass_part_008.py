@@ -242,6 +242,56 @@ async def test_commit_trees_differ_compares_resolved_trees(
 
 
 @pytest.mark.unit
+async def test_commit_trees_differ_disables_replace_and_graft_overrides(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tree proof must ignore refs/replace and grafts the same way ancestry does.
+
+    Regression for empty-descendant + ``refs/replace/<empty>`` FIXED forgery:
+    hardened ancestry alone is insufficient if ``rev-parse ^{tree}`` still
+    honors replace objects.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    monkeypatch.setenv("GIT_GRAFT_FILE", "/tmp/agent-grafts")
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/replace")
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_trees_differ(
+        runner,
+        worktree_path=worktree,
+        left="1" * 40,
+        right="2" * 40,
+    )
+
+    assert len(cmd.calls) == 2
+    for call in cmd.calls:
+        assert call.env is not None
+        assert call.env.get("GIT_NO_REPLACE_OBJECTS") == "1"
+        assert call.env.get("GIT_GRAFT_FILE") == os.devnull
+        assert "GIT_REPLACE_REF_BASE" not in call.env
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+
+@pytest.mark.unit
 async def test_commit_trees_differ_false_for_identical_or_unresolved_trees(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -345,4 +395,96 @@ async def test_commit_trees_differ_rejects_real_empty_commit(
         worktree_path=repo,
         left=start,
         right=content_tip,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_trees_differ_rejects_empty_commit_with_replace_forgery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real empty tip + refs/replace to a contentful commit must stay rejected.
+
+    Hardened ancestry still accepts the empty descendant; unhardened
+    ``rev-parse ^{tree}`` would see the replacement tree and falsely differ.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    monkeypatch.delenv("GIT_GRAFT_FILE", raising=False)
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    _git(repo, "config", "advice.graftFileDeprecated", "false")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "commit", "--allow-empty", "-qm", "empty")
+    empty_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.txt").write_text("forged-content\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    content_tree = _git(repo, "write-tree").stdout.strip()
+    forged = _git(
+        repo,
+        "commit-tree",
+        content_tree,
+        "-p",
+        start,
+        "-m",
+        "forged-contentful",
+    ).stdout.strip()
+    _git(repo, "update-ref", f"refs/replace/{empty_tip}", forged)
+    # Restore a clean worktree at the real empty tip without following replace.
+    subprocess.run(
+        ["git", "-C", str(repo), "reset", "--hard", empty_tip],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull},
+    )
+
+    # Unhardened git reports differing trees via the replace ref.
+    unhardened = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "rev-parse",
+            f"{start}^{{tree}}",
+            f"{empty_tip}^{{tree}}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unhardened.returncode == 0
+    start_tree, empty_via_replace = unhardened.stdout.strip().splitlines()
+    assert start_tree != empty_via_replace
+
+    # Ancestry of the real empty tip still holds under the hardened check.
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._head_descends_from(
+        runner,
+        worktree_path=repo,
+        ancestor=start,
+        descendant=empty_tip,
+    )
+    assert not await pre_push_validation._commit_trees_differ(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=empty_tip,
     )
