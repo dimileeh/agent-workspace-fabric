@@ -820,6 +820,29 @@ class TestParseVerdict:
         assert result.reason == "committed a regression test"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
+            'See "AWF-VERDICT: FIXED: example" then Status: AWF-VERDICT: SHIPPED: done',
+            'Cite "AWF-VERDICT: DEFER: track" Status: AWF-VERDICT: SHIPPED: done',
+            "`AWF-VERDICT: FIXED: x` Status: AWF-VERDICT: SHIPPED: done",
+            "Note 'AWF-VERDICT: FIXED: x' then Status: AWF-VERDICT: NEEDS_HUMAN: unsure",
+        ],
+    )
+    def test_private_awf_verdict_quoted_then_unquoted_mid_prose_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # Mid-prose lines kept whole (leading text before the first marker) must
+        # still fail closed when a quoted citation precedes a later unquoted
+        # marker — inspecting only the first match would leave is_attempt false
+        # and an earlier resolvable verdict would win (#822 PRRT_kwDOSJAM6s6ZmWN6).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_mid_prose_multi_marker_option_list_fail_closed(
         self,
     ) -> None:

@@ -940,16 +940,20 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     checkbox, emphasis, ATX heading, ``Final answer:``, and ``Verdict:`` /
     ``Result:`` wrappers are stripped first so those forms still match at the
     start when present.
+
+    Every marker on the segment is inspected: a quoted citation first must not
+    hide a later unquoted marker on a mid-prose line kept whole because the
+    first match had leading text (PRRT_kwDOSJAM6s6ZmWN6).
     """
     stripped = _strip_markdown_attempt_prefixes(segment)
-    match = _AWF_VERDICT_MARKER.search(stripped)
-    if match is None:
-        return False
-    if match.start() == 0:
-        return True
-    # Unquoted later markers fail closed; only confident quote/backtick
-    # embeddings are treated as prose citations of the grammar.
-    return not _awf_verdict_marker_embedded_in_reason_prose(stripped, match.start())
+    for match in _AWF_VERDICT_MARKER.finditer(stripped):
+        if match.start() == 0:
+            return True
+        # Unquoted later markers fail closed; only confident quote/backtick
+        # embeddings are treated as prose citations of the grammar.
+        if not _awf_verdict_marker_embedded_in_reason_prose(stripped, match.start()):
+            return True
+    return False
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
