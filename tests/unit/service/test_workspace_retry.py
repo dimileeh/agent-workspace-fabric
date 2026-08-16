@@ -21,7 +21,10 @@ from awf.service.workspaces import (
     create_workspace_row,
     retry_workspace_row,
 )
-from awf.service.workspaces_retry import _prune_retired_fallbacks
+from awf.service.workspaces_retry import (
+    _prune_and_migrate_retired_agent,
+    _prune_retired_fallbacks,
+)
 from tests.unit.service._workspace_retry_helpers import (
     _docker_ok,
     _mark_failed,
@@ -643,4 +646,69 @@ def test_prune_retired_fallbacks_handles_missing_or_invalid_structure() -> None:
         None,
         None,
         {"agent": "codex", "model": "gpt-5.5"},
+    ]
+
+
+async def test_retry_promotes_launchable_fallback_when_primary_retired(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True, exist_ok=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        first.agent = "gemini"
+        first.task_policy = {
+            **first.task_policy,
+            "provider_recovery": {
+                "fallbacks": [
+                    {"agent": "gemini-old", "model": "gemini-1.0"},
+                    {"agent": "codex", "model": "gpt-5.5"},
+                ]
+            },
+        }
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            settings=settings,
+            run_subprocess=_docker_ok,
+        )
+
+    assert retry.new_workspace.agent == "codex"
+    retried_policy = retry.new_workspace.task_policy
+    assert retried_policy.get("agent_model") == "gpt-5.5"
+    fallbacks = retried_policy.get("provider_recovery", {}).get("fallbacks", [])
+    assert fallbacks == [None, None]
+    preflight = retried_policy["provider_readiness_preflight"]
+    assert preflight["readiness_status"] == "ready"
+
+
+def test_prune_and_migrate_retired_agent_promotes_fallback() -> None:
+    policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "model": "gpt-5.5"},
+                {"agent": "opencode", "model": "opencode-1"},
+            ]
+        }
+    }
+    pruned, target_agent = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    assert target_agent == "codex"
+    assert pruned["agent_model"] == "gpt-5.5"
+    assert pruned["provider_recovery"]["fallbacks"] == [
+        None,
+        None,
+        {"agent": "opencode", "model": "opencode-1"},
     ]
