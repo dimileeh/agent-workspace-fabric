@@ -29,6 +29,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -1096,7 +1097,7 @@ class TestPullRequestMonitorAdoptionServicePart002:
             return _metadata(number=pr_number)
 
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "fetch_pull_request_adoption_metadata",
             _fake_fetch,
         )

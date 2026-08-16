@@ -30,6 +30,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     _LIVE_ADOPTION_STATUSES,
     PRMonitorAdoptionError,
@@ -840,9 +841,9 @@ class TestPullRequestMonitorAdoptionServicePart003:
             del logical_idempotency_key, task_external_id
             return []
 
-        monkeypatch.setattr(adoption_module, "_task_idempotency_key_family", _reserved_task_keys)
+        monkeypatch.setattr(adoption_helpers, "_task_idempotency_key_family", _reserved_task_keys)
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "_task_external_id_family_idempotency_keys",
             _reserved_external_keys,
         )

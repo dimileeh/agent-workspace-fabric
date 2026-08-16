@@ -10,6 +10,7 @@ from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Task, Workspace
 from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -654,7 +655,7 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             return await original_occupied(session, external_id)
 
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "_task_external_id_occupied",
             miss_preferred_on_first_attempt,
         )
@@ -742,7 +743,7 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             return await original_occupied(session, external_id)
 
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "_task_external_id_occupied",
             flip_preferred_after_first_probe,
         )

@@ -20,7 +20,7 @@ from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
-from awf.service import pr_monitor_adoption as adoption_mod
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     _adoption_external_id,
     pr_adoption_idempotency_key,
@@ -293,12 +293,12 @@ async def test_adopt_pr_rejects_hosted_execution_when_worker_delegation_unconfig
         )
 
     monkeypatch.setattr(
-        adoption_mod,
+        adoption_helpers,
         "hosted_delegation_config_from_service_settings",
         _raise_missing_worker_config,
     )
     monkeypatch.setattr(
-        adoption_mod,
+        adoption_helpers,
         "resolve_service_settings",
         lambda _settings: object(),
     )
