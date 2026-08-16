@@ -381,3 +381,21 @@ async def test_execution_validation_skips_fixes_and_conformance_for_retired_adap
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_kwargs["from_status"] == WorkspaceStatus.validating
     assert mark_kwargs["failure_reason"] == FailureReason.validation_failure
+
+
+@pytest.mark.unit
+def test_is_adapter_retired_handles_duck_typed_and_mock_objects() -> None:
+    """_is_adapter_retired returns True only when is_retired is explicitly True boolean."""
+    from unittest.mock import MagicMock
+
+    assert executor_execution_validation._is_adapter_retired(None) is False
+    assert executor_execution_validation._is_adapter_retired(SimpleNamespace()) is False
+
+    mock_retired = SimpleNamespace(is_retired=True)
+    assert executor_execution_validation._is_adapter_retired(mock_retired) is True
+
+    mock_active = SimpleNamespace(is_retired=False)
+    assert executor_execution_validation._is_adapter_retired(mock_active) is False
+
+    # Generic MagicMock auto-creates attributes as MagicMock objects (not bool True)
+    assert executor_execution_validation._is_adapter_retired(MagicMock()) is False

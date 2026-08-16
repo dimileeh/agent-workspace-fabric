@@ -96,6 +96,10 @@ from awf.runtime.validation_worktree import (
 )
 
 
+def _is_adapter_retired(adapter: Any) -> bool:
+    return getattr(adapter, "is_retired", False) is True
+
+
 async def run_validation_and_fix_cycle(
     self: Any,
     *,
@@ -142,7 +146,7 @@ async def run_validation_and_fix_cycle(
     # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
     max_fix_passes = (
         0
-        if (resume_disable_fix_passes or adapter is None or adapter.is_retired)
+        if (resume_disable_fix_passes or adapter is None or _is_adapter_retired(adapter))
         else self._config.max_validation_fix_passes
     )
     profile = _profile_for_workspace(
@@ -573,7 +577,7 @@ async def run_validation_and_fix_cycle(
             conformance_failure: _PlanningRunFailure | None = None
             if planning_validation_handoff is not None:
                 conformance_handoff = planning_validation_handoff
-                if adapter is None or adapter.is_retired:
+                if adapter is None or _is_adapter_retired(adapter):
                     conformance_failure = _PlanningRunFailure(
                         message="post-validation conformance check failed: agent adapter is unavailable",
                         reason_code=POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
@@ -810,7 +814,7 @@ async def run_validation_and_fix_cycle(
                         or remaining_conformance_iterations <= 0
                         or resume_disable_fix_passes
                         or adapter is None
-                        or adapter.is_retired
+                        or _is_adapter_retired(adapter)
                     ):
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
@@ -830,7 +834,7 @@ async def run_validation_and_fix_cycle(
                                 if (
                                     conformance_report_cleanup_failed
                                     or adapter is None
-                                    or adapter.is_retired
+                                    or _is_adapter_retired(adapter)
                                 )
                                 else FailureReason.agent_failure
                             ),
@@ -935,7 +939,7 @@ async def run_validation_and_fix_cycle(
         if (
             first_fail is None
             or adapter is None
-            or adapter.is_retired
+            or _is_adapter_retired(adapter)
             or (
                 not is_post_validation_conformance_fix_pass
                 and validation_fix_passes_used >= max_fix_passes
@@ -1061,7 +1065,7 @@ async def run_validation_and_fix_cycle(
                 _fix_prompt: str = fix_prompt,
                 _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
             ) -> AgentRunResult:
-                if adapter is None or adapter.is_retired:
+                if adapter is None or _is_adapter_retired(adapter):
                     raise RuntimeError("No agent adapter available for validation fix pass")
                 return await adapter.run(
                     compose_project=compose_project,
