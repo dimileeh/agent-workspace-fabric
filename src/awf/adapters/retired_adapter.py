@@ -86,28 +86,41 @@ class RetiredAgentAdapter(AgentAdapter):
         **kwargs: Any,
     ) -> AgentRunResult:
         del compose_project, compose_file, prompt, workspace_id, log_source, kwargs
+        from awf.adapters.provider_failures import classify_provider_failure
         from awf.common.commands import CommandResult
         from awf.service.provider_readiness import supported_launchable_agents
 
         supported = ", ".join(sorted(supported_launchable_agents()))
         message = f"agent runtime {self._runtime_str!r} is not supported; supported runtimes: {supported}."
         provider = self.get_provider(model)
+        classification = classify_provider_failure(
+            reason_code="UNSUPPORTED_AGENT_RUNTIME",
+            stdout="",
+            stderr=message,
+            provider=provider,
+            model=model,
+        )
+        provider_recovery = (
+            classification.to_metadata()
+            if classification is not None
+            else {
+                "reason_code": "UNSUPPORTED_AGENT_RUNTIME",
+                "failure_type": "unsupported_runtime",
+                "failure_scope": "provider",
+                "provider": provider,
+                "model": model,
+                "retryable": True,
+                "cooldown_seconds": 0,
+                "recommended_action": "Dispatch an approved fallback agent runtime.",
+                "fallback_allowed": True,
+            }
+        )
         raise AgentRunError(
             agent=self._runtime,
             result=CommandResult(returncode=1, stdout="", stderr=message),
             reason_code="UNSUPPORTED_AGENT_RUNTIME",
             details={
                 "agent": self._runtime_str,
-                "provider_recovery": {
-                    "reason_code": "UNSUPPORTED_AGENT_RUNTIME",
-                    "failure_type": "unsupported_runtime",
-                    "failure_scope": "provider",
-                    "provider": provider,
-                    "model": model,
-                    "retryable": True,
-                    "cooldown_seconds": 0,
-                    "recommended_action": "Dispatch an approved fallback agent runtime.",
-                    "fallback_allowed": True,
-                },
+                "provider_recovery": provider_recovery,
             },
         )

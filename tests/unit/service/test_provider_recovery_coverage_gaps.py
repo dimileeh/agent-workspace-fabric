@@ -1180,3 +1180,38 @@ def test_parse_provider_recovery_state_counts_active_targets_in_legacy_state() -
     state_zero = parse_provider_recovery_state(task_policy_zero)
     assert state_zero.fallback_attempt_number == 0
     assert state_zero.launched_fallback_attempts == 0
+
+
+def test_has_existing_provider_recovery_event_matches_retired_runtime_fingerprint() -> None:
+    import asyncio
+    from pathlib import Path
+
+    from awf.adapters.base import AgentRunError, RetiredAgentAdapter
+    from awf.common.commands import FakeCommandRunner
+
+    adapter = RetiredAgentAdapter(runtime="gemini", runner=FakeCommandRunner())
+    with pytest.raises(AgentRunError) as exc_info:
+        asyncio.run(
+            adapter.run(
+                compose_project="ws_test",
+                compose_file=Path("/tmp/compose.yml"),
+                prompt="fix issue",
+            )
+        )
+
+    err = exc_info.value
+    metadata = err.details["provider_recovery"]
+    assert "failure_fingerprint" in metadata
+    fingerprint = metadata["failure_fingerprint"]
+    assert fingerprint
+
+    workspace = SimpleNamespace(
+        events=[
+            _build_event(
+                event_type="workspace.provider_recovery_requested",
+                payload={"provider_recovery": {"failure_fingerprint": fingerprint}},
+            ),
+        ],
+    )
+
+    assert _has_existing_provider_recovery_event(workspace, metadata) is True

@@ -1066,6 +1066,8 @@ class TestRegistry:
             == "UNSUPPORTED_AGENT_RUNTIME"
         )
         assert exc_info.value.details["provider_recovery"]["retryable"] is True
+        assert "failure_fingerprint" in exc_info.value.details["provider_recovery"]
+        assert exc_info.value.details["provider_recovery"]["failure_fingerprint"]
 
     @pytest.mark.asyncio
     @pytest.mark.unit
