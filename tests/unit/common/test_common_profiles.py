@@ -103,7 +103,12 @@ def test_format_safe_validation_message_unknown_error_type() -> None:
         (("inline_profile", "runtime", "agent_image"), "inline_profile.runtime.agent_image"),
         # List indices
         (("validation_commands", 0), "validation_commands.0"),
-        (("validation_commands", "1"), "validation_commands.1"),
+        (("validation_commands", 1), "validation_commands.1"),
+        (("validation_commands", "1"), "validation_commands.<key>"),
+        # Numeric string keys (must be scrubbed to <key>)
+        (("inline_profile", "1234567890"), "inline_profile.<key>"),
+        (("profile", "1234567890"), "profile.<key>"),
+        (("1234567890",), "<key>"),
         # Dynamic dictionary keys after mapping fields
         (("runtime", "environment", "plainsecret48729"), "runtime.environment.<key>"),
         (("labels", "user_secret_key"), "labels.<key>"),

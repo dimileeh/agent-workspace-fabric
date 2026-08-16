@@ -316,7 +316,7 @@ def format_safe_validation_location(loc: Any) -> str:
         if prev_field in _DYNAMIC_MAPPING_FIELDS and not (prev_field == "ports" and in_services):
             formatted.append("<key>")
             prev_field = None
-        elif isinstance(part, int) or (isinstance(part, str) and part.isdigit()):
+        elif isinstance(part, int) and not isinstance(part, bool):
             formatted.append(str(part))
             prev_field = None
         else:
