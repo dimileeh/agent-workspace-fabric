@@ -37,18 +37,22 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
-# Loose workspace-id character class extending the ``service/orphans.py`` base
-# (which matches the pure ``ws_…`` parent id) so orphan GC can still reclaim
-# legacy/synthetic on-disk ids. ``re.fullmatch`` anchors it.
-# The class ``[A-Za-z0-9_.-]`` also admits ``.`` and ``-`` because companion
-# worktree ids are ``{workspace_id}__companion__{name}`` and a companion
-# ``ServiceName`` (api/schemas_companions.py) legitimately permits ``.`` and
-# ``-``; excluding them wrongly rejected ids like ``ws_…__companion__api.v2``.
-# ``/`` and null bytes stay excluded, and the leading ``(?!.*\.\.)`` lookahead
-# still forbids any ``..`` sequence — together the path-traversal risk at the
-# worktree sink. The required ``ws_`` prefix means the id can never be a bare
-# ``.`` or ``..`` component or start with ``.``.
-_WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
+# containment check, not an id-format check: orphan GC classifies *every*
+# on-disk ``ws_…`` directory (``service/orphans.py`` and
+# ``service/orphan_resources.py`` both scan on ``name.startswith("ws_")``), so
+# any grammar narrower than "safe single path component" makes legacy/synthetic
+# directories permanently un-reapable — the sink raises
+# ``GIT_WORKSPACE_ID_INVALID`` and the reaper records a failed reap instead of
+# falling back to filesystem deletion. So we admit every character that cannot
+# escape the worktree root (including ``.``/``-``, which companion ids
+# ``{workspace_id}__companion__{ServiceName}`` legitimately carry) and reject
+# only what can: the ``/`` and ``\`` path separators and null bytes. The
+# required ``ws_`` prefix means the id can never be empty, a bare ``.`` or
+# ``..`` component, or start with ``.``; the leading ``(?!.*\.\.)`` lookahead
+# (``DOTALL`` so an embedded newline cannot hide the sequence from ``.*``)
+# still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
+_WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
@@ -492,10 +496,11 @@ class GitManager:
         """Validate a caller-supplied workspace id and return its worktree path.
 
         Single sink for ``self._worktrees_dir / workspace_id``. Rejects ids that
-        could escape the worktree root (``..``, ``/``, a leading ``.``, null
-        bytes, empty) so the value handed to destructive git commands is always a
-        safe single path component. Uses the same loose character class as orphan
-        GC for compatibility; never silently sanitizes a bad id — it rejects it.
+        could escape the worktree root (``..``, ``/``, ``\\``, a leading ``.``,
+        null bytes, empty) so the value handed to destructive git commands is
+        always a safe single path component; every other character is accepted so
+        orphan GC can reap any ``ws_…`` directory its scanners classify, whatever
+        produced the name. Never silently sanitizes a bad id — it rejects it.
         """
         if not _WORKSPACE_ID_RE.fullmatch(workspace_id):
             raise GitOperationError(

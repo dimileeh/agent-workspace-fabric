@@ -881,6 +881,8 @@ _BAD_IDS = [
     "ws_a..b",  # embedded ".." without a slash (dot/hyphen class must still reject)
     "ws_x__companion__..",  # companion name ".." must not reach the sink
     "ws_abc/def",  # contains "/"
+    "ws_abc\\def",  # contains "\" (a separator on Windows)
+    "ws_a\n..b",  # ".." hidden behind a newline from the lookahead's ".*"
     "ws_abc\x00",  # null byte
     ".hidden",  # leading "."
     "",  # empty string
@@ -891,6 +893,8 @@ _BAD_ID_LABELS = [
     "embedded-dotdot",
     "companion-dotdot",
     "slash",
+    "backslash",
+    "newline-dotdot",
     "null-byte",
     "leading-dot",
     "empty",
@@ -1030,6 +1034,27 @@ class TestWorkspaceIdValidation:
         # can legitimately contain them. The sink must accept these or companion
         # provision / head_sha / cleanup wrongly raise GIT_WORKSPACE_ID_INVALID.
         workspace_id = f"ws_deadbeef__companion__{companion_name}"
+        assert (
+            manager._worktree_path_for(workspace_id)  # noqa: SLF001
+            == manager._worktrees_dir / workspace_id
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "workspace_id",
+        ["ws_legacy:name", "ws_legacy name", "ws_legacy@host", "ws_legacy+1", "ws_"],
+        ids=["colon", "space", "at-sign", "plus", "bare-prefix"],
+    )
+    def test_worktree_path_for_accepts_any_safe_single_path_component(
+        self, manager: GitManager, workspace_id: str
+    ) -> None:
+        # Orphan GC classifies EVERY on-disk directory whose name starts with
+        # ``ws_`` (service/orphans.py and service/orphan_resources.py), so a
+        # legacy/synthetic name using characters outside the currently generated
+        # id grammar still reaches this sink. Rejecting it here made the reap fail
+        # permanently with GIT_WORKSPACE_ID_INVALID instead of falling back to
+        # filesystem deletion; anything that cannot escape the worktree root must
+        # be accepted.
         assert (
             manager._worktree_path_for(workspace_id)  # noqa: SLF001
             == manager._worktrees_dir / workspace_id
