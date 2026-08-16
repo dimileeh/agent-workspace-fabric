@@ -521,6 +521,10 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     ``‘``/``’`` open/close independently so mid-quote citations (Markdown code
     spans, typographic prompt echoes) stay embedded, while a closing delimiter
     immediately before a real trailing marker does not.
+
+    ASCII ``'`` is only a quote delimiter when it is not a word-internal
+    apostrophe (``don't``, ``user's``); naive toggle would absorb a later
+    unquoted same-line marker into an earlier resolvable verdict.
     """
     if match_start <= 0:
         return False
@@ -529,11 +533,12 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     inside_backtick = False
     inside_curly_double = False
     inside_curly_single = False
-    for char in verdict_line[:match_start]:
+    for index, char in enumerate(verdict_line[:match_start]):
         if char == '"':
             inside_ascii_double = not inside_ascii_double
         elif char == "'":
-            inside_ascii_single = not inside_ascii_single
+            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
+                inside_ascii_single = not inside_ascii_single
         elif char == "`":
             inside_backtick = not inside_backtick
         elif char == "“":
@@ -551,6 +556,24 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
         or inside_curly_double
         or inside_curly_single
     )
+
+
+def _ascii_single_quote_is_delimiter(
+    verdict_line: str, index: int, inside_ascii_single: bool
+) -> bool:
+    """Return whether ``verdict_line[index]`` is an ASCII single-quote delimiter.
+
+    Word-internal apostrophes before a lowercase continuation (``don't``,
+    ``user's``, ``it's``) never toggle quote state. Outside a quote, only open
+    when the previous character is not alphanumeric so plural possessives like
+    ``users'`` do not start a span. A closer jammed against a following token
+    (``'AWF-VERDICT``) still closes because the next character is not lowercase.
+    """
+    prev = verdict_line[index - 1] if index > 0 else ""
+    nxt = verdict_line[index + 1] if index + 1 < len(verdict_line) else ""
+    if prev.isalnum() and nxt.islower():
+        return False
+    return inside_ascii_single or not prev.isalnum()
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:

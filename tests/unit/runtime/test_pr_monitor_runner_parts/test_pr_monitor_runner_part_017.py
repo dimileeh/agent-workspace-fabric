@@ -522,6 +522,35 @@ class TestParseVerdict:
         assert result.reason == "real trailing"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_apostrophe_in_reason_does_not_absorb_trailing_marker(
+        self,
+    ) -> None:
+        # ASCII apostrophes in contractions/possessives must not toggle quote state
+        # or a later unquoted same-line marker is treated as embedded and absorbed
+        # (#822 PRRT_kwDOSJAM6s6ZlVIN). Use an odd count so naive toggle cannot
+        # accidentally land outside-quote again.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: don't absorb the trailing blocker "
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must decide"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_apostrophe_in_reason_trailing_garbled_still_fail_closed(
+        self,
+    ) -> None:
+        # Same apostrophe trap must not absorb a trailing garbled marker into an
+        # earlier resolvable verdict (#822 PRRT_kwDOSJAM6s6ZlVIN).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: it's already correct AWF-VERDICT: SHIPPED: done"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_trailing_garbled_marker_fail_closed(
         self,
     ) -> None:
