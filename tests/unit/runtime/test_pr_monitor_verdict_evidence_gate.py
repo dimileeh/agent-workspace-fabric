@@ -613,6 +613,8 @@ async def test_salvage_retained_before_provider_recovery_retry_raise(
     [
         "post_commit_ownership_repair",
         "protected_scope_provider_recovery",
+        "service_recovery_failed",
+        "service_recovery_superseded",
         "cancelled_after_commit",
     ],
 )
@@ -628,9 +630,11 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     so cancellation during post-commit ownership repair has the same gap unless
     salvage is retained before propagating (PRRT_kwDOSJAM6s6Zmn1b). Without
     retaining evidence from that exception path, a later no-change FIXED at the
-    tip becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT). Cancellation
-    must also persist salvage to the DB so a worker reload does not drop the keys
-    (PRRT_kwDOSJAM6s6ZmsZQ).
+    tip becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT). All
+    commit-sink raises — including service-recovery failed/superseded, which the
+    outer runner catches without ``_persist_state`` — must selectively durable-
+    persist salvage before re-raise so a worker reload does not drop the keys
+    (PRRT_kwDOSJAM6s6ZmsZQ, PRRT_kwDOSJAM6s6Zm-Yt).
     """
     import asyncio
 
@@ -642,6 +646,8 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     from awf.runtime.pr_monitor_runner.types import (
         ProviderRecoveryRetryError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
     )
 
     sink_exc: BaseException
@@ -651,14 +657,22 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
         )
     elif sink_kind == "cancelled_after_commit":
         sink_exc = asyncio.CancelledError()
+    elif sink_kind == "service_recovery_failed":
+        sink_exc = _MonitorAgentServiceRecoveryFailedError(
+            "service recovery failed after sink HEAD advance"
+        )
+    elif sink_kind == "service_recovery_superseded":
+        sink_exc = _MonitorAgentServiceRecoverySupersededError(
+            "service recovery superseded after sink HEAD advance"
+        )
     else:
         sink_exc = ProviderRecoveryRetryError()
 
     start = "a" * 40
     salvaged = "b" * 40
-    item_id = "PRRT_salvage_sink_raise"
-    body_hash = "feedback_body_hash_sink_raise"
-    workspace_id = "ws_salvage_sink_raise"
+    item_id = f"PRRT_salvage_sink_raise_{sink_kind}"
+    body_hash = f"feedback_body_hash_sink_raise_{sink_kind}"
+    workspace_id = f"ws_salvage_sink_raise_{sink_kind}"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
     persisted_snapshots: list[dict[str, str]] = []
@@ -693,7 +707,7 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
         persisted_snapshots.append(snap)
 
     async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
-        raise AssertionError("cancel salvage must not call full _persist_state")
+        raise AssertionError("commit-sink salvage must not call full _persist_state")
 
     failed_runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
     failed_runner._persist_state = _persist_state
@@ -714,17 +728,17 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
     assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
-    if sink_kind == "cancelled_after_commit":
-        # Cancellation must flush salvage before re-raise; Exception paths rely on
-        # the outer loop / provider-error handler to persist.
-        assert persisted_snapshots
-        assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
-        assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
-        assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
-        # Simulate worker reload: drop in-memory keys and restore from the durable
-        # snapshot that cancellation persisted.
-        state = MonitorState()
-        state.threads_addressed_ids.update(persisted_snapshots[-1])
+    # Every commit-sink raise must flush salvage before re-raise. Exception paths
+    # cannot rely on the outer runner: recovery failed/superseded return without
+    # ``_persist_state`` (PRRT_kwDOSJAM6s6Zm-Yt).
+    assert persisted_snapshots
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    # Simulate worker reload: drop in-memory keys and restore from the durable
+    # snapshot that the commit-sink path persisted.
+    state = MonitorState()
+    state.threads_addressed_ids.update(persisted_snapshots[-1])
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after sink raise",

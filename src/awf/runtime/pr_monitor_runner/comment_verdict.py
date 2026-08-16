@@ -585,7 +585,9 @@ async def _invoke_cli_for_verdict_result(
     # becomes fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmirT). Also retain
     # before ``_handle_provider_agent_run_error``, which persists then raises.
     # ``CancelledError`` bypasses ``except Exception``; retain before propagating
-    # cancellation (PRRT_kwDOSJAM6s6Zmn1b).
+    # cancellation (PRRT_kwDOSJAM6s6Zmn1b). Service-recovery failed/superseded
+    # from the sink must selectively durable-persist before re-raise — the outer
+    # runner returns without ``_persist_state`` (PRRT_kwDOSJAM6s6Zm-Yt).
     commit_sink_error: BaseException | None = None
     committed_dirty_changes = False
     if commit_dirty_changes:
@@ -699,6 +701,16 @@ async def _invoke_cli_for_verdict_result(
     )
 
     if commit_sink_error is not None:
+        # In-memory salvage alone is lost when the outer runner catches
+        # ``_MonitorAgentServiceRecoveryFailedError`` /
+        # ``_MonitorAgentServiceRecoverySupersededError`` and returns without
+        # ``_persist_state`` (runner.py). Persist only ``__salvaged_fix_*``
+        # keys before re-raising — same selective merge as CancelledError /
+        # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt).
+        if state is not None and salvage_item_id is not None:
+            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+            if callable(persist):
+                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
         raise commit_sink_error from None
 
     if agent_run_err is not None:
