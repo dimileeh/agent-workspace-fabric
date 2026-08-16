@@ -818,8 +818,11 @@ async def _reject_unsupported_agent_runtime(
     from get_adapter.
     """
     from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents
+    from awf.service.provider_recovery import has_approved_launchable_fallback
 
     if not is_launchable_agent(workspace.agent):
+        if has_approved_launchable_fallback(workspace.task_policy):
+            return False
         supported = ", ".join(sorted(supported_launchable_agents()))
         message = (
             f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."

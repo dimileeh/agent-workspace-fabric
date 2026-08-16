@@ -1156,6 +1156,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         """Fail fast unsupported agent runtimes before provisioning; return True if rejected."""
         message = _provisioner_helpers.check_unsupported_agent_runtime(workspace.agent)
         if message is not None:
+            from awf.service.provider_recovery import has_approved_launchable_fallback
+
+            if has_approved_launchable_fallback(workspace.task_policy):
+                return False
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.policy_failure,

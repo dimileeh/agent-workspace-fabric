@@ -923,6 +923,22 @@ def _select_fallback_target(
     return target
 
 
+def has_approved_launchable_fallback(
+    task_policy: Mapping[str, Any] | None,
+) -> bool:
+    """Return True if task_policy has an approved launchable provider recovery fallback."""
+    if not task_policy:
+        return False
+    policy = parse_provider_recovery_policy(task_policy)
+    state = parse_provider_recovery_state(task_policy)
+    target = _select_fallback_target(policy, state)
+    if target is None or not target.agent:
+        return False
+    from awf.service.provider_readiness import is_launchable_agent
+
+    return is_launchable_agent(target.agent)
+
+
 def _select_fallback_target_with_index(
     policy: ProviderRecoveryPolicy,
     state: ProviderRecoveryState,
