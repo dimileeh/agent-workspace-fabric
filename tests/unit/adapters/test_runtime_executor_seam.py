@@ -852,6 +852,51 @@ class TestRuntimeExecutorSeam:
         assert exc.value.reason_code == "AGENT_CLI_FAILED"
 
     @pytest.mark.unit
+    async def test_hosted_cancellation_when_execute_task_already_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancellation when execute_task is already done discards result directly."""
+        discarded_tasks: list[asyncio.Task[AgentRuntimeExecResult]] = []
+        original_discard = base_module._discard_hosted_execute_task_result
+
+        def _record_discard(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+            discarded_tasks.append(task)
+            original_discard(task)
+
+        monkeypatch.setattr(base_module, "_discard_hosted_execute_task_result", _record_discard)
+
+        async def _cancelled_wait(
+            tasks: set[asyncio.Task[AgentRuntimeExecResult]], timeout: float | None = None
+        ) -> tuple[
+            set[asyncio.Task[AgentRuntimeExecResult]], set[asyncio.Task[AgentRuntimeExecResult]]
+        ]:
+            del timeout
+            await asyncio.gather(*tasks)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(base_module.asyncio, "wait", _cancelled_wait)
+
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(returncode=0, stdout="done", stderr="")
+        )
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancel_fast_done",
+            )
+
+        assert len(discarded_tasks) == 1
+        assert discarded_tasks[0].done()
+
+    @pytest.mark.unit
     async def test_hosted_path_streams_to_log_store(self) -> None:
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(returncode=0, stdout="line1\nline2\n", stderr="warn\n")

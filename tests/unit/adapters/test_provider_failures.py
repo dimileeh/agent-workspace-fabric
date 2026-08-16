@@ -316,3 +316,32 @@ def test_lint_rule_ids_containing_401_are_not_auth_failures() -> None:
     )
 
     assert classification is None
+
+
+def test_classifies_capacity_failure() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="server overloaded, try again later",
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+    )
+    assert classification is not None
+    assert classification.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert classification.failure_type == "capacity"
+
+
+def test_classifies_service_unhealthy_on_timeout() -> None:
+    from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
+
+    classification = classify_provider_failure(
+        reason_code=AGENT_TIMEOUT,
+        stdout="",
+        stderr="timeout",
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+        service_healthy=False,
+    )
+    assert classification is not None
+    assert classification.reason_code == AGENT_SERVICE_UNHEALTHY
+    assert classification.failure_type == "runtime_unhealthy"

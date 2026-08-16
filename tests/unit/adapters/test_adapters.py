@@ -1056,9 +1056,20 @@ class TestRegistry:
     @pytest.mark.unit
     async def test_run_agent_cli_non_streaming_without_sinks(self) -> None:
         """_run_agent_cli non-streaming path works cleanly without sinks (workspace_id=None)."""
-        runner = FakeCommandRunner()
-        runner.queue_result(stdout="cli stdout", stderr="cli stderr")
-        adapter = OpenCodeAdapter(runner=runner)
+
+        class _NonStreamingRunner:
+            async def run(
+                self,
+                args: list[str],
+                *,
+                input_bytes: bytes | None = None,
+                env: dict[str, str] | None = None,
+                timeout: float | None = None,
+            ) -> CommandResult:
+                del args, input_bytes, env, timeout
+                return CommandResult(returncode=0, stdout="cli stdout", stderr="cli stderr")
+
+        adapter = OpenCodeAdapter(runner=_NonStreamingRunner())
         res = await adapter.run(
             compose_project="awf_ws_test",
             compose_file=Path("/tmp/compose.yml"),
