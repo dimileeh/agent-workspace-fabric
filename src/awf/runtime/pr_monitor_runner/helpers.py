@@ -281,6 +281,11 @@ _FINAL_ANSWER_ATTEMPT_PREFIX = re.compile(
 # strip — a trailing emphasized marker must fail closed rather than leave an
 # earlier resolvable verdict selected.
 _MARKDOWN_EMPHASIS_PREFIX = re.compile(r"^(?:\*{1,3}|_{1,3})(?=\S)")
+# Leading ATX Markdown headings (``# AWF-VERDICT: …``, ``### AWF-VERDICT: …``).
+# CommonMark allows 1–6 hashes followed by whitespace. Attempt-only strip —
+# ``search()`` still finds the marker while a start-only attempt check would
+# leave ``###`` intact and keep an earlier resolvable verdict selected.
+_MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
@@ -592,15 +597,20 @@ def _strip_markdown_emphasis_prefix(stripped: str) -> str:
     return _MARKDOWN_EMPHASIS_PREFIX.sub("", stripped, count=1)
 
 
+def _strip_markdown_heading_prefix(stripped: str) -> str:
+    """Remove a leading ATX Markdown heading marker (``#``–``######``), if present."""
+    return _MARKDOWN_HEADING_PREFIX.sub("", stripped, count=1)
+
+
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
 
-    Do not yield Markdown-list-, task-list-, blockquote-, or emphasis-stripped
-    variants here. Those prefixes are stripped only in
+    Do not yield Markdown-list-, task-list-, blockquote-, emphasis-, or
+    heading-stripped variants here. Those prefixes are stripped only in
     ``_awf_verdict_segment_is_attempt`` so garbled finals fail closed; treating
-    ``- AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``, ``> AWF-VERDICT: …``, or
-    ``**AWF-VERDICT: …**`` as a successful match would let quoted/option-list
-    lines override an earlier hard block.
+    ``- AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``, ``> AWF-VERDICT: …``,
+    ``**AWF-VERDICT: …**``, or ``### AWF-VERDICT: …`` as a successful match
+    would let quoted/option-list lines override an earlier hard block.
     """
     yield stripped
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
@@ -877,18 +887,20 @@ def _strip_markdown_attempt_prefixes(segment: str) -> str:
 
     Agents may nest them in either order (``- > AWF-VERDICT: …``,
     ``> - > AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``,
-    ``Final answer: AWF-VERDICT: …``, ``**AWF-VERDICT: …**``). One-pass
-    blockquote-then-list leaves a residual ``>`` after ``- >``, plain list
-    strip leaves ``[ ]`` after a GFM task-list item, and a bare start-only
-    check misses ``Final answer:`` / emphasis wrappers — so the marker no
-    longer looks like a leading attempt.
+    ``Final answer: AWF-VERDICT: …``, ``**AWF-VERDICT: …**``,
+    ``### AWF-VERDICT: …``). One-pass blockquote-then-list leaves a residual
+    ``>`` after ``- >``, plain list strip leaves ``[ ]`` after a GFM task-list
+    item, and a bare start-only check misses ``Final answer:`` / emphasis /
+    heading wrappers — so the marker no longer looks like a leading attempt.
     """
     normalized = segment.lstrip()
     while True:
-        stripped = _strip_markdown_emphasis_prefix(
-            _strip_final_answer_attempt_prefix(
-                _strip_markdown_task_list_checkbox(
-                    _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+        stripped = _strip_markdown_heading_prefix(
+            _strip_markdown_emphasis_prefix(
+                _strip_final_answer_attempt_prefix(
+                    _strip_markdown_task_list_checkbox(
+                        _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+                    )
                 )
             )
         )
@@ -903,10 +915,11 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
     attempts; only segments that begin with the marker count toward the
     final-marker fail-closed gate. Leading Markdown blockquote, list,
-    task-list checkbox, emphasis, and ``Final answer:`` wrappers are stripped
-    first so ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …`` /
+    task-list checkbox, emphasis, ATX heading, and ``Final answer:`` wrappers
+    are stripped first so ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …`` /
     ``- [ ] AWF-VERDICT: …`` / ``Final answer: AWF-VERDICT: …`` /
-    ``**AWF-VERDICT: …**`` still count as garbled finals.
+    ``**AWF-VERDICT: …**`` / ``### AWF-VERDICT: …`` still count as garbled
+    finals.
     """
     return _AWF_VERDICT_MARKER.match(_strip_markdown_attempt_prefixes(segment)) is not None
 
