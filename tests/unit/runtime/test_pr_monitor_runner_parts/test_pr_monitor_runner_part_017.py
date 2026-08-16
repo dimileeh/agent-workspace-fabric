@@ -2082,6 +2082,39 @@ class TestParseVerdict:
         assert result.reason == ("already corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar")
 
     @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_hyphenated_self_correction_stays_absorbed(
+        self,
+    ) -> None:
+        # Compound ``self-correction:`` must not match the explicit separator
+        # (hyphen in the boundary class). Treating it as a self-correction would
+        # split a later resolvable marker and clear the NEEDS_HUMAN hard block
+        # (#822 PRRT_kwDOSJAM6s6ZnuQ0).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: docs mention self-correction: "
+            "AWF-VERDICT: FIXED: cited grammar"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("docs mention self-correction: AWF-VERDICT: FIXED: cited grammar")
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fixed_hyphenated_self_correction_stays_absorbed(
+        self,
+    ) -> None:
+        # Same compound-word guard under FIXED absorption so a cited
+        # ``self-correction:`` cannot become FALSE POSITIVE without HEAD advance
+        # (#822 PRRT_kwDOSJAM6s6ZnuQ0).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: docs mention self-correction: "
+            "AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == (
+            "docs mention self-correction: AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+
+    @pytest.mark.unit
     def test_private_awf_verdict_bare_corrected_prose_stays_absorbed(
         self,
     ) -> None:

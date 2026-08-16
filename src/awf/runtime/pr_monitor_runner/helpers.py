@@ -1245,9 +1245,11 @@ def _awf_verdict_leading_fixed_absorbs_later_marker(
 # Explicit self-correction before a later same-line marker
 # (``…; correction: AWF-VERDICT: …`` / ``…; corrected to: AWF-VERDICT: …``).
 # Bare past-participle ``corrected:`` is ordinary reason prose and must not
-# split (PRRT_kwDOSJAM6s6Znq6K).
+# split (PRRT_kwDOSJAM6s6Znq6K). Compound hyphenations like ``self-correction:``
+# must not count either — the boundary hyphen would otherwise clear a
+# NEEDS_HUMAN hard block (PRRT_kwDOSJAM6s6ZnuQ0).
 _EXPLICIT_VERDICT_CORRECTION_SEPARATOR = re.compile(
-    r"(?is)(?:^|[\s;,.:—–-])(?:correction|corrected\s+to)\s*:\s*\Z"
+    r"(?is)(?:^|[\s;,.:—–]|(?<![A-Za-z0-9])-)(?:correction|corrected\s+to)\s*:\s*\Z"
 )
 
 
