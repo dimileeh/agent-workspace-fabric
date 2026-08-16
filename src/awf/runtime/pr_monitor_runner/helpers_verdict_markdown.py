@@ -76,8 +76,9 @@ _BARE_VERDICT_LINE = re.compile(
 # ``FIXED: …`` are also treated as placeholders — not ``...real content``.
 # Callers that check reasons also decode HTML entities (``&lt;reason&gt;``,
 # nested ``&amp;lt;…&amp;gt;``) and CommonMark backslash escapes
-# (``\<reason\>``) against this same anchored pattern
-# (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z).
+# (``\<reason\>``), including mixed layers (``\&lt;reason\&gt;``), against
+# this same anchored pattern (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG,
+# PRRT_kwDOSJAM6s6ZpA-z, PRRT_kwDOSJAM6s6ZpHXM).
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"^\s*(?:"
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"

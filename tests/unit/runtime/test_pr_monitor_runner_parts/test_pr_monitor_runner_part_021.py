@@ -167,19 +167,30 @@ class TestParseVerdict:
             r"AWF-VERDICT: DEFER: \<what to track\>",
             # Nested backslash escapes still decode to a placeholder.
             r"AWF-VERDICT: FALSE POSITIVE: \\\<reason\\\>",
+            # Mixed HTML-entity + CommonMark backslash escapes need successive
+            # normalization; either transform alone leaves a layer behind
+            # (PRRT_kwDOSJAM6s6ZpHXM).
+            r"AWF-VERDICT: FALSE POSITIVE: \&lt;reason\&gt;",
+            r"AWF-VERDICT: FALSE POSITIVE: \&lt;one-sentence justification\&gt;",
+            r"AWF-VERDICT: FALSE POSITIVE: `\&lt;reason\&gt;`",
+            r"AWF-VERDICT: FIXED: \&lt;one-sentence summary\&gt;",
+            r"AWF-VERDICT: DEFER: \&lt;what to track\&gt;",
+            r"AWF-VERDICT: FALSE POSITIVE: \&amp;lt;reason\&amp;gt;",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
         # Balanced quote/backtick/Markdown-strong/strikethrough wrappers around a
         # template placeholder must not leave the echo as a usable reason
         # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG).
-        # Single emphasis is peeled only when the enclosed value is
-        # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are
-        # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S),
-        # including image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M).
+        # Single emphasis is peeled only when the enclosed value is placeholder-
+        # shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are peeled the
+        # same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S), including
+        # image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M).
         # HTML entity-escaped whole-reason echoes must also fail closed
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
-        # CommonMark backslash escapes (``\<reason\>``) likewise (PRRT_kwDOSJAM6s6ZpA-z).
+        # CommonMark backslash escapes (``\<reason\>``) likewise
+        # (PRRT_kwDOSJAM6s6ZpA-z). Mixed HTML + backslash layers must decode
+        # successively (PRRT_kwDOSJAM6s6ZpHXM).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -229,6 +240,12 @@ class TestParseVerdict:
                 r"AWF-VERDICT: FALSE POSITIVE: added the \<summary\> section",
                 r"added the \<summary\> section",
             ),
+            # Mixed HTML + backslash mid-reason tags stay usable after successive
+            # decode (PRRT_kwDOSJAM6s6ZpHXM).
+            (
+                r"AWF-VERDICT: FALSE POSITIVE: added the \&lt;summary\&gt; section",
+                r"added the \&lt;summary\&gt; section",
+            ),
         ],
     )
     def test_private_awf_entity_escaped_mid_reason_tag_still_usable(
@@ -236,7 +253,8 @@ class TestParseVerdict:
     ) -> None:
         # Anchored placeholder detection must not treat mid-reason entity-escaped
         # tags as whole-reason template echoes (PRRT_kwDOSJAM6s6Zoyj2).
-        # Same for CommonMark backslash escapes (PRRT_kwDOSJAM6s6ZpA-z).
+        # Same for CommonMark backslash escapes (PRRT_kwDOSJAM6s6ZpA-z) and
+        # mixed HTML + backslash layers (PRRT_kwDOSJAM6s6ZpHXM).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "false_positive"

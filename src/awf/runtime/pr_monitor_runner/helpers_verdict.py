@@ -428,12 +428,13 @@ def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
     shaped tags that continue with real prose (no absorbed marker) stay usable.
 
     HTML entity-escaped whole-reason echoes (``&lt;reason&gt;``, numeric
-    ``&#60;…&#62;``, and nested ``&amp;lt;…&amp;gt;``) and CommonMark
-    backslash-escaped echoes (``\\<reason\\>``) are decoded only for this
-    anchored check so escaped template paste cannot resolve as a substantive
-    reason, while mid-reason prose containing entity- or backslash-escaped tags
-    stays usable (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG,
-    PRRT_kwDOSJAM6s6ZpA-z).
+    ``&#60;…&#62;``, and nested ``&amp;lt;…&amp;gt;``), CommonMark
+    backslash-escaped echoes (``\\<reason\\>``), and mixed layers
+    (``\\&lt;reason\\&gt;``) are decoded successively only for this anchored
+    check so escaped template paste cannot resolve as a substantive reason,
+    while mid-reason prose containing entity- or backslash-escaped tags stays
+    usable (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z,
+    PRRT_kwDOSJAM6s6ZpHXM).
 
     Callers must pass text that has already been through
     ``_normalize_verdict_reason_inline_formatting`` (or an equivalent peel) so
@@ -457,6 +458,9 @@ _VERDICT_REASON_HTML_UNESCAPE_MAX_PASSES = 4
 # Same bound for nested CommonMark backslash escapes (``\\\<reason\\\>`` →
 # ``\<reason\>`` → ``<reason>``).
 _VERDICT_REASON_BACKSLASH_UNESCAPE_MAX_PASSES = 4
+# Alternating HTML + CommonMark passes for mixed layers such as
+# ``\&lt;reason\&gt;`` (each transform alone leaves one encoding behind).
+_VERDICT_REASON_MIXED_ESCAPE_MAX_PASSES = 4
 # CommonMark: a backslash before any ASCII punctuation yields the literal.
 _COMMONMARK_BACKSLASH_ESCAPED_PUNCT = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 
@@ -488,23 +492,39 @@ def _commonmark_backslash_unescape_to_stable(text: str) -> str:
     return decoded
 
 
+def _mixed_escape_unescape_to_stable(text: str) -> str:
+    """Decode interleaved HTML entities and CommonMark backslash escapes.
+
+    Independent HTML-only or backslash-only normalization leaves one layer on
+    mixed echoes such as ``\\&lt;reason\\&gt;`` (HTML → ``\\<reason\\>``,
+    backslash → ``&lt;reason&gt;``). Alternate both until stable so the
+    placeholder matcher sees ``<reason>`` (PRRT_kwDOSJAM6s6ZpHXM).
+    """
+    decoded = text
+    for _ in range(_VERDICT_REASON_MIXED_ESCAPE_MAX_PASSES):
+        nxt = _html_unescape_to_stable(decoded)
+        nxt = _commonmark_backslash_unescape_to_stable(nxt)
+        if nxt == decoded:
+            return decoded
+        decoded = nxt
+    return decoded
+
+
 def _text_matches_verdict_reason_template_placeholder(text: str) -> bool:
     """Return whether ``text`` matches the anchored template-placeholder pattern.
 
-    Tries the raw text first, then a bounded HTML-entity-decoded copy so
-    ``&lt;reason&gt;`` / ``&#60;reason&#62;`` / nested ``&amp;lt;…&amp;gt;``
-    whole-reason echoes fail closed, then a bounded CommonMark backslash-
-    unescaped copy so ``\\<reason\\>`` likewise fails closed — without
-    loosening the anchored match for mid-reason prose (PRRT_kwDOSJAM6s6Zoyj2,
-    PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z).
+    Tries the raw text first, then a bounded copy with HTML entities and
+    CommonMark backslash escapes applied successively until stable so
+    ``&lt;reason&gt;`` / ``&#60;reason&#62;`` / nested ``&amp;lt;…&amp;gt;``,
+    ``\\<reason\\>``, and mixed ``\\&lt;reason\\&gt;`` whole-reason echoes fail
+    closed — without loosening the anchored match for mid-reason prose
+    (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z,
+    PRRT_kwDOSJAM6s6ZpHXM).
     """
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(text):
         return True
-    decoded = _html_unescape_to_stable(text)
-    if decoded != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded) is not None:
-        return True
-    unescaped = _commonmark_backslash_unescape_to_stable(text)
-    return unescaped != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(unescaped) is not None
+    decoded = _mixed_escape_unescape_to_stable(text)
+    return decoded != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded) is not None
 
 
 def _verdict_reason_is_template_placeholder(reason: str) -> bool:
