@@ -605,30 +605,164 @@ def _html_complete_code_self_closes(line: str) -> bool:
     return _HTML_COMPLETE_CODE_SELF_CLOSING.match(_normalize_markdown_fence_line(line)) is not None
 
 
+def _independent_region_mask_for_code_close_lookahead(
+    lines: Sequence[str],
+) -> tuple[bool, ...]:
+    """Mark lines inside shields independent of complete ``<code>`` hybrid.
+
+    Look-ahead for a hybrid ``</code>`` must ignore closers that only appear
+    inside Markdown fences, HTML comments, and other regions that exist whether
+    or not hybrid ``<code>`` mode is chosen — otherwise a fenced/comment example
+    ``</code>`` falsely enables hybrid shielding and can suppress a later
+    top-level ``NEEDS_HUMAN`` (PRRT_kwDOSJAM6s6ZpoBt). Complete ``<code>``
+    openers are not entered here so a real unshielded ``</code>`` still counts.
+    """
+    n = len(lines)
+    masked = [False] * n
+    fence: str | None = None
+    fence_container_indent = 0
+    fence_blockquote_depth = 0
+    html_tag: str | None = None
+    html_comment = False
+    html_pi = False
+    html_declaration = False
+    html_declaration_blockquote_depth = 0
+    html_cdata = False
+    html_blank_terminated = False
+    html_blank_terminated_blockquote_depth = 0
+    for idx, line in enumerate(lines):
+        if fence is not None:
+            masked[idx] = True
+            if _markdown_fence_closes(
+                line,
+                fence=fence,
+                container_indent=fence_container_indent,
+                blockquote_depth=fence_blockquote_depth,
+            ):
+                fence = None
+                fence_container_indent = 0
+                fence_blockquote_depth = 0
+            continue
+        if html_comment:
+            masked[idx] = True
+            if _html_comment_closes(line):
+                html_comment = False
+            continue
+        if html_pi:
+            masked[idx] = True
+            if _html_processing_instruction_closes(line):
+                html_pi = False
+            continue
+        if html_declaration:
+            masked[idx] = True
+            if _html_declaration_closes(line, blockquote_depth=html_declaration_blockquote_depth):
+                html_declaration = False
+                html_declaration_blockquote_depth = 0
+            continue
+        if html_cdata:
+            masked[idx] = True
+            if _html_cdata_closes(line):
+                html_cdata = False
+            continue
+        if html_tag is not None:
+            masked[idx] = True
+            if _html_code_block_closes(line, html_tag):
+                html_tag = None
+            continue
+        if html_blank_terminated:
+            masked[idx] = True
+            if _html_blank_terminated_block_closes(
+                line, blockquote_depth=html_blank_terminated_blockquote_depth
+            ):
+                html_blank_terminated = False
+                html_blank_terminated_blockquote_depth = 0
+            continue
+        if _markdown_is_indented_code_line(line):
+            masked[idx] = True
+            continue
+        if _html_comment_opens(line):
+            masked[idx] = True
+            if not _html_comment_closes(line):
+                html_comment = True
+            continue
+        if _html_processing_instruction_opens(line):
+            masked[idx] = True
+            if not _html_processing_instruction_closes(line):
+                html_pi = True
+            continue
+        if _html_cdata_opens(line):
+            masked[idx] = True
+            if not _html_cdata_closes(line):
+                html_cdata = True
+            continue
+        if _html_declaration_opens(line):
+            masked[idx] = True
+            decl_bq_depth = _markdown_blockquote_container_depth(line)
+            if not _html_declaration_closes(line, blockquote_depth=decl_bq_depth):
+                html_declaration = True
+                html_declaration_blockquote_depth = decl_bq_depth
+            continue
+        if _html_type6_block_opens(line) or _html_type7_block_opens(line):
+            # Do not treat complete ``<code>`` as an independent blank-terminated
+            # region — that would mask a real later ``</code>`` and defeat hybrid
+            # look-ahead. Self-closing / never-closed complete openers stay free.
+            if _html_complete_code_opens(line):
+                continue
+            # Standalone ``</code>`` is itself a type-7 line; leave it unmasked so
+            # hybrid look-ahead can count it (PRRT_kwDOSJAM6s6ZpoBt /
+            # PRRT_kwDOSJAM6s6ZpLqP).
+            if _html_code_block_closes(line, "code"):
+                continue
+            opened_bq_depth = _markdown_blockquote_container_depth(line)
+            masked[idx] = True
+            if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
+                html_blank_terminated = True
+                html_blank_terminated_blockquote_depth = opened_bq_depth
+            continue
+        opened_html = _html_code_block_open_tag(line)
+        if opened_html is not None:
+            masked[idx] = True
+            if not _html_code_block_closes(line, opened_html):
+                html_tag = opened_html
+            continue
+        opened = _markdown_fence_open_marker(line)
+        if opened is not None:
+            masked[idx] = True
+            fence = opened
+            fence_container_indent = _markdown_fence_list_container_indent(line)
+            fence_blockquote_depth = _markdown_blockquote_container_depth(line)
+            continue
+    return tuple(masked)
+
+
 def _precompute_html_code_close_appears_from(lines: Sequence[str]) -> tuple[bool, ...]:
-    """Return whether a ``</code>`` appears at or after each index (O(n)).
+    """Return whether an unshielded ``</code>`` appears at or after each index.
 
     Reverse scan once so complete ``<code>`` openers can O(1)-check for a later
     closer instead of rescanning the remaining suffix on every opener
-    (PRRT_kwDOSJAM6s6ZpaIp).
+    (PRRT_kwDOSJAM6s6ZpaIp). Closers inside independent Markdown/HTML regions
+    (fences, comments, …) are ignored so they cannot falsely enable hybrid
+    shielding (PRRT_kwDOSJAM6s6ZpoBt).
     """
     n = len(lines)
     appears_from = [False] * n
+    independent = _independent_region_mask_for_code_close_lookahead(lines)
     seen_close = False
     for i in range(n - 1, -1, -1):
-        if _html_code_block_closes(lines[i], "code"):
+        if not independent[i] and _html_code_block_closes(lines[i], "code"):
             seen_close = True
         appears_from[i] = seen_close
     return tuple(appears_from)
 
 
 def _html_code_close_appears_later(lines: Sequence[str], start: int) -> bool:
-    """Return whether a ``</code>`` closer appears at or after ``start``.
+    """Return whether an unshielded ``</code>`` appears at or after ``start``.
 
     Used so never-closed complete ``<code>`` openers keep type-7 blank
     termination instead of hybrid forever-shielding (PRRT_kwDOSJAM6s6ZpTPI).
     Prefer ``_precompute_html_code_close_appears_from`` inside the line
     iterator so repeated openers stay linear (PRRT_kwDOSJAM6s6ZpaIp).
+    Shielded closers (fences/comments/…) do not count (PRRT_kwDOSJAM6s6ZpoBt).
     """
     if start < 0 or start >= len(lines):
         return False
@@ -815,8 +949,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_blank_terminated_blockquote_depth = 0
     html_code_blank_tail = False
     lines = stdout.splitlines()
-    # One reverse pass: later ``</code>`` lookups stay O(1) per opener so
-    # blank-separated unclosed ``<code>`` lines stay linear (PRRT_kwDOSJAM6s6ZpaIp).
+    # One reverse pass: later unshielded ``</code>`` lookups stay O(1) per
+    # opener so blank-separated unclosed ``<code>`` lines stay linear
+    # (PRRT_kwDOSJAM6s6ZpaIp); fenced/comment closers are ignored
+    # (PRRT_kwDOSJAM6s6ZpoBt).
     html_code_close_from = _precompute_html_code_close_appears_from(lines)
     for idx, line in enumerate(lines):
         if fence is not None:

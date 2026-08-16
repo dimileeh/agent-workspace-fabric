@@ -469,6 +469,70 @@ class TestParseVerdict:
         assert _html_code_close_appears_later(lines, -1) is False
 
     @pytest.mark.unit
+    def test_html_code_close_appears_later_ignores_fenced_closer(self) -> None:
+        # A ``</code>`` only inside a Markdown fence must not count as a later
+        # hybrid closer (PRRT_kwDOSJAM6s6ZpoBt).
+        lines = ["<code>", "body", "```", "</code>", "```", "after"]
+
+        assert _html_code_close_appears_later(lines, 0) is False
+        assert _html_code_close_appears_later(lines, 1) is False
+
+    @pytest.mark.unit
+    def test_html_code_close_appears_later_ignores_comment_closer(self) -> None:
+        # Same for HTML comments: example ``</code>`` text is not a hybrid
+        # closer (PRRT_kwDOSJAM6s6ZpoBt).
+        lines = ["<code>", "body", "<!--", "</code>", "-->", "after"]
+
+        assert _html_code_close_appears_later(lines, 0) is False
+        assert _html_code_close_appears_later(lines, 1) is False
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fenced_code_closer_does_not_hybrid_suppress_needs_human(
+        self,
+    ) -> None:
+        # Context-insensitive look-ahead treated fenced ``</code>`` as a real
+        # closer, entered hybrid shielding past the blank, and suppressed the
+        # explicit NEEDS_HUMAN so an earlier FIXED stayed authoritative
+        # (PRRT_kwDOSJAM6s6ZpoBt).
+        stdout = (
+            "AWF-VERDICT: FIXED: earlier evidence-backed fix\n"
+            "<code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example inside\n"
+            "\n"
+            "AWF-VERDICT: NEEDS_HUMAN: agent blocked this\n"
+            "```\n"
+            "</code>\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "agent blocked this"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_comment_code_closer_does_not_hybrid_suppress_needs_human(
+        self,
+    ) -> None:
+        # Same defect when the only later ``</code>`` sits inside an HTML
+        # comment (PRRT_kwDOSJAM6s6ZpoBt).
+        stdout = (
+            "AWF-VERDICT: FIXED: earlier evidence-backed fix\n"
+            "<code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example inside\n"
+            "\n"
+            "AWF-VERDICT: NEEDS_HUMAN: agent blocked this\n"
+            "<!--\n"
+            "</code>\n"
+            "-->\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "agent blocked this"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "tag",
         ["script", "style", "textarea"],
