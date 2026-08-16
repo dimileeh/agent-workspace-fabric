@@ -22,10 +22,6 @@ from awf.control.worker import cleanup as worker_cleanup
 from awf.control.worker import helpers as worker_helpers
 from awf.control.worker import recovery_preserved_queries as worker_recovery_preserved_queries
 from awf.control.worker import recovery_stale as worker_recovery_stale
-from awf.control.worker.constants import (
-    _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-    _STALE_ACTIVE_EXECUTION_REASON_CODE,
-)
 from awf.control.worker.helpers import (
     _active_execution_preservation_claim_cleanup_payload,
     _exception_chain_has_sqlalchemy_error,
@@ -52,10 +48,7 @@ from awf.db.resilience import (
 from awf.db.session import make_session_factory
 from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.runtime.inspection import RuntimeSnapshot
-from awf.service.workspace_runtime_health import (
-    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-)
+from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
 
 
@@ -1272,6 +1265,90 @@ async def test_record_stale_active_execution_detected_skips_diverged_or_fresh_cl
 
 
 @pytest.mark.unit
+async def test_fail_stranded_workspace_skips_fresh_execution_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace(
+        id="ws_fresh_claim",
+        status=WorkspaceStatus.running.value,
+        execution_claimed_by="worker-live",
+        execution_claim_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        failure_reason=None,
+    )
+    repo_calls: list[str] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.committed = False
+
+        async def __aenter__(self) -> RecordingSession:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class RecordingWorkspaceRepository:
+        def __init__(self, _session: RecordingSession) -> None:
+            pass
+
+        async def get_for_update(self, workspace_id: str) -> Workspace:
+            repo_calls.append(f"get:{workspace_id}")
+            return workspace
+
+        async def transition_if_current(self, *_args: object, **_kwargs: object) -> None:
+            repo_calls.append("transition_if_current")
+            raise AssertionError("fresh execution claim should skip guarded transition")
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            repo_calls.append("add_event")
+            raise AssertionError("fresh execution claim should skip event recording")
+
+    async def _load_failure_causality_snapshot(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("fresh execution claim should skip failure causality load")
+
+    recording_session = RecordingSession()
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "WorkspaceRepository",
+        RecordingWorkspaceRepository,
+    )
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "load_failure_causality_snapshot",
+        _load_failure_causality_snapshot,
+    )
+    worker = SimpleNamespace(_session_factory=lambda: recording_session)
+    finding = WorkspaceRuntimeFinding(
+        workspace_id=workspace.id,
+        workspace_status=WorkspaceStatus.running.value,
+        status="stranded",
+        reason_code="STRANDED_WORKSPACE",
+        decision="fail_workspace",
+        message="runtime is stranded",
+    )
+
+    await worker_recovery_stale._fail_stranded_workspace(  # noqa: SLF001
+        worker,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_fresh_claim",
+        ),
+        RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+        finding,
+    )
+
+    assert repo_calls == ["get:ws_fresh_claim"]
+    assert recording_session.committed is False
+    assert workspace.status == WorkspaceStatus.running.value
+    assert workspace.failure_reason is None
+    assert workspace.execution_claimed_by == "worker-live"
+
+
+@pytest.mark.unit
 def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
     cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
@@ -1400,40 +1477,4 @@ async def test_record_preserved_active_execution_skips_missing_workspace(
             compose_project_name="awf_missing",
         ),
         RuntimeSnapshot(stack_state="running", services=[]),
-    )
-
-
-@pytest.mark.unit
-async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Regression coverage for stale active execution can fail rejects preserved runtime."""
-    workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
-    worker = _worker(factory)
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
-        assert ws is not None
-        ws.execution_claimed_by = "stale-worker"
-        ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=30)
-        await repo.add_event(
-            ws,
-            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-            payload={"workspace_status": WorkspaceStatus.running.value},
-        )
-        await repo.add_event(
-            ws,
-            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-            payload={"workspace_status": WorkspaceStatus.running.value},
-        )
-        await session.commit()
-
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
-        _ActiveExecutionCandidate(
-            workspace_id=workspace_id,
-            status=WorkspaceStatus.running,
-            compose_project_name=f"awf_{workspace_id}",
-        )
     )
