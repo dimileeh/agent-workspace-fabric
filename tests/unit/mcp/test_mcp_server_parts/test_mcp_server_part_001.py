@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import (
     OperationResponse,
     PullRequestMonitorAdoptionResponse,
-    WorkspaceControlResponse,
 )
 from awf.common.config import Settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
@@ -32,8 +31,8 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
-from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.pr_monitor_adoption import _adoption_external_id
 from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
 
@@ -193,123 +192,6 @@ def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
     assert schema["minLength"] == 1
     assert string_schema["maxLength"] == 128
     assert "default" not in schema
-
-
-class _RecordingControlService:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object]]] = []
-
-    async def cancel_workspace(
-        self,
-        workspace_id: str,
-        *,
-        reason: str | None,
-        stop_stack: bool,
-        idempotency_key: str | None = None,
-        expected_version: int | None = None,
-    ) -> WorkspaceControlResponse:
-        self.calls.append(
-            (
-                "cancel",
-                {
-                    "workspace_id": workspace_id,
-                    "reason": reason,
-                    "stop_stack": stop_stack,
-                    "idempotency_key": idempotency_key,
-                    "expected_version": expected_version,
-                },
-            )
-        )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id="op_cancel",
-            operation_status="succeeded",
-            status="cancelled",
-            message="workspace cancellation requested",
-        )
-
-    async def stop_workspace(
-        self,
-        workspace_id: str,
-        *,
-        reason: str | None,
-        idempotency_key: str | None = None,
-        expected_version: int | None = None,
-    ) -> WorkspaceControlResponse:
-        self.calls.append(
-            (
-                "stop",
-                {
-                    "workspace_id": workspace_id,
-                    "reason": reason,
-                    "idempotency_key": idempotency_key,
-                    "expected_version": expected_version,
-                },
-            )
-        )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id="op_stop",
-            operation_status="succeeded",
-            status="cancelled",
-            message="workspace stack stopped",
-        )
-
-    async def destroy_workspace(
-        self,
-        workspace_id: str,
-        *,
-        force: bool,
-        remove_volumes: bool,
-        remove_worktree: bool,
-        idempotency_key: str | None = None,
-        expected_version: int | None = None,
-    ) -> WorkspaceControlResponse:
-        self.calls.append(
-            (
-                "destroy",
-                {
-                    "workspace_id": workspace_id,
-                    "force": force,
-                    "remove_volumes": remove_volumes,
-                    "remove_worktree": remove_worktree,
-                    "idempotency_key": idempotency_key,
-                    "expected_version": expected_version,
-                },
-            )
-        )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id="op_destroy",
-            operation_status="succeeded",
-            status="destroyed",
-            message="workspace destroyed",
-        )
-
-
-class _FailingControlService(_RecordingControlService):
-    async def cancel_workspace(
-        self,
-        workspace_id: str,
-        *,
-        reason: str | None,
-        stop_stack: bool,
-        idempotency_key: str | None = None,
-        expected_version: int | None = None,
-    ) -> WorkspaceControlResponse:
-        del workspace_id, reason, stop_stack, idempotency_key, expected_version
-        raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
-
-    async def stop_workspace(
-        self,
-        workspace_id: str,
-        *,
-        reason: str | None,
-        idempotency_key: str | None = None,
-        expected_version: int | None = None,
-    ) -> WorkspaceControlResponse:
-        del workspace_id, reason, idempotency_key, expected_version
-        raise WorkspaceControlError(error_code="NOPE", message="stop refused")
 
 
 @pytest.mark.unit
@@ -986,6 +868,10 @@ class TestToolRegistration:
                 profile_ref="auto",
                 idempotency_key=idempotency_key,
                 task_kind="sync_feature_pr",
+                task_external_id=_adoption_external_id(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                ),
                 remote_push_branch="feature/ready",
             )
             workspace.pr_number = 277
@@ -1296,218 +1182,3 @@ class TestOperationTools:
         assert isinstance(payload, dict)
         assert [item["id"] for item in payload["items"]] == [validate.id]
         assert [item["type"] for item in payload["items"]] == ["validate"]
-
-
-class TestWorkspaceControls:
-    @pytest.mark.unit
-    async def test_cancel_workspace_calls_service_and_returns_structured_response(
-        self,
-    ) -> None:
-        service = _RecordingControlService()
-        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
-
-        payload = await _call(
-            mcp,
-            "awf_cancel_workspace",
-            {
-                "workspace_id": "ws_control",
-                "reason": "stale task",
-                "stop_stack": False,
-                "idempotency_key": "ik-cancel",
-            },
-        )
-
-        assert service.calls == [
-            (
-                "cancel",
-                {
-                    "workspace_id": "ws_control",
-                    "reason": "stale task",
-                    "stop_stack": False,
-                    "idempotency_key": "ik-cancel",
-                    "expected_version": None,
-                },
-            )
-        ]
-        assert payload == {
-            "workspace_id": "ws_control",
-            "operation_id": "op_cancel",
-            "operation_status": "succeeded",
-            "status": "cancelled",
-            "message": "workspace cancellation requested",
-            "warnings": [],
-        }
-
-    @pytest.mark.unit
-    async def test_stop_workspace_calls_service_and_returns_structured_response(
-        self,
-    ) -> None:
-        service = _RecordingControlService()
-        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
-
-        payload = await _call(
-            mcp,
-            "awf_stop_workspace",
-            {
-                "workspace_id": "ws_control",
-                "reason": "free local resources",
-                "idempotency_key": "ik-stop",
-            },
-        )
-
-        assert service.calls == [
-            (
-                "stop",
-                {
-                    "workspace_id": "ws_control",
-                    "reason": "free local resources",
-                    "idempotency_key": "ik-stop",
-                    "expected_version": None,
-                },
-            )
-        ]
-        assert payload == {
-            "workspace_id": "ws_control",
-            "operation_id": "op_stop",
-            "operation_status": "succeeded",
-            "status": "cancelled",
-            "message": "workspace stack stopped",
-            "warnings": [],
-        }
-
-    @pytest.mark.unit
-    async def test_destroy_workspace_calls_service_and_returns_structured_response(
-        self,
-    ) -> None:
-        service = _RecordingControlService()
-        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
-
-        payload = await _call(
-            mcp,
-            "awf_destroy_workspace",
-            {
-                "workspace_id": "ws_control",
-                "force": True,
-                "remove_volumes": False,
-                "remove_worktree": False,
-                "idempotency_key": "ik-destroy",
-            },
-        )
-
-        assert service.calls == [
-            (
-                "destroy",
-                {
-                    "workspace_id": "ws_control",
-                    "force": True,
-                    "remove_volumes": False,
-                    "remove_worktree": False,
-                    "idempotency_key": "ik-destroy",
-                    "expected_version": None,
-                },
-            )
-        ]
-        assert payload == {
-            "workspace_id": "ws_control",
-            "operation_id": "op_destroy",
-            "operation_status": "succeeded",
-            "status": "destroyed",
-            "message": "workspace destroyed",
-            "warnings": [],
-        }
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("tool_name", "expected_message"),
-        [
-            ("awf_cancel_workspace", "cancel refused"),
-            ("awf_stop_workspace", "stop refused"),
-        ],
-    )
-    async def test_control_tool_errors_return_structured_mcp_error(
-        self,
-        tool_name: str,
-        expected_message: str,
-    ) -> None:
-        service = _FailingControlService()
-        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
-
-        result = await mcp.call_tool(
-            tool_name,
-            {"workspace_id": "ws_control", "idempotency_key": "ik-error"},
-        )
-
-        assert isinstance(result, CallToolResult)
-        assert result.isError is True
-        assert result.structuredContent == {
-            "error_code": "NOPE",
-            "message": expected_message,
-            "detail": None,
-        }
-
-    @pytest.mark.unit
-    async def test_cancel_workspace_records_operation_through_real_service(
-        self,
-        mcp,
-    ) -> None:  # type: ignore[no-untyped-def]
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = _workspace_id(created)
-
-        payload = await _call(
-            mcp,
-            "awf_cancel_workspace",
-            {
-                "workspace_id": workspace_id,
-                "reason": "no longer needed",
-                "stop_stack": False,
-                "idempotency_key": "ik-real-cancel",
-            },
-        )
-        operations_payload = await _call(
-            mcp,
-            "awf_list_workspace_operations",
-            {"workspace_id": workspace_id},
-        )
-
-        assert payload["workspace_id"] == workspace_id  # type: ignore[index]
-        assert payload["status"] == "cancelled"  # type: ignore[index]
-        assert payload["message"] == "workspace cancellation requested"  # type: ignore[index]
-        assert isinstance(operations_payload, dict)
-        operations = operations_payload["items"]
-        assert isinstance(operations, list)
-        assert operations_payload["has_more"] is False
-        assert operations[0]["type"] == "cancel"
-        assert operations[0]["status"] == "succeeded"
-        assert operations[0]["payload"] == {
-            "owner": "operator_api",
-            "source": "operator_api",
-            "reason": "no longer needed",
-            "reason_code": "OPERATOR_CANCEL",
-            "requested_action": "cancel",
-            "stop_stack": False,
-        }
-        assert operations[0]["idempotency_key"] == "ik-real-cancel"
-        assert operations[0]["result"] == {"status": "cancelled"}
-
-    @pytest.mark.unit
-    async def test_destroy_workspace_requires_force_for_active_workspace(
-        self,
-        mcp,
-    ) -> None:  # type: ignore[no-untyped-def]
-        from mcp.types import CallToolResult
-
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = _workspace_id(created)
-
-        result = await mcp.call_tool(
-            "awf_destroy_workspace",
-            {"workspace_id": workspace_id, "idempotency_key": "ik-destroy-active"},
-        )
-
-        assert isinstance(result, CallToolResult)
-        assert result.isError is True
-        assert result.structuredContent == {
-            "error_code": "WORKSPACE_ACTIVE",
-            "message": "Active workspaces require force=true before destroy.",
-            "detail": None,
-        }

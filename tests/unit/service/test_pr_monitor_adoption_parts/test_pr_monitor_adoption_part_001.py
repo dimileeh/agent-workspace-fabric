@@ -1230,6 +1230,10 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 profile_ref="auto",
                 idempotency_key=idempotency_key,
                 task_kind="sync_feature_pr",
+                task_external_id=adoption_module._adoption_external_id(
+                    repo_slug="acme/app",
+                    pr_number=123,
+                ),
                 remote_push_branch="feature/test",
             )
             workspace.pr_number = 123
