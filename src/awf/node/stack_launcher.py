@@ -278,7 +278,7 @@ def _clarification_agent_environment(
     *,
     auth_mounts: Sequence[AuthMount],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
     prefer_file_auth: bool = True,
 ) -> tuple[tuple[str, str], ...]:
@@ -430,7 +430,7 @@ def _is_clarification_git_auth_environment(name: str) -> bool:
 def _clarification_model_provider_environment_names(
     agent_environment: tuple[tuple[str, str], ...],
     *,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
 ) -> frozenset[str]:
     """Return selected runtime env names available to a clarification re-ask.
@@ -448,7 +448,11 @@ def _clarification_model_provider_environment_names(
             | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
         )
 
-    provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES.get(agent_runtime, frozenset()))
+    provider_names = set(
+        _CLARIFICATION_RUNTIME_ENV_NAMES.get(agent_runtime, frozenset())
+        if isinstance(agent_runtime, AgentRuntime)
+        else frozenset()
+    )
     if agent_runtime is AgentRuntime.opencode:
         provider_names.update(
             _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(
@@ -536,7 +540,7 @@ def _clarification_auth_mounts(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return read-only provider sources staged at destinations writable by ``agent``."""
@@ -571,7 +575,7 @@ def _clarification_resolve_google_credentials_placeholder(
     agent_environment: tuple[tuple[str, str], ...],
     *,
     auth_mounts: Sequence[AuthMount],
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
 ) -> tuple[tuple[str, str], ...]:
     """Replace a self-referential ADC Compose value with its concrete target."""
 
@@ -627,7 +631,7 @@ def _clarification_resolve_aws_web_identity_token_file_placeholder(
     agent_environment: tuple[tuple[str, str], ...],
     *,
     auth_mounts: Sequence[AuthMount],
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
 ) -> tuple[tuple[str, str], ...]:
     """Replace Bedrock web identity Compose values with their concrete targets."""
 
@@ -683,7 +687,7 @@ def _clarification_provider_auth_mounts(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
     provider_environment_names: frozenset[str] | None = None,
 ) -> tuple[AuthMount, ...]:
@@ -741,7 +745,7 @@ def _clarification_credential_process_environment_names(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None,
     provider_environment_names: frozenset[str],
 ) -> frozenset[str]:
@@ -792,7 +796,7 @@ def _clarification_aws_profile_mount_targets(
 def _clarification_model_provider_auth_mount_targets(
     agent_environment: tuple[tuple[str, str], ...],
     *,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
     provider_environment_names: frozenset[str] | None = None,
 ) -> frozenset[str]:
@@ -803,8 +807,10 @@ def _clarification_model_provider_auth_mount_targets(
         agent_runtime=agent_runtime,
         agent_model=agent_model,
     )
-    runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS.get(
-        agent_runtime, frozenset()
+    runtime_auth_mount_targets = (
+        _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS.get(agent_runtime, frozenset())
+        if isinstance(agent_runtime, AgentRuntime)
+        else frozenset()
     )
     if (
         agent_runtime is AgentRuntime.claude_code
@@ -927,7 +933,7 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
-    agent_runtime: AgentRuntime = AgentRuntime.codex
+    agent_runtime: AgentRuntime | str = AgentRuntime.codex
     agent_model: str | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
     clarification_enabled: bool = True

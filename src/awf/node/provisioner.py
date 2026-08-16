@@ -141,6 +141,13 @@ _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 _log = get_logger(__name__)
 
 
+def _parse_agent_runtime(agent: str) -> AgentRuntime | str:
+    try:
+        return AgentRuntime(agent)
+    except ValueError:
+        return agent
+
+
 class ServiceStartupDiagnosticsCapturer(Protocol):
     """Best-effort capturer of companion diagnostics on a service-startup failure.
 
@@ -215,8 +222,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
-        agent = AgentRuntime(workspace.agent)
-        defaults = self._config.agent_defaults.get(agent)
+        try:
+            agent: AgentRuntime | None = AgentRuntime(workspace.agent)
+        except ValueError:
+            agent = None
+        defaults = self._config.agent_defaults.get(agent) if agent is not None else None
         task_policy = workspace.task_policy
         raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
         effort = raw_effort.strip() if isinstance(raw_effort, str) else None
@@ -382,7 +392,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_runtime=_parse_agent_runtime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
                         clarification_enabled=clarification_enabled,
@@ -623,7 +633,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_runtime=_parse_agent_runtime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
                         clarification_enabled=clarification_enabled,

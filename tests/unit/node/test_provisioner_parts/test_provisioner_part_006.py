@@ -511,3 +511,61 @@ class TestFailureHandlingEdgesPart006:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_provisioning_allows_unknown_agent_runtime_string_with_approved_fallback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        """A workspace with an unknown string agent runtime that has an approved launchable fallback
+        must not crash during provisioning and must reach ready status so fallback recovery can dispatch.
+        """
+        git_called = False
+
+        class _MockGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                nonlocal git_called
+                git_called = True
+                from awf.node.git_manager import WorktreeLayout
+
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="awf/test",
+                )
+
+            async def head_sha(self, *args: Any, **kwargs: Any) -> str:
+                return "sha"
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_MockGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        task_policy = {
+            "provider_recovery": {
+                "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+            }
+        }
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="unknown_custom_agent",
+                test_commands=[],
+                task_policy=task_policy,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert git_called is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value

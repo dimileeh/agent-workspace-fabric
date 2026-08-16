@@ -741,7 +741,7 @@ def external_account_subject_token_file_rewrites(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """Map selected external-account credential-source paths to staged copies."""
@@ -805,7 +805,7 @@ def aws_profile_path_rewrites(
     *,
     agent_environment: tuple[tuple[str, str], ...],
     mirror_target: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """Map active AWS profile references to the corresponding staged copies."""
