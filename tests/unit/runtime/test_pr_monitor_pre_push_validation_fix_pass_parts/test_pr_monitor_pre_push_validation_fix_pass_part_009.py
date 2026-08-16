@@ -88,7 +88,11 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="enable_guard()",
         head_blob="x_enable_guard()",
     )
-    assert _added_salvage_blob_retained(commit_blob="", head_blob="anything\n")
+    # Empty-file addition salvage: only an exact empty tip blob retains it.
+    # Vacuous ``"" in head`` / early-True would accept an overwrite and let a
+    # later no-change FIXED retry reuse stale evidence (PRRT_kwDOSJAM6s6ZpEZh).
+    assert _added_salvage_blob_retained(commit_blob="", head_blob="")
+    assert not _added_salvage_blob_retained(commit_blob="", head_blob="anything\n")
 
 
 @pytest.mark.unit

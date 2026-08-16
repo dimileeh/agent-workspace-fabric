@@ -212,9 +212,12 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     the match must start at file start or after a newline, and if the salvage
     lacks a trailing newline it must end at EOF or before a newline — so the
     added patch remains a whole-line block, not a modified occurrence.
+
+    An empty salvage blob (new empty file) is a vacuous substring of every tip;
+    retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
     """
     if not commit_blob:
-        return True
+        return not head_blob
     start = 0
     while True:
         idx = head_blob.find(commit_blob, start)
