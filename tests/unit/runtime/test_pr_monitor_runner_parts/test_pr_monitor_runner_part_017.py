@@ -246,11 +246,18 @@ class TestParseVerdict:
         assert result.reason == "track follow-up separately"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_defer_placeholder_only_has_no_reason(self) -> None:
+    def test_private_awf_verdict_defer_placeholder_only_fail_closed(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: DEFER: <defer follow-up needed>")
 
-        assert result.verdict == "defer"
-        assert result.reason is None
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_false_positive_placeholder_only_fail_closed(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
 
     @pytest.mark.unit
     def test_private_awf_verdict_fixed_placeholder_only_fail_closed(self) -> None:

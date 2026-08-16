@@ -277,7 +277,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # no-reason final verdict is otherwise the agent's last word and must not be
     # trumped by an earlier non-blocking verdict (e.g. false_positive).
     # Blocking final verdicts remain authoritative even with no usable reason.
-    # Standalone FIXED placeholder echoes fail closed (never ``fix_committed``).
+    # Standalone resolvable placeholder echoes fail closed (never resolve).
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
@@ -307,6 +307,25 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             for parsed in reversed(verdicts[:-1]):
                 if parsed.verdict == latest_verdict and parsed.reason is not None:
                     return parsed
+            # Template-placeholder echoes (reason sanitized to None) fail closed for
+            # every resolvable verdict. FIXED placeholders may still fall back to an
+            # earlier reasoned hard block (#676); FALSE POSITIVE / DEFER placeholders
+            # never resolve on their own.
+            if (
+                latest_verdict in _RESOLVABLE_PLACEHOLDER_LABELS
+                and _last_awf_resolvable_reason_is_placeholder(stdout, verdict=latest_verdict)
+            ):
+                if latest_verdict == "fix_committed":
+                    for parsed in reversed(verdicts[:-1]):
+                        if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
+                            return parsed
+                    bare_blocking = _select_bare_verdict(
+                        bare_verdicts,
+                        priorities=("needs_human", "defer"),
+                    )
+                    if bare_blocking is not None:
+                        return bare_blocking
+                return _fail_closed_resolvable_placeholder_if_needed(stdout, latest)
             if latest_verdict in {"defer", "needs_human"}:
                 return latest
             for parsed in reversed(verdicts[:-1]):
@@ -318,7 +337,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             )
             if bare_blocking is not None:
                 return bare_blocking
-            return _fail_closed_fixed_placeholder_if_needed(stdout, latest)
+            return latest
         return latest
     selected_bare = _select_bare_verdict(
         bare_verdicts,
@@ -335,21 +354,31 @@ def _stdout_mentions_awf_verdict(stdout: str) -> bool:
     return bool(re.search(r"\bAWF-VERDICT\s*:", stdout, re.IGNORECASE))
 
 
-def _last_awf_fixed_reason_is_placeholder(stdout: str) -> bool:
-    """Return whether the final AWF FIXED line is a template-placeholder echo."""
+_RESOLVABLE_PLACEHOLDER_LABELS = {
+    "fix_committed": "fixed",
+    "false_positive": "false positive",
+    "defer": "defer",
+}
+
+
+def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict) -> bool:
+    """Return whether the final AWF line for ``verdict`` is a template-placeholder echo."""
+    wanted = _RESOLVABLE_PLACEHOLDER_LABELS.get(verdict)
+    if wanted is None:
+        return False
     last_reason: str | None = None
-    found_fixed = False
+    found = False
     for line in stdout.splitlines():
         for verdict_line in _verdict_line_candidates(line.strip()):
             awf_match = _AWF_VERDICT.fullmatch(verdict_line)
             if awf_match is None:
                 continue
             normalized_label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
-            if normalized_label != "fixed":
+            if normalized_label != wanted:
                 continue
-            found_fixed = True
+            found = True
             last_reason = awf_match.group("reason")
-    if not found_fixed:
+    if not found:
         return False
     cleaned = (last_reason or "").strip()
     if not cleaned:
@@ -357,16 +386,26 @@ def _last_awf_fixed_reason_is_placeholder(stdout: str) -> bool:
     return _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned) is not None
 
 
-def _fail_closed_fixed_placeholder_if_needed(
+def _fail_closed_resolvable_placeholder_if_needed(
     stdout: str,
     result: VerdictResult,
 ) -> VerdictResult:
-    """Convert a standalone FIXED placeholder echo into fail-closed needs_human."""
-    if result.verdict != "fix_committed" or result.reason is not None:
+    """Convert a standalone resolvable placeholder echo into fail-closed needs_human.
+
+    Prompt-template echoes such as ``AWF-VERDICT: FALSE POSITIVE: <one-sentence
+    justification>`` sanitize to a reasonless resolvable verdict; those must not
+    clear review items. Explicit reasonless non-placeholder verdicts still pass.
+    """
+    if result.verdict not in _RESOLVABLE_PLACEHOLDER_LABELS or result.reason is not None:
         return result
-    if not _last_awf_fixed_reason_is_placeholder(stdout):
+    if not _last_awf_resolvable_reason_is_placeholder(stdout, verdict=result.verdict):
         return result
-    return VerdictResult(verdict="needs_human", reason="fixed_placeholder_echo")
+    reason = (
+        "fixed_placeholder_echo"
+        if result.verdict == "fix_committed"
+        else "verdict_placeholder_echo"
+    )
+    return VerdictResult(verdict="needs_human", reason=reason)
 
 
 def _select_bare_verdict(
