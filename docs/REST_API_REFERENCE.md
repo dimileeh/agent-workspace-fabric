@@ -824,15 +824,23 @@ curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
     "pr_number": 42,
     "auto_merge": true,
     "initial_review_grace_period_seconds": 900,
+    "external_id": "CLOUD-TASK-42",
+    "task_class": "test_task",
     "reason": "attach AWF to existing PR"
   }'
 ```
 
 The response is `PullRequestMonitorAdoptionResponse` and includes the adopted
 `workspace_id`, `monitor_policy`, `validation_provenance`, `status_url`,
-`events_url`, `logs_url`, and `attached_existing`. A repeat adoption for the
-same repo/PR and same monitor policy returns the same workspace with
-`attached_existing=true`; policy changes return `PR_ADOPTION_POLICY_CONFLICT`.
+`events_url`, `logs_url`, and `attached_existing`. Optional `external_id` and
+`task_class` persist on the adopted workspace/task for join and scheduling
+parity with workspace create; omit `external_id` to use the generated repo/PR
+adoption identity, and omit `task_class` to leave the class unset. A repeat
+adoption for the same repo/PR and same monitor policy returns the same
+workspace with `attached_existing=true`; policy changes — including a different
+`external_id` or `task_class` on a live adoption — return
+`PR_ADOPTION_POLICY_CONFLICT`. An explicit `external_id` that already belongs to
+a different task scope returns `TASK_EXTERNAL_ID_CONFLICT`.
 Agent `model` and `effort` overrides are part of that raw monitor policy:
 omitting them requests the default/no-override policy and conflicts with an
 existing live adoption pinned to explicit `agent_model` or `agent_effort`

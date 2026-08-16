@@ -919,6 +919,16 @@ def workspace_adopt_pr(
             "keys are bare."
         ),
     ),
+    external_id: str | None = typer.Option(
+        None,
+        "--external-id",
+        help="Optional external task id persisted on the adopted workspace/task.",
+    ),
+    task_class: TaskClass | None = typer.Option(
+        None,
+        "--task-class",
+        help="Optional task class for scheduling/policy parity with workspace create.",
+    ),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -940,6 +950,8 @@ def workspace_adopt_pr(
     if execution not in {"local", "hosted"}:
         raise typer.BadParameter("--execution must be 'local' or 'hosted'")
     task_tag = _option_default(task_tag)
+    external_id = _option_default(external_id)
+    task_class = _option_default(task_class)
     _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
         "repo_url": repo if _repo_is_url else None,
@@ -962,6 +974,10 @@ def workspace_adopt_pr(
         body["effort"] = effort
     if task_tag is not None:
         body["task_tag"] = task_tag
+    if external_id is not None:
+        body["external_id"] = external_id
+    if task_class is not None:
+        body["task_class"] = _option_value(task_class)
     if owned_paths is not None:
         body["owned_paths"] = owned_paths
     response = _call(
