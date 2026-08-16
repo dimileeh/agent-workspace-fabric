@@ -1904,6 +1904,48 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_unquoted_marker_in_false_positive_reason_keeps_false_positive(
+        self,
+    ) -> None:
+        # Unquoted FIXED citations inside a FALSE POSITIVE reason must stay
+        # rationale. Splitting them lets FIXED win and become
+        # fixed_without_head_advance with no HEAD advance
+        # (#822 PRRT_kwDOSJAM6s6ZngUH).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: existing code already handles AWF-VERDICT: FIXED: lines"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == ("existing code already handles AWF-VERDICT: FIXED: lines")
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_leading_false_positive_then_needs_human(
+        self,
+    ) -> None:
+        # FALSE POSITIVE absorbs later nonblocking citations, but a later
+        # unquoted NEEDS_HUMAN must still win (fail closed).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: maybe cite AWF-VERDICT: FIXED: x but "
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must decide"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_quote_adjacent_trailing_after_false_positive_still_splits(
+        self,
+    ) -> None:
+        # Unambiguous trailing attempts after a closed quote still split for
+        # FALSE POSITIVE leaders (parity with FIXED/DEFER absorption gate).
+        result = _parse_verdict_result(
+            'AWF-VERDICT: FALSE POSITIVE: cite "something"AWF-VERDICT: FIXED: real trailing'
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_closing_quote_adjacent_trailing_after_defer_still_splits(
         self,
     ) -> None:

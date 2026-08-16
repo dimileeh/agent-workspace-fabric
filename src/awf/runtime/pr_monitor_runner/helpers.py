@@ -1114,18 +1114,21 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     treated as reason prose citations so they cannot resolve a thread the agent
     explicitly blocked (PRRT_kwDOSJAM6s6Zl4Ra).
 
-    When the leading marker is ``FIXED`` or ``DEFER``, later resolvable markers
-    cited in the reason (quoted or unquoted) stay rationale unless they are an
-    unambiguously separate trailing attempt after a closed quote/code span —
-    otherwise a ``FALSE POSITIVE`` citation would win and either bypass the
-    HEAD-advance evidence gate (``FIXED``, PRRT_kwDOSJAM6s6Zmggp) or skip DEFER
-    tracking-artifact creation (``DEFER``, PRRT_kwDOSJAM6s6Zm6F4). Later
-    ``NEEDS_HUMAN`` / unrecognized labels still split (fail closed).
+    When the leading marker is ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``,
+    later resolvable markers cited in the reason (quoted or unquoted) stay
+    rationale unless they are an unambiguously separate trailing attempt after
+    a closed quote/code span — otherwise a later citation would win and either
+    bypass the HEAD-advance evidence gate (``FIXED`` citation after
+    ``FALSE POSITIVE``, PRRT_kwDOSJAM6s6ZngUH; ``FALSE POSITIVE`` citation after
+    ``FIXED``, PRRT_kwDOSJAM6s6Zmggp) or skip DEFER tracking-artifact creation
+    (``DEFER``, PRRT_kwDOSJAM6s6Zm6F4). Later ``NEEDS_HUMAN`` / unrecognized
+    labels still split (fail closed).
 
     Subsequent markers embedded in quoted reason prose after a resolvable
-    leading verdict (for example a ``FIXED`` or ``DEFER`` reason that cites the
-    marker grammar inside ASCII/curly quotes or Markdown backticks) are not
-    split into new attempts — only unquoted trailing markers are.
+    leading verdict (for example a ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``
+    reason that cites the marker grammar inside ASCII/curly quotes or Markdown
+    backticks) are not split into new attempts — only unquoted trailing
+    markers are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
@@ -1159,9 +1162,10 @@ def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool
 
     Only ``NEEDS_HUMAN`` leaders absorb *all* later same-line markers into the
     reason so unquoted prose citations cannot override the block. ``FIXED`` /
-    ``DEFER`` use :func:`_awf_verdict_leading_fixed_absorbs_later_marker`
-    instead so unambiguous trailing attempts after a closed quote still split
-    and later blockers still fail closed.
+    ``DEFER`` / ``FALSE POSITIVE`` use
+    :func:`_awf_verdict_leading_fixed_absorbs_later_marker` instead so
+    unambiguous trailing attempts after a closed quote still split and later
+    blockers still fail closed.
     """
     leading = _AWF_VERDICT.match(verdict_line, match_start)
     if leading is None:
@@ -1176,21 +1180,25 @@ _FIXED_REASON_ABSORBABLE_LABELS = frozenset({"fixed", "false positive", "defer"}
 def _awf_verdict_leading_fixed_absorbs_later_marker(
     verdict_line: str, leading_start: int, later_start: int
 ) -> bool:
-    """Return whether a FIXED/DEFER leader keeps a later same-line marker as rationale.
+    """Return whether a nonblocking leader keeps a later same-line marker as rationale.
 
-    Unquoted (or mid-prose) resolvable marker citations inside a FIXED or DEFER
-    reason must not become the selected verdict — ``false_positive`` would
-    bypass the HEAD-advance evidence gate for FIXED (PRRT_kwDOSJAM6s6Zmggp) or
-    skip DEFER tracking-artifact creation (PRRT_kwDOSJAM6s6Zm6F4). Later
-    ``NEEDS_HUMAN`` and unrecognized labels still split (fail closed). Markers
-    that follow a closed quote/code span with only optional whitespace are
-    unambiguously separate trailing attempts and still split.
+    Unquoted (or mid-prose) resolvable marker citations inside a ``FIXED``,
+    ``DEFER``, or ``FALSE POSITIVE`` reason must not become the selected
+    verdict — a later ``FIXED`` after ``FALSE POSITIVE`` becomes
+    ``fixed_without_head_advance`` with no HEAD advance
+    (PRRT_kwDOSJAM6s6ZngUH); a later ``false_positive`` after ``FIXED`` would
+    bypass the HEAD-advance evidence gate (PRRT_kwDOSJAM6s6Zmggp); a later
+    ``false_positive`` after ``DEFER`` would skip tracking-artifact creation
+    (PRRT_kwDOSJAM6s6Zm6F4). Later ``NEEDS_HUMAN`` and unrecognized labels
+    still split (fail closed). Markers that follow a closed quote/code span
+    with only optional whitespace are unambiguously separate trailing attempts
+    and still split.
     """
     leading = _AWF_VERDICT.match(verdict_line, leading_start)
     if leading is None:
         return False
     leading_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
-    if leading_label not in {"fixed", "defer"}:
+    if leading_label not in _FIXED_REASON_ABSORBABLE_LABELS:
         return False
     later = _AWF_VERDICT.match(verdict_line, later_start)
     if later is None:
