@@ -273,6 +273,103 @@ class TestParseVerdict:
         assert result.reason == "track follow-up separately"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_multiline_fence(self) -> None:
+        # Agents may emit a blocking verdict then quote another verdict grammar
+        # inside a fenced example. Fence contents must not become the final
+        # authoritative marker (PRRT_kwDOSJAM6s6ZlqAE).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "```\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_fenced_example_with_info_string(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "```text\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_tilde_fenced_example(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "~~~\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "~~~\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unfenced_after_closed_fence_still_wins(self) -> None:
+        stdout = (
+            "```\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fenced_only_quote_is_markerless(self) -> None:
+        # A stdout that only quotes the grammar inside a fence never addressed
+        # the thread — fail closed as markerless, not as a selected resolvable.
+        stdout = "```\nAWF-VERDICT: FALSE POSITIVE: example\n```\n"
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unclosed_fence_shields_trailing_markers(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n```\nAWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fenced_placeholder_does_not_poison_final(self) -> None:
+        # A fenced template echo must not make an earlier reasoned FIXED look like
+        # a placeholder-only final when scanning last-reason provenance.
+        stdout = (
+            "AWF-VERDICT: FIXED: committed the fence skip\n"
+            "```\n"
+            "AWF-VERDICT: FIXED: <one-sentence summary>\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the fence skip"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_defer_placeholder_only_fail_closed(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: DEFER: <defer follow-up needed>")
 

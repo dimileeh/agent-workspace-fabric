@@ -236,6 +236,15 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+# Multiline Markdown fences (CommonMark-style). Info strings may not contain the
+# fence character, so same-line wraps (`` ```verdict``` ``) are not openers.
+# Markers inside an open fence must not participate in verdict selection.
+_MARKDOWN_FENCE_OPEN = re.compile(
+    r"^ {0,3}(?:"
+    r"(?P<fence>`{3,})[^`\n]*|"
+    r"(?P<fence_tilde>~{3,})[^~\n]*"
+    r")[ \t]*$"
+)
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -247,6 +256,39 @@ _MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 # fail closed rather than leave an earlier resolvable verdict selected.
 _MARKDOWN_BLOCKQUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
 _MAX_VERDICT_REASON_LENGTH = 500
+
+
+def _markdown_fence_open_marker(line: str) -> str | None:
+    """Return the fence marker that opens a multiline code fence on ``line``."""
+    opened = _MARKDOWN_FENCE_OPEN.match(line)
+    if opened is None:
+        return None
+    return opened.group("fence") or opened.group("fence_tilde")
+
+
+def _markdown_fence_closes(line: str, *, fence: str) -> bool:
+    """Return whether ``line`` closes a code fence opened with ``fence``."""
+    return re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line) is not None
+
+
+def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
+    """Yield stripped stdout lines outside multiline Markdown code fences.
+
+    Same-line wrapped fences (`` ```verdict``` ``) are still yielded so
+    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences shield
+    every subsequent line.
+    """
+    fence: str | None = None
+    for line in stdout.splitlines():
+        if fence is not None:
+            if _markdown_fence_closes(line, fence=fence):
+                fence = None
+            continue
+        opened = _markdown_fence_open_marker(line)
+        if opened is not None:
+            fence = opened
+            continue
+        yield line.strip()
 
 
 async def _record_ignored_monitor_terminal_callback(
@@ -318,8 +360,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     last_awf_mention_recognized = False
     saw_awf_mention = False
-    for line in stdout.splitlines():
-        stripped = line.strip()
+    # Skip multiline fenced regions so quoted example verdicts cannot override
+    # an authoritative unfenced marker (PRRT_kwDOSJAM6s6ZlqAE).
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
         for verdict_line in _verdict_line_candidates(stripped):
             # Multiple markers on one line are separate verdict units — do not
             # let the first reason group absorb a trailing second marker.
@@ -403,7 +446,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
 
 
 def _stdout_mentions_awf_verdict(stdout: str) -> bool:
-    return _AWF_VERDICT_MARKER.search(stdout) is not None
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
+        if _AWF_VERDICT_MARKER.search(stripped):
+            return True
+    return False
 
 
 _RESOLVABLE_PLACEHOLDER_LABELS = {
@@ -420,8 +466,8 @@ def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict)
         return False
     last_reason: str | None = None
     found = False
-    for line in stdout.splitlines():
-        for verdict_line in _verdict_line_candidates(line.strip()):
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
+        for verdict_line in _verdict_line_candidates(stripped):
             for segment in _awf_verdict_segments(verdict_line):
                 awf_match = _AWF_VERDICT.fullmatch(segment)
                 if awf_match is None:
