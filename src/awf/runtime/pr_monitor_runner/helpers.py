@@ -516,14 +516,22 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
 
     Distinguishes prose citations of the marker grammar from real trailing
     verdict attempts so a blocking reason cannot be overridden by a quote.
+    Tracks ASCII ``"`` toggles and curly ``“``/``”`` open/close independently so
+    mid-quote citations (including typographic prompt echoes) stay embedded,
+    while a closing quote immediately before a real trailing marker does not.
     """
     if match_start <= 0:
         return False
-    prev = verdict_line[match_start - 1]
-    if prev in '"“”':
-        return True
-    # Odd ASCII double-quote count before the match ⇒ still inside a quote.
-    return verdict_line[:match_start].count('"') % 2 == 1
+    inside_ascii = False
+    inside_curly = False
+    for char in verdict_line[:match_start]:
+        if char == '"':
+            inside_ascii = not inside_ascii
+        elif char == "“":
+            inside_curly = True
+        elif char == "”":
+            inside_curly = False
+    return inside_ascii or inside_curly
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:
