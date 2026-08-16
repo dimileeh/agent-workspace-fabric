@@ -520,6 +520,44 @@ async def test_worker_heartbeat_check_stale_result_includes_age_and_threshold(
 
 
 @pytest.mark.unit
+async def test_worker_heartbeat_check_missing_result_uses_missing_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorded heartbeat for the node reports WORKER_HEARTBEAT_MISSING.
+
+    ``latest_for_node`` returning ``None`` is the first-boot / just-pruned state.
+    Pin it deterministically (the readyz endpoint otherwise only hits this branch
+    when the shared heartbeat table happens to be empty at probe time, which makes
+    line coverage of the missing-heartbeat result non-deterministic across shards).
+    """
+
+    class _Session:
+        async def close(self) -> None:
+            return None
+
+    class _EmptyWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> None:
+            # No heartbeat recorded for this node yet — the missing-result branch.
+            assert node_id == "local"
+
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _EmptyWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="local")
+
+    assert result.ok is False
+    assert result.status == "fail"
+    assert result.reason == "WORKER_HEARTBEAT_MISSING"
+    assert "No worker heartbeat recorded for node 'local'" in (result.detail or "")
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_returns_posture_counts(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,
