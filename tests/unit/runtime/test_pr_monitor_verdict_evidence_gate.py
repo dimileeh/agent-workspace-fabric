@@ -50,6 +50,7 @@ def _evidence_runner(
     head_descends: bool | None = None,
     commit_trees_differ: bool | None = None,
     commit_changes_present: bool | None = None,
+    provider_recovery_raise: BaseException | None = None,
 ) -> SimpleNamespace:
     """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
     head_iter = iter(heads or [])
@@ -120,6 +121,8 @@ def _evidence_runner(
         state: object | None = None,
     ) -> None:
         del state
+        if provider_recovery_raise is not None:
+            raise provider_recovery_raise
 
     return _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=Path("/tmp"),
@@ -515,6 +518,84 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvage_retained_before_provider_recovery_retry_raise(
+    tmp_path: Path,
+) -> None:
+    """Dirty salvage must persist even when provider recovery raises retry.
+
+    ``_handle_provider_agent_run_error`` persists then raises for retry/fallback.
+    Recording salvage only after that call loses evidence for a later FIXED that
+    starts at the salvage tip and would otherwise become fixed_without_head_advance.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_before_recovery_raise"
+    body_hash = "feedback_body_hash_recovery_raise"
+    workspace_id = "ws_salvage_before_recovery_raise"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during provider outage",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+        provider_recovery_raise=ProviderRecoveryRetryError(),
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await comments._invoke_cli_for_verdict_result(
+            failed_runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after recovery",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after recovery"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
 

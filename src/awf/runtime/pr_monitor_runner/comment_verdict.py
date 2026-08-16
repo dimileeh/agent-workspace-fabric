@@ -339,13 +339,11 @@ async def _invoke_cli_for_verdict_result(
         else False
     )
 
-    if agent_run_err is not None:
-        await runner._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
-        _log.warning(
-            "monitor.cli_nonzero_exit",
-            returncode=agent_run_err.result.returncode,
-        )
-
+    # Evaluate HEAD advance and retain dirty salvage BEFORE provider recovery.
+    # ``_handle_provider_agent_run_error`` persists state then raises on
+    # retry/fallback; recording only after that call would drop salvage from a
+    # failed run that already committed a contentful fix, so a later no-change
+    # FIXED at the salvage tip becomes fixed_without_head_advance.
     item_end_head: str | None = None
     rev_parse_end = getattr(runner, "_rev_parse_head", None)
     if callable(rev_parse_end) and worktree_path.exists():
@@ -444,6 +442,14 @@ async def _invoke_cli_for_verdict_result(
     ):
         state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
         state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
+
+    if agent_run_err is not None:
+        # Persist (including salvage keys above) then maybe raise retry/fallback.
+        await runner._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+        _log.warning(
+            "monitor.cli_nonzero_exit",
+            returncode=agent_run_err.result.returncode,
+        )
 
     retained_salvage_evidence = False
     if (
