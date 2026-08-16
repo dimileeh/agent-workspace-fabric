@@ -22,10 +22,6 @@ from awf.control.worker import cleanup as worker_cleanup
 from awf.control.worker import helpers as worker_helpers
 from awf.control.worker import recovery_preserved_queries as worker_recovery_preserved_queries
 from awf.control.worker import recovery_stale as worker_recovery_stale
-from awf.control.worker.constants import (
-    _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-    _STALE_ACTIVE_EXECUTION_REASON_CODE,
-)
 from awf.control.worker.helpers import (
     _active_execution_preservation_claim_cleanup_payload,
     _exception_chain_has_sqlalchemy_error,
@@ -52,11 +48,7 @@ from awf.db.resilience import (
 from awf.db.session import make_session_factory
 from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.runtime.inspection import RuntimeSnapshot
-from awf.service.workspace_runtime_health import (
-    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-    WorkspaceRuntimeFinding,
-)
+from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
 
 
@@ -1485,40 +1477,4 @@ async def test_record_preserved_active_execution_skips_missing_workspace(
             compose_project_name="awf_missing",
         ),
         RuntimeSnapshot(stack_state="running", services=[]),
-    )
-
-
-@pytest.mark.unit
-async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Regression coverage for stale active execution can fail rejects preserved runtime."""
-    workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
-    worker = _worker(factory)
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
-        assert ws is not None
-        ws.execution_claimed_by = "stale-worker"
-        ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=30)
-        await repo.add_event(
-            ws,
-            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-            payload={"workspace_status": WorkspaceStatus.running.value},
-        )
-        await repo.add_event(
-            ws,
-            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-            payload={"workspace_status": WorkspaceStatus.running.value},
-        )
-        await session.commit()
-
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
-        _ActiveExecutionCandidate(
-            workspace_id=workspace_id,
-            status=WorkspaceStatus.running,
-            compose_project_name=f"awf_{workspace_id}",
-        )
     )

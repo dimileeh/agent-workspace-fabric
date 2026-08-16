@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.dialects import sqlite
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import awf.db.repositories as repositories
@@ -21,6 +21,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from tests.postgres import postgres_test_session
+from tests.unit.db.test_workspace_repository_parts.test_workspace_repository_part_002 import (
+    _RecordingSchedulerSession,
+)
 
 
 @pytest.fixture
@@ -603,3 +606,46 @@ class TestListEvents:
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id, limit=2)
 
         assert [event.id for event in events] == ["evt_zzz", "evt_aaa"]
+
+
+class TestSchedulerLocking:
+    """Workspace scheduler locking repository tests."""
+
+    @pytest.mark.unit
+    async def test_non_postgres_get_for_update_omits_row_lock(self) -> None:
+        """Verify non-Postgres get-for-update remains a plain select."""
+        session = _RecordingSchedulerSession("sqlite", values=["ws_unlocked"])
+        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_unlocked", skip_locked=True)
+
+        assert locked == "ws_unlocked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" not in sql
+        assert "SKIP LOCKED" not in sql
+        assert "workspaces.id = 'ws_unlocked'" in sql
+
+    @pytest.mark.unit
+    async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
+        """Verify Postgres get-for-update locks the workspace row."""
+        session = _RecordingSchedulerSession("postgresql", values=["ws_locked"])
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_locked")
+
+        assert locked == "ws_locked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "workspaces.id = 'ws_locked'" in sql
