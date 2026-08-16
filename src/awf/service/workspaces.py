@@ -308,11 +308,10 @@ class WorkspaceUnsupportedAgentRuntimeError(WorkspaceRetryError):
         agent_str = agent.value if isinstance(agent, AgentRuntime) else str(agent)
         supported = ", ".join(sorted(r.value for r in _LAUNCH_PROVIDER_BY_AGENT))
         message = (
-            f"Agent runtime {agent_str!r} is not supported for workspace creation; "
+            "Requested agent runtime is not supported for workspace creation; "
             f"supported runtimes: {supported}."
         )
         detail: dict[str, Any] = {
-            "agent": agent_str,
             "supported_agents": [r.value for r in _LAUNCH_PROVIDER_BY_AGENT],
         }
         self.agent = agent_str

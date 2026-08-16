@@ -1036,3 +1036,21 @@ async def test_workspace_detail_defaults_runtime_health_message_and_ignores_bad_
     assert bad_services.runtime_health is not None
     assert bad_services.runtime_health.reason_code == "AGENT_CONTAINER_MISSING"
     assert bad_services.runtime_health.services == []
+
+
+@pytest.mark.unit
+def test_unsupported_agent_runtime_error_omits_sensitive_agent_string() -> None:
+    from awf.mcp.server import _workspace_error_result
+    from awf.service.workspaces import WorkspaceUnsupportedAgentRuntimeError
+
+    sensitive_agent = "secret-token-12345-never-expose"
+    exc = WorkspaceUnsupportedAgentRuntimeError(sensitive_agent)
+    assert sensitive_agent not in exc.message
+    assert "agent" not in exc.detail
+    assert "supported_agents" in exc.detail
+    assert exc.message.startswith(
+        "Requested agent runtime is not supported for workspace creation;"
+    )
+
+    result = _workspace_error_result(exc)
+    assert sensitive_agent not in str(result.structuredContent)
