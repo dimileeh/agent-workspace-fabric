@@ -815,9 +815,15 @@ async def _invoke_cli_for_verdict_result(
         # so crashes still retry instead of parking a human escalation.
         if cli_failed and parsed.reason in _FAIL_CLOSED_VERDICT_REASONS:
             return VerdictResult(verdict="agent_failed")
-        # Explicit (or successful) NEEDS_HUMAN is not fix evidence — clear salvage
-        # even when the CLI also failed, so a later FIXED retry cannot reuse it.
-        _clear_retained_salvage()
+        # Explicit NEEDS_HUMAN is not fix evidence — clear salvage so a later
+        # FIXED retry cannot reuse it. Preserve salvage for synthetic fail-closed
+        # parses (markerless/garbled) so a later no-change FIXED can still prove
+        # an already-present salvage (PRRT_kwDOSJAM6s6ZncGe).
+        if _should_clear_salvage_for_parsed_verdict(
+            verdict=parsed.verdict,
+            reason=parsed.reason,
+        ):
+            _clear_retained_salvage()
         return parsed
     if parsed.verdict == "fix_committed":
         # Hosted recovery may sync a terminal SHA and set advance evidence before

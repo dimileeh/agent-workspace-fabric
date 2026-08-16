@@ -530,6 +530,225 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("synthetic_stdout", "synthetic_reason"),
+    [
+        (
+            "Committed a fix without a marker",
+            "unrecognized_or_markerless_verdict",
+        ),
+        (
+            "AWF-VERDICT: FIXD: garbled token",
+            "garbled_verdict_marker",
+        ),
+    ],
+)
+async def test_salvage_preserved_across_successful_synthetic_needs_human(
+    tmp_path: Path,
+    synthetic_stdout: str,
+    synthetic_reason: str,
+) -> None:
+    """Successful fail-closed parse must not drop retained salvage.
+
+    A prior failed run may have committed valid salvage. A later successful but
+    markerless/garbled invocation returns synthetic needs_human — clearing
+    salvage there strands a subsequent no-change FIXED as
+    fixed_without_head_advance (PRRT_kwDOSJAM6s6ZncGe). Clear only for explicit
+    NEEDS_HUMAN, matching ``_should_clear_salvage_for_parsed_verdict``.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = f"PRRT_salvage_synthetic_{synthetic_reason}"
+    body_hash = f"feedback_body_hash_synthetic_{synthetic_reason}"
+    workspace_id = f"ws_salvage_synthetic_{synthetic_reason}"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    synthetic_runner = _evidence_runner(
+        stdout=synthetic_stdout,
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    synthetic_runner._worktrees_root = tmp_path
+
+    synthetic = await comments._invoke_cli_for_verdict_result(
+        synthetic_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert synthetic.verdict == "needs_human"
+    assert synthetic.reason == synthetic_reason
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after guidance",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after guidance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_successful_explicit_needs_human_clears_retained_salvage(
+    tmp_path: Path,
+) -> None:
+    """Explicit NEEDS_HUMAN on a successful run must drop retained salvage."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_explicit_needs_human"
+    body_hash = "feedback_body_hash_explicit_needs_human"
+    workspace_id = "ws_salvage_explicit_needs_human"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    explicit_runner = _evidence_runner(
+        stdout="AWF-VERDICT: NEEDS_HUMAN: maintainer must choose after salvage",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    explicit_runner._worktrees_root = tmp_path
+
+    explicit = await comments._invoke_cli_for_verdict_result(
+        explicit_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert explicit.verdict == "needs_human"
+    assert explicit.reason == "maintainer must choose after salvage"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: should not reuse cleared salvage",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_salvage_retained_before_provider_recovery_retry_raise(
     tmp_path: Path,
 ) -> None:
