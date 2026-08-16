@@ -439,11 +439,15 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     tmp_path: Path,
 ) -> None:
     """Failed salvage must not resolve; successful FIXED retry may confirm it."""
-    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
 
     start = "a" * 40
     salvaged = "b" * 40
     item_id = "PRRT_salvage_retry"
+    body_hash = "feedback_body_hash_v1"
     workspace_id = "ws_salvage_retry"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
@@ -468,9 +472,11 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
         state=state,
         operation_start_head=start,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert failed.verdict == "agent_failed"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: confirmed salvaged fix",
@@ -491,10 +497,88 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
         state=state,
         operation_start_head=salvaged,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_feedback_body_change(
+    tmp_path: Path,
+) -> None:
+    """Retained salvage must not confirm FIXED after the feedback body changes."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_body_change"
+    workspace_id = "ws_salvage_body_change"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash="body_hash_before_edit",
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id))
+        == "body_hash_before_edit"
+    )
+
+    # Simulate agent_failed skipping stale-body cleanup while the reviewer edits.
+    state.mark_addressed(item_id, "agent_failed")
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse salvage after edited feedback",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash="body_hash_after_edit",
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -508,6 +592,7 @@ async def test_salvaged_fix_evidence_survives_later_head_advance(
     salvaged = "b" * 40
     later = "c" * 40
     item_id = "PRRT_salvage_later_head"
+    body_hash = "feedback_body_hash_later"
     workspace_id = "ws_salvage_later_head"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
@@ -532,6 +617,7 @@ async def test_salvaged_fix_evidence_survives_later_head_advance(
         state=state,
         operation_start_head=start,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert failed.verdict == "agent_failed"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
@@ -556,6 +642,7 @@ async def test_salvaged_fix_evidence_survives_later_head_advance(
         state=state,
         operation_start_head=later,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after burst"
@@ -567,12 +654,16 @@ async def test_salvaged_fix_evidence_rejects_non_descendant_head(
     tmp_path: Path,
 ) -> None:
     """Retained salvage must not count when HEAD left the salvage ancestry."""
-    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
 
     start = "a" * 40
     salvaged = "b" * 40
     unrelated = "d" * 40
     item_id = "PRRT_salvage_non_descendant"
+    body_hash = "feedback_body_hash_non_desc"
     workspace_id = "ws_salvage_non_descendant"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
@@ -597,9 +688,11 @@ async def test_salvaged_fix_evidence_rejects_non_descendant_head(
         state=state,
         operation_start_head=start,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert failed.verdict == "agent_failed"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: claimed without salvage ancestry",
@@ -620,10 +713,12 @@ async def test_salvaged_fix_evidence_rejects_non_descendant_head(
         state=state,
         operation_start_head=unrelated,
         evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
     )
     assert retry.verdict == "needs_human"
     assert retry.reason == "fixed_without_head_advance"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
 
 
 @pytest.mark.unit
@@ -659,6 +754,7 @@ async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
         state=state,
         operation_start_head=start,
         evidence_item_id="item_one",
+        evidence_body_hash="body_one",
     )
     assert failed.verdict == "agent_failed"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key("item_one")) == salvaged
@@ -680,6 +776,7 @@ async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
         state=state,
         operation_start_head=salvaged,
         evidence_item_id="item_two",
+        evidence_body_hash="body_two",
     )
     assert other.verdict == "needs_human"
     assert other.reason == "fixed_without_head_advance"

@@ -16,7 +16,10 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
-from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_body_hash_state_key,
+    _salvaged_fix_head_state_key,
+)
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
@@ -155,6 +158,7 @@ async def _invoke_cli_for_verdict_result(
     read_only: bool = False,
     require_fix_evidence: bool = True,
     evidence_item_id: str | None = None,
+    evidence_body_hash: str | None = None,
 ) -> VerdictResult:
     """Run the monitor agent and parse its verdict without losing reason details.
 
@@ -165,7 +169,9 @@ async def _invoke_cli_for_verdict_result(
     ``evidence_item_id`` scopes dirty-salvage retention so a later successful
     FIXED retry for the same thread/comment can confirm a prior failed-run
     salvage (HEAD at or descending from the salvaged SHA) without accepting
-    that failed invocation's verdict.
+    that failed invocation's verdict. ``evidence_body_hash`` binds that salvage
+    to the feedback body that produced it so an edited thread cannot reuse
+    stale salvage while ``agent_failed`` skips stale-body cleanup.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -175,6 +181,7 @@ async def _invoke_cli_for_verdict_result(
     if state is not None:
         state.hosted_terminal_head_advanced = False
     salvage_item_id = (evidence_item_id or "").strip() or None
+    salvage_body_hash = (evidence_body_hash or "").strip() or None
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
     mirror_path: Path | None = None
@@ -412,15 +419,25 @@ async def _invoke_cli_for_verdict_result(
     # still at (or descends from) the salvage tip — without resolving from the
     # failed invocation. Equality alone is too strict in multi-item bursts:
     # a later thread can advance HEAD past the salvage while leaving it in
-    # history.
+    # history. Bind the feedback body hash so an edited thread cannot reuse
+    # salvage created for prior feedback while agent_failed skips stale cleanup.
+    def _clear_retained_salvage() -> None:
+        if state is not None and salvage_item_id is not None:
+            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
+            state.threads_addressed_ids.pop(
+                _salvaged_fix_body_hash_state_key(salvage_item_id), None
+            )
+
     if (
         cli_failed
         and state is not None
         and salvage_item_id is not None
+        and salvage_body_hash is not None
         and local_head_advanced
         and item_end_head is not None
     ):
         state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
+        state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
 
     retained_salvage_evidence = False
     if (
@@ -428,12 +445,17 @@ async def _invoke_cli_for_verdict_result(
         and not cli_failed
         and state is not None
         and salvage_item_id is not None
+        and salvage_body_hash is not None
         and item_end_head is not None
     ):
         retained_head = (
             state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id)) or ""
         ).strip()
-        if retained_head:
+        retained_body = (
+            state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(salvage_item_id))
+            or ""
+        ).strip()
+        if retained_head and retained_body and retained_body == salvage_body_hash:
             retained_salvage_evidence = retained_head.lower() == item_end_head.lower() or (
                 callable(descends)
                 and worktree_path.exists()
@@ -443,11 +465,10 @@ async def _invoke_cli_for_verdict_result(
                     descendant=item_end_head,
                 )
             )
+        elif retained_head or retained_body:
+            # Feedback moved on or legacy unbound salvage — drop so it cannot linger.
+            _clear_retained_salvage()
     item_fix_evidence = item_fix_evidence or retained_salvage_evidence
-
-    def _clear_retained_salvage() -> None:
-        if state is not None and salvage_item_id is not None:
-            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
 
     parsed = _parse_verdict_result(result_stdout)
     if parsed.verdict in {"false_positive", "defer"}:
