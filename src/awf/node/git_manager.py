@@ -37,11 +37,18 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
-# Loose workspace-id character class, matching ``service/orphans.py`` so orphan
-# GC can still reclaim legacy/synthetic on-disk ids. ``re.fullmatch`` anchors it;
-# ``[A-Za-z0-9_]`` excludes ``/``, ``.`` (so ``..`` and a leading ``.`` cannot
-# appear) and null bytes — exactly the path-traversal risk at the worktree sink.
-_WORKSPACE_ID_RE = re.compile(r"ws_[A-Za-z0-9][A-Za-z0-9_]*")
+# Loose workspace-id character class extending the ``service/orphans.py`` base
+# (which matches the pure ``ws_…`` parent id) so orphan GC can still reclaim
+# legacy/synthetic on-disk ids. ``re.fullmatch`` anchors it.
+# The class ``[A-Za-z0-9_.-]`` also admits ``.`` and ``-`` because companion
+# worktree ids are ``{workspace_id}__companion__{name}`` and a companion
+# ``ServiceName`` (api/schemas_companions.py) legitimately permits ``.`` and
+# ``-``; excluding them wrongly rejected ids like ``ws_…__companion__api.v2``.
+# ``/`` and null bytes stay excluded, and the leading ``(?!.*\.\.)`` lookahead
+# still forbids any ``..`` sequence — together the path-traversal risk at the
+# worktree sink. The required ``ws_`` prefix means the id can never be a bare
+# ``.`` or ``..`` component or start with ``.``.
+_WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[A-Za-z0-9][A-Za-z0-9_.-]*")
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (

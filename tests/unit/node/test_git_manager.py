@@ -878,12 +878,23 @@ class TestRemoveWorktree:
 _BAD_IDS = [
     "..",  # contains ".."
     "ws_../../etc",  # ".." + "/"
+    "ws_a..b",  # embedded ".." without a slash (dot/hyphen class must still reject)
+    "ws_x__companion__..",  # companion name ".." must not reach the sink
     "ws_abc/def",  # contains "/"
     "ws_abc\x00",  # null byte
     ".hidden",  # leading "."
     "",  # empty string
 ]
-_BAD_ID_LABELS = ["dotdot", "dotdot-slash", "slash", "null-byte", "leading-dot", "empty"]
+_BAD_ID_LABELS = [
+    "dotdot",
+    "dotdot-slash",
+    "embedded-dotdot",
+    "companion-dotdot",
+    "slash",
+    "null-byte",
+    "leading-dot",
+    "empty",
+]
 
 
 class TestWorkspaceIdValidation:
@@ -1000,6 +1011,25 @@ class TestWorkspaceIdValidation:
         # Companion / isolated-reask worktree ids use only underscore markers,
         # so the loose pattern keeps them compatible.
         workspace_id = "ws_deadbeef__companion__redis"
+        assert (
+            manager._worktree_path_for(workspace_id)  # noqa: SLF001
+            == manager._worktrees_dir / workspace_id
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "companion_name",
+        ["api.v2", "api-v2", "redis-cache", "aira.web", "a.b-c_d"],
+        ids=["dot", "hyphen", "hyphen-word", "dotted", "mixed"],
+    )
+    def test_worktree_path_for_accepts_companion_name_with_dot_or_hyphen(
+        self, manager: GitManager, companion_name: str
+    ) -> None:
+        # ``ServiceName`` (api/schemas_companions.py) permits ``.`` and ``-`` in
+        # companion service names, so ``{workspace_id}__companion__{name}`` ids
+        # can legitimately contain them. The sink must accept these or companion
+        # provision / head_sha / cleanup wrongly raise GIT_WORKSPACE_ID_INVALID.
+        workspace_id = f"ws_deadbeef__companion__{companion_name}"
         assert (
             manager._worktree_path_for(workspace_id)  # noqa: SLF001
             == manager._worktrees_dir / workspace_id
