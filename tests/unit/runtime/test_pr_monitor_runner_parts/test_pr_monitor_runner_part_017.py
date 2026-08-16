@@ -374,6 +374,23 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_list_nested_fenced_example(self) -> None:
+        # List-contained fences (``- ```text``) are not top-level openers, and
+        # two-space list continuation does not meet indented-code indent — the
+        # example must still be skipped (PRRT_kwDOSJAM6s6ZmirV).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "- ```text\n"
+            "  AWF-VERDICT: FALSE POSITIVE: example\n"
+            "  ```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_tilde_fenced_example(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"

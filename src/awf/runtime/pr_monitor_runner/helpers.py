@@ -297,9 +297,20 @@ _MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
+def _normalize_markdown_fence_line(line: str) -> str:
+    """Strip container indent and one list marker for fence open/close matching.
+
+    List-nested openers such as ``- ```text`` are not top-level fence lines, and
+    continuation content is often only two-space indented (so it misses the
+    indented-code check). Normalize before matching so those regions stay
+    shielded from verdict selection.
+    """
+    return _MARKDOWN_LIST_PREFIX.sub("", line.lstrip(" \t"), count=1)
+
+
 def _markdown_fence_open_marker(line: str) -> str | None:
     """Return the fence marker that opens a multiline code fence on ``line``."""
-    opened = _MARKDOWN_FENCE_OPEN.match(line)
+    opened = _MARKDOWN_FENCE_OPEN.match(_normalize_markdown_fence_line(line))
     if opened is None:
         return None
     return opened.group("fence") or opened.group("fence_tilde")
@@ -307,18 +318,26 @@ def _markdown_fence_open_marker(line: str) -> str | None:
 
 def _markdown_fence_closes(line: str, *, fence: str) -> bool:
     """Return whether ``line`` closes a code fence opened with ``fence``."""
-    return re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line) is not None
+    normalized = _normalize_markdown_fence_line(line)
+    return (
+        re.match(
+            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
+            normalized,
+        )
+        is not None
+    )
 
 
 def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     """Yield stripped stdout lines outside Markdown code regions.
 
-    Skips multiline fenced blocks and CommonMark indented-code lines (four
-    spaces of indent, including a leading tab or 1–3 spaces plus a tab) so
-    quoted example markers cannot override an authoritative unfenced verdict.
-    Same-line wrapped fences (`` ```verdict``` ``) are still yielded so
-    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences shield
-    every subsequent line.
+    Skips multiline fenced blocks (including list-nested openers after
+    normalizing container indent and list prefixes) and CommonMark
+    indented-code lines (four spaces of indent, including a leading tab or
+    1–3 spaces plus a tab) so quoted example markers cannot override an
+    authoritative unfenced verdict. Same-line wrapped fences
+    (`` ```verdict``` ``) are still yielded so ``_CODE_FORMATTED_VERDICT_LINE``
+    can accept them. Unclosed fences shield every subsequent line.
     """
     fence: str | None = None
     for line in stdout.splitlines():
