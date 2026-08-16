@@ -485,19 +485,45 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     line as one unit. Splitting would drop that prose and make later quoted
     markers look like leading attempts (mid-prose option lists must not
     override an earlier real verdict).
+
+    Subsequent markers embedded in quoted reason prose (for example a
+    ``NEEDS_HUMAN`` reason that cites ``"AWF-VERDICT: FALSE POSITIVE: …"``)
+    are not split into new attempts — only unquoted trailing markers are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
         return [verdict_line]
     if verdict_line[: matches[0].start()].strip():
         return [verdict_line]
+    split_starts = [matches[0].start()]
+    for match in matches[1:]:
+        if _awf_verdict_marker_embedded_in_reason_prose(verdict_line, match.start()):
+            continue
+        split_starts.append(match.start())
+    if len(split_starts) == 1:
+        return [verdict_line]
     segments: list[str] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(verdict_line)
-        segment = verdict_line[match.start() : end].strip()
+    for index, start in enumerate(split_starts):
+        end = split_starts[index + 1] if index + 1 < len(split_starts) else len(verdict_line)
+        segment = verdict_line[start:end].strip()
         if segment:
             segments.append(segment)
     return segments or [verdict_line]
+
+
+def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:
+    """Return whether a same-line marker is quoted inside earlier reason text.
+
+    Distinguishes prose citations of the marker grammar from real trailing
+    verdict attempts so a blocking reason cannot be overridden by a quote.
+    """
+    if match_start <= 0:
+        return False
+    prev = verdict_line[match_start - 1]
+    if prev in '"“”':
+        return True
+    # Odd ASCII double-quote count before the match ⇒ still inside a quote.
+    return verdict_line[:match_start].count('"') % 2 == 1
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:

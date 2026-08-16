@@ -406,6 +406,23 @@ class TestParseVerdict:
         assert result.reason == "maintainer must choose checkout policy"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_quoted_marker_in_reason_keeps_needs_human(
+        self,
+    ) -> None:
+        # A blocking verdict that quotes another complete marker in its same-line
+        # reason must not split that quote into a second authoritative verdict
+        # (#822 PRRT_kwDOSJAM6s6ZlQ-D).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
+            '"AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken"'
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            'choose whether to emit "AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken"'
+        )
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_trailing_garbled_marker_fail_closed(
         self,
     ) -> None:
