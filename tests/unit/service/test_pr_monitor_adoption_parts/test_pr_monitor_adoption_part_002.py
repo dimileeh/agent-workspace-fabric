@@ -1140,6 +1140,9 @@ class TestPullRequestMonitorAdoptionServicePart002:
         # The default fetcher fails closed for non-GitHub forges (Line 564), so the
         # public contract must declare that error code too.
         assert "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY" in contract_codes
+        # Explicit external-ID occupancy and superseded-slot exhaustion raise
+        # TASK_EXTERNAL_ID_CONFLICT; capability registry + MCP parity list it.
+        assert "TASK_EXTERNAL_ID_CONFLICT" in contract_codes
 
     @pytest.mark.unit
     def test_inline_profile_name_handles_missing_profile(self) -> None:
