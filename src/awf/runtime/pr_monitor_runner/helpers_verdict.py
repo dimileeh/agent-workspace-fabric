@@ -44,6 +44,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_COMMENT_OPEN as _HTML_COMMENT_OPEN,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_COMPLETE_CODE_OPEN as _HTML_COMPLETE_CODE_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_DECLARATION_CLOSE as _HTML_DECLARATION_CLOSE,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -131,6 +134,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_comment_opens as _html_comment_opens,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_complete_code_opens as _html_complete_code_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_declaration_closes as _html_declaration_closes,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -183,6 +189,7 @@ __all__ = (
     "_HTML_CODE_BLOCK_OPEN",
     "_HTML_COMMENT_OPEN",
     "_HTML_COMMENT_CLOSE",
+    "_HTML_COMPLETE_CODE_OPEN",
     "_HTML_PROCESSING_INSTRUCTION_OPEN",
     "_HTML_PROCESSING_INSTRUCTION_CLOSE",
     "_HTML_DECLARATION_OPEN",
@@ -209,6 +216,7 @@ __all__ = (
     "_html_code_block_closes",
     "_html_comment_opens",
     "_html_comment_closes",
+    "_html_complete_code_opens",
     "_html_processing_instruction_opens",
     "_html_processing_instruction_closes",
     "_html_declaration_opens",

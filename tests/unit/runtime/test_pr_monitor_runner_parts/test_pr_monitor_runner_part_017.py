@@ -323,8 +323,8 @@ class TestParseVerdict:
     def test_private_awf_verdict_ignores_markers_after_html_code_until_blank(
         self,
     ) -> None:
-        # CommonMark treats complete ``<code>`` openers as type 7 (blank-
-        # terminated), not type 1. Ending the shield at ``</code>`` lets a
+        # Complete ``<code>`` openers keep a blank-terminated tail after
+        # ``</code>``. Ending the shield at ``</code>`` alone lets a
         # FALSE POSITIVE before the blank override NEEDS_HUMAN
         # (PRRT_kwDOSJAM6s6ZpLqP).
         stdout = (
@@ -335,6 +335,29 @@ class TestParseVerdict:
             "</code>\n"
             "AWF-VERDICT: FALSE POSITIVE: example\n"
             "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_after_blank_inside_html_code(
+        self,
+    ) -> None:
+        # Pure type-7 blank termination for ``<code>`` ends shielding on an
+        # interior blank, so a later resolvable marker before ``</code>``
+        # overrides NEEDS_HUMAN (PRRT_kwDOSJAM6s6ZpPQA). Keep close-tag
+        # shielding through the wrapper, then the blank-terminated tail.
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            "<code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: before blank\n"
+            "\n"
+            "AWF-VERDICT: FIXED: after blank inside code\n"
+            "</code>\n"
         )
 
         result = _parse_verdict_result(stdout)

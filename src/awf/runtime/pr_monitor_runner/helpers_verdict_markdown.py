@@ -25,6 +25,7 @@ __all__ = (
     "_HTML_TYPE6_BLOCK_OPEN",
     "_HTML_TYPE7_ATTR",
     "_HTML_TYPE7_BLOCK_OPEN",
+    "_HTML_COMPLETE_CODE_OPEN",
     "_HTML_BLANK_LINE",
     "_MARKDOWN_LIST_PREFIX",
     "_MARKDOWN_TASK_LIST_CHECKBOX",
@@ -50,6 +51,7 @@ __all__ = (
     "_html_cdata_closes",
     "_html_type6_block_opens",
     "_html_type7_block_opens",
+    "_html_complete_code_opens",
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_markdown_is_indented_code_line",
@@ -202,12 +204,12 @@ _MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
 # or an example can override an earlier hard block (PRRT_kwDOSJAM6s6ZnEAt).
 # CommonMark HTML block type 1 covers ``pre`` / ``script`` / ``style`` /
 # ``textarea``. ``code`` is kept here for incomplete / same-line example
-# wrappers; complete ``<code>`` openers are CommonMark type 7 and must be
-# classified on the blank-terminated path first (PRRT_kwDOSJAM6s6ZpLqP /
-# PRRT_kwDOSJAM6s6ZnQhP). Opener: optional 0–3 spaces, then the tag name
-# followed by whitespace, ``>``, or EOL. Open matching peels list/blockquote
-# containers first (same as fences) so ``- <pre>`` / ``> <code>`` still enter
-# HTML mode (PRRT_kwDOSJAM6s6ZnHBW).
+# wrappers; complete ``<code>`` openers use a hybrid close-tag + blank-tail
+# path (PRRT_kwDOSJAM6s6ZpLqP / PRRT_kwDOSJAM6s6ZpPQA / PRRT_kwDOSJAM6s6ZnQhP).
+# Opener: optional 0–3 spaces, then the tag name followed by whitespace,
+# ``>``, or EOL. Open matching peels list/blockquote containers first (same as
+# fences) so ``- <pre>`` / ``> <code>`` still enter HTML mode
+# (PRRT_kwDOSJAM6s6ZnHBW).
 _HTML_CODE_BLOCK_OPEN = re.compile(
     r"^ {0,3}<(?P<tag>pre|code|script|style|textarea)(?=[\s>]|$)",
     re.IGNORECASE,
@@ -254,8 +256,9 @@ _HTML_TYPE6_BLOCK_OPEN = re.compile(
 # type 7. Keep the open-tag exclusion so type-1 openers stay on the close-tag
 # path above; do not exclude closers or an example after ``</pre>`` overrides
 # an earlier hard block (PRRT_kwDOSJAM6s6Zn6x4). ``code`` is not type 1 —
-# complete ``<code>`` openers belong here so shielding lasts until the blank
-# (PRRT_kwDOSJAM6s6ZpLqP). Custom elements such as ``<custom-example>`` land
+# complete ``<code>`` openers still match here but the iterator upgrades them
+# to close-tag + blank-tail hybrid shielding (PRRT_kwDOSJAM6s6ZpLqP /
+# PRRT_kwDOSJAM6s6ZpPQA). Custom elements such as ``<custom-example>`` land
 # here; type-6 tags may also match but are recognized first. Attribute values
 # follow CommonMark (unquoted / single- / double-quoted) so a quoted ``>``
 # (``data-value=">">``) does not truncate the open tag and skip the blank-line
@@ -276,6 +279,13 @@ _HTML_TYPE7_BLOCK_OPEN = re.compile(
     rf"{_HTML_TYPE7_ATTR}*"
     r"\s*/?>"
     r")[ \t]*$",
+    re.IGNORECASE,
+)
+# Complete ``<code …>`` / ``<code/>`` on its own line (type-7 shape). Used to
+# divert from pure blank-termination into hybrid close-tag + blank-tail
+# shielding (PRRT_kwDOSJAM6s6ZpPQA).
+_HTML_COMPLETE_CODE_OPEN = re.compile(
+    rf"^ {{0,3}}<code{_HTML_TYPE7_ATTR}*\s*/?>[ \t]*$",
     re.IGNORECASE,
 )
 _HTML_BLANK_LINE = re.compile(r"^[ \t]*$")
@@ -401,11 +411,12 @@ def _html_code_block_open_tag(line: str) -> str | None:
 
     Recognizes CommonMark type-1 tags (``pre`` / ``script`` / ``style`` /
     ``textarea``) plus ``code`` for incomplete / same-line example wrappers.
-    Complete ``<code>`` openers are matched as type 7 first in
-    ``_iter_non_fenced_verdict_lines`` (PRRT_kwDOSJAM6s6ZpLqP). Normalize
-    list/blockquote containers first (same as fence openers) so ``- <pre>`` /
-    ``> <code>`` enter HTML shielding; otherwise lightly indented example
-    markers inside override an earlier hard block (PRRT_kwDOSJAM6s6ZnHBW).
+    Complete ``<code>`` openers are diverted to hybrid close-tag + blank-tail
+    shielding in ``_iter_non_fenced_verdict_lines`` (PRRT_kwDOSJAM6s6ZpLqP /
+    PRRT_kwDOSJAM6s6ZpPQA). Normalize list/blockquote containers first (same as
+    fence openers) so ``- <pre>`` / ``> <code>`` enter HTML shielding; otherwise
+    lightly indented example markers inside override an earlier hard block
+    (PRRT_kwDOSJAM6s6ZnHBW).
     """
     opened = _HTML_CODE_BLOCK_OPEN.match(_normalize_markdown_fence_line(line))
     if opened is None:
@@ -543,6 +554,17 @@ def _html_type7_block_opens(line: str) -> bool:
     like other raw-HTML openers.
     """
     return _HTML_TYPE7_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_complete_code_opens(line: str) -> bool:
+    """Return whether ``line`` is a complete standalone ``<code>`` opener.
+
+    Complete ``<code>`` tags match the type-7 line shape but need hybrid
+    shielding: close-tag through ``</code>`` so interior blanks do not end
+    early, then blank-terminated tail after the closer (PRRT_kwDOSJAM6s6ZpPQA /
+    PRRT_kwDOSJAM6s6ZpLqP). Normalize containers like other raw-HTML openers.
+    """
+    return _HTML_COMPLETE_CODE_OPEN.match(_normalize_markdown_fence_line(line)) is not None
 
 
 def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0) -> bool:
@@ -694,19 +716,20 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     ``>     example`` / ``-     example`` stay shielded — PRRT_kwDOSJAM6s6Zoxg4,
     PRRT_kwDOSJAM6s6Zo4bL), raw HTML type-1 / example code blocks (``pre`` /
     ``script`` / ``style`` / ``textarea``, plus incomplete / same-line
-    ``code`` wrappers; complete ``<code>`` openers are type 7 below —
-    PRRT_kwDOSJAM6s6ZpLqP), including list- and blockquote-nested openers,
-    HTML comment blocks (``<!-- … -->``, including nested openers), CommonMark
-    type-3–5 raw HTML blocks (processing instruction ``<?…?>``, declaration
-    ``<!Letter…>``, CDATA ``<![CDATA[…]]>``, including nested openers), and
-    CommonMark type-6/7 raw HTML blocks (block tags such as ``div``, complete
-    ``<code>`` openers, and custom tags, continuing through their terminating
-    blank line) so quoted example markers cannot override an authoritative
-    unfenced verdict. Same-line wrapped fences (`` ```verdict``` ``) are still
-    yielded so ``_CODE_FORMATTED_VERDICT_LINE`` can accept them; same-line HTML
-    wrappers and comments are skipped entirely. Unclosed fences, HTML code
-    blocks, HTML comments, type-3–5 raw HTML blocks, or type-6/7
-    blank-terminated blocks shield every subsequent line.
+    ``code`` wrappers; complete ``<code>`` openers use hybrid close-tag +
+    blank-tail shielding — PRRT_kwDOSJAM6s6ZpLqP / PRRT_kwDOSJAM6s6ZpPQA),
+    including list- and blockquote-nested openers, HTML comment blocks
+    (``<!-- … -->``, including nested openers), CommonMark type-3–5 raw HTML
+    blocks (processing instruction ``<?…?>``, declaration ``<!Letter…>``,
+    CDATA ``<![CDATA[…]]>``, including nested openers), and CommonMark
+    type-6/7 raw HTML blocks (block tags such as ``div`` and custom tags,
+    continuing through their terminating blank line) so quoted example markers
+    cannot override an authoritative unfenced verdict. Same-line wrapped
+    fences (`` ```verdict``` ``) are still yielded so
+    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them; same-line HTML wrappers
+    and comments are skipped entirely. Unclosed fences, HTML code blocks, HTML
+    comments, type-3–5 raw HTML blocks, or type-6/7 blank-terminated blocks
+    shield every subsequent line.
     """
     fence: str | None = None
     fence_container_indent = 0
@@ -719,6 +742,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_cdata = False
     html_blank_terminated = False
     html_blank_terminated_blockquote_depth = 0
+    html_code_blank_tail = False
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(
@@ -750,6 +774,13 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             continue
         if html_tag is not None:
             if _html_code_block_closes(line, html_tag):
+                # Complete ``<code>`` openers continue blank-terminated after
+                # ``</code>`` so post-close markers before the blank stay
+                # shielded (PRRT_kwDOSJAM6s6ZpLqP) without ending early on
+                # interior blanks (PRRT_kwDOSJAM6s6ZpPQA).
+                if html_tag == "code" and html_code_blank_tail:
+                    html_blank_terminated = True
+                html_code_blank_tail = False
                 html_tag = None
             continue
         if html_blank_terminated:
@@ -785,10 +816,12 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 html_declaration = True
                 html_declaration_blockquote_depth = decl_bq_depth
             continue
-        # Type 6/7 before type-1 / example ``code`` openers so a complete
-        # ``<code>`` line is blank-terminated (CommonMark type 7) rather than
-        # ending at ``</code>`` (PRRT_kwDOSJAM6s6ZpLqP). Incomplete / same-line
-        # ``<code…`` still fall through to the close-tag path below.
+        # Type 6/7 before type-1 / example ``code`` openers. Complete
+        # ``<code>`` lines match type 7 but take hybrid close-tag + blank-tail
+        # shielding so interior blanks do not end early while markers after
+        # ``</code>`` stay shielded until the blank (PRRT_kwDOSJAM6s6ZpLqP /
+        # PRRT_kwDOSJAM6s6ZpPQA). Incomplete / same-line ``<code…`` still fall
+        # through to the close-tag path below.
         if _html_type6_block_opens(line) or _html_type7_block_opens(line):
             # Type 6/7 continue until a blank line (same-line wrappers still
             # skip the opener line itself). Track opener blockquote depth so
@@ -796,6 +829,12 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             # treating nested ``> >`` / ``>>`` as blanks (PRRT_kwDOSJAM6s6ZnYwP /
             # PRRT_kwDOSJAM6s6ZnblF).
             opened_bq_depth = _markdown_blockquote_container_depth(line)
+            if _html_complete_code_opens(line):
+                if not _html_code_block_closes(line, "code"):
+                    html_tag = "code"
+                    html_code_blank_tail = True
+                    html_blank_terminated_blockquote_depth = opened_bq_depth
+                continue
             if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
                 html_blank_terminated = True
                 html_blank_terminated_blockquote_depth = opened_bq_depth
