@@ -332,10 +332,11 @@ When meaningful bot or human feedback appears, AWF:
 
 Per-comment CLI output uses an `AWF-VERDICT:` marker. `FIXED` is accepted only
 when that same review item shows a verified local (or hosted) HEAD/commit
-advance; markerless, empty, garbled, or template-placeholder output fails
-closed to `needs_human` (or `agent_failed` on CLI crash) and is never guessed
-as a fix. Explicit `FALSE POSITIVE` / `DEFER` still resolve without a commit;
-`NEEDS_HUMAN` blocks merge.
+advance; markerless, bare-marker, empty, garbled, or template-placeholder
+output fails closed to `needs_human` (or `agent_failed` on CLI crash) and is
+never guessed as a fix. Explicit `AWF-VERDICT: FALSE POSITIVE` /
+`AWF-VERDICT: DEFER` still resolve without a commit; `NEEDS_HUMAN` blocks
+merge.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.

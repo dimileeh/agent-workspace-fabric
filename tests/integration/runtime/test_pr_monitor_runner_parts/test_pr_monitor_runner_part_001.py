@@ -732,7 +732,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        adapter.queue(stdout="FALSE POSITIVE: the existing code is correct")
+        adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: the existing code is correct")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push noop
         # Even on "false_positive" verdict, the runner resolves the thread

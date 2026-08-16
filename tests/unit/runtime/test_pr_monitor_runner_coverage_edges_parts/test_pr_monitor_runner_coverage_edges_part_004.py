@@ -517,8 +517,8 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="FALSE POSITIVE: no code change needed")
-    adapter.queue(stdout="FALSE POSITIVE: second review is also stale")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: no code change needed")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: second review is also stale")
     workspace_id = "ws_review_burst"
     first_review = ReviewComment(comment_id="1", body_excerpt="first", author="reviewer")
     second_review = review_node(cid=2, author="reviewer", body="second")

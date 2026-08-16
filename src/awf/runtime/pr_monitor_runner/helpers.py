@@ -256,8 +256,9 @@ def _parse_verdict(stdout: str) -> Verdict:
     """Map the CLI's final message to a structured verdict.
 
     The prompt templates instruct the CLI to report a structured stdout
-    verdict. Markerless, empty, garbled, and FIXED placeholder-echo output
-    fail closed to ``needs_human`` — never guess ``fix_committed``.
+    ``AWF-VERDICT:`` line. Markerless, bare-marker, empty, garbled, and FIXED
+    placeholder-echo output fail closed to ``needs_human`` — never guess
+    ``fix_committed``.
     """
     return _parse_verdict_result(stdout).verdict
 
@@ -270,17 +271,20 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human", reason="empty_verdict_output")
-    # AWF-prefixed verdicts are canonical and must win over bare fallback lines,
-    # even when bare lines appear later in output. When multiple AWF verdicts are
-    # present, the final AWF line wins. If that line omits a reason, preserve an
-    # earlier reason for the same verdict. Sanitized non-blocking placeholders
-    # (for example ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back
-    # only to an earlier reasoned hard block (needs_human/defer) or a bare
-    # blocking fallback so a prompt echo cannot clear a hard block; a genuine
-    # no-reason final verdict is otherwise the agent's last word and must not be
-    # trumped by an earlier non-blocking verdict (e.g. false_positive).
+    # AWF-prefixed verdicts are canonical. Bare FALSE POSITIVE / DEFER /
+    # NEEDS_HUMAN lines are collected only as hard-block fallbacks when an AWF
+    # FIXED line has no usable reason — never as a standalone selected verdict.
+    # When multiple AWF verdicts are present, the final AWF line wins. If that
+    # line omits a reason, preserve an earlier reason for the same verdict.
+    # Sanitized non-blocking placeholders (for example
+    # ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back only to an
+    # earlier reasoned hard block (needs_human/defer) or a bare blocking
+    # fallback so a prompt echo cannot clear a hard block; a genuine no-reason
+    # final verdict is otherwise the agent's last word and must not be trumped
+    # by an earlier non-blocking verdict (e.g. false_positive).
     # Blocking final verdicts remain authoritative even with no usable reason.
     # Standalone resolvable placeholder echoes fail closed (never resolve).
+    # Markerless / bare-only output fails closed to needs_human.
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
@@ -302,12 +306,11 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                         reason=bare_match.group("reason"),
                     )
                 )
-    verdicts = awf_verdicts or bare_verdicts
-    if verdicts is awf_verdicts and awf_verdicts:
-        latest = verdicts[-1]
+    if awf_verdicts:
+        latest = awf_verdicts[-1]
         if latest.reason is None:
             latest_verdict = latest.verdict
-            for parsed in reversed(verdicts[:-1]):
+            for parsed in reversed(awf_verdicts[:-1]):
                 if parsed.verdict == latest_verdict and parsed.reason is not None:
                     return parsed
             # Template-placeholder echoes (reason sanitized to None) fail closed for
@@ -319,7 +322,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 and _last_awf_resolvable_reason_is_placeholder(stdout, verdict=latest_verdict)
             ):
                 if latest_verdict == "fix_committed":
-                    for parsed in reversed(verdicts[:-1]):
+                    for parsed in reversed(awf_verdicts[:-1]):
                         if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
                             return parsed
                     bare_blocking = _select_bare_verdict(
@@ -331,7 +334,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 return _fail_closed_resolvable_placeholder_if_needed(stdout, latest)
             if latest_verdict in {"defer", "needs_human"}:
                 return latest
-            for parsed in reversed(verdicts[:-1]):
+            for parsed in reversed(awf_verdicts[:-1]):
                 if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
                     return parsed
             bare_blocking = _select_bare_verdict(
@@ -342,12 +345,6 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 return bare_blocking
             return latest
         return latest
-    selected_bare = _select_bare_verdict(
-        bare_verdicts,
-        priorities=("needs_human", "false_positive", "defer", "fix_committed"),
-    )
-    if selected_bare is not None:
-        return selected_bare
     if _stdout_mentions_awf_verdict(stdout):
         return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
     return VerdictResult(verdict="needs_human", reason="unrecognized_or_markerless_verdict")

@@ -334,7 +334,7 @@ verified local (or hosted) HEAD/commit advance:
 |---|---|---|
 | `AWF-VERDICT: FIXED: <summary>` **and** a committed change for this item | CLI committed the fix for this thread | pushes after the burst settles, then resolves the thread |
 | `AWF-VERDICT: FIXED: …` with **no** HEAD advance for this item | Claim without evidence | stays unresolved (`needs_human`); does not resolve |
-| Empty / markerless / garbled / placeholder-echo output | No usable verdict | stays unresolved (`needs_human` or `agent_failed` on CLI crash) — never treated as FIXED |
+| Empty / markerless / bare-marker / garbled / placeholder-echo output | No usable `AWF-VERDICT:` line | stays unresolved (`needs_human` or `agent_failed` on CLI crash) — never treated as FIXED / FALSE POSITIVE / DEFER |
 | `AWF-VERDICT: FALSE POSITIVE: <reason>` | CLI disagrees, replies inline | resolves with the reply posted |
 | `AWF-VERDICT: DEFER: <what to track>` | needs follow-up, not blocking | captures a tracking note, resolves |
 | `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** — respond via `awf workspace guide` (§10, "Responding to a human escalation") |

@@ -20,8 +20,23 @@ class TestParseVerdict:
         assert _parse_verdict("") == "needs_human"
 
     @pytest.mark.unit
-    def test_false_positive_marker(self) -> None:
-        assert _parse_verdict("FALSE POSITIVE: reviewer misread the diff") == "false_positive"
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "FIXED: done",
+            "FALSE POSITIVE: reviewer misread the diff",
+            "DEFER: needs human judgement",
+            "FALSE POSITIVE:",
+            "false positive: minor",
+        ],
+    )
+    def test_bare_verdict_without_awf_marker_fail_closed(self, stdout: str) -> None:
+        # Canonical contract is AWF-VERDICT:; bare FIXED / FALSE POSITIVE / DEFER
+        # must never resolve (PR #822 review 4945481906).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
 
     @pytest.mark.unit
     def test_private_awf_verdict_false_positive_marker(self) -> None:
@@ -294,19 +309,8 @@ class TestParseVerdict:
         assert result.reason == "pushed regression test"
 
     @pytest.mark.unit
-    def test_false_positive_case_insensitive(self) -> None:
-        assert _parse_verdict("false positive: minor") == "false_positive"
-
-    @pytest.mark.unit
-    def test_bare_false_positive_without_reason_has_no_reason(self) -> None:
-        result = _parse_verdict_result("FALSE POSITIVE:")
-
-        assert result.verdict == "false_positive"
-        assert result.reason is None
-
-    @pytest.mark.unit
-    def test_defer_marker(self) -> None:
-        assert _parse_verdict("DEFER: needs human judgement") == "defer"
+    def test_awf_false_positive_case_insensitive(self) -> None:
+        assert _parse_verdict("AWF-VERDICT: false positive: minor") == "false_positive"
 
     @pytest.mark.unit
     def test_plain_reply_fail_closed_as_needs_human(self) -> None:
@@ -344,27 +348,32 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
-    def test_later_defer_does_not_overwrite_prior_false_positive_marker(self) -> None:
-        # Hardening keeps blocking verdicts from being demoted by a later defer.
+    def test_bare_only_mixed_verdicts_fail_closed(self) -> None:
+        # Without an AWF marker, precedence among bare lines is irrelevant —
+        # all fail closed rather than selecting FALSE POSITIVE / DEFER.
         reply = "FALSE POSITIVE: not a real issue.\nDEFER: follow-up issue"
-        assert _parse_verdict(reply) == "false_positive"
+        result = _parse_verdict_result(reply)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
 
     @pytest.mark.unit
-    def test_later_defer_does_not_overwrite_bare_needs_human(self) -> None:
-        # ``NEEDS_HUMAN`` must keep merge-blocking priority over later defer text.
-        reply = "NEEDS_HUMAN: follow-up needed\nDEFER: follow-up issue"
+    def test_later_defer_does_not_overwrite_awf_needs_human(self) -> None:
+        # AWF ``NEEDS_HUMAN`` must keep merge-blocking priority over later bare defer.
+        reply = "AWF-VERDICT: NEEDS_HUMAN: follow-up needed\nDEFER: follow-up issue"
         assert _parse_verdict(reply) == "needs_human"
 
     @pytest.mark.unit
-    def test_later_false_positive_does_not_overwrite_bare_needs_human(self) -> None:
-        # ``NEEDS_HUMAN`` must keep merge-blocking priority over later false-positive
-        # text so a non-blocking later marker cannot clear a hard block.
-        reply = "NEEDS_HUMAN: follow-up needed\nFALSE POSITIVE: not a real issue"
+    def test_later_bare_false_positive_does_not_overwrite_awf_needs_human(self) -> None:
+        # Bare false-positive text must not clear an AWF hard block.
+        reply = "AWF-VERDICT: NEEDS_HUMAN: follow-up needed\nFALSE POSITIVE: not a real issue"
         assert _parse_verdict(reply) == "needs_human"
 
     @pytest.mark.unit
-    def test_bare_false_positive_takes_precedence_over_bare_defer(self) -> None:
-        reply = "DEFER: fix this later\nFALSE POSITIVE: not a real problem"
+    def test_awf_false_positive_takes_precedence_over_awf_defer(self) -> None:
+        reply = (
+            "AWF-VERDICT: DEFER: fix this later\nAWF-VERDICT: FALSE POSITIVE: not a real problem"
+        )
         assert _parse_verdict(reply) == "false_positive"
 
     @pytest.mark.unit

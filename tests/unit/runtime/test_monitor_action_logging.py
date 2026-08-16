@@ -517,7 +517,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review status only")
         cmd.queue_result(
             returncode=0,
             stdout=pr_payload(comments=[blocking_comment]),
@@ -589,7 +589,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
-        adapter.queue(stdout="FALSE POSITIVE: disabled-review status only")
+        adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: disabled-review status only")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
         # Keep the test finite by simulating an external merge after AWF
@@ -929,7 +929,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review status only")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
         # The monitor stays alive after the review-comment fix cycle; finish

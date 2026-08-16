@@ -1061,7 +1061,7 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(comments=[policy_comment]))
-    adapter.queue(stdout="FALSE POSITIVE: trigger-review checklist status only")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review checklist status only")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
