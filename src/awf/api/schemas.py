@@ -221,7 +221,7 @@ class WorkspaceRepo(BaseModel):
 class WorkspaceProviderFallbackTarget(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     model: Annotated[str, Field(min_length=1, max_length=128)]
 
@@ -490,7 +490,7 @@ class WorkspaceCreateRequest(BaseModel):
         return self.task.task_tag
 
     @property
-    def agent(self) -> AgentRuntime:
+    def agent(self) -> AgentRuntime | str:
         return self.task.agent
 
     @property
@@ -967,7 +967,7 @@ class WorkspaceResponse(BaseModel):
     )
     initial_review_grace_period_seconds: float | None
 
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1137,7 +1137,7 @@ class TaskResponse(BaseModel):
     base_branch: str
     task_class: TaskClass | None
     owned_paths: list[str]
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1173,7 +1173,7 @@ class TaskAttemptResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
     readiness: MergeCandidateReadinessResponse | None = None
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     status: WorkspaceStatus
     pr_url: str | None
     failure_reason: str | None
@@ -1203,7 +1203,7 @@ class WorkspaceOverviewResponse(BaseModel):
     branch_name: str | None
     task_class: TaskClass | None
     owned_paths: list[str]
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1390,7 +1390,7 @@ class WorkspaceLockResponse(BaseModel):
 
     workspace_id: str
     title: str
-    agent: AgentRuntime
+    agent: AgentRuntime | str
     status: WorkspaceStatus
     repo_url: str
     branch_base: str

@@ -40,7 +40,13 @@ from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
-from awf.db.enums import AgentRuntime, EgressDecision, FailureReason, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    EgressDecision,
+    FailureReason,
+    WorkspaceStatus,
+    parse_agent_runtime,
+)
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -141,11 +147,7 @@ _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 _log = get_logger(__name__)
 
 
-def _parse_agent_runtime(agent: str) -> AgentRuntime | str:
-    try:
-        return AgentRuntime(agent)
-    except ValueError:
-        return agent
+_parse_agent_runtime = parse_agent_runtime
 
 
 class ServiceStartupDiagnosticsCapturer(Protocol):

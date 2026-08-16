@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.workspace_observability as workspace_observability_module
 from awf.api.schemas import WorkspaceCreateRequest
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+    parse_agent_runtime,
+)
 from awf.db.repositories import (
     OperationRepository,
     TaskAttemptRepository,
@@ -805,3 +811,59 @@ async def test_read_log_rejects_missing_and_out_of_root_streams_then_reads_chunk
         "agent.outside",
     ]
     assert missing_logs is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_agent_runtime_tolerance_in_projections(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ensure parse_agent_runtime and workspace overview/tasks builders tolerate unknown runtime strings."""
+    assert parse_agent_runtime("codex") == AgentRuntime.codex
+    assert parse_agent_runtime("unknown_agent_xyz") == "unknown_agent_xyz"
+
+    async with factory() as session:
+        service = WorkspaceService(session_factory=factory)
+        request = WorkspaceCreateRequest(
+            repo={"url": "git@github.com:example/service.git", "base_branch": "main"},
+            task={
+                "title": "Test Unknown Agent",
+                "prompt": "Prompt",
+                "agent": "codex",
+            },
+            workspace={"profile_ref": "auto", "profile": None},
+            validation={"commands": ["uv run pytest -q"]},
+            preflight={
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "test fixture",
+            },
+        )
+        workspace = await service.create(request)
+
+        # Directly update the workspace row and task attempt row in DB to have an unknown agent string
+        repo = WorkspaceRepository(session)
+        ws_row = await repo.get(workspace.id)
+        assert ws_row is not None
+        ws_row.agent = "custom_unknown_agent_v1"
+
+        attempt_repo = TaskAttemptRepository(session)
+        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+        if attempt is not None:
+            attempt.agent = "custom_unknown_agent_v1"
+
+        await session.commit()
+
+        # Workspace overview must not raise ValueError
+        overviews = await workspace_observability_module.list_workspace_overview_response(
+            session, limit=10
+        )
+        matching = [item for item in overviews.items if item.workspace_id == workspace.id]
+        assert len(matching) == 1
+        assert matching[0].agent == "custom_unknown_agent_v1"
+
+        # Tasks list response must not raise ValueError
+        from awf.service.tasks import build_task_list_response
+
+        tasks_resp = await build_task_list_response(session, limit=10)
+        matching_task = [t for t in tasks_resp.items if t.workspace_id == workspace.id]
+        assert len(matching_task) == 1
+        assert matching_task[0].agent == "custom_unknown_agent_v1"

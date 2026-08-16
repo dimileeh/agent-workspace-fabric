@@ -261,6 +261,16 @@ class AgentRuntime(StrEnum):
     """xAI Grok Build CLI — ``grok -p`` with headless auto-approval flags."""
 
 
+def parse_agent_runtime(agent: str | AgentRuntime) -> AgentRuntime | str:
+    """Parse a raw string or enum value into an AgentRuntime if valid, else return the raw string."""
+    if isinstance(agent, AgentRuntime):
+        return agent
+    try:
+        return AgentRuntime(agent)
+    except ValueError:
+        return agent
+
+
 class EgressDecision(StrEnum):
     """Per-workspace egress enforcement outcome recorded in audit evidence."""
 

@@ -27,7 +27,7 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
 )
 from awf.common.logging import get_logger
-from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_agent_runtime
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
@@ -407,7 +407,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         branch_name=ws.branch_name,
         task_class=ws.task_class,
         owned_paths=list(ws.owned_paths),
-        agent=AgentRuntime(ws.agent),
+        agent=parse_agent_runtime(ws.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
