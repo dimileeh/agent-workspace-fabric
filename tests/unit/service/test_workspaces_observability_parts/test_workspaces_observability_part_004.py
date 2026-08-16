@@ -400,7 +400,7 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
     [
         (AgentRuntime.codex, "gpt-5.6-sol"),
         (AgentRuntime.cursor, "sonnet-4-thinking"),
-        (AgentRuntime.gemini, "gemini-3.1-pro-preview"),
+        (AgentRuntime.antigravity, "gemini-3.1-pro-preview"),
         (AgentRuntime.claude_code, "claude-opus-5"),
         (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
     ],
@@ -576,7 +576,7 @@ def test_recovery_summary_pairs_reverse_transition_with_monitor_event_payload() 
 def test_recovery_summary_surfaces_active_pr_monitor_operation() -> None:
     base = datetime(2026, 4, 27, 21, 0, tzinfo=UTC)
     reverse_at = base + timedelta(seconds=60)
-    operation_payload = {
+    operation_payload: dict[str, object] = {
         "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "Coverage validation must be refreshed.",
@@ -741,3 +741,27 @@ def test_recovery_summary_uses_inactive_operator_recovery_operation() -> None:
         "recovery_mode": "validate_only",
     }
     assert "validate-only recovery" in summary.summary
+
+
+@pytest.mark.unit
+def test_effective_agent_identity_preserves_retired_gemini_defaults() -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.gemini,
+        task_policy=None,
+    )
+    assert identity.model == "gemini-3.1-pro-preview"
+    assert identity.model_source == "default"
+    assert identity.effort == "xhigh"
+    assert identity.effort_source == "default"
+
+    identity_with_policy = effective_agent_identity(
+        agent=AgentRuntime.gemini,
+        task_policy={
+            "agent_model": "custom-gemini-model",
+            "agent_effort": "medium",
+        },
+    )
+    assert identity_with_policy.model == "custom-gemini-model"
+    assert identity_with_policy.model_source == "task_policy"
+    assert identity_with_policy.effort == "medium"
+    assert identity_with_policy.effort_source == "task_policy"

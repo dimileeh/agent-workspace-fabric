@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -76,17 +75,14 @@ from awf.node.compose_manager import AuthMount
 
 _CONTAINER_HOME = "/home/agent"
 _GH_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gh"
-_GCLOUD_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gcloud"
 _GITCONFIG_TARGET = f"{_CONTAINER_HOME}/.gitconfig"
 _SSH_TARGET = f"{_CONTAINER_HOME}/.ssh"
 _CODEX_TARGET = f"{_CONTAINER_HOME}/.codex"
-_GEMINI_TARGET = f"{_CONTAINER_HOME}/.gemini"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
 _GROK_TARGET = f"{_CONTAINER_HOME}/.grok"
 _OLLAMA_TARGET = f"{_CONTAINER_HOME}/.ollama"
 _GROK_AUTH_FILES = frozenset(("auth.json", "config.toml"))
 _OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
-_GEMINI_USAGE_HISTORY_DIRS = ("tmp",)
 _LEGACY_PROVIDER_TARGETS: Mapping[str, frozenset[str]] = {
     "github": frozenset({_GH_CONFIG_TARGET}),
 }
@@ -140,7 +136,7 @@ def resolve_service_auth_mounts(
     host_home: Path,
     work_dir: Path,
     workspace_id: str,
-    host_env: Mapping[str, str] | None = None,
+    host_env: Mapping[str, str] | None = None,  # noqa: ARG001
     suppressed_targets: Collection[str] = (),
     suppressed_providers: Collection[str] = (),
     workspace_owner_uid: int | None = None,
@@ -154,6 +150,11 @@ def resolve_service_auth_mounts(
     ``AWF_HOST_HOME`` at that same absolute path inside the worker container so
     the resolver can check and copy credential files while the host Docker daemon
     can later bind-mount the same sources into the agent container.
+
+    ``host_env`` is unused: ambient host environment no longer selects auth
+    mounts (Google ADC/gcloud credentials are profile-declared, never
+    auto-mounted). The parameter is retained so the resolver seam and its many
+    call sites keep a stable signature.
     """
 
     normalized_home = host_home.expanduser()
@@ -162,7 +163,6 @@ def resolve_service_auth_mounts(
     )
     base_mounts = _build_host_auth_mounts(
         normalized_home,
-        host_env=host_env,
         suppressed_targets=suppressed_target_set,
     )
     return _workspace_auth_mounts(
@@ -180,36 +180,18 @@ def resolve_service_auth_mounts(
 def _build_host_auth_mounts(
     host_home: Path,
     *,
-    host_env: Mapping[str, str] | None = None,
     suppressed_targets: Collection[str] = (),
 ) -> list[AuthMount]:
     ro_mounts = [
         (host_home / ".config" / "gh", _GH_CONFIG_TARGET, "ro"),
-        (host_home / ".config" / "gcloud", _GCLOUD_CONFIG_TARGET, "ro"),
         (host_home / ".gitconfig", _GITCONFIG_TARGET, "ro"),
         (host_home / ".ssh", _SSH_TARGET, "ro"),
     ]
-    mounts = [
+    return [
         AuthMount(source=str(src), target=target, mode=mode)
         for src, target, mode in ro_mounts
         if target not in suppressed_targets and src.exists()
     ]
-
-    source_env = os.environ if host_env is None else host_env
-    google_credentials = source_env.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if google_credentials:
-        credentials_path = Path(google_credentials).expanduser()
-        credentials_target = str(credentials_path)
-        if credentials_target not in suppressed_targets and credentials_path.exists():
-            mounts.append(
-                AuthMount(
-                    source=str(credentials_path),
-                    target=credentials_target,
-                    mode="ro",
-                )
-            )
-
-    return mounts
 
 
 def _workspace_auth_mounts(
@@ -252,13 +234,6 @@ def _workspace_auth_mounts(
     mounts.extend(claude_auth.mounts)
     chown_exempt_sources.update(claude_auth.chown_exempt_sources)
     extra_chown_paths.extend(claude_auth.extra_chown_paths)
-    if _GEMINI_TARGET not in suppressed_targets:
-        mounts.extend(
-            _prepare_isolated_gemini_auth(
-                host_home=host_home,
-                target_root=auth_root / "gemini",
-            )
-        )
     if _OPENCODE_TARGET not in suppressed_targets:
         mounts.extend(
             _prepare_isolated_opencode_auth(
@@ -347,31 +322,6 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
         shutil.copytree(rules, target_root / "rules")
 
     return target_root
-
-
-def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
-    """Seed per-workspace Gemini auth without sharing writable host files."""
-
-    source_dir = host_home / ".gemini"
-    target_dir = target_root / ".gemini"
-    if not source_dir.is_dir():
-        return ()
-
-    target_root.mkdir(parents=True, exist_ok=True)
-    if not target_dir.exists():
-        shutil.copytree(
-            source_dir,
-            target_dir,
-            ignore=shutil.ignore_patterns(*_GEMINI_USAGE_HISTORY_DIRS),
-        )
-
-    return (
-        AuthMount(
-            source=str(target_dir),
-            target=_GEMINI_TARGET,
-            mode="rw",
-        ),
-    )
 
 
 def _prepare_isolated_opencode_auth(

@@ -102,7 +102,7 @@ async def start_isolated_usage_sampling(
     except Exception:
         _log.warning(
             "usage.collect.error",
-            agent=adapter.name.value,
+            agent=adapter.name_str,
             workspace_id=workspace_id,
             phase="start_isolated",
             exc_info=True,

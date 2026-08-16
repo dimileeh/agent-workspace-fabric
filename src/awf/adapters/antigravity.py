@@ -33,9 +33,8 @@ Auth: agy 1.1.13 reads only ``GEMINI_API_KEY``. API-key mode requires
 ``settings.json`` ``{"modelProvider":"gemini"}`` **and** a non-empty
 ``GEMINI_API_KEY``. The preamble seeds that settings file when
 ``GEMINI_API_KEY`` is set (create if missing; upsert ``modelProvider`` on an
-existing file while preserving unrelated keys) — never on
-``ANTIGRAVITY_API_KEY`` alone, and never by aliasing credentials across env
-names.
+existing file while preserving unrelated keys). ANTIGRAVITY_API_KEY is
+retired.
 
 Output uses ``stream-json`` so the idle stdout watchdog sees continuous events
 (``text``/``json`` buffer until completion).
@@ -87,11 +86,10 @@ class AntigravityAdapter(AgentAdapter):
     def hosted_env_passthrough_names(self) -> tuple[str, ...]:
         """Antigravity hosted credential contract.
 
-        Names only — secret values are never transported. Primary key is
-        ``ANTIGRAVITY_API_KEY``; ``GEMINI_API_KEY`` is also forwarded (agy 1.1.x
-        AI Studio path). No ``GOOGLE_API_KEY`` aliasing.
+        Names only — secret values are never transported. Authenticates with
+        ``GEMINI_API_KEY`` (AI Studio key). ANTIGRAVITY_API_KEY is retired.
         """
-        return ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY")
+        return ("GEMINI_API_KEY",)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the agy print-mode command; prompt bridged via ``$(cat)``.

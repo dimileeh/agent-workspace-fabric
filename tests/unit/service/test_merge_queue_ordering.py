@@ -784,6 +784,7 @@ def test_provider_recovery_state_response_includes_fallback_target(
         source_attempt_id="att_source",
         recommended_action="Run fallback workspace.",
         terminal=False,
+        launched_fallback_attempts=1,
     )
 
     monkeypatch.setattr(
@@ -796,6 +797,7 @@ def test_provider_recovery_state_response_includes_fallback_target(
 
     assert response is not None
     assert response.action == "fallback"
+    assert response.launched_fallback_attempts == 1
     assert response.fallback_target is not None
     assert response.fallback_target.agent == AgentRuntime.codex.value
     assert response.fallback_target.provider == "openai"

@@ -199,6 +199,11 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
+            return False
+
         async def _block_open_pr_reexecution_without_recovery(
             self, *_args: object, **_kwargs: object
         ) -> object:
@@ -359,6 +364,11 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
+            return False
+
         async def _block_open_pr_reexecution_without_recovery(
             self, *_args: object, **_kwargs: object
         ) -> object:
@@ -497,6 +507,11 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_cleanup_failure(
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
+            return False
+
         async def _block_open_pr_reexecution_without_recovery(
             self, *_args: object, **_kwargs: object
         ) -> object:
@@ -617,6 +632,11 @@ async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_r
             return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
             return False
 
         async def _dispatch_non_feature_task_kind(self, *_args: object, **_kwargs: object) -> bool:
@@ -745,6 +765,11 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
             return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
             return False
 
         async def _block_open_pr_reexecution_without_recovery(
@@ -893,6 +918,11 @@ async def test_execute_repairs_mirror_hooks_path_after_baseline_coverage_cleanup
             return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
             return False
 
         async def _block_open_pr_reexecution_without_recovery(
@@ -1051,6 +1081,11 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
             return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
             return False
 
         async def _block_open_pr_reexecution_without_recovery(
@@ -1218,6 +1253,11 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
+            return False
+
         async def _block_open_pr_reexecution_without_recovery(
             self, *_args: object, **_kwargs: object
         ) -> object:
@@ -1367,6 +1407,11 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
             return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _reject_unsupported_agent_runtime(
+            self, *_args: object, **_kwargs: object
+        ) -> bool:
             return False
 
         async def _block_open_pr_reexecution_without_recovery(

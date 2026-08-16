@@ -27,8 +27,10 @@ from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
+    _MONITOR_ONLY_TASK_KINDS,
     _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
     _SUPPORTED_TASK_KINDS,
+    _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
     _UNSUPPORTED_TASK_KIND_REASON_CODE,
 )
 from awf.control.executor.forge_gate import unsupported_forge_error
@@ -338,8 +340,12 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
         if monitor is None and self._pr_monitor_factory is not None:
-            agent = AgentRuntime(ws.agent)
-            defaults = self._defaults_for(agent)
+            agent: AgentRuntime | str
+            try:
+                agent = AgentRuntime(ws.agent)
+            except ValueError:
+                agent = ws.agent
+            defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
             adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
             adapter = get_adapter(
                 agent,
@@ -798,6 +804,53 @@ async def _reject_unsupported_task_kind(
     return False
 
 
+async def _reject_unsupported_agent_runtime(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Workspace,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
+) -> bool:
+    """Fail fast unsupported agent runtimes; return True if rejected.
+
+    Runs unconditionally before agent setup or dispatch so an already-queued
+    row with a historical or unknown agent runtime (such as retired Gemini)
+    fails fast without consuming provisioning resources or raising KeyError
+    from get_adapter. Monitor-only task kinds (sync_feature_pr, sync_release_pr)
+    do not use the coding runtime during standard execution and bypass this gate.
+    """
+    if workspace.task_kind in _MONITOR_ONLY_TASK_KINDS:
+        return False
+
+    from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents
+    from awf.service.provider_recovery import has_approved_launchable_fallback
+
+    if not is_launchable_agent(workspace.agent):
+        if has_approved_launchable_fallback(workspace.task_policy):
+            return False
+        supported = ", ".join(sorted(supported_launchable_agents()))
+        message = (
+            f"agent runtime {workspace.agent!r} is not supported; supported runtimes: {supported}."
+        )
+        if _get_active_recovery_payload(workspace) is not None:
+            await self._finish_active_recovery_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+                error_message=message,
+            )
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=from_status,
+            failure_reason=FailureReason.policy_failure,
+            message=message,
+            reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+            details={"agent": workspace.agent},
+        )
+        return True
+    return False
+
+
 async def _gate_sync_handoff_unsupported_forge(
     self: Any,
     *,
@@ -1205,8 +1258,12 @@ async def _build_handoff_pr_monitor(
         ):
             return None
         if monitor is None and self._pr_monitor_factory is not None:
-            agent = AgentRuntime(workspace.agent)
-            defaults = self._defaults_for(agent)
+            agent: AgentRuntime | str
+            try:
+                agent = AgentRuntime(workspace.agent)
+            except ValueError:
+                agent = workspace.agent
+            defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
             adapter_defaults = _agent_defaults_for_workspace(workspace, defaults)
             adapter = get_adapter(
                 agent,

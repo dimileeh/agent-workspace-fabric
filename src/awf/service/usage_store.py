@@ -46,7 +46,6 @@ REASON_NO_RECORDS = "ccusage_no_records"
 _PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
     AgentRuntime.claude_code: "claude",
     AgentRuntime.codex: "codex",
-    AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
 }
 
@@ -67,10 +66,10 @@ _TOTAL_TOKEN_KEYS = ("totalTokens", "total_tokens")
 _COST_KEYS = ("totalCost", "costUSD", "cost", "cost_estimate")
 
 
-def provider_ccusage_source(runtime: AgentRuntime) -> str | None:
+def provider_ccusage_source(runtime: AgentRuntime | str) -> str | None:
     """Return the ccusage source subcommand for an AWF runtime, or ``None``."""
 
-    return _PROVIDER_CCUSAGE_SOURCE.get(runtime)
+    return _PROVIDER_CCUSAGE_SOURCE.get(runtime)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)

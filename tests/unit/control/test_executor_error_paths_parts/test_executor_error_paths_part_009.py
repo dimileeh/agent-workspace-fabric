@@ -577,3 +577,195 @@ class TestTaskKindFailFast:
             assert op.error_code == reason_code
             assert op.result == {"reason_code": reason_code}
             assert op.finished_at is not None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_execute_routes_unsupported_agent_runtime_without_fallback_to_policy_failure(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A queued workspace with an unsupported/historical agent runtime (like gemini)
+        without an approved launchable fallback must fail fast with policy_failure and
+        UNSUPPORTED_AGENT_RUNTIME.
+        """
+        ws_id = await _seed_ready(factory, agent=agent)
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    async def test_execute_unsupported_agent_runtime_triggers_provider_fallback(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A historical gemini workspace with an approved launchable fallback
+        must invoke provider recovery and create a fallback attempt on execute.
+        """
+        task_policy = {
+            "provider_recovery": {
+                "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+            }
+        }
+        ws_id = await _seed_ready(factory, agent="gemini", task_policy=task_policy)
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert any(e.reason_code == "UNSUPPORTED_AGENT_RUNTIME" for e in ws.events)
+            assert ws.events[-1].reason_code == "PROVIDER_FALLBACK_SELECTED"
+
+            repo = WorkspaceRepository(s)
+            all_ws = await repo.list(limit=100)
+            fallback_attempts = [w for w in all_ws if w.agent == "antigravity"]
+            assert len(fallback_attempts) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_resume_pr_monitor_allows_unsupported_agent_runtime(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A legacy workspace with an unsupported agent runtime in monitoring_pr must
+        allow monitor construction so clean PRs can complete, deferring failures to run().
+        """
+        from awf.adapters.base import AgentRunError
+
+        ws_id = await _seed_monitoring_pr(factory, agent=agent)
+        monitor_runs: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                monitor_runs.append(workspace_id)
+
+        captured_adapter: list[Any] = []
+
+        def _monitor_factory(adapter: Any, *_args: Any) -> object:
+            captured_adapter.append(adapter)
+            return _Monitor()
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_runs == [ws_id]
+        assert len(captured_adapter) == 1
+        adapter = captured_adapter[0]
+
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project="p",
+                compose_file=tmp_path / "compose.yml",
+                prompt="fix review feedback",
+                workspace_id=ws_id,
+            )
+        assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+        assert f"agent runtime {agent!r} is not supported" in exc_info.value.result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_recovery_bypasses_unsupported_agent_runtime_check(
+        self,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A workspace with an active validate-only recovery payload and an unsupported agent runtime
+        must bypass the unsupported agent runtime check.
+        """
+        ws_id = await _seed_ready(factory, agent=agent)
+        async with factory() as s:
+            op = await OperationRepository(s).create(
+                workspace_id=ws_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"source": "worker_restart", "recovery_mode": "validate_only"},
+                idempotency_key=f"worker_restart:validate_only:{ws_id}",
+            )
+            op_id = op.id
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        # Recovery proceeded to validation without invoking any agent adapter
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            # Verify that execution was NOT rejected by the unsupported agent runtime gate.
+            if ws.events:
+                assert ws.events[-1].reason_code != "UNSUPPORTED_AGENT_RUNTIME"
+            op = await OperationRepository(s).get(op_id)
+            assert op is not None
+            assert op.error_code != "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_kind", ["sync_feature_pr", "sync_release_pr"])
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_execute_allows_unsupported_agent_runtime_for_monitor_only_task_kinds(
+        self,
+        task_kind: str,
+        agent: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Monitor-only task kinds (sync_feature_pr, sync_release_pr) bypass the agent
+        runtime gate in execute().
+        """
+        ws_id = await _seed_ready(
+            factory,
+            task_kind=task_kind,
+            agent=agent,
+        )
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            rejected = await executor._reject_unsupported_agent_runtime(
+                workspace_id=ws_id,
+                workspace=ws,
+            )
+            assert rejected is False
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert not [
+                event for event in ws.events if event.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+            ]

@@ -96,6 +96,10 @@ from awf.runtime.validation_worktree import (
 )
 
 
+def _is_adapter_retired(adapter: Any) -> bool:
+    return getattr(adapter, "is_retired", False) is True
+
+
 async def run_validation_and_fix_cycle(
     self: Any,
     *,
@@ -106,7 +110,7 @@ async def run_validation_and_fix_cycle(
     compose_file: Path,
     base_commit: str,
     expected_branch: str,
-    adapter: AgentAdapter,
+    adapter: AgentAdapter | None,
     run_model: str | None = None,
     default_model: str | None = None,
     baseline_coverage: ValidationCoverageResult | None,
@@ -123,15 +127,7 @@ async def run_validation_and_fix_cycle(
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
-    ``resume_disable_fix_passes`` marks a blocked-resume with active operator
-    grants — both an approve-and-keep grant resume (agent skipped, kept verbatim)
-    and a combined directive+grant resume (directive agent ran, grants still
-    active). A validation fix pass re-invokes the coding adapter, which would both
-    spend tokens and — while grants are active — potentially rewrite a granted
-    protected file and have the new violation suppressed by the same single-use
-    grant. So grant-bearing resumes run validation with zero fix passes: a failure
-    marks the workspace FAILED for operator triage instead of firing a fix pass.
-    This mirrors the pre-commit repair gate (PRRT_kwDOSJAM6s6J5SDf).
+    Grant-bearing resumes run with zero fix passes to prevent rewriting granted files.
     """
     if run_model is None:
         run_model = default_model
@@ -140,7 +136,11 @@ async def run_validation_and_fix_cycle(
     successful_validation_workspace_head_sha: str | None = None
 
     # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
-    max_fix_passes = 0 if resume_disable_fix_passes else self._config.max_validation_fix_passes
+    max_fix_passes = (
+        0
+        if (resume_disable_fix_passes or adapter is None or _is_adapter_retired(adapter))
+        else self._config.max_validation_fix_passes
+    )
     profile = _profile_for_workspace(
         ws,
         worktree_path=worktree_path,
@@ -234,15 +234,9 @@ async def run_validation_and_fix_cycle(
         else 0
     )
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
-    # The loop always exits via ``break`` (validation+conformance success) or a
-    # terminal ``return`` (budget exhausted / hard failure); the per-category
-    # budgets guarantee the final attempt hits one of those paths, so the
-    # ``range`` is never exhausted by natural fall-through to the trailing
-    # ``return`` below. The fall-through branch is kept as a defensive backstop.
+    # Loop exits via break or terminal return; per-category budgets guarantee
+    # the final attempt hits one of those paths.
     for pass_number in range(max_validation_attempts):  # pragma: no branch
-        # This loop covers the initial validation plus any validation or
-        # post-validation conformance fix prompts. The per-category
-        # counters below enforce their separate budgets.
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,
@@ -569,76 +563,206 @@ async def run_validation_and_fix_cycle(
             conformance_failure: _PlanningRunFailure | None = None
             if planning_validation_handoff is not None:
                 conformance_handoff = planning_validation_handoff
-                try:
-                    if post_validation_conformance_fix_attempts:
-                        conformance_handoff = replace(
-                            planning_validation_handoff,
-                            iteration=(
-                                planning_validation_handoff.iteration
-                                + post_validation_conformance_fix_attempts
-                            ),
-                        )
-                    if recovery is not None:
-                        _log.info(
-                            "executor.post_validation_conformance_recovery_single_attempt",
-                            workspace_id=workspace_id,
-                            validation_run_id=validation_run_id,
-                            recovery_mode=recovery.get("recovery_mode"),
-                            source=recovery.get("source"),
-                            max_fix_passes=post_validation_conformance_fix_pass_budget,
-                            will_retry=False,
-                        )
-                    conformance_scope_baseline = (
-                        await self._capture_post_validation_conformance_scope_baseline(
-                            worktree_path,
-                            conformance_handoff.report_path,
-                        )
+                if adapter is None or _is_adapter_retired(adapter):
+                    conformance_failure = _PlanningRunFailure(
+                        message="post-validation conformance check failed: agent adapter is unavailable",
+                        reason_code=POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
                     )
+                else:
+                    try:
+                        if post_validation_conformance_fix_attempts:
+                            conformance_handoff = replace(
+                                planning_validation_handoff,
+                                iteration=(
+                                    planning_validation_handoff.iteration
+                                    + post_validation_conformance_fix_attempts
+                                ),
+                            )
+                        if recovery is not None:
+                            _log.info(
+                                "executor.post_validation_conformance_recovery_single_attempt",
+                                workspace_id=workspace_id,
+                                validation_run_id=validation_run_id,
+                                recovery_mode=recovery.get("recovery_mode"),
+                                source=recovery.get("source"),
+                                max_fix_passes=post_validation_conformance_fix_pass_budget,
+                                will_retry=False,
+                            )
+                        conformance_scope_baseline = (
+                            await self._capture_post_validation_conformance_scope_baseline(
+                                worktree_path,
+                                conformance_handoff.report_path,
+                            )
+                        )
 
-                    async def _run_conformance_agent(
-                        _accept_existing_plan: bool,
-                        *,
-                        _handoff: _PlanningValidationHandoff = conformance_handoff,
-                        _validation_run_id: str = validation_run_id,
-                        _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
-                        _conformance_scope_baseline: Any = conformance_scope_baseline,
-                    ) -> Any:
-                        return await self._run_post_validation_conformance_check(
+                        async def _run_conformance_agent(
+                            _accept_existing_plan: bool,
+                            *,
+                            _handoff: _PlanningValidationHandoff = conformance_handoff,
+                            _validation_run_id: str = validation_run_id,
+                            _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
+                            _conformance_scope_baseline: Any = conformance_scope_baseline,
+                        ) -> Any:
+                            return await self._run_post_validation_conformance_check(
+                                adapter=adapter,
+                                workspace=ws,
+                                profile=profile,
+                                compose_project=compose_project,
+                                compose_file=compose_file,
+                                worktree_path=worktree_path,
+                                model=run_model,
+                                handoff=_handoff,
+                                validation_run_id=_validation_run_id,
+                                base_commit=base_commit,
+                                hosted_pr_identity=_hosted_pr_identity,
+                                conformance_scope_baseline=_conformance_scope_baseline,
+                                require_hosted_terminal_head=(
+                                    not hosted_pr_adoption_validate_only_recovery
+                                ),
+                            )
+
+                        async def _finish_conformance_recovery_failure(
+                            *,
+                            reason_code: str = AGENT_SERVICE_RECOVERY_ABORTED,
+                            details: Mapping[str, Any] | None = None,
+                            _validation_run_id: str = validation_run_id,
+                            _validation_coverage: dict[str, object] | None = validation_coverage,
+                        ) -> None:
+                            message = (
+                                "agent compose service recovery failed during "
+                                "post-validation conformance"
+                            )
+                            await self._finish_pending_validate_operations(
+                                workspace_id=workspace_id,
+                                status=OperationStatus.failed,
+                                validation_run_id=_validation_run_id,
+                                requested_tier=validation_tier,
+                                reason_code=reason_code,
+                                coverage=_validation_coverage,
+                                error_message=message,
+                            )
+                            await _mark_failed_preserving_planning_artifacts(
+                                workspace_id=workspace_id,
+                                from_status=WorkspaceStatus.validating,
+                                failure_reason=FailureReason.infrastructure_failure,
+                                message=message,
+                                reason_code=reason_code,
+                                details=details,
+                            )
+
+                        (
+                            conformance_recovered,
+                            conformance_failure,
+                        ) = await _run_agent_callable_with_service_recovery(
+                            self,
+                            run_agent=_run_conformance_agent,
                             adapter=adapter,
                             workspace=ws,
                             profile=profile,
                             compose_project=compose_project,
                             compose_file=compose_file,
-                            worktree_path=worktree_path,
                             model=run_model,
-                            handoff=_handoff,
-                            validation_run_id=_validation_run_id,
-                            base_commit=base_commit,
-                            hosted_pr_identity=_hosted_pr_identity,
-                            conformance_scope_baseline=_conformance_scope_baseline,
-                            require_hosted_terminal_head=(
-                                not hosted_pr_adoption_validate_only_recovery
-                            ),
+                            command_evidence=[],
+                            workspace_id=workspace_id,
+                            execution_owner_id=execution_owner_id,
+                            before_mark_failed=_finish_conformance_recovery_failure,
+                            before_mark_failed_marks_workspace=True,
+                            before_agent_retry=before_agent_retry,
+                            after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+                            expected_status=WorkspaceStatus.validating,
+                            failure_from_status=WorkspaceStatus.validating,
                         )
-
-                    async def _finish_conformance_recovery_failure(
-                        *,
-                        reason_code: str = AGENT_SERVICE_RECOVERY_ABORTED,
-                        details: Mapping[str, Any] | None = None,
-                        _validation_run_id: str = validation_run_id,
-                        _validation_coverage: dict[str, object] | None = validation_coverage,
-                    ) -> None:
-                        message = (
-                            "agent compose service recovery failed during "
-                            "post-validation conformance"
+                        if not conformance_recovered:
+                            return ExecutionValidationResult(
+                                stop=True,
+                                successful_validation_run_id=successful_validation_run_id,
+                                successful_validation_workspace_head_sha=(
+                                    successful_validation_workspace_head_sha
+                                ),
+                            )
+                    except ComposeExecCleanupError as exc:
+                        message = cleanup_failure_message(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_cleanup_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            source=exc.source,
+                            label=exc.label,
+                            invocation_id=exc.invocation_id,
+                            reason_code=exc.reason_code,
                         )
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
                             status=OperationStatus.failed,
-                            validation_run_id=_validation_run_id,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await _mark_failed_preserving_planning_artifacts(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                        )
+                        return ExecutionValidationResult(
+                            stop=True,
+                            successful_validation_run_id=successful_validation_run_id,
+                            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                        )
+                    except AgentRunError as exc:
+                        reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+                        message = _post_validation_conformance_agent_failure_message(exc)
+                        _log.warning(
+                            "executor.post_validation_conformance_agent_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            returncode=exc.result.returncode,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
                             requested_tier=validation_tier,
                             reason_code=reason_code,
-                            coverage=_validation_coverage,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await _mark_failed_preserving_planning_artifacts(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.agent_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=_post_validation_conformance_agent_failure_details(
+                                exc,
+                                validation_run_id=validation_run_id,
+                            ),
+                        )
+                        return ExecutionValidationResult(
+                            stop=True,
+                            successful_validation_run_id=successful_validation_run_id,
+                            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                        )
+                    except Exception as exc:
+                        reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
+                        message = (f"post-validation conformance check failed: {exc!r}")[:2000]
+                        _log.exception(
+                            "executor.post_validation_conformance_unexpected_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
                             error_message=message,
                         )
                         await _mark_failed_preserving_planning_artifacts(
@@ -647,136 +771,12 @@ async def run_validation_and_fix_cycle(
                             failure_reason=FailureReason.infrastructure_failure,
                             message=message,
                             reason_code=reason_code,
-                            details=details,
                         )
-
-                    (
-                        conformance_recovered,
-                        conformance_failure,
-                    ) = await _run_agent_callable_with_service_recovery(
-                        self,
-                        run_agent=_run_conformance_agent,
-                        adapter=adapter,
-                        workspace=ws,
-                        profile=profile,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        model=run_model,
-                        command_evidence=[],
-                        workspace_id=workspace_id,
-                        execution_owner_id=execution_owner_id,
-                        before_mark_failed=_finish_conformance_recovery_failure,
-                        before_mark_failed_marks_workspace=True,
-                        before_agent_retry=before_agent_retry,
-                        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
-                        expected_status=WorkspaceStatus.validating,
-                        failure_from_status=WorkspaceStatus.validating,
-                    )
-                    if not conformance_recovered:
                         return ExecutionValidationResult(
                             stop=True,
                             successful_validation_run_id=successful_validation_run_id,
-                            successful_validation_workspace_head_sha=(
-                                successful_validation_workspace_head_sha
-                            ),
+                            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                         )
-                except ComposeExecCleanupError as exc:
-                    message = cleanup_failure_message(exc)
-                    _log.error(
-                        "executor.post_validation_conformance_cleanup_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        source=exc.source,
-                        label=exc.label,
-                        invocation_id=exc.invocation_id,
-                        reason_code=exc.reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    await _mark_failed_preserving_planning_artifacts(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except AgentRunError as exc:
-                    reason_code = exc.reason_code or "AGENT_CLI_FAILED"
-                    message = _post_validation_conformance_agent_failure_message(exc)
-                    _log.warning(
-                        "executor.post_validation_conformance_agent_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        returncode=exc.result.returncode,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    await _mark_failed_preserving_planning_artifacts(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.agent_failure,
-                        message=message,
-                        reason_code=reason_code,
-                        details=_post_validation_conformance_agent_failure_details(
-                            exc,
-                            validation_run_id=validation_run_id,
-                        ),
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except Exception as exc:
-                    reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
-                    message = (f"post-validation conformance check failed: {exc!r}")[:2000]
-                    _log.exception(
-                        "executor.post_validation_conformance_unexpected_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    await _mark_failed_preserving_planning_artifacts(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=reason_code,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
                 if conformance_failure is not None:
                     remaining_conformance_iterations = max(
                         0,
@@ -788,17 +788,15 @@ async def run_validation_and_fix_cycle(
                     )
                     # Recovery skips feature execution; retrying this
                     # conformance miss would only rerun validation.
-                    # ``resume_disable_fix_passes`` (a grant-bearing resume) must
-                    # likewise never fire a conformance fix pass: re-invoking the
-                    # agent while operator grants are active could rewrite a
-                    # granted protected file and have the new violation suppressed
-                    # by the same single-use grant. Mark FAILED for operator
-                    # triage instead (mirrors the zeroed validation-fix budget).
+                    # Grant-bearing resumes (resume_disable_fix_passes) never fire a conformance
+                    # fix pass; mark FAILED for operator triage instead.
                     if (
                         conformance_report_cleanup_failed
                         or recovery is not None
                         or remaining_conformance_iterations <= 0
                         or resume_disable_fix_passes
+                        or adapter is None
+                        or _is_adapter_retired(adapter)
                     ):
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
@@ -815,7 +813,11 @@ async def run_validation_and_fix_cycle(
                             "from_status": WorkspaceStatus.validating,
                             "failure_reason": (
                                 FailureReason.infrastructure_failure
-                                if conformance_report_cleanup_failed
+                                if (
+                                    conformance_report_cleanup_failed
+                                    or adapter is None
+                                    or _is_adapter_retired(adapter)
+                                )
                                 else FailureReason.agent_failure
                             ),
                             "message": conformance_failure.message[:2000],
@@ -916,9 +918,14 @@ async def run_validation_and_fix_cycle(
             baseline_coverage=baseline_coverage,
         )
 
-        if first_fail is None or (
-            not is_post_validation_conformance_fix_pass
-            and validation_fix_passes_used >= max_fix_passes
+        if (
+            first_fail is None
+            or adapter is None
+            or _is_adapter_retired(adapter)
+            or (
+                not is_post_validation_conformance_fix_pass
+                and validation_fix_passes_used >= max_fix_passes
+            )
         ):
             # Exhausted our budget (or no failure details to anchor a
             # fix prompt on) — mark failed and let the operator triage.
@@ -1040,6 +1047,8 @@ async def run_validation_and_fix_cycle(
                 _fix_prompt: str = fix_prompt,
                 _hosted_pr_identity: dict[str, Any] | None = hosted_pr_identity,
             ) -> AgentRunResult:
+                if adapter is None or _is_adapter_retired(adapter):
+                    raise RuntimeError("No agent adapter available for validation fix pass")
                 return await adapter.run(
                     compose_project=compose_project,
                     compose_file=compose_file,

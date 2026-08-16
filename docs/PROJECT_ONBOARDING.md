@@ -53,7 +53,7 @@ then require only the matching auth.
 
 ## One-message prompt
 
-Use this with Codex, Claude Code, Cursor, Gemini, OpenCode, Grok, or a human
+Use this with Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok, or a human
 operator:
 
 ```text
@@ -105,7 +105,7 @@ I will inspect this repository for AWF onboarding. I will not launch a workspace
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
 
-### Gemini
+### Antigravity
 
 ```text
 Analyze this repository for AWF onboarding. Do not launch a workspace yet.

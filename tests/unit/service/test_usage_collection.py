@@ -1210,7 +1210,7 @@ async def test_final_sample_reason_codes(
         compose_project="p",
         compose_file=_COMPOSE_FILE,
         workspace_id="ws_reason",
-        provider=AgentRuntime.gemini,
+        provider=AgentRuntime.codex,
     )
     await ctx.finalize(status="failed")
 
