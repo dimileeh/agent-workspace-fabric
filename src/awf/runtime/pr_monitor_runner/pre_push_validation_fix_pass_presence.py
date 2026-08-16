@@ -265,6 +265,32 @@ def _binding_names(text: str) -> set[str]:
     return names
 
 
+def _is_declaration_opener_line(raw_line: str) -> bool:
+    """Return True for def/class/function/let/const/var/#define opener lines.
+
+    Same-signature redefinitions reuse identical opener text, so tip-extra
+    detection needs multiset counting for these lines. Assignments are excluded:
+    value rebinds already change line text, and surplus copies of salvage
+    assignment text in unrelated hunks must not look like supersession
+    (PRRT_kwDOSJAM6s6ZqGeU).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//"):
+        return False
+    if stripped.startswith("#") and _DEFINE_DIRECTIVE_LINE_RE.match(stripped) is None:
+        return False
+    for pattern in (
+        _DEFINE_BINDING_RE,
+        _DEF_BINDING_RE,
+        _CLASS_BINDING_RE,
+        _FUNCTION_BINDING_RE,
+        _LET_CONST_BINDING_RE,
+    ):
+        if pattern.match(raw_line) is not None:
+            return True
+    return False
+
+
 def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set[str]:
     """Return names whose last binding line differs between parent and salvage."""
     parent_last: dict[str, str] = {}
@@ -295,20 +321,28 @@ def _tip_extra_can_supersede_modified_salvage(
     surrounding context merge-file reproduces that tip cleanly, so equality
     alone would retain stale FIXED evidence. Only names whose last binding line
     changed vs parent count — unrelated appends and later hunks stay retained
-    (PRRT_kwDOSJAM6s6Zp_3j).
+    (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use set difference except for
+    declaration openers, which need multiset counting so same-signature
+    redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij); full-line multiset
+    would over-reject surplus salvage assignment copies (PRRT_kwDOSJAM6s6ZqGeU).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:
         return False
-    # Multiset difference (not set): a same-signature redefinition reuses the
-    # salvage opener line text, so set membership would drop the duplicate
-    # binding from tip-only extras and miss supersession (PRRT_kwDOSJAM6s6ZqDij).
-    remaining = Counter(commit_blob.splitlines())
+    commit_lines = commit_blob.splitlines()
+    commit_set = set(commit_lines)
+    # Multiset only for declaration openers: same-signature redefinition reuses
+    # the salvage opener line text, so set membership would drop the duplicate
+    # from tip-only extras and miss supersession (PRRT_kwDOSJAM6s6ZqDij).
+    opener_remaining = Counter(line for line in commit_lines if _is_declaration_opener_line(line))
     extra_lines: list[str] = []
     for line in head_blob.splitlines():
-        if remaining[line] > 0:
-            remaining[line] -= 1
-        else:
+        if _is_declaration_opener_line(line):
+            if opener_remaining[line] > 0:
+                opener_remaining[line] -= 1
+            else:
+                extra_lines.append(line)
+        elif line not in commit_set:
             extra_lines.append(line)
     if not extra_lines:
         return False

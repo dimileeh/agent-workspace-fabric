@@ -315,11 +315,35 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9\n",
     )
+    # Surplus copies of salvage assignment text in an unrelated later hunk must
+    # not look like supersession. Full-line multiset would mark the duplicate
+    # ``FEATURE_ENABLED = True`` as tip-only and drop still-valid FIXED evidence;
+    # assignment rebinds already change line text, so set difference is enough
+    # (PRRT_kwDOSJAM6s6ZqGeU).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED = True\n",
+    )
+    parent_indented = "class C:\n    FEATURE_ENABLED = False\n"
+    commit_indented = "class C:\n    FEATURE_ENABLED = True\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_indented, commit_blob=commit_indented
+    ) == {"FEATURE_ENABLED"}
+    # Same indented assignment text reused in a later local hunk — identical line
+    # text, so only full-line multiset would treat the surplus copy as tip-extra.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_indented,
+        commit_blob=commit_indented,
+        head_blob=(
+            "class C:\n    FEATURE_ENABLED = True\ndef helper():\n    FEATURE_ENABLED = True\n"
+        ),
+    )
     # Same-signature redefinition reuses the salvage opener line text. A set
     # difference of tip vs salvage lines drops that duplicate opener from
     # tip-only extras, so the append looks non-superseding while merge-file
     # still matches HEAD — unlike the added-blob path, which keeps the literal
-    # suffix (PRRT_kwDOSJAM6s6ZqDij).
+    # suffix. Multiset applies only to declaration openers (PRRT_kwDOSJAM6s6ZqDij).
     parent_def = "x = 1\n"
     commit_def = "x = 1\ndef guard():\n    return True\n"
     head_redef = "x = 1\ndef guard():\n    return True\ndef guard():\n    return False\n"
@@ -342,6 +366,34 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         head_blob=(
             "x = 1\nfunction guard() {\n  return true;\n}\nfunction guard() {\n  return false;\n}\n"
         ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\nconst guard = true;\n",
+        head_blob="x = 1\nconst guard = true;\nconst guard = false;\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\n#define GUARD 1\n",
+        head_blob="x = 1\n#define GUARD 1\n#define GUARD 0\n",
+    )
+    # Comment / non-directive hash lines are not declaration openers; they must
+    # not flip tip-extra multiset accounting (PRRT_kwDOSJAM6s6ZqGeU).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n// def guard():\n# not-a-define\n"),
+    )
+    # No salvage binding change / exact tip match → no supersession.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=commit,
+        commit_blob=commit,
+        head_blob=commit + "other = 1\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=commit,
     )
 
 
