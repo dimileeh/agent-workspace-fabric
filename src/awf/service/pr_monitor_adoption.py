@@ -157,13 +157,20 @@ class PullRequestMonitorAdoptionService:
             repo_slug=repo.slug(),
             pr_number=pr_number,
         )
-        task_external_id = _adoption_external_id(repo_slug=repo.slug(), pr_number=pr_number)
+        # History lookup stays on the deterministic generated adoption id even when
+        # the caller supplies an explicit external_id (policy/persistence only).
+        history_external_id = _adoption_external_id(repo_slug=repo.slug(), pr_number=pr_number)
+        effective_external_id = _effective_adoption_external_id(
+            request,
+            repo_slug=repo.slug(),
+            pr_number=pr_number,
+        )
         workspace_repo = WorkspaceRepository(self._session)
         await workspace_repo.acquire_idempotency_key_lock(idempotency_key)
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
         adoption_history = await workspace_repo.list_pr_adoption_history(
-            task_external_id=task_external_id,
+            task_external_id=history_external_id,
             idempotency_key=idempotency_key,
             task_kind=PR_ADOPTION_TASK_KIND,
             repo_slug=repo.slug(),
@@ -172,7 +179,7 @@ class PullRequestMonitorAdoptionService:
         live_adoption = _select_live_adoption_workspace(adoption_history)
         if live_adoption is not None:
             _raise_if_adoption_forge_mismatch(live_adoption, repo=repo)
-            _raise_if_policy_conflicts(live_adoption, request, repo=repo)
+            _raise_if_policy_conflicts(live_adoption, request, repo=repo, pr_number=pr_number)
             return await self._response(live_adoption, attached_existing=True)
 
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
@@ -184,7 +191,7 @@ class PullRequestMonitorAdoptionService:
                 pr_number=pr_number,
             )
             if _adoption_workspace_is_resumable(existing):
-                _raise_if_policy_conflicts(existing, request, repo=repo)
+                _raise_if_policy_conflicts(existing, request, repo=repo, pr_number=pr_number)
                 return await self._response(existing, attached_existing=True)
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
@@ -200,18 +207,23 @@ class PullRequestMonitorAdoptionService:
                 idempotency_key=idempotency_key,
                 repo=repo,
                 pr_number=pr_number,
+                effective_external_id=effective_external_id,
             )
             superseded_workspace = existing
-        workspace = await self._create_adoption_workspace(
-            request=request,
-            repo=repo,
-            metadata=metadata,
-            idempotency_key=idempotency_key,
-            logical_idempotency_key=idempotency_key,
-            previous_terminal_adoptions=previous_terminal_adoptions,
-            superseded_adoption=superseded_adoption,
-            superseded_workspace=superseded_workspace,
-        )
+        try:
+            workspace = await self._create_adoption_workspace(
+                request=request,
+                repo=repo,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
+                logical_idempotency_key=idempotency_key,
+                previous_terminal_adoptions=previous_terminal_adoptions,
+                superseded_adoption=superseded_adoption,
+                superseded_workspace=superseded_workspace,
+                effective_external_id=effective_external_id,
+            )
+        except TaskExternalIdConflictError as exc:
+            raise _task_external_id_conflict_error(exc) from exc
         return await self._response(workspace, attached_existing=False)
 
     async def _supersede_previous_adoption(
@@ -221,6 +233,7 @@ class PullRequestMonitorAdoptionService:
         idempotency_key: str,
         repo: RepoRef,
         pr_number: int,
+        effective_external_id: str,
     ) -> dict[str, Any]:
         previous_idempotency_key = workspace.idempotency_key
         superseded_idempotency_key = _superseded_adoption_idempotency_key(
@@ -228,15 +241,11 @@ class PullRequestMonitorAdoptionService:
             workspace_id=workspace.id,
         )
         workspace.idempotency_key = superseded_idempotency_key
-        adoption_external_id = _adoption_external_id(
-            repo_slug=repo.slug(),
-            pr_number=pr_number,
-        )
         superseded_external_id = _superseded_adoption_external_id(
-            external_id=adoption_external_id,
+            external_id=effective_external_id,
             workspace_id=workspace.id,
         )
-        if workspace.task_external_id == adoption_external_id:
+        if workspace.task_external_id == effective_external_id:
             workspace.task_external_id = superseded_external_id
 
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
@@ -245,7 +254,7 @@ class PullRequestMonitorAdoptionService:
             if task is not None:
                 if task.idempotency_key == idempotency_key:
                     task.idempotency_key = superseded_idempotency_key
-                if task.external_id == adoption_external_id:
+                if task.external_id == effective_external_id:
                     task.external_id = superseded_external_id
 
         await WorkspaceRepository(self._session).advance_workspace_version(workspace)
@@ -308,6 +317,7 @@ class PullRequestMonitorAdoptionService:
         previous_terminal_adoptions: list[dict[str, str | None]],
         superseded_adoption: dict[str, Any] | None = None,
         superseded_workspace: Workspace | None = None,
+        effective_external_id: str,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
         repo_url = _adoption_repo_url(request=request, repo=repo)
@@ -322,6 +332,8 @@ class PullRequestMonitorAdoptionService:
             ),
         )
         operator_reason = _redacted_optional_text(request.reason)
+        task_class = request.task_class.value if request.task_class is not None else None
+        explicit_external_id = request.external_id is not None
         workspace_repo = WorkspaceRepository(self._session)
         workspace = await workspace_repo.create(
             repo_url=repo_url,
@@ -332,9 +344,8 @@ class PullRequestMonitorAdoptionService:
                 or f"PR monitor adoption: {repo.slug()}#{metadata.number}"
             ),
             task_prompt=request.task_prompt or _adoption_task_prompt(repo=repo, metadata=metadata),
-            task_external_id=_adoption_external_id(
-                repo_slug=repo.slug(), pr_number=metadata.number
-            ),
+            task_external_id=effective_external_id,
+            task_class=task_class,
             task_tag=request.task_tag,
             agent=request.agent.value,
             test_commands=[],
@@ -407,7 +418,7 @@ class PullRequestMonitorAdoptionService:
                 task_idempotency_key=idempotency_key,
             )
         except TaskExternalIdConflictError:
-            if not previous_terminal_adoptions:
+            if explicit_external_id or not previous_terminal_adoptions:
                 raise
             task = await _create_generated_task()
         else:
@@ -416,6 +427,8 @@ class PullRequestMonitorAdoptionService:
                 and task.idempotency_key == logical_idempotency_key
                 and await _task_has_existing_attempt(self._session, task.id)
             ):
+                if explicit_external_id:
+                    raise TaskExternalIdConflictError(effective_external_id)
                 task = await _create_generated_task()
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
@@ -1046,6 +1059,64 @@ def _adoption_external_id(*, repo_slug: str, pr_number: int) -> str:
     return f"pr-adopt-{digest[:40]}"
 
 
+def _effective_adoption_external_id(
+    request: PullRequestMonitorAdoptionRequest,
+    *,
+    repo_slug: str,
+    pr_number: int,
+) -> str:
+    if request.external_id is not None:
+        return request.external_id
+    return _adoption_external_id(repo_slug=repo_slug, pr_number=pr_number)
+
+
+def _is_generated_adoption_external_id_lineage(
+    *,
+    existing_external_id: str | None,
+    repo_slug: str,
+    pr_number: int,
+) -> bool:
+    if existing_external_id is None:
+        return False
+    generated = _adoption_external_id(repo_slug=repo_slug, pr_number=pr_number)
+    if existing_external_id == generated:
+        return True
+    prefix = f"{generated}:g"
+    if not existing_external_id.startswith(prefix):
+        return False
+    suffix = existing_external_id[len(prefix) :]
+    return suffix.isdigit()
+
+
+def _adoption_external_id_policy_conflicts(
+    workspace: Workspace,
+    request: PullRequestMonitorAdoptionRequest,
+    *,
+    repo_slug: str,
+    pr_number: int,
+) -> bool:
+    existing = workspace.task_external_id
+    if request.external_id is not None:
+        return existing != request.external_id
+    return not _is_generated_adoption_external_id_lineage(
+        existing_external_id=existing,
+        repo_slug=repo_slug,
+        pr_number=pr_number,
+    )
+
+
+def _task_external_id_conflict_error(exc: TaskExternalIdConflictError) -> PRMonitorAdoptionError:
+    return PRMonitorAdoptionError(
+        error_code="TASK_EXTERNAL_ID_CONFLICT",
+        message=(
+            "External task ID is already associated with a different "
+            "repo/base/task-class/owned-path scope; use a unique external "
+            "task ID for this backlog slice or retry the original scope."
+        ),
+        detail={"external_id": _redacted_optional_text(exc.external_id)},
+    )
+
+
 def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: str) -> str:
     return f"{idempotency_key}:superseded:{workspace_id}"
 
@@ -1189,6 +1260,7 @@ def _raise_if_policy_conflicts(
     request: PullRequestMonitorAdoptionRequest,
     *,
     repo: RepoRef,
+    pr_number: int,
 ) -> None:
     requested_grace = request.initial_review_grace_period_seconds
     requested_agent = request.agent.value
@@ -1268,6 +1340,45 @@ def _raise_if_policy_conflicts(
                 "workspace_id": workspace.id,
                 "existing_task_tag": workspace.task_tag,
                 "requested_task_tag": request.task_tag,
+            },
+        )
+    if _adoption_external_id_policy_conflicts(
+        workspace,
+        request,
+        repo_slug=repo.slug(),
+        pr_number=pr_number,
+    ):
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different external_id policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "field": "external_id",
+                "existing_external_id": _redacted_optional_text(workspace.task_external_id),
+                "requested_external_id": _redacted_optional_text(
+                    _effective_adoption_external_id(
+                        request,
+                        repo_slug=repo.slug(),
+                        pr_number=pr_number,
+                    )
+                    if request.external_id is not None
+                    else None
+                ),
+                "requested_external_id_policy": (
+                    "explicit" if request.external_id is not None else "generated"
+                ),
+            },
+        )
+    requested_task_class = request.task_class.value if request.task_class is not None else None
+    if workspace.task_class != requested_task_class:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different task_class policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "field": "task_class",
+                "existing_task_class": workspace.task_class,
+                "requested_task_class": requested_task_class,
             },
         )
     # Compare the persisted tri-state INTENT, not the resolved column: the

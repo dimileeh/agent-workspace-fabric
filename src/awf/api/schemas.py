@@ -157,6 +157,8 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
             ),
         ),
     ] = None
+    external_id: Annotated[str | None, Field(default=None, max_length=128)] = None
+    task_class: TaskClass | None = None
     reason: Annotated[str | None, Field(default=None, max_length=512)] = None
 
     @field_validator("task_tag")

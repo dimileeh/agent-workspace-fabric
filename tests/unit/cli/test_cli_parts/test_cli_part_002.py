@@ -46,6 +46,8 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
     assert "--owned-path" in visible_help
     assert "--execution" in visible_help
+    assert "--external-id" in visible_help
+    assert "--task-class" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -167,6 +169,47 @@ class TestWorkspaceAdoptPr:
         assert bad.exit_code != 0
         assert "task tag" in bad.output
         mock_bad.assert_not_called()
+
+    @pytest.mark.unit
+    def test_external_id_and_task_class_forwarded_when_set_omitted_when_unset(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--external-id",
+                    "CLOUD-TASK-42",
+                    "--task-class",
+                    "test_task",
+                ],
+            )
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["external_id"] == "CLOUD-TASK-42"
+        assert body["task_class"] == "test_task"
+
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock_omit:
+            omit = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                ],
+            )
+        assert omit.exit_code == 0
+        omit_body = mock_omit.call_args.kwargs["json"]
+        assert "external_id" not in omit_body
+        assert "task_class" not in omit_body
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

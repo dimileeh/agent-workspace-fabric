@@ -4137,6 +4137,18 @@
             "$ref": "#/components/schemas/PullRequestMonitorExecutionPolicy",
             "description": "Explicit PR monitor execution policy. Hosted mode is never inferred from environment or Docker availability."
           },
+          "external_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
@@ -4258,6 +4270,16 @@
               }
             ],
             "title": "Repo Url"
+          },
+          "task_class": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "task_prompt": {
             "anyOf": [
