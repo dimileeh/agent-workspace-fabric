@@ -364,9 +364,11 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # Sanitized non-blocking placeholders (for example
     # ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back only to an
     # earlier reasoned hard block (needs_human/defer) or a bare blocking
-    # fallback so a prompt echo cannot clear a hard block; a genuine no-reason
-    # final verdict is otherwise the agent's last word and must not be trumped
-    # by an earlier non-blocking verdict (e.g. false_positive).
+    # fallback so a prompt echo cannot clear a hard block; the same hard-block
+    # fallback applies to FALSE POSITIVE / DEFER placeholders so escalation text
+    # is preserved. A genuine no-reason final verdict is otherwise the agent's
+    # last word and must not be trumped by an earlier non-blocking verdict
+    # (e.g. false_positive).
     # Blocking final verdicts remain authoritative even with no usable reason.
     # Standalone resolvable placeholder echoes fail closed (never resolve).
     # Markerless / bare-only output fails closed to needs_human.
@@ -427,20 +429,28 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                     if parsed.verdict == latest_verdict and parsed.reason is not None:
                         return parsed
             # Template-placeholder echoes (reason sanitized to None) fail closed for
-            # every resolvable verdict. FIXED placeholders may still fall back to an
-            # earlier reasoned hard block (#676); FALSE POSITIVE / DEFER placeholders
-            # never resolve on their own.
+            # every resolvable verdict. Any resolvable placeholder may still fall back
+            # to an earlier reasoned hard block (#676 / #822 PRRT_kwDOSJAM6s6ZlxgI),
+            # but never to the same label as the placeholder (that would still
+            # resolve/defer). FALSE POSITIVE / DEFER placeholders never resolve alone.
             if final_is_resolvable_placeholder:
-                if latest_verdict == "fix_committed":
-                    for parsed in reversed(awf_verdicts[:-1]):
-                        if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
-                            return parsed
-                    bare_blocking = _select_bare_verdict(
-                        bare_verdicts,
-                        priorities=("needs_human", "defer"),
-                    )
-                    if bare_blocking is not None:
-                        return bare_blocking
+                for parsed in reversed(awf_verdicts[:-1]):
+                    if (
+                        parsed.verdict in {"needs_human", "defer"}
+                        and parsed.verdict != latest_verdict
+                        and parsed.reason is not None
+                    ):
+                        return parsed
+                bare_blocking = _select_bare_verdict(
+                    bare_verdicts,
+                    # Exclude same-label DEFER so a DEFER placeholder cannot
+                    # reuse an earlier reasoned DEFER (fail-closed same-label).
+                    priorities=(
+                        ("needs_human",) if latest_verdict == "defer" else ("needs_human", "defer")
+                    ),
+                )
+                if bare_blocking is not None:
+                    return bare_blocking
                 return _fail_closed_resolvable_placeholder_if_needed(stdout, latest)
             if latest_verdict in {"defer", "needs_human"}:
                 return latest

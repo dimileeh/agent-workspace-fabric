@@ -514,6 +514,27 @@ class TestParseVerdict:
         assert result.reason == "maintainer review required"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_placeholder",
+        [
+            "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>",
+            "AWF-VERDICT: DEFER: <what to track>",
+        ],
+    )
+    def test_private_awf_resolvable_placeholder_preserves_earlier_hard_block(
+        self,
+        final_placeholder: str,
+    ) -> None:
+        # FALSE POSITIVE / DEFER placeholders must keep an earlier reasoned hard
+        # block the same way FIXED placeholders do (#822 PRRT_kwDOSJAM6s6ZlxgI).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer review required\n" + final_placeholder
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer review required"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_placeholder_only_fail_closed(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: <one-sentence summary>")
 
