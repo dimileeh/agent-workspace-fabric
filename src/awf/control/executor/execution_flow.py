@@ -177,12 +177,6 @@ async def execute(
             return
         recovery = guard_result.recovery
 
-    if recovery is None and await self._reject_unsupported_agent_runtime(
-        workspace_id=workspace_id,
-        workspace=ws,
-    ):
-        return
-
     # Forge-support gate — fail fast on a detected-but-unimplemented forge
     # (e.g. bitbucket) BEFORE every downstream gh path (non-feature dispatch,
     # agent run, push, ``gh pr create``). See ``forge_gate`` for the
@@ -306,8 +300,12 @@ async def execute(
 
     try:
         try:
-            agent = AgentRuntime(ws.agent)
-            defaults = self._defaults_for(agent)
+            try:
+                agent = AgentRuntime(ws.agent)
+                defaults = self._defaults_for(agent)
+            except ValueError:
+                agent = ws.agent
+                defaults = None
             adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
             run_model = _agent_run_model_for_workspace(ws)
             adapter = get_adapter(

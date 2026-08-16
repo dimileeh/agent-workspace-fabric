@@ -580,7 +580,7 @@ class TestTaskKindFailFast:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
-    async def test_execute_fails_fast_on_unsupported_agent_runtime(
+    async def test_execute_routes_unsupported_agent_runtime_to_agent_failure(
         self,
         agent: str,
         fake: FakeCommandRunner,
@@ -588,7 +588,8 @@ class TestTaskKindFailFast:
         tmp_path: Path,
     ) -> None:
         """A queued workspace with an unsupported/historical agent runtime (like gemini)
-        must fail fast on execute without trying to build an adapter or run the agent.
+        must route through RetiredAgentAdapter and fail with agent_failure so provider recovery
+        can dispatch an approved fallback.
         """
         ws_id = await _seed_ready(factory, agent=agent)
 
@@ -596,14 +597,48 @@ class TestTaskKindFailFast:
 
         await executor.execute(ws_id)
 
-        assert fake.calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
+            assert ws.failure_reason == "agent_failure"
+            assert "UNSUPPORTED_AGENT_RUNTIME" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    async def test_execute_unsupported_agent_runtime_triggers_provider_fallback(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A historical gemini workspace with an approved launchable fallback
+        must invoke provider recovery and create a fallback attempt on execute.
+        """
+        task_policy = {
+            "provider_recovery": {
+                "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+            }
+        }
+        ws_id = await _seed_ready(factory, agent="gemini", task_policy=task_policy)
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert any(e.reason_code == "UNSUPPORTED_AGENT_RUNTIME" for e in ws.events)
+            assert ws.events[-1].reason_code == "PROVIDER_FALLBACK_SELECTED"
+
+            repo = WorkspaceRepository(s)
+            all_ws = await repo.list(limit=100)
+            fallback_attempts = [w for w in all_ws if w.agent == "antigravity"]
+            assert len(fallback_attempts) == 1
 
     @pytest.mark.unit
     @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])

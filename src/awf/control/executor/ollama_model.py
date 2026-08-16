@@ -25,6 +25,7 @@ from awf.adapters.opencode import (
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
+    _agent_runtime_or_none,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -96,7 +97,7 @@ async def _ensure_ollama_model_or_mark_failed(
     non-OpenCode runtimes.
     """
 
-    agent = AgentRuntime(ws.agent)
+    agent = _agent_runtime_or_none(ws.agent)
     if agent is not AgentRuntime.opencode:
         return True
 
