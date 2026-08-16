@@ -74,9 +74,11 @@ def _salvaged_fix_head_state_key(item_id: str) -> str:
 
     When the comment agent crashes after leaving a valid dirty fix,
     ``_commit_dirty_worktree`` still commits it and the invocation returns
-    ``agent_failed``. The settle loop retries the same item with that salvage as
-    the new start HEAD; a successful FIXED without another tree change must be
-    able to confirm the prior salvage without accepting the failed run's verdict.
+    ``agent_failed``. The settle loop retries the same item; a successful FIXED
+    without another tree change must be able to confirm the prior salvage when
+    HEAD still equals or descends from that SHA — without accepting the failed
+    run's verdict. Descent matters in multi-item bursts where a later thread
+    advances HEAD past the salvage tip while leaving it in history.
     """
     return f"__salvaged_fix_head__:{item_id}"
 

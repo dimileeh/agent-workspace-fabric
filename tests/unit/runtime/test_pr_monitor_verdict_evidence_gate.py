@@ -498,6 +498,135 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
 
 
 @pytest.mark.unit
+async def test_salvaged_fix_evidence_survives_later_head_advance(
+    tmp_path: Path,
+) -> None:
+    """Retained salvage must count when a later burst tip descends from it."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_later_head"
+    workspace_id = "ws_salvage_later_head"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Another item moved HEAD past the salvage tip; this retry starts/ends there.
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after burst",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after burst"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_non_descendant_head(
+    tmp_path: Path,
+) -> None:
+    """Retained salvage must not count when HEAD left the salvage ancestry."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    unrelated = "d" * 40
+    item_id = "PRRT_salvage_non_descendant"
+    workspace_id = "ws_salvage_non_descendant"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed without salvage ancestry",
+        dirty=False,
+        heads=[unrelated],
+        head_descends=False,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=unrelated,
+        evidence_item_id=item_id,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
 async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
     tmp_path: Path,
 ) -> None:

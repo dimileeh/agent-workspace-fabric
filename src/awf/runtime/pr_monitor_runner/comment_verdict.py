@@ -164,7 +164,8 @@ async def _invoke_cli_for_verdict_result(
 
     ``evidence_item_id`` scopes dirty-salvage retention so a later successful
     FIXED retry for the same thread/comment can confirm a prior failed-run
-    salvage without accepting that failed invocation's verdict.
+    salvage (HEAD at or descending from the salvaged SHA) without accepting
+    that failed invocation's verdict.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -407,8 +408,11 @@ async def _invoke_cli_for_verdict_result(
     item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
 
     # Failed runs may still leave a contentful salvage commit. Retain that SHA
-    # for this item so a later successful FIXED can confirm it once HEAD is
-    # still at the salvage tip — without resolving from the failed invocation.
+    # for this item so a later successful FIXED can confirm it when HEAD is
+    # still at (or descends from) the salvage tip — without resolving from the
+    # failed invocation. Equality alone is too strict in multi-item bursts:
+    # a later thread can advance HEAD past the salvage while leaving it in
+    # history.
     if (
         cli_failed
         and state is not None
@@ -429,8 +433,16 @@ async def _invoke_cli_for_verdict_result(
         retained_head = (
             state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id)) or ""
         ).strip()
-        if retained_head and retained_head.lower() == item_end_head.lower():
-            retained_salvage_evidence = True
+        if retained_head:
+            retained_salvage_evidence = retained_head.lower() == item_end_head.lower() or (
+                callable(descends)
+                and worktree_path.exists()
+                and await descends(
+                    worktree_path=worktree_path,
+                    ancestor=retained_head,
+                    descendant=item_end_head,
+                )
+            )
     item_fix_evidence = item_fix_evidence or retained_salvage_evidence
 
     def _clear_retained_salvage() -> None:
