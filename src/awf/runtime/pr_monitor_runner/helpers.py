@@ -399,13 +399,14 @@ def _normalize_markdown_fence_line(line: str) -> str:
 
 
 def _markdown_fence_list_container_indent(line: str) -> int:
-    """Column width of leading indent plus list marker on a fence opener.
+    """Column width of leading indent plus list marker(s) on a fence opener.
 
-    ``10. ```text`` → 4; ``- ```text`` → 2; ``> - ```text`` → 2; top-level /
-    blockquote-only fences → 0. Closers for list-nested openers may carry this
-    indent plus CommonMark's optional 0–3 spaces relative to the container
-    (PRRT_kwDOSJAM6s6ZmsZS). Blockquote width is tracked separately and stripped
-    before this indent is applied on closers.
+    ``10. ```text`` → 4; ``10. 10. ```text`` → 8 (sum nested list widths);
+    ``- ```text`` → 2; ``> - ```text`` → 2; top-level / blockquote-only
+    fences → 0. Closers for list-nested openers may carry this indent plus
+    CommonMark's optional 0–3 spaces relative to the container
+    (PRRT_kwDOSJAM6s6ZmsZS, PRRT_kwDOSJAM6s6Zn6x6). Blockquote width is
+    tracked separately and stripped before this indent is applied on closers.
     """
     rest = line.lstrip(" \t")
     leading_ws = len(line) - len(rest)
@@ -419,7 +420,9 @@ def _markdown_fence_list_container_indent(line: str) -> int:
             continue
         lst = _MARKDOWN_LIST_PREFIX.match(rest)
         if lst is not None:
-            list_width = lst.end()
+            # Nested list containers stack widths; retaining only the last
+            # marker would under-indent closers for ``10. 10. ```text``.
+            list_width += lst.end()
             rest = rest[lst.end() :]
             continue
         break

@@ -1331,6 +1331,26 @@ class TestParseVerdict:
         assert result.reason == "closed ordered-list fence"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_nested_ordered_list_fence_sums_container_indent(
+        self,
+    ) -> None:
+        # Nested ordered-list openers (``10. 10. ```text``) need eight columns of
+        # continuation indent. Overwriting list_width with only the inner marker
+        # leaves container_indent at 4 (max closer indent 7), so the fence never
+        # closes and a later top-level FIXED stays hidden (PRRT_kwDOSJAM6s6Zn6x6).
+        stdout = (
+            "10. 10. ```text\n"
+            "        AWF-VERDICT: FALSE POSITIVE: example\n"
+            "        ```\n"
+            "AWF-VERDICT: FIXED: closed nested ordered-list fence\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "closed nested ordered-list fence"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ordered_list_blockquote_fence_indented_closer(
         self,
     ) -> None:
