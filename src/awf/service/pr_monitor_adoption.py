@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import inspect, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.defaults import defaults_with_model_overrides
@@ -246,14 +247,12 @@ class PullRequestMonitorAdoptionService:
         # Release whatever active identity the terminal generation still holds.
         # Matching only the *new* effective ID strands a prior explicit ID when
         # re-adoption omits or changes identity, blocking later re-use of that ID.
-        # Probe the task namespace so an occupied preferred superseded slot does
-        # not raise IntegrityError on flush and wedge later re-adoptions.
-        workspace.task_external_id = await _release_superseded_adoption_external_id(
-            self._session,
-            workspace.task_external_id,
-            workspace_id=workspace.id,
-        )
-
+        # Probe + savepoint-retry the task namespace so an occupied (or
+        # concurrently claimed) preferred superseded slot does not raise an
+        # unhandled IntegrityError on flush and wedge later re-adoptions.
+        previous_workspace_external_id = workspace.task_external_id
+        owned_task: Task | None = None
+        previous_task_external_id: str | None = None
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
         if attempt is not None:
             task = await TaskRepository(self._session).get(attempt.task_id)
@@ -267,15 +266,50 @@ class PullRequestMonitorAdoptionService:
                 # same-scope source task keeps its external_id / key so prior
                 # attempts and future lookups stay intact — including when
                 # reuse stamped a null source key with the adoption key.
+                owned_task = task
+                previous_task_external_id = task.external_id
                 task.idempotency_key = superseded_idempotency_key
-                task.external_id = await _release_superseded_adoption_external_id(
-                    self._session,
-                    task.external_id,
-                    workspace_id=workspace.id,
-                )
 
-        await WorkspaceRepository(self._session).advance_workspace_version(workspace)
-        await self._session.flush()
+        last_integrity_error: IntegrityError | None = None
+        for _ in range(_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS):
+            try:
+                # Nested savepoint: recover uq_tasks_external_id races the same
+                # way TaskRepository.create_or_get does, without poisoning the
+                # outer adoption savepoint / advisory-lock transaction.
+                async with self._session.begin_nested():
+                    workspace.task_external_id = await _release_superseded_adoption_external_id(
+                        self._session,
+                        previous_workspace_external_id,
+                        workspace_id=workspace.id,
+                    )
+                    if owned_task is not None:
+                        owned_task.external_id = await _release_superseded_adoption_external_id(
+                            self._session,
+                            previous_task_external_id,
+                            workspace_id=workspace.id,
+                        )
+                    await WorkspaceRepository(self._session).advance_workspace_version(workspace)
+                    await self._session.flush()
+                break
+            except IntegrityError as exc:
+                # Savepoint rollback undoes the DB write, but ORM attributes still
+                # hold the colliding candidate. Revert before the next probe so a
+                # SELECT autoflush cannot re-emit the conflict outside the savepoint.
+                workspace.task_external_id = previous_workspace_external_id
+                if owned_task is not None:
+                    owned_task.external_id = previous_task_external_id
+                last_integrity_error = exc
+                continue
+        else:
+            raise PRMonitorAdoptionError(
+                error_code="TASK_EXTERNAL_ID_CONFLICT",
+                message=(
+                    "Unable to allocate a free superseded external task ID slot; "
+                    "retry after clearing colliding external task IDs."
+                ),
+                detail={"workspace_id": workspace.id},
+            ) from last_integrity_error
+
         return {
             "reason_code": PR_ADOPTION_SUPERSEDED_REASON,
             "repo_slug": repo.slug(),
@@ -1276,6 +1310,10 @@ async def _allocate_superseded_adoption_external_id(
 
     Prefers the deterministic nonce-0 encoding; if another task already owns that
     value, try salted candidates rather than flushing into ``uq_tasks_external_id``.
+
+    The occupancy probe is best-effort: a concurrent insert can still claim the
+    candidate before the caller's flush. ``_supersede_previous_adoption`` recovers
+    that ``uq_tasks_external_id`` race inside a savepoint and retries allocation.
     """
     for collision_nonce in range(_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS):
         candidate = _superseded_adoption_external_id(
