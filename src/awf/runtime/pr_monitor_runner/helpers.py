@@ -529,8 +529,10 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     immediately before a real trailing marker does not.
 
     ASCII ``'`` is only a quote delimiter when it is not a word-internal
-    apostrophe (``don't``, ``user's``); naive toggle would absorb a later
-    unquoted same-line marker into an earlier resolvable verdict.
+    apostrophe (``don't``, ``user's``); ASCII ``"`` is only a delimiter at
+    plausible quote boundaries (not inch/unit marks like ``5"``). Naive toggle
+    would absorb a later unquoted same-line marker into an earlier resolvable
+    verdict.
     """
     if match_start <= 0:
         return False
@@ -541,7 +543,8 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     inside_curly_single = False
     for index, char in enumerate(verdict_line[:match_start]):
         if char == '"':
-            inside_ascii_double = not inside_ascii_double
+            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
+                inside_ascii_double = not inside_ascii_double
         elif char == "'":
             if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
                 inside_ascii_single = not inside_ascii_single
@@ -562,6 +565,23 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
         or inside_curly_double
         or inside_curly_single
     )
+
+
+def _ascii_double_quote_is_delimiter(
+    verdict_line: str, index: int, inside_ascii_double: bool
+) -> bool:
+    """Return whether ``verdict_line[index]`` is an ASCII double-quote delimiter.
+
+    Inch/unit marks after an alphanumeric (``5"``, ``12"x``) must not open a
+    quote span; naive toggle would absorb a later unquoted same-line marker.
+    Outside a quote, only open when the previous character is not alphanumeric
+    so delimiters sit at plausible quote boundaries. Inside a quote, every
+    ``"`` closes (including when jammed against a following token).
+    """
+    if inside_ascii_double:
+        return True
+    prev = verdict_line[index - 1] if index > 0 else ""
+    return not prev.isalnum()
 
 
 def _ascii_single_quote_is_delimiter(

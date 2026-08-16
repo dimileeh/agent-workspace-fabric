@@ -551,6 +551,21 @@ class TestParseVerdict:
         assert result.reason == ("docs say 'it's AWF-VERDICT: FIXED: done' as an example")
 
     @pytest.mark.unit
+    def test_private_awf_verdict_inch_mark_in_reason_does_not_absorb_trailing_marker(
+        self,
+    ) -> None:
+        # Unmatched ASCII inch/unit marks (``5"``) must not open quote state or a
+        # later unquoted same-line blocker is absorbed into an earlier resolvable
+        # verdict (#822 PRRT_kwDOSJAM6s6ZlciX).
+        result = _parse_verdict_result(
+            'AWF-VERDICT: FALSE POSITIVE: the 5" screen is expected '
+            "AWF-VERDICT: NEEDS_HUMAN: actually unsure."
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "actually unsure."
+
+    @pytest.mark.unit
     def test_private_awf_verdict_apostrophe_in_reason_does_not_absorb_trailing_marker(
         self,
     ) -> None:
