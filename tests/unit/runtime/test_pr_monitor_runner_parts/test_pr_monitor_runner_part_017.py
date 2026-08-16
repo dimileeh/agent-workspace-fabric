@@ -522,6 +522,35 @@ class TestParseVerdict:
         assert result.reason == "real trailing"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_closing_single_quote_jammed_before_lowercase_still_splits(
+        self,
+    ) -> None:
+        # A closer jammed against a following lowercase token ('strict'by) must
+        # still close — otherwise quote state stays open and a trailing unquoted
+        # blocker is absorbed into an earlier resolvable verdict
+        # (#822 PRRT_kwDOSJAM6s6ZlYG3).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: use 'strict'by default "
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must decide"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_contraction_inside_single_quotes_keeps_embedded_marker(
+        self,
+    ) -> None:
+        # Contractions inside a real ASCII single-quoted span must not close the
+        # quote early, or a mid-prose marker citation would incorrectly split.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: docs say 'it's AWF-VERDICT: FIXED: done' as an example"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("docs say 'it's AWF-VERDICT: FIXED: done' as an example")
+
+    @pytest.mark.unit
     def test_private_awf_verdict_apostrophe_in_reason_does_not_absorb_trailing_marker(
         self,
     ) -> None:

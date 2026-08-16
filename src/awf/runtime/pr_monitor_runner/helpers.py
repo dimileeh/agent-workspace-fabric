@@ -566,14 +566,33 @@ def _ascii_single_quote_is_delimiter(
     Word-internal apostrophes before a lowercase continuation (``don't``,
     ``user's``, ``it's``) never toggle quote state. Outside a quote, only open
     when the previous character is not alphanumeric so plural possessives like
-    ``users'`` do not start a span. A closer jammed against a following token
-    (``'AWF-VERDICT``) still closes because the next character is not lowercase.
+    ``users'`` do not start a span. Inside a quote, a closer jammed against a
+    following lowercase token (``'strict'by``) still closes unless the letters
+    after the apostrophe are a short English contraction suffix (``n't``,
+    ``'s``, ``'re``, …), so trailing unquoted markers are not absorbed.
     """
     prev = verdict_line[index - 1] if index > 0 else ""
     nxt = verdict_line[index + 1] if index + 1 < len(verdict_line) else ""
     if prev.isalnum() and nxt.islower():
-        return False
+        return inside_ascii_single and not _ascii_apostrophe_is_contraction_suffix(
+            verdict_line, index
+        )
     return inside_ascii_single or not prev.isalnum()
+
+
+# Short alphabetic tails after an ASCII apostrophe that mark English contractions
+# / clitics (n't, 's, 're, 've, 'll, 'd, 'm). Longer jammed tokens ('strict'by)
+# are closers, not apostrophes.
+_ASCII_APOSTROPHE_CONTRACTION_SUFFIXES = frozenset({"t", "s", "re", "ve", "ll", "d", "m"})
+
+
+def _ascii_apostrophe_is_contraction_suffix(verdict_line: str, index: int) -> bool:
+    """Return whether letters after ``verdict_line[index]`` look like a contraction."""
+    end = index + 1
+    while end < len(verdict_line) and verdict_line[end].isalpha():
+        end += 1
+    suffix = verdict_line[index + 1 : end].lower()
+    return suffix in _ASCII_APOSTROPHE_CONTRACTION_SUFFIXES
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:
