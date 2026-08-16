@@ -507,6 +507,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "PR_METADATA_FETCH_FAILED",
                 "PR_METADATA_INVALID",
                 "PR_ADOPTION_POLICY_CONFLICT",
+                "TASK_EXTERNAL_ID_CONFLICT",
             }
         ),
         rest_response_model="PullRequestMonitorAdoptionResponse",
@@ -528,6 +529,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "task_title",
                 "task_prompt",
                 "task_tag",
+                "external_id",
+                "task_class",
                 "reason",
             }
         ),
@@ -549,6 +552,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "task_title",
                 "task_prompt",
                 "task_tag",
+                "external_id",
+                "task_class",
                 "reason",
             }
         ),
@@ -567,6 +572,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--initial-review-grace-period-seconds",
                 "--title",
                 "--prompt",
+                "--external-id",
+                "--task-class",
                 "--reason",
                 "--api-token",
             }

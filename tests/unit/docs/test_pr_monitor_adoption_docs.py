@@ -192,6 +192,56 @@ def test_runbook_documents_agent_default_idempotency_semantics() -> None:
 
 
 @pytest.mark.unit
+def test_runbook_documents_external_id_and_task_class_identity_semantics() -> None:
+    doc = _read("docs/PR_MONITOR_ADOPTION.md")
+    normalized_doc = re.sub(r"\s+", " ", doc)
+
+    for identity_term in (
+        "external_id",
+        "task_class",
+        "TASK_EXTERNAL_ID_CONFLICT",
+        "PR_ADOPTION_POLICY_CONFLICT",
+    ):
+        assert identity_term in doc
+
+    for semantic in (
+        "omit `external_id` to use the generated repo/PR adoption identity",
+        "Changing either value on a live adoption",
+        "TASK_EXTERNAL_ID_CONFLICT",
+        "already belongs to a different task scope",
+    ):
+        assert semantic in normalized_doc
+
+
+@pytest.mark.unit
+def test_reference_docs_document_adoption_external_id_and_task_class() -> None:
+    rest = _read("docs/REST_API_REFERENCE.md")
+    rest_adoption = rest.split("## PR Monitor Adoption", 1)[1].split(
+        "Inspect the adopted monitor:", 1
+    )[0]
+    cli = _read("docs/CLI_REFERENCE.md")
+    mcp = _read("docs/MCP_REFERENCE.md")
+    mcp_adoption = mcp.split("Example `awf_adopt_pull_request_monitor` arguments:", 1)[1].split(
+        "`awf_get_workspace_runtime` arguments:", 1
+    )[0]
+
+    for surface, text in (
+        ("REST", rest_adoption),
+        ("CLI", cli),
+        ("MCP", mcp_adoption),
+    ):
+        assert "external_id" in text, f"{surface} adoption docs omit external_id"
+        assert "task_class" in text, f"{surface} adoption docs omit task_class"
+
+    assert '"external_id": "CLOUD-TASK-42"' in rest_adoption
+    assert '"task_class": "test_task"' in rest_adoption
+    assert "--external-id" in cli
+    assert "--task-class" in cli
+    assert "TASK_EXTERNAL_ID_CONFLICT" in rest_adoption
+    assert "TASK_EXTERNAL_ID_CONFLICT" in mcp_adoption
+
+
+@pytest.mark.unit
 def test_runbook_covers_observability_and_recovery_surfaces() -> None:
     doc = _read("docs/PR_MONITOR_ADOPTION.md")
 

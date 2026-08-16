@@ -701,6 +701,10 @@ async def adopt_pull_request_monitor(
             settings=settings,
         ).adopt(payload)
     except PRMonitorAdoptionError as exc:
+        # Mirror workspace-create conflict handling: returning JSONResponse must
+        # not let get_db_session commit partial adoption mutations (workspace
+        # insert and/or superseded prior adoption) after a wrapped conflict.
+        await session.rollback()
         return JSONResponse(
             status_code=exc.status_code,
             content=ErrorResponse(
