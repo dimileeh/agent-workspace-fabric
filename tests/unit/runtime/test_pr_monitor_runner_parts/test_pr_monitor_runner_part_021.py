@@ -137,6 +137,14 @@ class TestParseVerdict:
             "AWF-VERDICT: FIXED: *<one-sentence summary>*",
             "AWF-VERDICT: FIXED: ~~<one-sentence summary>~~",
             "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com)",
+            # HTML entity-escaped whole-reason placeholders (PRRT_kwDOSJAM6s6Zoyj2).
+            "AWF-VERDICT: FALSE POSITIVE: &lt;reason&gt;",
+            "AWF-VERDICT: FALSE POSITIVE: &lt;one-sentence justification&gt;",
+            "AWF-VERDICT: FALSE POSITIVE: &#60;reason&#62;",
+            "AWF-VERDICT: FALSE POSITIVE: &#x3c;one-sentence summary&#x3e;",
+            "AWF-VERDICT: FALSE POSITIVE: `&lt;reason&gt;`",
+            "AWF-VERDICT: FIXED: &lt;one-sentence summary&gt;",
+            "AWF-VERDICT: DEFER: &lt;what to track&gt;",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
@@ -146,6 +154,8 @@ class TestParseVerdict:
         # Single emphasis is peeled only when the enclosed value is
         # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are
         # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S).
+        # HTML entity-escaped whole-reason echoes must also fail closed
+        # (PRRT_kwDOSJAM6s6Zoyj2).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -175,6 +185,17 @@ class TestParseVerdict:
 
         assert result.verdict == "false_positive"
         assert result.reason == "stale review boilerplate"
+
+    @pytest.mark.unit
+    def test_private_awf_entity_escaped_mid_reason_tag_still_usable(self) -> None:
+        # Anchored placeholder detection must not treat mid-reason entity-escaped
+        # tags as whole-reason template echoes (PRRT_kwDOSJAM6s6Zoyj2).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: added the &lt;summary&gt; section"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "added the &lt;summary&gt; section"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from collections.abc import Iterable, Sequence
 
@@ -426,6 +427,11 @@ def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
     prevent a whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-
     shaped tags that continue with real prose (no absorbed marker) stay usable.
 
+    HTML entity-escaped whole-reason echoes (``&lt;reason&gt;``, numeric
+    ``&#60;…&#62;``) are decoded only for this anchored check so escaped
+    template paste cannot resolve as a substantive reason, while mid-reason
+    prose containing entity-escaped tags stays usable (PRRT_kwDOSJAM6s6Zoyj2).
+
     Callers must pass text that has already been through
     ``_normalize_verdict_reason_inline_formatting`` (or an equivalent peel) so
     the single-emphasis peel gate can reuse this without re-entering normalize
@@ -433,13 +439,27 @@ def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
     """
     if not cleaned:
         return False
-    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+    if _text_matches_verdict_reason_template_placeholder(cleaned):
         return True
     marker = _AWF_VERDICT_MARKER.search(cleaned)
     if marker is None or marker.start() == 0:
         return False
     prefix = _normalize_verdict_reason_inline_formatting(cleaned[: marker.start()])
-    return bool(prefix) and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(prefix) is not None
+    return bool(prefix) and _text_matches_verdict_reason_template_placeholder(prefix)
+
+
+def _text_matches_verdict_reason_template_placeholder(text: str) -> bool:
+    """Return whether ``text`` matches the anchored template-placeholder pattern.
+
+    Tries the raw text first, then an HTML-entity-decoded copy so
+    ``&lt;reason&gt;`` / ``&#60;reason&#62;`` whole-reason echoes fail closed
+    without loosening the anchored match for mid-reason prose
+    (PRRT_kwDOSJAM6s6Zoyj2).
+    """
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(text):
+        return True
+    decoded = html.unescape(text)
+    return decoded != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded) is not None
 
 
 def _verdict_reason_is_template_placeholder(reason: str) -> bool:
