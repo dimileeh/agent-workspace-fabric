@@ -480,9 +480,16 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     Same-line trailing markers must not be absorbed into an earlier reason
     group; each marker is authoritative in order (final marker wins / fails
     closed), matching multiline parsing.
+
+    When the first marker is preceded by non-whitespace prose, keep the whole
+    line as one unit. Splitting would drop that prose and make later quoted
+    markers look like leading attempts (mid-prose option lists must not
+    override an earlier real verdict).
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
+        return [verdict_line]
+    if verdict_line[: matches[0].start()].strip():
         return [verdict_line]
     segments: list[str] = []
     for index, match in enumerate(matches):

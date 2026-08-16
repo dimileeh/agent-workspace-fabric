@@ -388,6 +388,24 @@ class TestParseVerdict:
         assert result.reason == "committed a regression test"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_mid_prose_multi_marker_option_list_keeps_earlier_verdict(
+        self,
+    ) -> None:
+        # Splitting multi-marker lines must not drop leading prose — otherwise
+        # later quoted markers become leading attempts and can override an
+        # earlier real verdict (#822 PRRT_kwDOSJAM6s6ZlPBt).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose checkout policy\n"
+            "Decide among: (1) AWF-VERDICT: FALSE POSITIVE: stale nit "
+            "(2) AWF-VERDICT: DEFER: track later"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must choose checkout policy"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_trailing_garbled_marker_fail_closed(
         self,
     ) -> None:
