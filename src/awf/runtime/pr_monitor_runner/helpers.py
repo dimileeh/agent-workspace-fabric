@@ -640,8 +640,10 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     ASCII ``'`` is only a quote delimiter when it is not a word-internal
     apostrophe (``don't``, ``user's``) or a leading elision (``'em``, ``'til``,
     ``'cause``); ASCII ``"`` is only a delimiter at plausible quote boundaries
-    (not inch/unit marks like ``5"``). Naive toggle would absorb a later
-    unquoted same-line marker into an earlier resolvable verdict.
+    (not inch/unit marks like ``5"``). Backslash-escaped ASCII quotes
+    (``\"``, ``\'``; odd preceding ``\\`` run) are literal reason text and
+    never toggle. Naive toggle would absorb a later unquoted same-line marker
+    into an earlier resolvable verdict.
     """
     if match_start <= 0:
         return False
@@ -691,6 +693,21 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     )
 
 
+def _ascii_quote_is_backslash_escaped(verdict_line: str, index: int) -> bool:
+    """Return whether ``verdict_line[index]`` is escaped by an odd ``\\`` run.
+
+    Agents often cite expected literal quotes as ``\\"foo`` in a reason; those
+    must not open ASCII quote state or a later unquoted same-line blocker is
+    absorbed. An even run (``\\\\"``) leaves a real delimiter.
+    """
+    count = 0
+    cursor = index - 1
+    while cursor >= 0 and verdict_line[cursor] == "\\":
+        count += 1
+        cursor -= 1
+    return count % 2 == 1
+
+
 def _ascii_double_quote_is_delimiter(
     verdict_line: str, index: int, inside_ascii_double: bool
 ) -> bool:
@@ -698,10 +715,13 @@ def _ascii_double_quote_is_delimiter(
 
     Inch/unit marks after an alphanumeric (``5"``, ``12"x``) must not open a
     quote span; naive toggle would absorb a later unquoted same-line marker.
-    Outside a quote, only open when the previous character is not alphanumeric
-    so delimiters sit at plausible quote boundaries. Inside a quote, every
-    ``"`` closes (including when jammed against a following token).
+    Backslash-escaped quotes (``\\"``) are never delimiters. Outside a quote,
+    only open when the previous character is not alphanumeric so delimiters sit
+    at plausible quote boundaries. Inside a quote, every unescaped ``"`` closes
+    (including when jammed against a following token).
     """
+    if _ascii_quote_is_backslash_escaped(verdict_line, index):
+        return False
     if inside_ascii_double:
         return True
     prev = verdict_line[index - 1] if index > 0 else ""
@@ -717,13 +737,16 @@ def _ascii_single_quote_is_delimiter(
     ``user's``, ``it's``) never toggle quote state. Leading elisions after a
     non-alphanumeric boundary (``'em``, ``'til``, ``'cause``) also never toggle
     — otherwise an open span never closes and a later unquoted same-line marker
-    is absorbed, or an already-open citation closes early. Outside a quote, only
-    open when the previous character is not alphanumeric so plural possessives
-    like ``users'`` do not start a span. Inside a quote, a closer jammed against
-    a following lowercase token (``'strict'by``) still closes unless the letters
-    after the apostrophe are a short English contraction suffix (``n't``,
-    ``'s``, ``'re``, …), so trailing unquoted markers are not absorbed.
+    is absorbed, or an already-open citation closes early. Backslash-escaped
+    quotes (``\\'``) are never delimiters. Outside a quote, only open when the
+    previous character is not alphanumeric so plural possessives like ``users'``
+    do not start a span. Inside a quote, a closer jammed against a following
+    lowercase token (``'strict'by``) still closes unless the letters after the
+    apostrophe are a short English contraction suffix (``n't``, ``'s``,
+    ``'re``, …), so trailing unquoted markers are not absorbed.
     """
+    if _ascii_quote_is_backslash_escaped(verdict_line, index):
+        return False
     prev = verdict_line[index - 1] if index > 0 else ""
     nxt = verdict_line[index + 1] if index + 1 < len(verdict_line) else ""
     if prev.isalnum() and nxt.islower():

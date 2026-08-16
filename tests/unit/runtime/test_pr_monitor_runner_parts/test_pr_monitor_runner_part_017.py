@@ -908,6 +908,65 @@ class TestParseVerdict:
         assert result.reason == "actually unsure."
 
     @pytest.mark.unit
+    def test_private_awf_verdict_escaped_quote_in_reason_does_not_absorb_trailing_marker(
+        self,
+    ) -> None:
+        # Backslash-escaped ASCII quotes (``\"``) are literal reason text, not
+        # delimiters. Treating them as openers absorbs a later unquoted same-line
+        # blocker into an earlier resolvable verdict (#822 PRRT_kwDOSJAM6s6ZlzwP).
+        result = _parse_verdict_result(
+            r"AWF-VERDICT: FALSE POSITIVE: expected text starts with \"foo "
+            "AWF-VERDICT: NEEDS_HUMAN: actually unsure"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "actually unsure"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_escaped_quotes_inside_real_span_keep_embedded_marker(
+        self,
+    ) -> None:
+        # Escaped quotes inside a real ASCII double-quoted citation must not close
+        # the span early or a mid-prose marker citation would incorrectly split
+        # (#822 PRRT_kwDOSJAM6s6ZlzwP).
+        result = _parse_verdict_result(
+            r'AWF-VERDICT: NEEDS_HUMAN: cite "print \"AWF-VERDICT: FALSE POSITIVE: '
+            r'override\" here" and block'
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            r'cite "print \"AWF-VERDICT: FALSE POSITIVE: override\" here" and block'
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_escaped_single_quote_in_reason_does_not_absorb_trailing_marker(
+        self,
+    ) -> None:
+        # Same escape rule for ASCII single quotes (#822 PRRT_kwDOSJAM6s6ZlzwP).
+        result = _parse_verdict_result(
+            r"AWF-VERDICT: FALSE POSITIVE: expected text starts with \'foo "
+            "AWF-VERDICT: NEEDS_HUMAN: actually unsure"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "actually unsure"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_double_backslash_before_quote_still_delimits(
+        self,
+    ) -> None:
+        # An even backslash run (``\\"``) leaves a real delimiter; an unclosed
+        # quote must still absorb the trailing marker (#822 PRRT_kwDOSJAM6s6ZlzwP).
+        result = _parse_verdict_result(
+            r"AWF-VERDICT: FALSE POSITIVE: path ends with \\"
+            '"foo AWF-VERDICT: NEEDS_HUMAN: actually unsure'
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == r'path ends with \\"foo AWF-VERDICT: NEEDS_HUMAN: actually unsure'
+
+    @pytest.mark.unit
     def test_private_awf_verdict_apostrophe_in_reason_does_not_absorb_trailing_marker(
         self,
     ) -> None:
