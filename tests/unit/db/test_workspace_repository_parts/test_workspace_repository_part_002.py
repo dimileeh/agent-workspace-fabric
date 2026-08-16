@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
 import awf.db.repositories as repositories
+import awf.db.repositories.workspace_repo as workspace_repo_mod
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
@@ -1355,6 +1356,133 @@ class TestOwnedPathOverlapLookup:
             )
 
         assert session.executed == []
+
+    @pytest.mark.unit
+    async def test_schedulable_candidate_wrapper_delegates_options(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify the private candidate wrapper preserves scheduler options."""
+        session = object()
+        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        candidates = [_recorded_workspace_row("ws_candidate", status=WorkspaceStatus.ready)]
+        calls: list[dict[str, object]] = []
+
+        async def _list_schedulable_candidates(
+            received_session: object,
+            dialect_name: str | None,
+            **kwargs: object,
+        ) -> list[Workspace]:
+            calls.append(
+                {
+                    "session": received_session,
+                    "dialect_name": dialect_name,
+                    **kwargs,
+                }
+            )
+            return candidates
+
+        monkeypatch.setattr(
+            workspace_repo_mod,
+            "list_schedulable_candidates",
+            _list_schedulable_candidates,
+        )
+
+        listed = await repo._list_schedulable_candidates(  # noqa: SLF001
+            status=WorkspaceStatus.ready,
+            limit=3,
+            exclude_ids={"ws_excluded"},
+            node_id="node-a",
+            after="cursor",
+            scoring_at=scoring_at,
+            execution_claim_owner_id="worker-a",
+        )
+
+        assert listed is candidates
+        assert calls == [
+            {
+                "session": session,
+                "dialect_name": "sqlite",
+                "status": WorkspaceStatus.ready,
+                "limit": 3,
+                "exclude_ids": {"ws_excluded"},
+                "node_id": "node-a",
+                "after": "cursor",
+                "scoring_at": scoring_at,
+                "execution_claim_owner_id": "worker-a",
+            }
+        ]
+
+    @pytest.mark.unit
+    def test_sort_schedulable_workspace_wrapper_delegates_limit_and_scoring_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify the private sort wrapper preserves scheduler scoring inputs."""
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        candidates = [
+            _recorded_workspace_row("ws-a", status=WorkspaceStatus.ready),
+            _recorded_workspace_row("ws-b", status=WorkspaceStatus.ready),
+        ]
+        sorted_candidates = list(reversed(candidates))
+        calls: list[dict[str, object]] = []
+
+        def _sort_schedulable_workspaces(
+            received_candidates: list[Workspace],
+            limit: int | None,
+            *,
+            scoring_at: datetime,
+        ) -> list[Workspace]:
+            calls.append(
+                {
+                    "candidates": received_candidates,
+                    "limit": limit,
+                    "scoring_at": scoring_at,
+                }
+            )
+            return sorted_candidates
+
+        monkeypatch.setattr(
+            workspace_repo_mod,
+            "sort_schedulable_workspaces",
+            _sort_schedulable_workspaces,
+        )
+
+        listed = WorkspaceRepository._sort_schedulable_workspaces(  # noqa: SLF001
+            candidates,
+            1,
+            scoring_at=scoring_at,
+        )
+
+        assert listed is sorted_candidates
+        assert calls == [
+            {
+                "candidates": candidates,
+                "limit": 1,
+                "scoring_at": scoring_at,
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_non_postgres_get_for_update_omits_row_lock(self) -> None:
+        """Verify non-Postgres get-for-update remains a plain select."""
+        session = _RecordingSchedulerSession("sqlite", values=["ws_unlocked"])
+        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_unlocked", skip_locked=True)
+
+        assert locked == "ws_unlocked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" not in sql
+        assert "SKIP LOCKED" not in sql
+        assert "workspaces.id = 'ws_unlocked'" in sql
 
     @pytest.mark.unit
     async def test_postgres_get_for_update_locks_workspace_row(self) -> None:

@@ -811,6 +811,211 @@ async def test_fail_stale_active_execution_skips_status_mismatch(
 
 
 @pytest.mark.unit
+async def test_fail_hosted_pr_adoption_after_restart_skips_lost_transition() -> None:
+    workspace = Workspace(
+        id="ws_hosted_lost_transition",
+        status=WorkspaceStatus.provisioning.value,
+        pr_url="https://github.com/example/repo/pull/42",
+        pr_number=42,
+        execution_claimed_by="worker-old",
+        execution_claim_expires_at=datetime(2026, 6, 4, 8, 0, tzinfo=UTC),
+        monitor_claimed_by="monitor-old",
+        monitor_claim_expires_at=datetime(2026, 6, 4, 8, 5, tzinfo=UTC),
+        execution_claim_epoch=9,
+        failure_reason=None,
+        failure_message=None,
+    )
+    transition_calls: list[dict[str, object]] = []
+
+    class LostTransitionRepository:
+        async def transition_if_current(
+            self,
+            workspace_id: str,
+            *,
+            from_status: WorkspaceStatus,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, object],
+            extra_conditions: tuple[object, ...],
+        ) -> None:
+            transition_calls.append(
+                {
+                    "workspace_id": workspace_id,
+                    "from_status": from_status,
+                    "to": to,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                    "extra_conditions_count": len(extra_conditions),
+                }
+            )
+
+    await worker_recovery_stale._fail_hosted_pr_adoption_after_restart(  # noqa: SLF001
+        LostTransitionRepository(),  # type: ignore[arg-type]
+        workspace,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.provisioning,
+            compose_project_name=None,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+        ),
+        reason_code="HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE",
+        message="setup incomplete",
+    )
+
+    assert len(transition_calls) == 1
+    call = transition_calls[0]
+    assert call["workspace_id"] == workspace.id
+    assert call["from_status"] == WorkspaceStatus.provisioning
+    assert call["to"] == WorkspaceStatus.failed
+    assert call["reason_code"] == "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+    assert call["extra_conditions_count"] == 1
+    payload = call["payload"]
+    assert isinstance(payload, dict)
+    assert payload["source"] == "hosted_pr_adoption"
+    assert payload["failure_reason"] == FailureReason.infrastructure_failure.value
+    assert payload["previous_claim"] == {
+        "execution_claimed_by": "worker-old",
+        "execution_claim_expires_at": "2026-06-04T08:00:00+00:00",
+        "monitor_claimed_by": "monitor-old",
+        "monitor_claim_expires_at": "2026-06-04T08:05:00+00:00",
+    }
+    assert workspace.execution_claimed_by == "worker-old"
+    assert workspace.monitor_claimed_by == "monitor-old"
+    assert workspace.execution_claim_epoch == 9
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+
+
+@pytest.mark.unit
+async def test_hosted_pr_adoption_monitor_attach_preserves_epoch_without_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+    workspace = Workspace(
+        id="ws_hosted_no_claims",
+        status=WorkspaceStatus.running.value,
+        task_policy=policy,
+        pr_url="https://github.com/example/repo/pull/43",
+        pr_number=43,
+        execution_claimed_by=None,
+        execution_claim_expires_at=None,
+        monitor_claimed_by=None,
+        monitor_claim_expires_at=None,
+        execution_claim_epoch=5,
+    )
+    transition_calls: list[dict[str, object]] = []
+    event_calls: list[dict[str, object]] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        async def __aenter__(self) -> RecordingSession:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class RecordingWorkspaceRepository:
+        def __init__(self, _session: RecordingSession) -> None:
+            pass
+
+        async def get_for_update(self, workspace_id: str) -> Workspace:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def transition(
+            self,
+            ws: Workspace,
+            *,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            transition_calls.append(
+                {
+                    "workspace_id": ws.id,
+                    "to": to,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                }
+            )
+            ws.status = to.value
+
+        async def add_event(
+            self,
+            ws: Workspace,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            event_calls.append(
+                {
+                    "workspace_id": ws.id,
+                    "event_type": event_type,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                }
+            )
+
+    async def _setup_completed(_session: RecordingSession, ws: Workspace) -> bool:
+        assert ws is workspace
+        return True
+
+    recording_session = RecordingSession()
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "WorkspaceRepository",
+        RecordingWorkspaceRepository,
+    )
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "_has_hosted_monitor_handoff_setup_completed",
+        _setup_completed,
+    )
+    worker = SimpleNamespace(_session_factory=lambda: recording_session)
+
+    recovered = await worker_recovery_stale._recover_hosted_pr_adoption_active_execution(  # noqa: SLF001
+        worker,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.running,
+            compose_project_name=None,
+            task_policy=policy,
+        ),
+    )
+
+    assert recovered is True
+    assert recording_session.commits == 1
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    assert workspace.monitor_claimed_by is None
+    assert workspace.monitor_claim_expires_at is None
+    assert workspace.execution_claim_epoch == 5
+    assert len(transition_calls) == 1
+    payload = transition_calls[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["source"] == "hosted_pr_adoption"
+    assert payload["previous_claim"] == {
+        "execution_claimed_by": None,
+        "execution_claim_expires_at": None,
+        "monitor_claimed_by": None,
+        "monitor_claim_expires_at": None,
+    }
+    assert payload["pr_url"] == "https://github.com/example/repo/pull/43"
+    assert payload["pr_number"] == 43
+    assert [event["reason_code"] for event in event_calls] == [
+        "STRANDED_WORKSPACE",
+        "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+    ]
+
+
+@pytest.mark.unit
 async def test_fail_stale_active_execution_restores_primary_failure_row_fields(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

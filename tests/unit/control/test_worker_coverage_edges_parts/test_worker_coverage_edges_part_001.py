@@ -55,6 +55,7 @@ from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    WorkspaceRuntimeFinding,
 )
 from tests.postgres import postgres_test_engine
 
@@ -1269,6 +1270,90 @@ async def test_record_stale_active_execution_detected_skips_diverged_or_fresh_cl
             event.event_type != "workspace.stale_active_execution_detected"
             for event in claimed.events
         )
+
+
+@pytest.mark.unit
+async def test_fail_stranded_workspace_skips_fresh_execution_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = Workspace(
+        id="ws_fresh_claim",
+        status=WorkspaceStatus.running.value,
+        execution_claimed_by="worker-live",
+        execution_claim_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        failure_reason=None,
+    )
+    repo_calls: list[str] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.committed = False
+
+        async def __aenter__(self) -> RecordingSession:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class RecordingWorkspaceRepository:
+        def __init__(self, _session: RecordingSession) -> None:
+            pass
+
+        async def get_for_update(self, workspace_id: str) -> Workspace:
+            repo_calls.append(f"get:{workspace_id}")
+            return workspace
+
+        async def transition_if_current(self, *_args: object, **_kwargs: object) -> None:
+            repo_calls.append("transition_if_current")
+            raise AssertionError("fresh execution claim should skip guarded transition")
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            repo_calls.append("add_event")
+            raise AssertionError("fresh execution claim should skip event recording")
+
+    async def _load_failure_causality_snapshot(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("fresh execution claim should skip failure causality load")
+
+    recording_session = RecordingSession()
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "WorkspaceRepository",
+        RecordingWorkspaceRepository,
+    )
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "load_failure_causality_snapshot",
+        _load_failure_causality_snapshot,
+    )
+    worker = SimpleNamespace(_session_factory=lambda: recording_session)
+    finding = WorkspaceRuntimeFinding(
+        workspace_id=workspace.id,
+        workspace_status=WorkspaceStatus.running.value,
+        status="stranded",
+        reason_code="STRANDED_WORKSPACE",
+        decision="fail_workspace",
+        message="runtime is stranded",
+    )
+
+    await worker_recovery_stale._fail_stranded_workspace(  # noqa: SLF001
+        worker,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_fresh_claim",
+        ),
+        RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+        finding,
+    )
+
+    assert repo_calls == ["get:ws_fresh_claim"]
+    assert recording_session.committed is False
+    assert workspace.status == WorkspaceStatus.running.value
+    assert workspace.failure_reason is None
+    assert workspace.execution_claimed_by == "worker-live"
 
 
 @pytest.mark.unit

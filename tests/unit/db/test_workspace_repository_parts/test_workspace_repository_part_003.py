@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import awf.db.repositories as repositories
+import awf.db.repositories.workspace_repo as workspace_repo_mod
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
@@ -248,6 +250,149 @@ class TestAddEvents:
         assert "RETURNING event_sequence, version" in sql
 
     @pytest.mark.unit
+    async def test_transition_if_current_non_postgres_release_claims_in_guarded_update(
+        self,
+    ) -> None:
+        """Verify provisioning exits release execution claims atomically."""
+
+        class EmptyResult:
+            def one_or_none(self) -> None:
+                return None
+
+        class RecordingSession:
+            info: dict[str, str] = {}
+            bind = None
+
+            def __init__(self) -> None:
+                self.executed: list[object] = []
+
+            async def execute(self, statement: object) -> EmptyResult:
+                self.executed.append(statement)
+                return EmptyResult()
+
+        recording_session = RecordingSession()
+        repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        transitioned = await repo.transition_if_current(
+            "ws_release_claim",
+            from_status=WorkspaceStatus.provisioning,
+            to=WorkspaceStatus.ready,
+            reason_code="PROVISIONED",
+        )
+
+        assert transitioned is None
+        assert len(recording_session.executed) == 1
+        sql = " ".join(str(recording_session.executed[0].compile(dialect=sqlite.dialect())).split())
+        assert "execution_claimed_by=?" in sql
+        assert "execution_claim_expires_at=?" in sql
+        assert "WHERE workspaces.id = ? AND workspaces.status = ?" in sql
+
+    @pytest.mark.unit
+    async def test_transition_if_current_returns_none_when_atomic_select_loses_row(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify a won guarded update still returns None if the row disappears."""
+
+        class UpdateResult:
+            def one_or_none(self) -> tuple[int, int]:
+                return (7, 3)
+
+        class MissingSelectResult:
+            def scalar_one_or_none(self) -> None:
+                return None
+
+        class RecordingSession:
+            info: dict[str, str] = {}
+            bind = None
+
+            def __init__(self) -> None:
+                self.executed: list[object] = []
+                self.results = [UpdateResult(), MissingSelectResult()]
+
+            async def execute(self, statement: object) -> object:
+                self.executed.append(statement)
+                return self.results.pop(0)
+
+        async def _finish_transition(
+            self: WorkspaceRepository,
+            *_args: object,
+            **_kwargs: object,
+        ) -> Workspace:
+            del self
+            raise AssertionError("missing follow-up row should skip finish transition")
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "_finish_transition_if_current",
+            _finish_transition,
+        )
+        recording_session = RecordingSession()
+        repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        transitioned = await repo.transition_if_current(
+            "ws_deleted_after_update",
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="CLAIMED",
+        )
+
+        assert transitioned is None
+        assert len(recording_session.executed) == 2
+        assert recording_session.results == []
+
+    @pytest.mark.unit
+    async def test_sync_merge_candidate_skips_monitoring_pr_when_task_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify PR candidate creation is skipped when the owning task vanished."""
+        task_calls: list[str] = []
+        created_candidates: list[object] = []
+
+        class MissingTaskRepository:
+            def __init__(self, _session: object) -> None:
+                pass
+
+            async def get(self, task_id: str) -> None:
+                task_calls.append(task_id)
+
+        class RecordingMergeCandidateRepository:
+            def __init__(self, _session: object) -> None:
+                pass
+
+            async def make_attempt_canonical_and_create_candidate(
+                self,
+                **kwargs: object,
+            ) -> None:
+                created_candidates.append(kwargs)
+
+        monkeypatch.setattr(workspace_repo_mod, "TaskRepository", MissingTaskRepository)
+        monkeypatch.setattr(
+            workspace_repo_mod,
+            "MergeCandidateRepository",
+            RecordingMergeCandidateRepository,
+        )
+        repo = WorkspaceRepository(object(), dialect_name="sqlite")  # type: ignore[arg-type]
+        workspace = Workspace(
+            id="ws_monitor_task_missing",
+            status=WorkspaceStatus.pushing.value,
+            pr_url="https://github.com/example/repo/pull/17",
+            monitor_last_commit_sha="h" * 40,
+            base_commit="b" * 40,
+        )
+        attempt = SimpleNamespace(task_id="task-missing")
+
+        await repo._sync_merge_candidate_lifecycle(  # noqa: SLF001
+            workspace,
+            attempt=attempt,  # type: ignore[arg-type]
+            to=WorkspaceStatus.monitoring_pr,
+        )
+
+        assert task_calls == ["task-missing"]
+        assert created_candidates == []
+
+    @pytest.mark.unit
     async def test_batch_reserves_event_order_without_advancing_workspace_version(
         self,
         session: AsyncSession,
@@ -313,6 +458,68 @@ class TestAddEvents:
         assert workspace.event_sequence == next_event_sequence + 1
         assert workspace.updated_at == workspace_updated_at
         assert committed_attrs == ["event_sequence", "event_sequence"]
+
+    @pytest.mark.unit
+    async def test_add_events_empty_input_does_not_reserve_event_order(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        event_sequence = workspace.event_sequence
+        version = workspace.version
+        updated_at = workspace.updated_at
+
+        events = await repo.add_events(workspace, events=[])
+
+        assert events == []
+        assert workspace.event_sequence == event_sequence
+        assert workspace.version == version
+        assert workspace.updated_at == updated_at
+
+    @pytest.mark.unit
+    async def test_record_ignored_stale_callback_preserves_operation_and_reason(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+
+        event = await repo.record_ignored_stale_callback(
+            workspace,
+            callback_source="executor",
+            callback_action="workspace_ready",
+            expected_status=WorkspaceStatus.provisioning,
+            requested_status=WorkspaceStatus.ready,
+            operation_id="op-stale",
+            reason_code="OPERATION_ALREADY_FINISHED",
+        )
+
+        assert event.event_type == "workspace.stale_callback_ignored"
+        assert event.reason_code == "STALE_CALLBACK_IGNORED"
+        assert event.payload == {
+            "callback_source": "executor",
+            "callback_action": "workspace_ready",
+            "expected_status": WorkspaceStatus.provisioning.value,
+            "actual_status": WorkspaceStatus.requested.value,
+            "requested_status": WorkspaceStatus.ready.value,
+            "operation_id": "op-stale",
+            "reason_code": "OPERATION_ALREADY_FINISHED",
+        }
 
     @pytest.mark.unit
     async def test_add_event_with_states_reserves_order_and_uses_explicit_states(

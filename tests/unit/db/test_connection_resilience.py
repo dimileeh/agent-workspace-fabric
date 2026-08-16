@@ -530,6 +530,42 @@ async def test_db_retry_reports_retry_hook_for_replayed_commit_failures() -> Non
 
 
 @pytest.mark.unit
+async def test_db_retry_does_not_retry_commit_base_exception() -> None:
+    class CommitExit(BaseException):
+        pass
+
+    failure = CommitExit("commit cancellation")
+    sessions: list[_BaseExceptionCommitSession] = []
+    retries: list[tuple[BaseException, int]] = []
+
+    def _factory() -> _BaseExceptionCommitSession:
+        session = _BaseExceptionCommitSession(failure)
+        sessions.append(session)
+        return session
+
+    async def _operation(_session: _BaseExceptionCommitSession) -> str:
+        return "created"
+
+    async def _on_retry(exc: BaseException, attempt: int) -> None:
+        retries.append((exc, attempt))
+
+    with pytest.raises(CommitExit) as exc_info:
+        await run_db_operation_with_retry(
+            _factory,
+            _operation,
+            attempts=2,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=_on_retry,
+        )
+
+    assert exc_info.value is failure
+    assert len(sessions) == 1
+    assert sessions[0].events == ["commit", "close"]
+    assert retries == []
+
+
+@pytest.mark.unit
 async def test_db_retry_replays_commit_failures_when_explicitly_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,6 +608,25 @@ class _RetrySession:
         self.events.append("commit")
         if self.fail_commit:
             raise _closed_connection_error()
+
+    async def invalidate(self) -> None:
+        self.events.append("invalidate")
+
+    async def rollback(self) -> None:
+        self.events.append("rollback")
+
+    async def close(self) -> None:
+        self.events.append("close")
+
+
+class _BaseExceptionCommitSession:
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+        self.events: list[str] = []
+
+    async def commit(self) -> None:
+        self.events.append("commit")
+        raise self.failure
 
     async def invalidate(self) -> None:
         self.events.append("invalidate")
