@@ -168,10 +168,11 @@ async def _invoke_cli_for_verdict_result(
 
     ``evidence_item_id`` scopes dirty-salvage retention so a later successful
     FIXED retry for the same thread/comment can confirm a prior failed-run
-    salvage (HEAD at or descending from the salvaged SHA) without accepting
-    that failed invocation's verdict. ``evidence_body_hash`` binds that salvage
-    to the feedback body that produced it so an edited thread cannot reuse
-    stale salvage while ``agent_failed`` skips stale-body cleanup.
+    salvage (HEAD still at the salvaged tip when the retry also started there,
+    or descending from both the salvaged SHA and the retry start) without
+    accepting that failed invocation's verdict. ``evidence_body_hash`` binds
+    that salvage to the feedback body that produced it so an edited thread
+    cannot reuse stale salvage while ``agent_failed`` skips stale-body cleanup.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -416,11 +417,14 @@ async def _invoke_cli_for_verdict_result(
 
     # Failed runs may still leave a contentful salvage commit. Retain that SHA
     # for this item so a later successful FIXED can confirm it when HEAD is
-    # still at (or descends from) the salvage tip — without resolving from the
+    # still at the salvage tip (and this retry started there) or descends from
+    # both the salvage tip and the retry start — without resolving from the
     # failed invocation. Equality alone is too strict in multi-item bursts:
     # a later thread can advance HEAD past the salvage while leaving it in
-    # history. Bind the feedback body hash so an edited thread cannot reuse
-    # salvage created for prior feedback while agent_failed skips stale cleanup.
+    # history; equality without a matching start would also accept a backward
+    # reset that discards that later tip. Bind the feedback body hash so an
+    # edited thread cannot reuse salvage created for prior feedback while
+    # agent_failed skips stale cleanup.
     def _clear_retained_salvage() -> None:
         if state is not None and salvage_item_id is not None:
             state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
@@ -456,15 +460,39 @@ async def _invoke_cli_for_verdict_result(
             or ""
         ).strip()
         if retained_head and retained_body and retained_body == salvage_body_hash:
-            retained_salvage_evidence = retained_head.lower() == item_end_head.lower() or (
-                callable(descends)
-                and worktree_path.exists()
-                and await descends(
-                    worktree_path=worktree_path,
-                    ancestor=retained_head,
-                    descendant=item_end_head,
+            # Equality alone accepts H2→H1 resets that discard another item's
+            # tip after item-start ancestry already rejected the backward move.
+            # Only reuse the salvage tip when this retry also started there;
+            # otherwise require end to remain a descendant of both the retry
+            # start and the retained salvage.
+            end_matches_retained = retained_head.lower() == item_end_head.lower()
+            if end_matches_retained:
+                retained_salvage_evidence = (
+                    item_start_head is not None and item_start_head.lower() == retained_head.lower()
                 )
-            )
+            else:
+                start_ok = item_start_head is not None and (
+                    item_start_head.lower() == item_end_head.lower()
+                    or (
+                        callable(descends)
+                        and worktree_path.exists()
+                        and await descends(
+                            worktree_path=worktree_path,
+                            ancestor=item_start_head,
+                            descendant=item_end_head,
+                        )
+                    )
+                )
+                retained_salvage_evidence = bool(
+                    start_ok
+                    and callable(descends)
+                    and worktree_path.exists()
+                    and await descends(
+                        worktree_path=worktree_path,
+                        ancestor=retained_head,
+                        descendant=item_end_head,
+                    )
+                )
         elif retained_head or retained_body:
             # Feedback moved on or legacy unbound salvage — drop so it cannot linger.
             _clear_retained_salvage()
