@@ -500,6 +500,22 @@ async def _invoke_cli_for_verdict_result(
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                     **repair_details,
                 )
+                # Agent may have self-committed before the unexpected crash.
+                # Sibling except handlers do not catch raises from this block, so
+                # retain+persist HEAD advance before propagating poisoned hooks
+                # (PRRT_kwDOSJAM6s6ZninJ) — otherwise a later no-change FIXED at
+                # the tip becomes fixed_without_head_advance.
+                await _retain_failed_run_salvage_despite_cancellation(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    state=state,
+                    salvage_item_id=salvage_item_id,
+                    salvage_body_hash=salvage_body_hash,
+                    isolated_worktree_host_path=isolated_worktree_host_path,
+                    result_stdout=result_stdout,
+                )
                 raise _MonitorMirrorHooksPathRepairFailedError() from exc
         # Unexpected agent crashes still try to sink dirty work. Capture post-sink
         # HEAD and retain salvage before re-raising — otherwise a later no-change

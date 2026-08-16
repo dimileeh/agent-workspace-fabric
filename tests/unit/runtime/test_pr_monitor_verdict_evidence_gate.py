@@ -1559,6 +1559,160 @@ async def test_salvage_persisted_when_agent_raises_unexpected_after_self_commit(
 
 
 @pytest.mark.unit
+async def test_salvage_persisted_when_post_exception_mirror_repair_fails_after_self_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mirror-repair rethrow after unexpected crash must still durable-persist salvage.
+
+    When the agent self-commits then raises, ``except Exception`` repairs mirror
+    hooks before the salvage block. A simultaneous ``after_comment_agent_exception``
+    repair failure used to rethrow ``_MonitorMirrorHooksPathRepairFailedError``
+    first; sibling handlers do not catch that raise, so HEAD advance was stranded
+    and a later no-change FIXED became ``fixed_without_head_advance``
+    (PRRT_kwDOSJAM6s6ZninJ). Capture+persist salvage before propagating the
+    mirror-repair error.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import _MonitorMirrorHooksPathRepairFailedError
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_post_exc_mirror_repair"
+    body_hash = "feedback_body_hash_post_exc_mirror_repair"
+    workspace_id = "ws_salvage_post_exc_mirror_repair"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_post_exc_mirror_repair"
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    repair_calls = 0
+
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _agent_self_commits_then_crashes(**_kwargs: object) -> AgentRunResult:
+        raise RuntimeError("adapter crashed after self-commit")
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_must_not_run(**_kwargs: object) -> bool:
+        raise AssertionError("poisoned mirror repair must not reach dirty-commit sink")
+
+    async def _repair_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        nonlocal repair_calls
+        assert path == mirror
+        repair_calls += 1
+        # Call 1: pre-launch before the crashing agent. Call 2: post-exception
+        # repair that must fail. Later calls (retry pre-launch) succeed again.
+        if repair_calls == 2:
+            raise OSError("hooks config locked after agent crash")
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_ownership)
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: mirror)
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    runner._deps = SimpleNamespace(adapter=SimpleNamespace(run=_agent_self_commits_then_crashes))
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    runner._commit_dirty_worktree = _commit_dirty_must_not_run
+
+    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+
+    assert repair_calls == 2
+    assert persist_state_calls == 0
+    assert persisted_snapshots
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after mirror repair failure",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after mirror repair failure"
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_persist_failed_run_salvage_durably_merges_only_salvage_keys(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
