@@ -218,13 +218,15 @@ async def _commit_changes_present_in_head(
     reuse therefore requires either an identical tree at ``head``, or that
     **every** path changed by ``commit`` vs its first parent still carries the
     salvage commit's complete tree entry at ``head`` (mode, type, and object id —
-    not merely a blob OID that differs from the parent). A third-content overwrite
-    (A→B salvage, later tip to C) must fail closed even though C≠A — otherwise a
-    no-change FIXED retry can reuse stale salvage after B is gone. Mode-only
-    salvage (e.g. chmod +x) that a later tip reverts must likewise fail closed,
-    because Git stores mode separately from the object id. Partial or full
-    reverts and revert-then-unrelated tips fail closed. Root commits and
-    unresolved objects also fail closed.
+    not merely a blob OID that differs from the parent). A deleted path is an
+    empty entry: it counts as present only when the parent still had the path and
+    ``head`` remains absent (both-missing bogus lookups fail closed). A
+    third-content overwrite (A→B salvage, later tip to C) must fail closed even
+    though C≠A — otherwise a no-change FIXED retry can reuse stale salvage after
+    B is gone. Mode-only salvage (e.g. chmod +x) that a later tip reverts must
+    likewise fail closed, because Git stores mode separately from the object id.
+    Partial or full reverts and revert-then-unrelated tips fail closed. Root
+    commits and unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -309,12 +311,15 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        # Require a concrete salvage tree entry. Two missing entries (e.g. a
-        # C-quoted miss or bogus path) must not compare equal as "present".
+        # Empty salvage entry is a deletion: accept only when the parent still
+        # had the path and head remains absent. Both-missing (bogus/C-quoted
+        # path) fails closed because the parent lookup is empty too
+        # (PRRT_kwDOSJAM6s6ZmEAd).
         commit_entry = await _tree_entry_at(commit_sha, path)
-        if not commit_entry:
+        head_entry = await _tree_entry_at(head_sha, path)
+        if commit_entry != head_entry:
             return False
-        if await _tree_entry_at(head_sha, path) != commit_entry:
+        if not commit_entry and not await _tree_entry_at(parent, path):
             return False
     return True
 

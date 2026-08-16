@@ -764,11 +764,81 @@ async def test_commit_changes_present_in_head_rejects_newline_pathname_overwrite
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_preserved_deletion(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Deletion salvage must reuse when the tip still lacks the deleted path.
+
+    A crashed fix that removed a file leaves an empty salvage tree entry. Later
+    tips that preserve that absence must retain evidence; a tip that recreates
+    the file must fail closed (PRRT_kwDOSJAM6s6ZmEAd).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (repo / "gone.txt").write_text("delete-me\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt", "gone.txt")
+    _git(repo, "commit", "-qm", "base with file to delete")
+    _git(repo, "rm", "-q", "gone.txt")
+    (repo / "keep.txt").write_text("keep-and-edit\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-qm", "salvage deletes gone.txt and edits keep.txt")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "later.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-qm", "later tip preserving deletion")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "gone.txt").write_text("recreated\n", encoding="utf-8")
+    _git(repo, "add", "gone.txt")
+    _git(repo, "commit", "-qm", "undo deletion")
+    recreated = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=recreated,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Two empty ls-tree tokens must not count as retained salvage evidence."""
+    """Two empty ls-tree tokens must not count as retained salvage evidence.
+
+    Absence on the salvage tip is only a legitimate deletion when the parent
+    still had the path. A bogus/C-quoted spelling that misses parent, salvage,
+    and head alike must fail closed.
+    """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
     worktree = tmp_path / "worktrees" / "workspace"
@@ -789,6 +859,8 @@ async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
     cmd.queue_result(returncode=0, stdout=f"{parent_tree}\n")  # parent^{tree}
     cmd.queue_result(returncode=0, stdout=f"{bogus_path}\0")  # diff-tree -z
     cmd.queue_result(returncode=0, stdout="")  # ls-tree commit (missing)
+    cmd.queue_result(returncode=0, stdout="")  # ls-tree head (missing)
+    cmd.queue_result(returncode=0, stdout="")  # ls-tree parent (missing)
 
     runner = make_runner(
         factory=factory,
