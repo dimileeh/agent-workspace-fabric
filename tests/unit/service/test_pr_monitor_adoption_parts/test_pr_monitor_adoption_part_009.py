@@ -123,6 +123,16 @@ class TestAdoptionForgeGates:
         assert excinfo.value.detail["repo_slug"] == "acme/widget"
 
     @pytest.mark.unit
+    async def test_default_metadata_fetcher_rejects_non_github_forge(self) -> None:
+        repo = RepoRef(owner="acme", name="widget", forge="bitbucket")
+        with pytest.raises(PRMonitorAdoptionError) as excinfo:
+            await adoption_helpers._default_metadata_fetcher(repo=repo, pr_number=7)
+        assert excinfo.value.error_code == "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail["forge"] == "bitbucket"
+        assert excinfo.value.detail["repo_slug"] == "acme/widget"
+
+    @pytest.mark.unit
     def test_pr_url_forge_gate_accepts_supported_bitbucket_host(self) -> None:
         # parse_github_pull_request_url rejects non-github hosts; the helper must
         # still re-parse bitbucket.org and pass a supported forge through.
@@ -360,11 +370,16 @@ class TestSupersedeDivergentAndExhaustion:
         factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Explicit re-adoption must not mint a generation when the logical key is owned."""
+        """Explicit re-adoption must not mint a generation when the logical key is owned.
+
+        Same PR title keeps task scope identical so ``create_or_get`` reuses the
+        prior task (else-branch), then the owned-generation guard raises.
+        """
+        shared_title = "feature: owned-slot"
         async with factory() as session:
             first = await PullRequestMonitorAdoptionService(
                 session,
-                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+                metadata_fetcher=_MetadataFetcher(_metadata(title=shared_title)),
             ).adopt(
                 PullRequestMonitorAdoptionRequest(
                     repo_slug="dimileeh/aira-web",
@@ -416,7 +431,7 @@ class TestSupersedeDivergentAndExhaustion:
             with pytest.raises(PRMonitorAdoptionError) as excinfo:
                 await PullRequestMonitorAdoptionService(
                     session,
-                    metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+                    metadata_fetcher=_MetadataFetcher(_metadata(title=shared_title)),
                 ).adopt(
                     PullRequestMonitorAdoptionRequest(
                         repo_slug="dimileeh/aira-web",
@@ -425,6 +440,7 @@ class TestSupersedeDivergentAndExhaustion:
                     )
                 )
         assert excinfo.value.error_code == "TASK_EXTERNAL_ID_CONFLICT"
+        assert excinfo.value.detail["external_id"] == generated_external_id
 
     @pytest.mark.unit
     async def test_owned_generation_slot_without_explicit_id_mints_generation(
@@ -432,11 +448,16 @@ class TestSupersedeDivergentAndExhaustion:
         factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Omitted external_id must mint a generation rather than reuse an owned slot."""
+        """Omitted external_id must mint a generation rather than reuse an owned slot.
+
+        Same PR title keeps task scope identical so ``create_or_get`` reuses the
+        prior task, then the owned-generation guard mints a ``:gN`` external id.
+        """
+        shared_title = "feature: owned-slot-mint"
         async with factory() as session:
             first = await PullRequestMonitorAdoptionService(
                 session,
-                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+                metadata_fetcher=_MetadataFetcher(_metadata(title=shared_title)),
             ).adopt(
                 PullRequestMonitorAdoptionRequest(
                     repo_slug="dimileeh/aira-web",
@@ -483,7 +504,7 @@ class TestSupersedeDivergentAndExhaustion:
         async with factory() as session:
             second = await PullRequestMonitorAdoptionService(
                 session,
-                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+                metadata_fetcher=_MetadataFetcher(_metadata(title=shared_title)),
             ).adopt(
                 PullRequestMonitorAdoptionRequest(
                     repo_slug="dimileeh/aira-web",
