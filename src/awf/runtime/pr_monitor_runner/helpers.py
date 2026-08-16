@@ -258,6 +258,8 @@ _MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
 # line iterator must track them or an example can override an earlier hard
 # block (PRRT_kwDOSJAM6s6ZnEAt). CommonMark HTML block type-1 style: optional
 # 0–3 spaces, then the tag name followed by whitespace, ``>``, or EOL.
+# Open matching peels list/blockquote containers first (same as fences) so
+# ``- <pre>`` / ``> <code>`` still enter HTML mode (PRRT_kwDOSJAM6s6ZnHBW).
 _HTML_CODE_BLOCK_OPEN = re.compile(
     r"^ {0,3}<(?P<tag>pre|code)(?=[\s>]|$)",
     re.IGNORECASE,
@@ -314,14 +316,15 @@ _MARKDOWN_BLOCKQUOTE_FENCE_LINE_PREFIX = re.compile(r"^ {0,3}(?:>[ \t]?)+")
 
 
 def _normalize_markdown_fence_line(line: str) -> str:
-    """Strip container indent, blockquotes, and list markers for fence *open* matching.
+    """Strip container indent, blockquotes, and list markers for open matching.
 
-    List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` are
-    not top-level fence lines, and continuation content is often only two-space
-    indented (so it misses the indented-code check). Normalize before matching
-    so those regions stay shielded from verdict selection. Closers must not use
-    this helper — peeling a list or blockquote marker would treat ``- ``` `` /
-    ``> ``` `` inside a top-level fence as a closer.
+    List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` /
+    ``- <pre>`` are not top-level fence or HTML-code lines, and continuation
+    content is often only two-space indented (so it misses the indented-code
+    check). Normalize before matching so those regions stay shielded from
+    verdict selection. Closers must not use this helper — peeling a list or
+    blockquote marker would treat ``- ``` `` / ``> ``` `` inside a top-level
+    fence as a closer.
     """
     rest = line.lstrip(" \t")
     # Peel blockquote and list in either order (``> - ``` `` / ``- > ``` ``).
@@ -387,8 +390,14 @@ def _markdown_fence_open_marker(line: str) -> str | None:
 
 
 def _html_code_block_open_tag(line: str) -> str | None:
-    """Return ``pre``/``code`` when ``line`` opens a raw HTML code block."""
-    opened = _HTML_CODE_BLOCK_OPEN.match(line)
+    """Return ``pre``/``code`` when ``line`` opens a raw HTML code block.
+
+    Normalize list/blockquote containers first (same as fence openers) so
+    ``- <pre>`` / ``> <code>`` enter HTML shielding; otherwise lightly
+    indented example markers inside override an earlier hard block
+    (PRRT_kwDOSJAM6s6ZnHBW).
+    """
+    opened = _HTML_CODE_BLOCK_OPEN.match(_normalize_markdown_fence_line(line))
     if opened is None:
         return None
     return opened.group("tag").lower()
@@ -451,8 +460,9 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     Skips multiline fenced blocks (including list- and blockquote-nested
     openers after normalizing container prefixes), CommonMark indented-code
     lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
-    tab), and raw HTML ``<pre>`` / ``<code>`` blocks so quoted example markers
-    cannot override an authoritative unfenced verdict. Same-line wrapped fences
+    tab), and raw HTML ``<pre>`` / ``<code>`` blocks (including list- and
+    blockquote-nested openers) so quoted example markers cannot override an
+    authoritative unfenced verdict. Same-line wrapped fences
     (`` ```verdict``` ``) are still yielded so ``_CODE_FORMATTED_VERDICT_LINE``
     can accept them; same-line HTML wrappers are skipped entirely. Unclosed
     fences or HTML code blocks shield every subsequent line.

@@ -321,6 +321,44 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "- <pre>\n"
+                "  AWF-VERDICT: FALSE POSITIVE: example\n"
+                "  </pre>\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <pre>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> </pre>\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> - <code>\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">   </code>\n"
+            ),
+        ],
+        ids=["list_html_pre", "blockquote_html_pre", "blockquote_list_html_code"],
+    )
+    def test_private_awf_verdict_ignores_list_blockquote_nested_html_code(
+        self,
+        stdout: str,
+    ) -> None:
+        # HTML <pre>/<code> openers must peel list/blockquote containers the
+        # same way fence openers do; otherwise ``- <pre>`` never enters HTML
+        # mode and a lightly indented example overrides NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZnHBW).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_same_line_html_pre_wrapper(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
