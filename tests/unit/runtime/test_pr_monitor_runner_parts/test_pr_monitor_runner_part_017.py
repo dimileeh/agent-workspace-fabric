@@ -395,15 +395,32 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_list_prefixed_valid_final_wins(self) -> None:
-        # Stripping list prefixes for classification must also let a valid
-        # bulleted final marker remain authoritative.
+    def test_private_awf_verdict_list_prefixed_valid_final_fail_closed(self) -> None:
+        # List-stripped candidates must not make bulleted valid markers
+        # authoritative — that newly bypasses fail-closed option-list handling
+        # (#822 PRRT_kwDOSJAM6s6ZljVL). Agents must emit a non-bulleted final.
         result = _parse_verdict_result(
             "AWF-VERDICT: FALSE POSITIVE: rationale\n- AWF-VERDICT: FIXED: committed the fix"
         )
 
-        assert result.verdict == "fix_committed"
-        assert result.reason == "committed the fix"
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_multiline_list_option_items_fail_closed(self) -> None:
+        # Same-line mid-prose option lists already keep NEEDS_HUMAN; multiline
+        # ``- AWF-VERDICT:`` option items must not select the last list entry
+        # and resolve (#822 PRRT_kwDOSJAM6s6ZljVL).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose checkout policy\n"
+            "- AWF-VERDICT: FALSE POSITIVE: stale nit\n"
+            "- AWF-VERDICT: DEFER: track later"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
     def test_private_awf_verdict_trailing_prose_marker_quote_keeps_earlier_verdict(

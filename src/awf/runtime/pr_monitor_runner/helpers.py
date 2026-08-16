@@ -237,8 +237,10 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
 # Leading Markdown list markers agents often emit before a canonical verdict line
-# (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip before fullmatch / attempt
-# classification so a final garbled list-prefixed marker still fails closed.
+# (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
+# classification so a final garbled list-prefixed marker still fails closed —
+# never yield list-stripped forms as successful fullmatch candidates (that
+# would make multiline option lists authoritative over an earlier hard block).
 _MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
@@ -480,20 +482,20 @@ def _strip_markdown_list_prefix(stripped: str) -> str:
 
 
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:
+    """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
+
+    Do not yield Markdown-list-stripped variants here. List prefixes are stripped
+    only in ``_awf_verdict_segment_is_attempt`` so garbled finals fail closed;
+    treating ``- AWF-VERDICT: …`` as a successful match would let multiline
+    option lists override an earlier hard block.
+    """
     yield stripped
-    unbulleted = _strip_markdown_list_prefix(stripped)
-    if unbulleted != stripped and unbulleted:
-        yield unbulleted
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
     if code_match is None:
         return
     inner = code_match.group("line").strip()
-    if not inner:
-        return
-    yield inner
-    inner_unbulleted = _strip_markdown_list_prefix(inner)
-    if inner_unbulleted != inner and inner_unbulleted:
-        yield inner_unbulleted
+    if inner:
+        yield inner
 
 
 def _awf_verdict_segments(verdict_line: str) -> list[str]:
