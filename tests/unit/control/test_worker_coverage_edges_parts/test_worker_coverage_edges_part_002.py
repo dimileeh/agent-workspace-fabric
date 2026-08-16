@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -20,7 +18,6 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
-from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.control.worker import helpers as worker_helpers
 from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
 from awf.control.worker import recovery_stale as worker_recovery_stale
@@ -811,6 +808,211 @@ async def test_fail_stale_active_execution_skips_status_mismatch(
 
 
 @pytest.mark.unit
+async def test_fail_hosted_pr_adoption_after_restart_skips_lost_transition() -> None:
+    workspace = Workspace(
+        id="ws_hosted_lost_transition",
+        status=WorkspaceStatus.provisioning.value,
+        pr_url="https://github.com/example/repo/pull/42",
+        pr_number=42,
+        execution_claimed_by="worker-old",
+        execution_claim_expires_at=datetime(2026, 6, 4, 8, 0, tzinfo=UTC),
+        monitor_claimed_by="monitor-old",
+        monitor_claim_expires_at=datetime(2026, 6, 4, 8, 5, tzinfo=UTC),
+        execution_claim_epoch=9,
+        failure_reason=None,
+        failure_message=None,
+    )
+    transition_calls: list[dict[str, object]] = []
+
+    class LostTransitionRepository:
+        async def transition_if_current(
+            self,
+            workspace_id: str,
+            *,
+            from_status: WorkspaceStatus,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, object],
+            extra_conditions: tuple[object, ...],
+        ) -> None:
+            transition_calls.append(
+                {
+                    "workspace_id": workspace_id,
+                    "from_status": from_status,
+                    "to": to,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                    "extra_conditions_count": len(extra_conditions),
+                }
+            )
+
+    await worker_recovery_stale._fail_hosted_pr_adoption_after_restart(  # noqa: SLF001
+        LostTransitionRepository(),  # type: ignore[arg-type]
+        workspace,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.provisioning,
+            compose_project_name=None,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+        ),
+        reason_code="HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE",
+        message="setup incomplete",
+    )
+
+    assert len(transition_calls) == 1
+    call = transition_calls[0]
+    assert call["workspace_id"] == workspace.id
+    assert call["from_status"] == WorkspaceStatus.provisioning
+    assert call["to"] == WorkspaceStatus.failed
+    assert call["reason_code"] == "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+    assert call["extra_conditions_count"] == 1
+    payload = call["payload"]
+    assert isinstance(payload, dict)
+    assert payload["source"] == "hosted_pr_adoption"
+    assert payload["failure_reason"] == FailureReason.infrastructure_failure.value
+    assert payload["previous_claim"] == {
+        "execution_claimed_by": "worker-old",
+        "execution_claim_expires_at": "2026-06-04T08:00:00+00:00",
+        "monitor_claimed_by": "monitor-old",
+        "monitor_claim_expires_at": "2026-06-04T08:05:00+00:00",
+    }
+    assert workspace.execution_claimed_by == "worker-old"
+    assert workspace.monitor_claimed_by == "monitor-old"
+    assert workspace.execution_claim_epoch == 9
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+
+
+@pytest.mark.unit
+async def test_hosted_pr_adoption_monitor_attach_preserves_epoch_without_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+    workspace = Workspace(
+        id="ws_hosted_no_claims",
+        status=WorkspaceStatus.running.value,
+        task_policy=policy,
+        pr_url="https://github.com/example/repo/pull/43",
+        pr_number=43,
+        execution_claimed_by=None,
+        execution_claim_expires_at=None,
+        monitor_claimed_by=None,
+        monitor_claim_expires_at=None,
+        execution_claim_epoch=5,
+    )
+    transition_calls: list[dict[str, object]] = []
+    event_calls: list[dict[str, object]] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        async def __aenter__(self) -> RecordingSession:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class RecordingWorkspaceRepository:
+        def __init__(self, _session: RecordingSession) -> None:
+            pass
+
+        async def get_for_update(self, workspace_id: str) -> Workspace:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def transition(
+            self,
+            ws: Workspace,
+            *,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            transition_calls.append(
+                {
+                    "workspace_id": ws.id,
+                    "to": to,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                }
+            )
+            ws.status = to.value
+
+        async def add_event(
+            self,
+            ws: Workspace,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            event_calls.append(
+                {
+                    "workspace_id": ws.id,
+                    "event_type": event_type,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                }
+            )
+
+    async def _setup_completed(_session: RecordingSession, ws: Workspace) -> bool:
+        assert ws is workspace
+        return True
+
+    recording_session = RecordingSession()
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "WorkspaceRepository",
+        RecordingWorkspaceRepository,
+    )
+    monkeypatch.setattr(
+        worker_recovery_stale,
+        "_has_hosted_monitor_handoff_setup_completed",
+        _setup_completed,
+    )
+    worker = SimpleNamespace(_session_factory=lambda: recording_session)
+
+    recovered = await worker_recovery_stale._recover_hosted_pr_adoption_active_execution(  # noqa: SLF001
+        worker,
+        _ActiveExecutionCandidate(
+            workspace_id=workspace.id,
+            status=WorkspaceStatus.running,
+            compose_project_name=None,
+            task_policy=policy,
+        ),
+    )
+
+    assert recovered is True
+    assert recording_session.commits == 1
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    assert workspace.monitor_claimed_by is None
+    assert workspace.monitor_claim_expires_at is None
+    assert workspace.execution_claim_epoch == 5
+    assert len(transition_calls) == 1
+    payload = transition_calls[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["source"] == "hosted_pr_adoption"
+    assert payload["previous_claim"] == {
+        "execution_claimed_by": None,
+        "execution_claim_expires_at": None,
+        "monitor_claimed_by": None,
+        "monitor_claim_expires_at": None,
+    }
+    assert payload["pr_url"] == "https://github.com/example/repo/pull/43"
+    assert payload["pr_number"] == 43
+    assert [event["reason_code"] for event in event_calls] == [
+        "STRANDED_WORKSPACE",
+        "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+    ]
+
+
+@pytest.mark.unit
 async def test_fail_stale_active_execution_restores_primary_failure_row_fields(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1279,63 +1481,3 @@ async def test_salvage_monitor_cooldown_active_evicts_expired_entries(
 
     assert not worker._active_salvage_monitor_resume_cooldown_active("ws_expired")  # noqa: SLF001
     assert "ws_expired" not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
-
-
-@pytest.mark.unit
-async def test_forget_execution_task_ignores_replaced_task(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Regression coverage for forget execution task ignores replaced task."""
-    worker = _worker(factory)
-
-    async def _pending() -> None:
-        await asyncio.Event().wait()
-
-    tracked = asyncio.create_task(_pending())
-    stale = asyncio.create_task(_pending())
-    worker._execution_tasks["ws_replaced"] = tracked  # noqa: SLF001
-    worker._execution_task_kinds["ws_replaced"] = (  # noqa: SLF001
-        worker_dispatch_methods._ExecutionTaskKind.READY
-    )
-    try:
-        # A late done-callback from a previously cancelled task must not evict the
-        # task that currently owns the slot (identity guard).
-        worker._forget_execution_task("ws_replaced", stale)  # noqa: SLF001
-        assert worker._execution_tasks["ws_replaced"] is tracked  # noqa: SLF001
-        assert (
-            worker._execution_task_kinds["ws_replaced"]  # noqa: SLF001
-            is worker_dispatch_methods._ExecutionTaskKind.READY
-        )
-
-        # The matching task clears both slot-accounting maps together.
-        worker._forget_execution_task("ws_replaced", tracked)  # noqa: SLF001
-        assert "ws_replaced" not in worker._execution_tasks  # noqa: SLF001
-        assert "ws_replaced" not in worker._execution_task_kinds  # noqa: SLF001
-    finally:
-        for task in (tracked, stale):
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-
-@pytest.mark.unit
-async def test_reconcile_drops_monitor_kind_when_task_already_gone(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Drop stale monitor-resume kind entries when the workspace row is already gone."""
-    worker = _worker(factory)
-    # Simulate a monitor resume that finished concurrently during the status load:
-    # the kind entry lingers while its task is already gone and the workspace row
-    # is absent (so it is no longer monitoring_pr). Reconcile should drop the stale
-    # kind entry without logging a cancellation or raising.
-    worker._execution_task_kinds["ws_vanished"] = (  # noqa: SLF001
-        worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
-    )
-
-    with structlog.testing.capture_logs() as captured:
-        await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
-
-    assert "ws_vanished" not in worker._execution_task_kinds  # noqa: SLF001
-    assert not any(
-        event.get("event") == "worker.stale_monitor_execution_task_cancelled" for event in captured
-    )

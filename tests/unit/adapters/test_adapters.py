@@ -24,6 +24,7 @@ import yaml
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
+from awf.adapters.antigravity import AntigravityAdapter
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
@@ -899,6 +900,7 @@ class TestClaudeCodeAdapter:
         (CodexAdapter, AgentRuntime.codex),
         (CursorAdapter, AgentRuntime.cursor),
         (GeminiAdapter, AgentRuntime.gemini),
+        (AntigravityAdapter, AgentRuntime.antigravity),
         (OpenCodeAdapter, AgentRuntime.opencode),
         (GrokAdapter, AgentRuntime.grok),
     ],
@@ -935,6 +937,7 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
         (CodexAdapter, ()),
         (CursorAdapter, ()),
         (GeminiAdapter, ()),
+        (AntigravityAdapter, ()),
         (OpenCodeAdapter, ()),
         (GrokAdapter, ()),
     ],
@@ -957,6 +960,7 @@ def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
         CodexAdapter,
         CursorAdapter,
         GeminiAdapter,
+        AntigravityAdapter,
         OpenCodeAdapter,
         GrokAdapter,
     ):
@@ -968,10 +972,11 @@ class TestCentralDefaults:
 
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-8"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.6-sol"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
@@ -986,7 +991,7 @@ class TestCentralDefaults:
             defaults=DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex],
         )
 
-        assert codex._default_model == "gpt-5.5"
+        assert codex._default_model == "gpt-5.6-sol"
         assert codex._default_effort == "xhigh"
 
 
@@ -1002,6 +1007,7 @@ class TestRegistry:
         claude = get_adapter(AgentRuntime.claude_code, runner=runner)
         cursor = get_adapter(AgentRuntime.cursor, runner=runner)
         gemini = get_adapter(AgentRuntime.gemini, runner=runner)
+        antigravity = get_adapter(AgentRuntime.antigravity, runner=runner)
         opencode = get_adapter(AgentRuntime.opencode, runner=runner)
         grok = get_adapter(AgentRuntime.grok, runner=runner)
 
@@ -1009,5 +1015,6 @@ class TestRegistry:
         assert claude.name == AgentRuntime.claude_code
         assert cursor.name == AgentRuntime.cursor
         assert gemini.name == AgentRuntime.gemini
+        assert antigravity.name == AgentRuntime.antigravity
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok

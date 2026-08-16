@@ -30,6 +30,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service import config as service_config
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
@@ -645,7 +646,7 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 },
             )
 
-        monkeypatch.setattr(adoption_module, "resolve_service_settings", _resolve_service_settings)
+        monkeypatch.setattr(adoption_helpers, "resolve_service_settings", _resolve_service_settings)
 
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(
@@ -869,7 +870,7 @@ class TestPullRequestMonitorAdoptionServicePart001:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(adoption_module, "defaults_with_model_overrides", lambda _models: {})
+        monkeypatch.setattr(adoption_helpers, "defaults_with_model_overrides", lambda _models: {})
 
         policy = adoption_module._requested_agent_policy(
             PullRequestMonitorAdoptionRequest(

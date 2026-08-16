@@ -127,7 +127,7 @@ services:
             /home/agent/.config/opencode) credential_files="auth.json" ;;
             /home/agent/.grok) credential_files="auth.json" ;;
             /home/agent/.ollama) credential_files="id_ed25519 id_ed25519.pub" ;;
-            /home/agent/.aws) credential_files="credentials" ;;
+            /home/agent/.aws) credential_files="credentials config" ;;
             *)
               cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
               credential_files=""

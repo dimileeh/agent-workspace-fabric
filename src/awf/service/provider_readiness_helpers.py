@@ -352,17 +352,6 @@ def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
     return "none"
 
 
-def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
-    return {
-        "codex": "CODEX",
-        "claude_code": "CLAUDE",
-        "cursor": "CURSOR",
-        "gemini": "GEMINI",
-        "opencode": "OPENCODE",
-        "grok": "GROK",
-    }.get(provider, "PROVIDER")
-
-
 def _probe_agent_runtime_cli(
     settings: ServiceSettings,
     *,
@@ -1460,6 +1449,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     HttpStreamResponseLike,
     ProviderName,
     SubprocessRun,
+    _agent_runtime_cli_reason_prefix,
     _opencode_model_targets_non_ollama_provider,
 )
 

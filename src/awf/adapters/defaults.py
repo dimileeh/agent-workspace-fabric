@@ -11,14 +11,20 @@ from awf.db.enums import AgentRuntime
 
 DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
-        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-4-8", effort="xhigh"),
-        AgentRuntime.codex: AgentDefaults(model="gpt-5.5", effort="xhigh"),
+        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5", effort="xhigh"),
+        AgentRuntime.codex: AgentDefaults(model="gpt-5.6-sol", effort="xhigh"),
         # Cursor documents model selection but not a portable effort flag.
         # Use the thinking-capable Sonnet variant as AWF's high-effort default.
         AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_THINKING_MODEL, effort="xhigh"),
         # Gemini CLI 0.39+ documents Gemini 3.1 Pro Preview as the direct
         # Pro-class model ID when the account has access.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
+        # Antigravity API-key mode (agy 1.1.13) accepts exactly the slugs in
+        # ANTIGRAVITY_API_KEY_MODE_MODELS; gemini-3.1-pro-preview is the
+        # Pro-class default. Effort is accepted/recorded but never emitted:
+        # agy rejects --effort for all models in API-key mode (OAuth-only
+        # composite slugs such as gemini-3.6-flash-high).
+        AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
         AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
         # The Grok Build CLI reports grok-build as the current default coding model.
         AgentRuntime.grok: AgentDefaults(model="grok-build", effort="xhigh"),

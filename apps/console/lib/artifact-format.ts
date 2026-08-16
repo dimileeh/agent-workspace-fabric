@@ -1,4 +1,5 @@
 import type { WorkspaceArtifact } from "@/lib/types";
+import { awfPath } from "./console-urls.ts";
 
 // Stable names the executor deposits into the served artifact dir. The console
 // labels artifacts by filename (the API's ``kind`` stays suffix-based).
@@ -28,7 +29,9 @@ export function hasConformanceArtifact(items: WorkspaceArtifact[]): boolean {
 }
 
 export function artifactDownloadPath(workspaceId: string, name: string): string {
-  return `/api/awf/workspaces/${encodeURIComponent(workspaceId)}/artifacts/download?path=${encodeURIComponent(name)}`;
+  return awfPath(`workspaces/${encodeURIComponent(workspaceId)}/artifacts/download`, {
+    path: name,
+  });
 }
 
 // The artifact list API is cursor-paginated (default page 50, max 500) and
@@ -42,11 +45,10 @@ export const ARTIFACT_LIST_PAGE_SIZE = 200;
 export const ARTIFACT_LIST_MAX_PAGES = 50;
 
 export function artifactListPath(workspaceId: string, cursor: string | null): string {
-  const query = new URLSearchParams({ limit: String(ARTIFACT_LIST_PAGE_SIZE) });
-  if (cursor) {
-    query.set("cursor", cursor);
-  }
-  return `/api/awf/workspaces/${encodeURIComponent(workspaceId)}/artifacts?${query.toString()}`;
+  return awfPath(`workspaces/${encodeURIComponent(workspaceId)}/artifacts`, {
+    limit: ARTIFACT_LIST_PAGE_SIZE,
+    cursor: cursor ?? undefined,
+  });
 }
 
 export interface ArtifactListPage {
