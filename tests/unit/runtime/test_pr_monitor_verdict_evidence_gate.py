@@ -520,6 +520,94 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "failed_verdict"),
+    [
+        (
+            "AWF-VERDICT: FALSE POSITIVE: printed before crash with dirty edits",
+            "agent_failed",
+        ),
+        (
+            "AWF-VERDICT: DEFER: printed before crash with dirty edits",
+            "agent_failed",
+        ),
+        (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose after dirty crash",
+            "needs_human",
+        ),
+    ],
+)
+async def test_non_fixed_crash_clears_dirty_salvage_before_retry(
+    tmp_path: Path,
+    stdout: str,
+    failed_verdict: str,
+) -> None:
+    """Explicit non-FIXED crash must not leave salvage for a later FIXED retry."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_non_fixed_crash"
+    body_hash = "feedback_body_hash_non_fixed"
+    workspace_id = "ws_salvage_non_fixed_crash"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout=stdout,
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == failed_verdict
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: should not reuse non-fixed salvage",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_salvaged_fix_evidence_rejects_feedback_body_change(
     tmp_path: Path,
 ) -> None:

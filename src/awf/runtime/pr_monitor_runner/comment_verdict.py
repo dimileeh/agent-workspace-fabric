@@ -520,9 +520,11 @@ async def _invoke_cli_for_verdict_result(
         # Never upgrade an explicit non-fix marker because dirty or hosted head
         # advanced (strand prevention over guessing). But a nonzero CLI exit means
         # the run did not complete — do not resolve/defer from a pre-crash marker.
+        # Drop any dirty salvage from this crash so a later no-change FIXED retry
+        # cannot treat a non-FIXED attempt as item evidence.
+        _clear_retained_salvage()
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
-        _clear_retained_salvage()
         return parsed
     if parsed.verdict == "needs_human":
         # Keep explicit NEEDS_HUMAN (and successful fail-closed parses). Only map
@@ -530,8 +532,9 @@ async def _invoke_cli_for_verdict_result(
         # so crashes still retry instead of parking a human escalation.
         if cli_failed and parsed.reason in _FAIL_CLOSED_VERDICT_REASONS:
             return VerdictResult(verdict="agent_failed")
-        if not cli_failed:
-            _clear_retained_salvage()
+        # Explicit (or successful) NEEDS_HUMAN is not fix evidence — clear salvage
+        # even when the CLI also failed, so a later FIXED retry cannot reuse it.
+        _clear_retained_salvage()
         return parsed
     if parsed.verdict == "fix_committed":
         # Hosted recovery may sync a terminal SHA and set advance evidence before
