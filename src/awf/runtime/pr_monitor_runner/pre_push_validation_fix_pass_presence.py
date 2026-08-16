@@ -291,9 +291,33 @@ def _is_declaration_opener_line(raw_line: str) -> bool:
     return False
 
 
+def _opens_nested_binding_scope(raw_line: str) -> bool:
+    """Return True when ``raw_line`` opens a nestable def/class/function scope.
+
+    Assignments, ``#define``, and ``let``/``const``/``var`` bind a name but do
+    not push an enclosing scope for qualified keys (PRRT_kwDOSJAM6s6ZqKN3).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//"):
+        return False
+    if stripped.startswith("#"):
+        return False
+    for pattern in (_DEF_BINDING_RE, _CLASS_BINDING_RE, _FUNCTION_BINDING_RE):
+        if pattern.match(raw_line) is not None:
+            return True
+    return False
+
+
 def _line_indent(raw_line: str) -> int:
     """Return leading space/tab count for ``raw_line``."""
     return len(raw_line) - len(raw_line.lstrip(" \t"))
+
+
+def _scoped_binding_key(scope_names: list[str], name: str) -> str:
+    """Qualify ``name`` with enclosing scope names (``A.ok``), or return bare."""
+    if not scope_names:
+        return name
+    return ".".join((*scope_names, name))
 
 
 def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
@@ -321,23 +345,86 @@ def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
 
 
 def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
-    """Map each binding name to the span of its last occurrence in ``text``."""
+    """Map each scoped binding key to the span of its last occurrence in ``text``.
+
+    Keys are qualified by enclosing def/class/function scopes (``A.ok``) so
+    same-named methods on different classes do not collide
+    (PRRT_kwDOSJAM6s6ZqKN3).
+    """
     lines = text.splitlines()
     last_start: dict[str, int] = {}
+    # (indent, name) stack for nestable declaration openers.
+    scope_stack: list[tuple[int, str]] = []
     for idx, raw_line in enumerate(lines):
+        if raw_line.strip() == "":
+            continue
+        indent = _line_indent(raw_line)
+        while scope_stack and scope_stack[-1][0] >= indent:
+            scope_stack.pop()
         name = _binding_name_for_line(raw_line)
-        if name is not None:
-            last_start[name] = idx
-    return {name: _binding_span_at(lines, start) for name, start in last_start.items()}
+        if name is None:
+            continue
+        key = _scoped_binding_key([entry[1] for entry in scope_stack], name)
+        last_start[key] = idx
+        if _opens_nested_binding_scope(raw_line):
+            scope_stack.append((indent, name))
+    return {key: _binding_span_at(lines, start) for key, start in last_start.items()}
+
+
+def _tip_extra_line_indices(*, commit_blob: str, head_blob: str) -> set[int]:
+    """Return head line indices that are tip-only vs the salvage commit blob.
+
+    Declaration openers use multiset counting so same-signature redefinitions
+    remain tip-extra (PRRT_kwDOSJAM6s6ZqDij); other lines use set difference so
+    surplus salvage assignment copies are not tip-extra (PRRT_kwDOSJAM6s6ZqGeU).
+    """
+    commit_lines = commit_blob.splitlines()
+    commit_set = set(commit_lines)
+    opener_remaining = Counter(line for line in commit_lines if _is_declaration_opener_line(line))
+    extra: set[int] = set()
+    for idx, line in enumerate(head_blob.splitlines()):
+        if _is_declaration_opener_line(line):
+            if opener_remaining[line] > 0:
+                opener_remaining[line] -= 1
+            else:
+                extra.add(idx)
+        elif line not in commit_set:
+            extra.add(idx)
+    return extra
+
+
+def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[str]:
+    """Return scoped binding keys whose opener lines fall in ``line_indices``."""
+    if not line_indices:
+        return set()
+    lines = text.splitlines()
+    keys: set[str] = set()
+    scope_stack: list[tuple[int, str]] = []
+    for idx, raw_line in enumerate(lines):
+        if raw_line.strip() == "":
+            continue
+        indent = _line_indent(raw_line)
+        while scope_stack and scope_stack[-1][0] >= indent:
+            scope_stack.pop()
+        name = _binding_name_for_line(raw_line)
+        if name is None:
+            continue
+        key = _scoped_binding_key([entry[1] for entry in scope_stack], name)
+        if idx in line_indices:
+            keys.add(key)
+        if _opens_nested_binding_scope(raw_line):
+            scope_stack.append((indent, name))
+    return keys
 
 
 def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set[str]:
-    """Return names whose last binding span differs between parent and salvage.
+    """Return scoped keys whose last binding span differs between parent and salvage.
 
     Spans include declaration bodies, not only opener lines, so body-only
     function/class edits count as changed bindings (PRRT_kwDOSJAM6s6ZqHvh).
-    Parent-only names (deleted by salvage) also count so a tip that
-    reintroduces them can supersede (PRRT_kwDOSJAM6s6ZqKGY).
+    Keys are scope-qualified so ``A.ok`` and ``C.ok`` stay distinct
+    (PRRT_kwDOSJAM6s6ZqKN3). Parent-only names (deleted by salvage) also count
+    so a tip that reintroduces them can supersede (PRRT_kwDOSJAM6s6ZqKGY).
     """
     parent_spans = _last_binding_spans(parent_blob)
     commit_spans = _last_binding_spans(commit_blob)
@@ -357,37 +444,27 @@ def _tip_extra_can_supersede_modified_salvage(
     A tip can keep the salvage hunk and append a later rebinding of the same
     name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``); with
     surrounding context merge-file reproduces that tip cleanly, so equality
-    alone would retain stale FIXED evidence. Only names whose last binding span
-    (opener plus indented body) changed vs parent count — unrelated appends and
-    later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use set
-    difference except for declaration openers, which need multiset counting so
-    same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
+    alone would retain stale FIXED evidence. Only scoped keys whose last binding
+    span (opener plus indented body) changed vs parent count — unrelated appends
+    and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use
+    set difference except for declaration openers, which need multiset counting
+    so same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
     full-line multiset would over-reject surplus salvage assignment copies
     (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
     bindings (PRRT_kwDOSJAM6s6ZqHvh). Parent-only (deleted) salvage names also
-    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).
+    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY). Tip-extra
+    binding keys are resolved against the full tip blob so an unrelated later
+    ``def ok`` under another class does not collide with salvaged ``A.ok``
+    (PRRT_kwDOSJAM6s6ZqKN3).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:
         return False
-    commit_lines = commit_blob.splitlines()
-    commit_set = set(commit_lines)
-    # Multiset only for declaration openers: same-signature redefinition reuses
-    # the salvage opener line text, so set membership would drop the duplicate
-    # from tip-only extras and miss supersession (PRRT_kwDOSJAM6s6ZqDij).
-    opener_remaining = Counter(line for line in commit_lines if _is_declaration_opener_line(line))
-    extra_lines: list[str] = []
-    for line in head_blob.splitlines():
-        if _is_declaration_opener_line(line):
-            if opener_remaining[line] > 0:
-                opener_remaining[line] -= 1
-            else:
-                extra_lines.append(line)
-        elif line not in commit_set:
-            extra_lines.append(line)
-    if not extra_lines:
+    extra_indices = _tip_extra_line_indices(commit_blob=commit_blob, head_blob=head_blob)
+    if not extra_indices:
         return False
-    return bool(changed & _binding_names("\n".join(extra_lines) + "\n"))
+    tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
+    return bool(changed & tip_extra_keys)
 
 
 def _suffix_can_supersede_added_salvage(*, salvage: str, suffix: str) -> bool:

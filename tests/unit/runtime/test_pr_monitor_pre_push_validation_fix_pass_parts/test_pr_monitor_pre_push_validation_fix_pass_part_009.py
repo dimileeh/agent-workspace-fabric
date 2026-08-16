@@ -329,7 +329,7 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     commit_indented = "class C:\n    FEATURE_ENABLED = True\n"
     assert _salvage_changed_binding_names(
         parent_blob=parent_indented, commit_blob=commit_indented
-    ) == {"C", "FEATURE_ENABLED"}
+    ) == {"C", "C.FEATURE_ENABLED"}
     # Same indented assignment text reused in a later local hunk — identical line
     # text, so only full-line multiset would treat the surplus copy as tip-extra.
     # Enclosing class ``C`` is also in ``changed`` because the class span body
@@ -396,15 +396,62 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     )
     parent_class = "x = 1\nclass Guard:\n    def ok(self):\n        return False\n"
     commit_class = "x = 1\nclass Guard:\n    def ok(self):\n        return True\n"
-    assert "Guard" in _salvage_changed_binding_names(
+    class_changed = _salvage_changed_binding_names(
         parent_blob=parent_class, commit_blob=commit_class
     )
+    assert "Guard" in class_changed
+    assert "Guard.ok" in class_changed
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_class,
         commit_blob=commit_class,
         head_blob=(
             "x = 1\nclass Guard:\n    def ok(self):\n        return True\n"
             "class Guard:\n    def ok(self):\n        return False\n"
+        ),
+    )
+    # Body-only salvage of ``A.ok`` must not treat an unrelated later ``C.ok``
+    # opener as a tip-extra rebind. Flat file-global names + opener multiset
+    # wrongly put bare ``ok`` in ``changed`` and counted the surplus method as
+    # supersession, dropping still-valid FIXED evidence (PRRT_kwDOSJAM6s6ZqKN3).
+    parent_scoped = (
+        "class A:\n"
+        "    def ok(self):\n"
+        "        return False\n"
+        "class B:\n"
+        "    def other(self):\n"
+        "        return 1\n"
+    )
+    commit_scoped = (
+        "class A:\n"
+        "    def ok(self):\n"
+        "        return True\n"
+        "class B:\n"
+        "    def other(self):\n"
+        "        return 1\n"
+    )
+    scoped_changed = _salvage_changed_binding_names(
+        parent_blob=parent_scoped, commit_blob=commit_scoped
+    )
+    assert "A.ok" in scoped_changed
+    assert "ok" not in scoped_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_scoped,
+        commit_blob=commit_scoped,
+        head_blob=(commit_scoped + "class C:\n    def ok(self):\n        return False\n"),
+    )
+    # Same-class tip-extra redefinition of the salvaged method still supersedes.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_scoped,
+        commit_blob=commit_scoped,
+        head_blob=(
+            "class A:\n"
+            "    def ok(self):\n"
+            "        return True\n"
+            "    def ok(self):\n"
+            "        return False\n"
+            "class B:\n"
+            "    def other(self):\n"
+            "        return 1\n"
         ),
     )
     assert _salvage_changed_binding_names(
