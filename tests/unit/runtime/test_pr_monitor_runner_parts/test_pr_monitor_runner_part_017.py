@@ -1190,6 +1190,43 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "list_indent",
+        [
+            "-     ",
+            "*     ",
+            "1.     ",
+            "- \t",
+            "   -     ",
+            "> -     ",
+            "- >     ",
+        ],
+        ids=[
+            "bullet_four_spaces",
+            "star_four_spaces",
+            "ordered_four_spaces",
+            "bullet_space_tab",
+            "indented_bullet_four_spaces",
+            "bq_then_list_four_spaces",
+            "list_then_bq_four_spaces",
+        ],
+    )
+    def test_private_awf_verdict_ignores_list_nested_indented_code(self, list_indent: str) -> None:
+        # Four-column indented code nested in a list starts with ``-`` / ``1.``,
+        # so raw-line and blockquote-only peels miss it; attempt detection then
+        # treats the example as a garbled final over an earlier FIXED
+        # (PRRT_kwDOSJAM6s6Zo4bL).
+        stdout = (
+            "AWF-VERDICT: FIXED: committed the list-indent skip\n"
+            f"{list_indent}AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the list-indent skip"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_three_space_indent_still_counts(self) -> None:
         # CommonMark indented code requires four spaces; lighter indent is prose.
         result = _parse_verdict_result("   AWF-VERDICT: DEFER: track follow-up separately")
