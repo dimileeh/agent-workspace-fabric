@@ -372,6 +372,40 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
+            "- AWF-VERDICT: SHIPPED: done",
+            "* AWF-VERDICT: SHIPPED: done",
+            "+ AWF-VERDICT: SHIPPED: done",
+            "1. AWF-VERDICT: SHIPPED: done",
+            "2) AWF-VERDICT: SHIPPED: done",
+        ],
+    )
+    def test_private_awf_verdict_list_prefixed_garbled_final_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # Markdown list markers before a garbled final marker must not prevent
+        # attempt classification — otherwise an earlier resolvable verdict wins
+        # (#822 PRRT_kwDOSJAM6s6ZlgUj).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_list_prefixed_valid_final_wins(self) -> None:
+        # Stripping list prefixes for classification must also let a valid
+        # bulleted final marker remain authoritative.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: rationale\n- AWF-VERDICT: FIXED: committed the fix"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the fix"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_trailing_prose_marker_quote_keeps_earlier_verdict(
         self,
     ) -> None:

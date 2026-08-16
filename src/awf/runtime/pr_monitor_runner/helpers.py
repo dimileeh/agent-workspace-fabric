@@ -236,6 +236,10 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+# Leading Markdown list markers agents often emit before a canonical verdict line
+# (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip before fullmatch / attempt
+# classification so a final garbled list-prefixed marker still fails closed.
+_MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
@@ -470,14 +474,26 @@ def _select_bare_verdict(
     return None
 
 
+def _strip_markdown_list_prefix(stripped: str) -> str:
+    """Remove a single leading Markdown list marker, if present."""
+    return _MARKDOWN_LIST_PREFIX.sub("", stripped, count=1)
+
+
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     yield stripped
+    unbulleted = _strip_markdown_list_prefix(stripped)
+    if unbulleted != stripped and unbulleted:
+        yield unbulleted
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
     if code_match is None:
         return
     inner = code_match.group("line").strip()
-    if inner:
-        yield inner
+    if not inner:
+        return
+    yield inner
+    inner_unbulleted = _strip_markdown_list_prefix(inner)
+    if inner_unbulleted != inner and inner_unbulleted:
+        yield inner_unbulleted
 
 
 def _awf_verdict_segments(verdict_line: str) -> list[str]:
@@ -626,9 +642,11 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
 
     Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
     attempts; only segments that begin with the marker count toward the
-    final-marker fail-closed gate.
+    final-marker fail-closed gate. Leading Markdown list markers are stripped
+    first so ``- AWF-VERDICT: SHIPPED: …`` still counts as a garbled final.
     """
-    return _AWF_VERDICT_MARKER.match(segment.lstrip()) is not None
+    normalized = _strip_markdown_list_prefix(segment.lstrip())
+    return _AWF_VERDICT_MARKER.match(normalized) is not None
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
