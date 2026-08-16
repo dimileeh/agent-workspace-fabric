@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from sqlalchemy import and_, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
@@ -53,25 +54,16 @@ class TaskRepository:
             idempotency_key=idempotency_key,
         )
         if existing is not None:
-            if (
-                external_id is not None
-                and existing.external_id == external_id
-                and not _task_scope_matches(
-                    existing,
-                    repo_url=repo_url,
-                    base_branch=base_branch,
-                    task_class=task_class,
-                    owned_paths=owned_paths,
-                    title=title,
-                )
-            ):
-                raise TaskExternalIdConflictError(external_id)
-            if existing.external_id is None and external_id is not None:
-                existing.external_id = external_id
-            if existing.idempotency_key is None and idempotency_key is not None:
-                existing.idempotency_key = idempotency_key
-            await self._session.flush()
-            return existing
+            return await self._reuse_or_conflict(
+                existing,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                title=title,
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+                task_class=task_class,
+                owned_paths=owned_paths,
+            )
 
         task = Task(
             id=new_task_id(),
@@ -84,9 +76,65 @@ class TaskRepository:
             task_class=task_class,
             owned_paths=list(owned_paths),
         )
-        self._session.add(task)
-        await self._session.flush()
+        # Concurrent create_or_get callers (e.g. two PR adoptions with the same
+        # explicit external_id under distinct PR idempotency locks) can both miss
+        # the pre-insert lookup. Recover the unique-constraint race and re-evaluate
+        # scope so losers join same-scope tasks or raise TaskExternalIdConflictError
+        # instead of leaking IntegrityError as an internal failure.
+        try:
+            async with self._session.begin_nested():
+                self._session.add(task)
+                await self._session.flush()
+        except IntegrityError:
+            raced = await self._find_reusable(
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+            )
+            if raced is None:
+                raise
+            return await self._reuse_or_conflict(
+                raced,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                title=title,
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+                task_class=task_class,
+                owned_paths=owned_paths,
+            )
         return task
+
+    async def _reuse_or_conflict(
+        self,
+        existing: Task,
+        *,
+        repo_url: str,
+        base_branch: str,
+        title: str,
+        external_id: str | None,
+        idempotency_key: str | None,
+        task_class: str | None,
+        owned_paths: list[str],
+    ) -> Task:
+        if (
+            external_id is not None
+            and existing.external_id == external_id
+            and not _task_scope_matches(
+                existing,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                task_class=task_class,
+                owned_paths=owned_paths,
+                title=title,
+            )
+        ):
+            raise TaskExternalIdConflictError(external_id)
+        if existing.external_id is None and external_id is not None:
+            existing.external_id = external_id
+        if existing.idempotency_key is None and idempotency_key is not None:
+            existing.idempotency_key = idempotency_key
+        await self._session.flush()
+        return existing
 
     async def get(self, task_id: str) -> Task | None:
         return await self._session.get(Task, task_id)
