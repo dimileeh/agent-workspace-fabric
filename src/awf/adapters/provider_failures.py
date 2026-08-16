@@ -51,6 +51,7 @@ _AUTH_FAILURE_MARKERS = (
     "authentication required. run 'agy' to log in",
     "gemini_api_key environment variable is not set",
     "gemini_api_key",
+    "google_api_key",
     "ollama api key",
     "ollama cloud authentication",
     "opencode auth",

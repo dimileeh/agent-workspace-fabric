@@ -85,6 +85,24 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     assert "<redacted>" in classification.failure_fingerprint
 
 
+def test_classifies_google_api_key_auth_failure() -> None:
+    """Missing or invalid GOOGLE_API_KEY classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="GOOGLE_API_KEY environment variable is not set",
+        provider=None,
+        model="google/gemini-2.5-flash",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "google"
+    assert classification.model == "google/gemini-2.5-flash"
+    assert classification.retryable is True
+
+
 def test_classifies_cursor_auth_failure_and_redacts_secret_fingerprint() -> None:
     """Cursor auth failures infer the Cursor provider and redact API keys."""
     classification = classify_provider_failure(
