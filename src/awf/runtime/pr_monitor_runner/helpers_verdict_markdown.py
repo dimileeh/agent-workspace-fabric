@@ -9,7 +9,6 @@ __all__ = (
     "_CODE_FORMATTED_VERDICT_LINE",
     "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
     "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
-    "_VERDICT_REASON_INLINE_LINK_WRAPPER",
     "_VERDICT_REASON_PYTHON_DUNDER",
     "_MARKDOWN_FENCE_OPEN",
     "_MARKDOWN_INDENTED_CODE_LINE",
@@ -55,6 +54,7 @@ __all__ = (
     "_markdown_fence_closes",
     "_markdown_is_indented_code_line",
     "_iter_non_fenced_verdict_lines",
+    "_verdict_reason_inline_link_label",
 )
 
 import re
@@ -123,9 +123,63 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
 # (``![<…>](https://example.com)``). Peeled only when the label is
 # placeholder-shaped — same gate as single emphasis — so a real linked /
 # imaged justification stays usable (PRRT_kwDOSJAM6s6Zos6S,
-# PRRT_kwDOSJAM6s6Zo-5M).
-_VERDICT_REASON_INLINE_LINK_WRAPPER = re.compile(r"^!?\[\s*(?P<label>.*?)\s*\]\s*\([^)\n]*\)$")
+# PRRT_kwDOSJAM6s6Zo-5M). Destinations may contain balanced parentheses or
+# backslash-escaped ``(`` / ``)``; a plain ``[^)]*`` stop would leave
+# ``[<reason>](https://example.com/a_(b))`` unpeeled and accept the echo as
+# a substantive reason (PRRT_kwDOSJAM6s6ZpLqR).
 _VERDICT_REASON_PYTHON_DUNDER = re.compile(r"^__[A-Za-z_][A-Za-z0-9_]*__$")
+
+
+def _verdict_reason_inline_link_label(reason: str) -> str | None:
+    """Return the label when ``reason`` is a whole-reason Markdown link/image.
+
+    Matches ``[label](destination)`` and ``![label](destination)`` spanning the
+    entire string. Label selection is non-greedy (earliest ``]\\s*(`` that
+    yields a destination consuming the rest of the string), matching the prior
+    ``.*?`` regex. Destinations allow nested balanced parentheses and
+    backslash-escaped characters; newlines abort matching
+    (PRRT_kwDOSJAM6s6ZpLqR).
+    """
+    if reason.startswith("!["):
+        after_open = 2
+    elif reason.startswith("["):
+        after_open = 1
+    else:
+        return None
+
+    n = len(reason)
+    label_start = after_open
+    while label_start < n and reason[label_start] in " \t":
+        label_start += 1
+
+    # Non-greedy: try each ``]`` followed by optional whitespace and ``(``.
+    j = label_start
+    while j < n:
+        if reason[j] == "]":
+            k = j + 1
+            while k < n and reason[k] in " \t":
+                k += 1
+            if k < n and reason[k] == "(":
+                depth = 1
+                p = k + 1
+                while p < n and depth > 0:
+                    ch = reason[p]
+                    if ch == "\n":
+                        break
+                    if ch == "\\" and p + 1 < n:
+                        p += 2
+                        continue
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                    p += 1
+                if depth == 0 and p == n:
+                    return reason[label_start:j].rstrip(" \t")
+        j += 1
+    return None
+
+
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
 # contain backticks (so same-line wraps like `` ```verdict``` `` are not
 # openers). Tilde info strings may include ``~`` (e.g. ``~~~ lang~option``).

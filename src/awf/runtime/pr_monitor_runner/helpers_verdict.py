@@ -95,9 +95,6 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER as _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
-    _VERDICT_REASON_INLINE_LINK_WRAPPER as _VERDICT_REASON_INLINE_LINK_WRAPPER,
-)
-from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_INLINE_QUOTE_WRAPPER as _VERDICT_REASON_INLINE_QUOTE_WRAPPER,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -169,6 +166,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _normalize_markdown_fence_line as _normalize_markdown_fence_line,
 )
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _verdict_reason_inline_link_label as _verdict_reason_inline_link_label,
+)
 
 __all__ = (
     "_BARE_VERDICT_LINE",
@@ -177,7 +177,6 @@ __all__ = (
     "_CODE_FORMATTED_VERDICT_LINE",
     "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
     "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
-    "_VERDICT_REASON_INLINE_LINK_WRAPPER",
     "_VERDICT_REASON_PYTHON_DUNDER",
     "_MARKDOWN_FENCE_OPEN",
     "_MARKDOWN_INDENTED_CODE_LINE",
@@ -228,6 +227,7 @@ __all__ = (
     "_RESOLVABLE_PLACEHOLDER_LABELS",
     "_normalized_verdict_reason_is_template_placeholder",
     "_verdict_reason_is_template_placeholder",
+    "_verdict_reason_inline_link_label",
     "_normalize_verdict_reason_inline_formatting",
     "_last_awf_resolvable_reason_is_placeholder",
     "_fail_closed_resolvable_placeholder_if_needed",
@@ -549,7 +549,8 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     ``[<…>](https://example.com)`` / ``![<…>](https://example.com)``). Those
     wrappers must not defeat whole-reason placeholder detection
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
-    PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
+    PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
+    PRRT_kwDOSJAM6s6ZpLqR).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -584,12 +585,14 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
                 continue
             cleaned = inner
             continue
-        link_match = _VERDICT_REASON_INLINE_LINK_WRAPPER.fullmatch(cleaned)
-        if link_match is not None:
+        link_label = _verdict_reason_inline_link_label(cleaned)
+        if link_label is not None:
             # Markdown links / images: peel only when the label is
             # placeholder-shaped so a real linked or imaged justification
             # remains usable (PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
-            inner = link_match.group("label").strip()
+            # Destinations may include balanced / escaped parentheses
+            # (PRRT_kwDOSJAM6s6ZpLqR).
+            inner = link_label.strip()
             normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
             if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
                 break
