@@ -188,7 +188,6 @@ class TestPullRequestMonitorAdoptionServicePart003:
                 idempotency_key=logical_key,
                 repo=RepoRef(owner="dimileeh", name="aira-web"),
                 pr_number=277,
-                effective_external_id=adoption_external_id,
             )
             await session.commit()
 
@@ -245,7 +244,6 @@ class TestPullRequestMonitorAdoptionServicePart003:
                 idempotency_key=logical_key,
                 repo=RepoRef(owner="dimileeh", name="aira-web"),
                 pr_number=277,
-                effective_external_id=adoption_external_id,
             )
             await session.commit()
 
@@ -289,10 +287,6 @@ class TestPullRequestMonitorAdoptionServicePart003:
                 idempotency_key=logical_key,
                 repo=RepoRef(owner="dimileeh", name="aira-web"),
                 pr_number=277,
-                effective_external_id=adoption_module._adoption_external_id(
-                    repo_slug="dimileeh/aira-web",
-                    pr_number=277,
-                ),
             )
             await session.commit()
 

@@ -256,6 +256,85 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert await _count(session, Task) == 2
 
     @pytest.mark.unit
+    async def test_terminal_readoption_with_changed_identity_releases_prior_external_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Terminal supersession must free the prior explicit ID even when the next
+        generation omits external_id (effective ID changes), so a later re-adoption
+        with the original explicit ID can create a fresh monitor.
+        """
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id="CLOUD-TASK-42",
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        async with factory() as session:
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert old_workspace.task_external_id == (
+                adoption_module._superseded_adoption_external_id(
+                    external_id="CLOUD-TASK-42",
+                    workspace_id=first.workspace_id,
+                )
+            )
+            assert old_task.external_id == old_workspace.task_external_id
+            second_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            assert second_workspace is not None
+            second_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            third = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: third")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id="CLOUD-TASK-42",
+                )
+            )
+            await session.commit()
+
+        assert third.attached_existing is False
+        assert third.workspace_id != second.workspace_id
+        async with factory() as session:
+            fresh_workspace = await WorkspaceRepository(session).get(third.workspace_id)
+            fresh_task = await session.get(Task, third.task_id)
+            assert fresh_workspace is not None
+            assert fresh_task is not None
+            assert fresh_workspace.task_external_id == "CLOUD-TASK-42"
+            assert fresh_task.external_id == "CLOUD-TASK-42"
+
+    @pytest.mark.unit
     async def test_explicit_id_collision_with_unrelated_task_does_not_corrupt(
         self,
         factory: async_sessionmaker[AsyncSession],

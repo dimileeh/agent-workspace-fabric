@@ -207,7 +207,6 @@ class PullRequestMonitorAdoptionService:
                 idempotency_key=idempotency_key,
                 repo=repo,
                 pr_number=pr_number,
-                effective_external_id=effective_external_id,
             )
             superseded_workspace = existing
         try:
@@ -233,7 +232,6 @@ class PullRequestMonitorAdoptionService:
         idempotency_key: str,
         repo: RepoRef,
         pr_number: int,
-        effective_external_id: str,
     ) -> dict[str, Any]:
         previous_idempotency_key = workspace.idempotency_key
         superseded_idempotency_key = _superseded_adoption_idempotency_key(
@@ -241,12 +239,13 @@ class PullRequestMonitorAdoptionService:
             workspace_id=workspace.id,
         )
         workspace.idempotency_key = superseded_idempotency_key
-        superseded_external_id = _superseded_adoption_external_id(
-            external_id=effective_external_id,
+        # Release whatever active identity the terminal generation still holds.
+        # Matching only the *new* effective ID strands a prior explicit ID when
+        # re-adoption omits or changes identity, blocking later re-use of that ID.
+        workspace.task_external_id = _release_superseded_adoption_external_id(
+            workspace.task_external_id,
             workspace_id=workspace.id,
         )
-        if workspace.task_external_id == effective_external_id:
-            workspace.task_external_id = superseded_external_id
 
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
         if attempt is not None:
@@ -254,8 +253,10 @@ class PullRequestMonitorAdoptionService:
             if task is not None:
                 if task.idempotency_key == idempotency_key:
                     task.idempotency_key = superseded_idempotency_key
-                if task.external_id == effective_external_id:
-                    task.external_id = superseded_external_id
+                task.external_id = _release_superseded_adoption_external_id(
+                    task.external_id,
+                    workspace_id=workspace.id,
+                )
 
         await WorkspaceRepository(self._session).advance_workspace_version(workspace)
         await self._session.flush()
@@ -1123,6 +1124,28 @@ def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: 
 
 def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> str:
     return f"{external_id}:superseded:{workspace_id}"
+
+
+def _is_superseded_adoption_external_id(external_id: str) -> bool:
+    return ":superseded:" in external_id
+
+
+def _release_superseded_adoption_external_id(
+    external_id: str | None,
+    *,
+    workspace_id: str,
+) -> str | None:
+    """Rewrite an active adoption external ID into a superseded slot.
+
+    Already-superseded values (and ``None``) are left unchanged so a second
+    supersession pass does not nest ``:superseded:`` markers.
+    """
+    if external_id is None or _is_superseded_adoption_external_id(external_id):
+        return external_id
+    return _superseded_adoption_external_id(
+        external_id=external_id,
+        workspace_id=workspace_id,
+    )
 
 
 def _adoption_generation_external_id(
