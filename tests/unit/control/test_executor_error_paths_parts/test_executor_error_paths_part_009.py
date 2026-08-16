@@ -580,7 +580,7 @@ class TestTaskKindFailFast:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
-    async def test_execute_routes_unsupported_agent_runtime_to_agent_failure(
+    async def test_execute_routes_unsupported_agent_runtime_without_fallback_to_policy_failure(
         self,
         agent: str,
         fake: FakeCommandRunner,
@@ -588,8 +588,8 @@ class TestTaskKindFailFast:
         tmp_path: Path,
     ) -> None:
         """A queued workspace with an unsupported/historical agent runtime (like gemini)
-        must route through RetiredAgentAdapter and fail with agent_failure so provider recovery
-        can dispatch an approved fallback.
+        without an approved launchable fallback must fail fast with policy_failure and
+        UNSUPPORTED_AGENT_RUNTIME.
         """
         ws_id = await _seed_ready(factory, agent=agent)
 
@@ -601,8 +601,8 @@ class TestTaskKindFailFast:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "agent_failure"
-            assert "UNSUPPORTED_AGENT_RUNTIME" in (ws.failure_message or "")
+            assert ws.failure_reason == "policy_failure"
+            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
