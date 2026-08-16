@@ -30,7 +30,7 @@ class AgentRunError(Exception):
     def __init__(
         self,
         *,
-        agent: AgentRuntime,
+        agent: AgentRuntime | str,
         result: CommandResult,
         reason_code: str = "AGENT_CLI_FAILED",
         details: dict[str, Any] | None = None,
@@ -40,7 +40,8 @@ class AgentRunError(Exception):
         self.result = result
         self.reason_code = reason_code
         self.details = details or {}
+        agent_str = agent.value if isinstance(agent, AgentRuntime) else str(agent)
         super().__init__(
-            f"{agent.value} exited {result.returncode} ({reason_code}): "
+            f"{agent_str} exited {result.returncode} ({reason_code}): "
             f"{result.stderr.strip() or result.stdout.strip() or '<no output>'}"
         )

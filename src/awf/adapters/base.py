@@ -223,9 +223,15 @@ class AgentAdapter(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> AgentRuntime:
+    def name(self) -> AgentRuntime | str:
         """Identity of the underlying agent runtime."""
         ...  # pragma: no cover
+
+    @property
+    def name_str(self) -> str:
+        """Return string representation of adapter's runtime name."""
+        name = self.name
+        return name.value if isinstance(name, AgentRuntime) else str(name)
 
     @property
     def default_model(self) -> str | None:
@@ -608,7 +614,7 @@ class AgentAdapter(ABC):
                     compose_file=compose_file,
                     cli_args=cli_args,
                     source=log_source,
-                    label=self.name.value,
+                    label=self.name_str,
                     workdir=workdir,
                     preserve_stdin=True,
                     env_passthrough=env_passthrough,
@@ -656,7 +662,7 @@ class AgentAdapter(ABC):
                             compose_file=compose_file,
                             cli_args=baseline_cli_args,
                             source=log_source,
-                            label=self.name.value,
+                            label=self.name_str,
                             worktree_host_path=isolated_worktree_host_path,
                             preserve_stdin=True,
                             read_only_volume_binds=read_only_volume_binds,
@@ -672,7 +678,7 @@ class AgentAdapter(ABC):
                     compose_file=compose_file,
                     cli_args=cli_args,
                     source=log_source,
-                    label=self.name.value,
+                    label=self.name_str,
                     worktree_host_path=isolated_worktree_host_path,
                     preserve_stdin=True,
                     read_only_volume_binds=read_only_volume_binds,
@@ -687,7 +693,7 @@ class AgentAdapter(ABC):
             args = invocation.args
             _log.info(
                 "agent.run.start",
-                agent=self.name.value,
+                agent=self.name_str,
                 compose_project=compose_project,
                 workspace_id=workspace_id,
                 model=selected_model,
@@ -748,7 +754,7 @@ class AgentAdapter(ABC):
         except Exception:
             _log.warning(
                 "usage.collect.error",
-                agent=self.name.value,
+                agent=self.name_str,
                 workspace_id=workspace_id,
                 phase="start",
                 exc_info=True,
@@ -787,7 +793,7 @@ class AgentAdapter(ABC):
         except Exception:
             _log.warning(
                 "usage.collect.error",
-                agent=self.name.value,
+                agent=self.name_str,
                 workspace_id=workspace_id,
                 phase="capture_isolated_baseline",
                 exc_info=True,
@@ -807,7 +813,7 @@ class AgentAdapter(ABC):
         except Exception:
             _log.warning(
                 "usage.collect.error",
-                agent=self.name.value,
+                agent=self.name_str,
                 workspace_id=workspace_id,
                 phase="finalize",
                 exc_info=True,
@@ -1009,7 +1015,7 @@ class AgentAdapter(ABC):
         )
         _log.info(
             "agent.run.hosted.start",
-            agent=self.name.value,
+            agent=self.name_str,
             workspace_id=workspace_id,
             model=selected_model,
             effort=self._default_effort,
@@ -1031,7 +1037,7 @@ class AgentAdapter(ABC):
             if self._usage_sampler is not None:
                 _log.info(
                     "agent.run.hosted.usage_sampling_skipped",
-                    agent=self.name.value,
+                    agent=self.name_str,
                     workspace_id=workspace_id,
                 )
             try:
@@ -1162,9 +1168,9 @@ class AgentAdapter(ABC):
             workspace_id=workspace_id,
             base_stream_id=log_source,
             source=log_source,
-            name=f"{log_source.capitalize()} ({self.name.value})"
+            name=f"{log_source.capitalize()} ({self.name_str})"
             if log_source != "agent"
-            else self.name.value,
+            else self.name_str,
         )
 
     def _final_status_for_exception(self, exc: AgentRunError) -> str:
@@ -1218,7 +1224,7 @@ class AgentAdapter(ABC):
         if command_result.ok:
             _log.info(
                 "agent.run.hosted.ok",
-                agent=self.name.value,
+                agent=self.name_str,
                 workspace_id=workspace_id,
                 stdout_bytes=len(command_result.stdout),
                 stderr_bytes=len(command_result.stderr),
@@ -1248,7 +1254,7 @@ class AgentAdapter(ABC):
         )
         _log.warning(
             log_event,
-            agent=self.name.value,
+            agent=self.name_str,
             workspace_id=workspace_id,
             returncode=command_result.returncode,
             reason_code=reason_code,
@@ -1325,7 +1331,7 @@ class AgentAdapter(ABC):
                     else:
                         _log.warning(
                             "agent.run.watchdog_unavailable",
-                            agent=self.name.value,
+                            agent=self.name_str,
                             compose_project=compose_project,
                             workspace_id=workspace_id,
                             reason="runner does not support run_streaming",
@@ -1346,7 +1352,7 @@ class AgentAdapter(ABC):
                 else:
                     _log.warning(
                         "agent.run.watchdog_unavailable",
-                        agent=self.name.value,
+                        agent=self.name_str,
                         compose_project=compose_project,
                         workspace_id=workspace_id,
                         reason="runner does not support run_streaming",
@@ -1452,7 +1458,7 @@ class AgentAdapter(ABC):
             )
             _log.warning(
                 log_event,
-                agent=self.name.value,
+                agent=self.name_str,
                 compose_project=compose_project,
                 workspace_id=workspace_id,
                 returncode=result.returncode,
@@ -1479,7 +1485,7 @@ class AgentAdapter(ABC):
 
         _log.info(
             "agent.run.ok",
-            agent=self.name.value,
+            agent=self.name_str,
             compose_project=compose_project,
             workspace_id=workspace_id,
             stdout_bytes=len(result.stdout),
@@ -1502,7 +1508,7 @@ class AgentAdapter(ABC):
         await capture_isolated_usage_before_cleanup(
             sampler_ctx,
             invocation,
-            agent=self.name.value,
+            agent=self.name_str,
             workspace_id=workspace_id,
         )
 
@@ -1538,6 +1544,7 @@ class RetiredAgentAdapter(AgentAdapter):
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
         )
+        self._runtime: AgentRuntime | str
         if isinstance(runtime, AgentRuntime):
             self._runtime = runtime
             self._runtime_str = runtime.value
@@ -1546,11 +1553,11 @@ class RetiredAgentAdapter(AgentAdapter):
             try:
                 self._runtime = AgentRuntime(runtime)
             except ValueError:
-                self._runtime = runtime  # type: ignore[assignment]
+                self._runtime = str(runtime)
 
     @property
-    def name(self) -> AgentRuntime:
-        return self._runtime if isinstance(self._runtime, AgentRuntime) else AgentRuntime.gemini
+    def name(self) -> AgentRuntime | str:
+        return self._runtime
 
     def get_provider(self, model: str | None) -> str:
         del model
@@ -1578,7 +1585,7 @@ class RetiredAgentAdapter(AgentAdapter):
         supported = ", ".join(sorted(supported_launchable_agents()))
         message = f"agent runtime {self._runtime_str!r} is not supported; supported runtimes: {supported}."
         raise AgentRunError(
-            agent=self._runtime if isinstance(self._runtime, AgentRuntime) else AgentRuntime.gemini,
+            agent=self._runtime,
             result=CommandResult(returncode=1, stdout="", stderr=message),
             reason_code="UNSUPPORTED_AGENT_RUNTIME",
             details={"agent": self._runtime_str},

@@ -39,7 +39,7 @@ class UsageSampler(Protocol):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
     ) -> UsageSampleContext: ...
 
 
@@ -75,7 +75,7 @@ class IsolatedUsageSampler(Protocol):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext:
         """Start usage collection for a disposable agent invocation."""

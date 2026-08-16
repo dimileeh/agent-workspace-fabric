@@ -1017,3 +1017,32 @@ class TestRegistry:
         gemini = get_adapter(AgentRuntime.gemini, runner=runner)
         assert isinstance(gemini, RetiredAgentAdapter)
         assert gemini.name == AgentRuntime.gemini
+        assert gemini.name_str == "gemini"
+
+        unknown = get_adapter("unknown_custom_runtime", runner=runner)
+        assert isinstance(unknown, RetiredAgentAdapter)
+        assert unknown.name == "unknown_custom_runtime"
+        assert unknown.name_str == "unknown_custom_runtime"
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_retired_agent_adapter_run_preserves_unrecognized_runtime(self) -> None:
+        """RetiredAgentAdapter.run reports the true unrecognized runtime string in AgentRunError."""
+        from pathlib import Path
+
+        from awf.adapters.base import AgentRunError, RetiredAgentAdapter
+
+        runner = FakeCommandRunner()
+        adapter = get_adapter("unknown_custom_runtime", runner=runner)
+        assert isinstance(adapter, RetiredAgentAdapter)
+
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project="test",
+                compose_file=Path("/tmp/compose.yml"),
+                prompt="hello",
+            )
+
+        assert exc_info.value.agent == "unknown_custom_runtime"
+        assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+        assert exc_info.value.details == {"agent": "unknown_custom_runtime"}

@@ -159,7 +159,7 @@ class CcusageCollector(UsageSampler):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
     ) -> _CcusageSampleContext:
         source = provider_ccusage_source(provider)
         prior_snapshot = await asyncio.to_thread(
@@ -191,7 +191,7 @@ class CcusageCollector(UsageSampler):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
         cli_args: list[str],
     ) -> IsolatedUsageSampleContext:
         """Capture a one-off clarification container's usage before it is removed."""
@@ -235,7 +235,7 @@ class _CcusageSampleContext(UsageSampleContext):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
         source: str | None,
         accumulated_usage_at_run_start: NormalizedUsage | None,
         prior_ccusage_source: str | None,
@@ -541,7 +541,9 @@ class _CcusageSampleContext(UsageSampleContext):
     ) -> None:
         snapshot = UsageSnapshot(
             workspace_id=self._workspace_id,
-            provider=self._provider.value,
+            provider=self._provider.value
+            if isinstance(self._provider, AgentRuntime)
+            else str(self._provider),
             ccusage_source=self._source,
             status=status_label,
             run_status=run_status,
@@ -655,7 +657,7 @@ class _IsolatedCcusageSampleContext(_CcusageSampleContext):
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
-        provider: AgentRuntime,
+        provider: AgentRuntime | str,
         source: str | None,
         accumulated_usage_at_run_start: NormalizedUsage | None,
         prior_ccusage_source: str | None,

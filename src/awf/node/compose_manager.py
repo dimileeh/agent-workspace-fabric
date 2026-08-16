@@ -104,7 +104,7 @@ def upgrade_persisted_clarification_service(
     *,
     compose_file: Path,
     workspace_id: str,
-    agent_runtime: AgentRuntime,
+    agent_runtime: AgentRuntime | str,
     agent_model: str | None = None,
 ) -> tuple[str, ...] | None:
     """Add clarification safely to a legacy persisted stack, if needed.
@@ -184,18 +184,26 @@ def upgrade_persisted_clarification_service(
     # Never hand the primary worktree to a reason-only invocation, even if a
     # malformed legacy environment happens to name it as a provider setting.
     provider_auth_mounts = [mount for mount in auth_mounts if mount.target != "/workspace"]
+    runtime_enum: AgentRuntime
+    if isinstance(agent_runtime, AgentRuntime):
+        runtime_enum = agent_runtime
+    else:
+        try:
+            runtime_enum = AgentRuntime(agent_runtime)
+        except ValueError:
+            runtime_enum = AgentRuntime.gemini
     selected_mounts = _clarification_auth_mounts(
         provider_auth_mounts,
         agent_environment=agent_environment_items,
         mirror_target=mirror_target,
-        agent_runtime=agent_runtime,
+        agent_runtime=runtime_enum,
         agent_model=agent_model,
     )
     provider_environment = _clarification_agent_environment(
         agent_environment_items,
         auth_mounts=provider_auth_mounts,
         mirror_target=mirror_target,
-        agent_runtime=agent_runtime,
+        agent_runtime=runtime_enum,
         agent_model=agent_model,
         prefer_file_auth=False,
     )
@@ -203,14 +211,14 @@ def upgrade_persisted_clarification_service(
         provider_auth_mounts,
         agent_environment=agent_environment_items,
         mirror_target=mirror_target,
-        agent_runtime=agent_runtime,
+        agent_runtime=runtime_enum,
         agent_model=agent_model,
     )
     aws_profile_rewrites = _aws_profile_path_rewrites(
         provider_auth_mounts,
         agent_environment=agent_environment_items,
         mirror_target=mirror_target,
-        agent_runtime=agent_runtime,
+        agent_runtime=runtime_enum,
         agent_model=agent_model,
     )
     clarification_environment = dict(provider_environment)
