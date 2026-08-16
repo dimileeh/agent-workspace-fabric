@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     Verdict,
     VerdictResult,
+    _is_synthetic_needs_human_reason,
     _owned_paths_for_prompt,
     _owned_paths_for_prompt_or_empty,
 )
@@ -1292,9 +1293,14 @@ async def _enforce_needs_human_reason(
             ) from exc
     else:
         sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
-        reask_needs_human_reason = (
-            sanitized_reask_reason if reask_result.verdict == "needs_human" else None
+        # Fail-closed / FIXED-without-evidence synthetic reasons are not a
+        # human decision; do not treat them as a successful clarification.
+        usable_clarification = (
+            reask_result.verdict == "needs_human"
+            and sanitized_reask_reason is not None
+            and not _is_synthetic_needs_human_reason(sanitized_reask_reason)
         )
+        reask_needs_human_reason = sanitized_reask_reason if usable_clarification else None
         cleanup_error, _isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success",
             needs_human_reason=reask_needs_human_reason,
@@ -1313,9 +1319,7 @@ async def _enforce_needs_human_reason(
                 # Hosted clarification has no local isolation fallback. Its
                 # executor failed before a reason could be collected.
                 needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
-            if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(
-                reask_result
-            ):
+            if usable_clarification:
                 return reask_result
     await _record_needs_human_reason_missing(
         runner,

@@ -59,6 +59,18 @@ _FAIL_CLOSED_VERDICT_REASONS = frozenset(
     }
 )
 
+# Synthetic needs_human reasons from fail-closed parse or FIXED evidence gating.
+# A NEEDS_HUMAN clarification re-ask must not treat these as a successful
+# human-decision reason that overwrites a reasonless blocker.
+_SYNTHETIC_NEEDS_HUMAN_REASONS = _FAIL_CLOSED_VERDICT_REASONS | frozenset(
+    {"fixed_without_head_advance"}
+)
+
+
+def _is_synthetic_needs_human_reason(reason: str | None) -> bool:
+    """Return whether ``reason`` is a parser/gate artifact, not a human decision."""
+    return reason is not None and reason in _SYNTHETIC_NEEDS_HUMAN_REASONS
+
 
 @dataclass(frozen=True)
 class VerdictResult:
