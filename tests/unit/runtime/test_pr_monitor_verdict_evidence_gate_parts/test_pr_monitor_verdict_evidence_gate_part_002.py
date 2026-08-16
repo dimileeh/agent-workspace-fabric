@@ -278,6 +278,153 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
 
 
 @pytest.mark.unit
+async def test_salvage_retained_when_cancelled_during_post_commit_head_evaluate(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid post-commit HEAD evaluate must still retain durable salvage.
+
+    After ``_commit_dirty_worktree`` returns with HEAD already advanced, the
+    success path awaits ``_evaluate_local_head_advance`` (rev-parse / ancestry /
+    tree probes) before retain+persist. An unshielded cancel there escapes with
+    no item-bound evidence, so a restart's no-change FIXED becomes
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zoxg2). Capture and selective
+    persist must use the same cancellation-safe pattern as sink/agent cancel.
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6Zoxg2"
+    body_hash = "feedback_body_hash_post_commit_evaluate_cancel"
+    workspace_id = "ws_post_commit_evaluate_cancel"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_post_commit_evaluate_cancel"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    entered_evaluate = asyncio.Event()
+
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed before post-commit evaluate cancel",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _commit_dirty_worktree_returns(**_kwargs: object) -> bool:
+        return True
+
+    rev_parse_calls = 0
+
+    async def _rev_parse_head_hangs_once(_worktree_path: Path) -> str | None:
+        # Hang only the unshielded success-path probe; shielded salvage retain
+        # must re-evaluate and observe the advanced HEAD.
+        nonlocal rev_parse_calls
+        rev_parse_calls += 1
+        if rev_parse_calls == 1:
+            entered_evaluate.set()
+            await asyncio.Event().wait()
+        return salvaged
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    runner._commit_dirty_worktree = _commit_dirty_worktree_returns
+    runner._rev_parse_head = _rev_parse_head_hangs_once
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_evaluate.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert rev_parse_calls >= 2, "shielded retain must re-probe HEAD after cancel"
+    assert persisted_snapshots, "post-commit evaluate cancel must durable-write salvage"
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after post-commit evaluate cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after post-commit evaluate cancel"
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
 async def test_salvage_retained_when_agent_cancelled_after_self_commit(
     tmp_path: Path,
 ) -> None:

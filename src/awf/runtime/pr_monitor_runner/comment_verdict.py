@@ -687,65 +687,12 @@ async def _invoke_cli_for_verdict_result(
             )
             raise
 
-    item_end_head, local_head_advanced, descends, trees_differ = await _evaluate_local_head_advance(
-        runner,
-        worktree_path=worktree_path,
-        item_start_head=item_start_head,
-    )
-    local_ancestry_evaluable = (
-        item_start_head is not None
-        and item_end_head is not None
-        and callable(descends)
-        and worktree_path.exists()
-    )
-    # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
-    # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
-    # FIXED via the flag after local ancestry correctly rejected the same move.
-    # Empty hosted tips need the same tree-diff gate as local advances.
-    hosted_head_advanced = False
-    if state is not None and state.hosted_terminal_head_advanced:
-        synced_head = (state.last_push_sha or "").strip() or None
-        if (
-            item_start_head is not None
-            and synced_head is not None
-            and synced_head.lower() != item_start_head.lower()
-            and callable(descends)
-            and worktree_path.exists()
-            and await descends(
-                worktree_path=worktree_path,
-                ancestor=item_start_head,
-                descendant=synced_head,
-            )
-        ):
-            hosted_head_advanced = bool(
-                callable(trees_differ)
-                and await trees_differ(
-                    worktree_path=worktree_path,
-                    left=item_start_head,
-                    right=synced_head,
-                )
-            )
-    # Dirty commit is item-scoped evidence only when local HEAD/ancestry cannot
-    # be evaluated (stub runners / missing worktree / missing heads). When both
-    # heads are known, ancestry (or equal SHAs) is authoritative — never accept
-    # FIXED via dirty after a known non-descendant move.
-    dirty_fix_evidence = bool(committed_dirty_changes) and not local_ancestry_evaluable
-    item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
-
-    # Failed runs may still leave a contentful salvage commit. Retain that SHA
-    # for this item so a later successful FIXED can confirm it when HEAD is
-    # still at the salvage tip (and this retry started there) or descends from
-    # both the salvage tip and the retry start with salvaged path changes still
-    # present — without resolving from the failed invocation. Ancestry alone
-    # would accept a descendant that reverts the salvage. Equality alone is too
-    # strict in multi-item bursts: a later thread can advance HEAD past the
-    # salvage while leaving it in history; equality without a matching start
-    # would also accept a backward reset that discards that later tip. Bind the
-    # feedback body hash so an edited thread cannot reuse salvage created for
-    # prior feedback while agent_failed skips stale cleanup. Bind the invocation
-    # start SHA so descendant reuse verifies the full start..salvage delta when
-    # the failed run created multiple commits (PRRT_kwDOSJAM6s6ZmG-B).
-    # A sink raise after HEAD advance is also a failed run for salvage purposes.
+    # Post-commit evidence capture (evaluate → retain → selective persist on sink
+    # failure) must survive worker cancel the same way as sink/agent cancel paths.
+    # An unshielded ``_evaluate_local_head_advance`` await after the sink returns
+    # lets CancelledError escape before salvage keys are retained/persisted while
+    # HEAD already carries the fix — a restart's no-change FIXED becomes
+    # fixed_without_head_advance (PRRT_kwDOSJAM6s6Zoxg2).
     def _clear_retained_salvage() -> None:
         if state is not None and salvage_item_id is not None:
             state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
@@ -783,35 +730,113 @@ async def _invoke_cli_for_verdict_result(
                 if cancellation is not None:
                     raise cancellation
 
-    retain_for_failed_run = cli_failed or commit_sink_error is not None
-    _retain_or_clear_failed_run_salvage(
-        state=state,
-        salvage_item_id=salvage_item_id,
-        salvage_body_hash=salvage_body_hash,
-        local_head_advanced=local_head_advanced,
-        item_end_head=item_end_head,
-        item_start_head=item_start_head,
-        isolated_worktree_host_path=isolated_worktree_host_path,
-        result_stdout=result_stdout,
-        retain_for_failed_run=retain_for_failed_run,
-    )
+    try:
+        (
+            item_end_head,
+            local_head_advanced,
+            descends,
+            trees_differ,
+        ) = await _evaluate_local_head_advance(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+        )
+        local_ancestry_evaluable = (
+            item_start_head is not None
+            and item_end_head is not None
+            and callable(descends)
+            and worktree_path.exists()
+        )
+        # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
+        # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
+        # FIXED via the flag after local ancestry correctly rejected the same move.
+        # Empty hosted tips need the same tree-diff gate as local advances.
+        hosted_head_advanced = False
+        if state is not None and state.hosted_terminal_head_advanced:
+            synced_head = (state.last_push_sha or "").strip() or None
+            if (
+                item_start_head is not None
+                and synced_head is not None
+                and synced_head.lower() != item_start_head.lower()
+                and callable(descends)
+                and worktree_path.exists()
+                and await descends(
+                    worktree_path=worktree_path,
+                    ancestor=item_start_head,
+                    descendant=synced_head,
+                )
+            ):
+                hosted_head_advanced = bool(
+                    callable(trees_differ)
+                    and await trees_differ(
+                        worktree_path=worktree_path,
+                        left=item_start_head,
+                        right=synced_head,
+                    )
+                )
+        # Dirty commit is item-scoped evidence only when local HEAD/ancestry cannot
+        # be evaluated (stub runners / missing worktree / missing heads). When both
+        # heads are known, ancestry (or equal SHAs) is authoritative — never accept
+        # FIXED via dirty after a known non-descendant move.
+        dirty_fix_evidence = bool(committed_dirty_changes) and not local_ancestry_evaluable
+        item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
 
-    if commit_sink_error is not None:
-        # In-memory salvage alone is lost when the outer runner catches
-        # ``_MonitorAgentServiceRecoveryFailedError`` /
-        # ``_MonitorAgentServiceRecoverySupersededError`` and returns without
-        # ``_persist_state`` (runner.py). Persist only ``__salvaged_fix_*``
-        # keys before re-raising — same selective merge as CancelledError /
-        # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt). Shield the write so
-        # cancel mid-await cannot drop salvage evidence (PRRT_kwDOSJAM6s6ZovMQ).
-        if state is not None and salvage_item_id is not None:
-            await _await_failed_run_salvage_persist_shielded(
-                runner,
-                workspace_id,
-                state,
-                salvage_item_id=salvage_item_id,
-            )
-        raise commit_sink_error from None
+        # Failed runs may still leave a contentful salvage commit. Retain that SHA
+        # for this item so a later successful FIXED can confirm it when HEAD is
+        # still at the salvage tip (and this retry started there) or descends from
+        # both the salvage tip and the retry start with salvaged path changes still
+        # present — without resolving from the failed invocation. Ancestry alone
+        # would accept a descendant that reverts the salvage. Equality alone is too
+        # strict in multi-item bursts: a later thread can advance HEAD past the
+        # salvage while leaving it in history; equality without a matching start
+        # would also accept a backward reset that discards that later tip. Bind the
+        # feedback body hash so an edited thread cannot reuse salvage created for
+        # prior feedback while agent_failed skips stale cleanup. Bind the invocation
+        # start SHA so descendant reuse verifies the full start..salvage delta when
+        # the failed run created multiple commits (PRRT_kwDOSJAM6s6ZmG-B).
+        # A sink raise after HEAD advance is also a failed run for salvage purposes.
+        retain_for_failed_run = cli_failed or commit_sink_error is not None
+        _retain_or_clear_failed_run_salvage(
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            local_head_advanced=local_head_advanced,
+            item_end_head=item_end_head,
+            item_start_head=item_start_head,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+            retain_for_failed_run=retain_for_failed_run,
+        )
+
+        if commit_sink_error is not None:
+            # In-memory salvage alone is lost when the outer runner catches
+            # ``_MonitorAgentServiceRecoveryFailedError`` /
+            # ``_MonitorAgentServiceRecoverySupersededError`` and returns without
+            # ``_persist_state`` (runner.py). Persist only ``__salvaged_fix_*``
+            # keys before re-raising — same selective merge as CancelledError /
+            # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt). Shield the write so
+            # cancel mid-await cannot drop salvage evidence (PRRT_kwDOSJAM6s6ZovMQ).
+            if state is not None and salvage_item_id is not None:
+                await _await_failed_run_salvage_persist_shielded(
+                    runner,
+                    workspace_id,
+                    state,
+                    salvage_item_id=salvage_item_id,
+                )
+            raise commit_sink_error from None
+    except asyncio.CancelledError:
+        await _retain_failed_run_salvage_despite_cancellation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+        )
+        raise
 
     if agent_run_err is not None:
         # Persist (including salvage keys above) then maybe raise retry/fallback.
