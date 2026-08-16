@@ -206,7 +206,7 @@ Responsibilities:
   - `gh pr view <n> --json ...` for the structured bits.
   - A GraphQL query for review threads (inline + outside-diff) and their `isResolved` + `id` fields — `gh` CLI alone doesn't surface these; GraphQL mutation `resolveReviewThread` needs the thread ID anyway.
 - **`invoke_cli_to_address_thread(thread) -> verdict`**
-  - `docker compose exec agent <cli>` with a prompt that includes: PR number, thread body, file + line anchor (if inline), existing replies. The CLI must print an `AWF-VERDICT:` marker. `FIXED` is accepted only when that item shows a verified HEAD/commit advance; markerless/empty/garbled/placeholder output fails closed to `needs_human` (or `agent_failed` on CLI crash) — never guessed as a fix. Explicit `FALSE POSITIVE` / `DEFER` resolve without a commit; `NEEDS_HUMAN` blocks.
+  - `docker compose exec agent <cli>` with a prompt that includes: PR number, thread body, file + line anchor (if inline), existing replies. The CLI is told: if fix is needed, edit + `git commit`; else, write a one-line false-positive reply.
 - **`resolve_threads(ids)`**
   - GraphQL mutation `resolveReviewThread(threadId: $id)` per thread. Batch, with exponential backoff on 5xx.
 - **`sync_base_into_head()`**
