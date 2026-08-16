@@ -140,7 +140,11 @@ async def run_validation_and_fix_cycle(
     successful_validation_workspace_head_sha: str | None = None
 
     # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
-    max_fix_passes = 0 if resume_disable_fix_passes else self._config.max_validation_fix_passes
+    max_fix_passes = (
+        0
+        if (resume_disable_fix_passes or adapter is None)
+        else self._config.max_validation_fix_passes
+    )
     profile = _profile_for_workspace(
         ws,
         worktree_path=worktree_path,
@@ -567,7 +571,7 @@ async def run_validation_and_fix_cycle(
         )
         if val_result.all_passed:
             conformance_failure: _PlanningRunFailure | None = None
-            if planning_validation_handoff is not None:
+            if planning_validation_handoff is not None and adapter is not None:
                 conformance_handoff = planning_validation_handoff
                 try:
                     if post_validation_conformance_fix_attempts:
@@ -916,9 +920,13 @@ async def run_validation_and_fix_cycle(
             baseline_coverage=baseline_coverage,
         )
 
-        if first_fail is None or (
-            not is_post_validation_conformance_fix_pass
-            and validation_fix_passes_used >= max_fix_passes
+        if (
+            first_fail is None
+            or adapter is None
+            or (
+                not is_post_validation_conformance_fix_pass
+                and validation_fix_passes_used >= max_fix_passes
+            )
         ):
             # Exhausted our budget (or no failure details to anchor a
             # fix prompt on) — mark failed and let the operator triage.
