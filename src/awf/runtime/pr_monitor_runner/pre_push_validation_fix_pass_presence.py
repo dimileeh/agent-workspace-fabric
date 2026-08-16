@@ -22,6 +22,12 @@ _ASSIGN_BINDING_RE = re.compile(
     r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
     r"|"
     r"[ \t]*:="  # `name :=`
+    r"|"
+    # YAML / mapping ``name: value`` (no equals). Must not steal ``name :=``
+    # (handled above) or typed assignments (first alt). Plain ``name:`` with an
+    # empty / scalar value still counts so config overrides fail closed
+    # (PRRT_kwDOSJAM6s6ZqNAk).
+    r"[ \t]*:[ \t]*(?!=)"
     r")"
 )
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -254,8 +260,10 @@ def _binding_names(text: str) -> set[str]:
     """Return names bound by assignments / defs / defines in ``text``.
 
     Used to detect when appended tip content rebinds a name from an added salvage
-    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``), which
-    keeps a line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM).
+    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, or YAML
+    ``feature_enabled: true`` then ``feature_enabled: false``), which keeps a
+    line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
+    PRRT_kwDOSJAM6s6ZqNAk).
     """
     names: set[str] = set()
     for raw_line in text.splitlines():

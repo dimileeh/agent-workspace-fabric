@@ -95,6 +95,26 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="#define FEATURE_ENABLED 1\n",
         head_blob="#define FEATURE_ENABLED 1\n#define FEATURE_ENABLED 0\n",
     )
+    # YAML-style ``key: value`` rebinds must fail closed the same way equals-
+    # style assignments do; the matcher previously only handled ``=`` / ``:=``
+    # and declarations, so an appended override kept a line-aligned prefix and
+    # reused stale FIXED evidence (PRRT_kwDOSJAM6s6ZqNAk).
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature_enabled: true\n",
+        head_blob="feature_enabled: true\nfeature_enabled: false\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature_enabled: true\n",
+        head_blob="feature_enabled: true\nfeature_enabled: false\nother_key: 1\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature_enabled: true\n",
+        head_blob="feature_enabled: true\n# feature_enabled: false\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature_enabled: true\n",
+        head_blob="feature_enabled: true\nother_key: 1\n",
+    )
     # Spaced ``# define`` is a real preprocessor binding (whitespace between ``#``
     # and the keyword is allowed, same as open-``#if`` scanning). Skipping it as
     # a comment would keep a line-aligned prefix and reuse stale salvage evidence
@@ -291,6 +311,28 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent,
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 3\nFEATURE_ENABLED = False\n"),
+    )
+    # YAML-style key rebinds must supersede like equals-style assignments
+    # (PRRT_kwDOSJAM6s6ZqNAk).
+    parent_yaml = "x: 1\nfeature_enabled: false\ny: 2\n"
+    commit_yaml = "x: 1\nfeature_enabled: true\ny: 2\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_yaml, commit_blob=commit_yaml) == {
+        "feature_enabled"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_yaml,
+        commit_blob=commit_yaml,
+        head_blob="x: 1\nfeature_enabled: true\ny: 2\nfeature_enabled: false\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_yaml,
+        commit_blob=commit_yaml,
+        head_blob="x: 1\nfeature_enabled: true\ny: 2\nother_key: 1\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_yaml,
+        commit_blob=commit_yaml,
+        head_blob="x: 1\nfeature_enabled: true\ny: 2\n# feature_enabled: false\n",
     )
     # Unrelated append / later hunk must not look like supersession.
     assert not _tip_extra_can_supersede_modified_salvage(
