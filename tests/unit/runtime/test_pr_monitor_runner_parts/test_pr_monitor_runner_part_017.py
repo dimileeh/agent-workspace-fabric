@@ -1524,14 +1524,20 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: **<one-sentence justification>**",
             "AWF-VERDICT: FALSE POSITIVE: __<one-sentence justification>__",
             "AWF-VERDICT: FALSE POSITIVE: **`<one-sentence justification>`**",
+            "AWF-VERDICT: FALSE POSITIVE: *<one-sentence justification>*",
+            "AWF-VERDICT: FALSE POSITIVE: _<one-sentence justification>_",
+            "AWF-VERDICT: FALSE POSITIVE: *`<one-sentence justification>`*",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
             "AWF-VERDICT: FIXED: **<one-sentence summary>**",
+            "AWF-VERDICT: FIXED: *<one-sentence summary>*",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
         # Balanced quote/backtick/Markdown-strong wrappers around a template
         # placeholder must not leave the echo as a usable reason
-        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9).
+        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9). Single emphasis is
+        # peeled only when the enclosed value is placeholder-shaped
+        # (PRRT_kwDOSJAM6s6ZoDQU).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -1560,6 +1566,36 @@ class TestParseVerdict:
 
         assert result.verdict == "false_positive"
         assert result.reason == "stale review boilerplate"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            # Single emphasis around real prose is not peeled (only placeholder-
+            # shaped inners are); the wrapped text remains a usable reason.
+            (
+                "AWF-VERDICT: FALSE POSITIVE: *stale review boilerplate*",
+                "*stale review boilerplate*",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: _stale review boilerplate_",
+                "_stale review boilerplate_",
+            ),
+            # Underscored identifiers must not be mistaken for emphasis wrappers
+            # around a template placeholder (PRRT_kwDOSJAM6s6ZoDQU).
+            ("AWF-VERDICT: FALSE POSITIVE: _already_fixed_", "_already_fixed_"),
+            ("AWF-VERDICT: FALSE POSITIVE: _snake_case_reason_", "_snake_case_reason_"),
+        ],
+    )
+    def test_private_awf_single_emphasis_non_placeholder_reason_still_usable(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "false_positive"
+        assert result.reason == expected_reason
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

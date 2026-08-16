@@ -234,14 +234,21 @@ _VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
     r'^(?:"\s*(?P<dq>.*?)\s*"|\'\s*(?P<sq>.*?)\s*\'|'
     r"“\s*(?P<cdq>.*?)\s*”|‘\s*(?P<csq>.*?)\s*’)$"
 )
-# Balanced Markdown strong wrappers around a reason (``**<…>**``, ``__<…>__``).
-# Same peel loop as ticks/quotes so template-placeholder echoes still fail
-# closed (PRRT_kwDOSJAM6s6ZoAz9). Single ``*`` / ``_`` emphasis is intentionally
-# not peeled — it collides with snake_case / underscored identifiers. Whole-reason
-# Python dunders (``__init__``, ``__name__``) also match ``__…__``; those are
-# skipped in the peel loop (PRRT_kwDOSJAM6s6ZoC7B).
+# Balanced Markdown strong/emphasis wrappers around a reason (``**<…>**``,
+# ``__<…>__``, and single ``*<…>*`` / ``_<…>_``). Same peel loop as ticks/quotes
+# so template-placeholder echoes still fail closed (PRRT_kwDOSJAM6s6ZoAz9).
+# Strong is always peeled; single emphasis is peeled only when the enclosed
+# value is placeholder-shaped so snake_case / ``_name_`` identifiers stay
+# intact (PRRT_kwDOSJAM6s6ZoDQU). Whole-reason Python dunders (``__init__``,
+# ``__name__``) also match ``__…__``; those are skipped in the peel loop
+# (PRRT_kwDOSJAM6s6ZoC7B). Strong alts must precede single-emphasis alts.
 _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
-    r"^(?:\*\*\s*(?P<strong_star>.*?)\s*\*\*|__\s*(?P<strong_under>.*?)\s*__)$"
+    r"^(?:"
+    r"\*\*\s*(?P<strong_star>.*?)\s*\*\*|"
+    r"__\s*(?P<strong_under>.*?)\s*__|"
+    r"\*\s*(?P<em_star>.*?)\s*\*|"
+    r"_\s*(?P<em_under>.*?)\s*_"
+    r")$"
 )
 _VERDICT_REASON_PYTHON_DUNDER = re.compile(r"^__[A-Za-z_][A-Za-z0-9_]*__$")
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
@@ -1036,9 +1043,10 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     """Peel balanced outer quote/backtick/strong wrappers from a verdict reason.
 
     Agents often echo prompt placeholders inside inline code, quotes, or
-    Markdown strong markers (`` `<one-sentence justification>` `` / ``"<…>"`` /
-    ``**<…>**`` / ``__<…>__``). Those wrappers must not defeat whole-reason
-    placeholder detection (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9).
+    Markdown strong/emphasis markers (`` `<one-sentence justification>` `` /
+    ``"<…>"`` / ``**<…>**`` / ``__<…>__`` / ``*<…>*`` / ``_<…>_``). Those
+    wrappers must not defeat whole-reason placeholder detection
+    (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -1058,7 +1066,19 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
                 and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
             ):
                 break
-            cleaned = next(g for g in emphasis_match.groups() if g is not None).strip()
+            inner = next(g for g in emphasis_match.groups() if g is not None).strip()
+            # Single emphasis: peel only when the enclosed value is
+            # placeholder-shaped (after nested tick/quote/strong unwrap).
+            if (
+                emphasis_match.group("em_star") is not None
+                or emphasis_match.group("em_under") is not None
+            ):
+                normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
+                if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(normalized_inner) is None:
+                    break
+                cleaned = normalized_inner
+                continue
+            cleaned = inner
             continue
         break
     return cleaned
