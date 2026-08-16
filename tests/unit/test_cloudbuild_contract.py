@@ -8,11 +8,13 @@ Provenance-carrier schema (config labels on
 - awf.source.repository     — `$REPO_FULL_NAME` (fail-closed if empty)
 - awf.core.digest           — from core Buildx `--metadata-file`
 - awf.agent.runtime.digest  — multi-arch index from runtime `--metadata-file`
+- awf.core.console.digest   — from console Buildx `--metadata-file`
 
 Only the carrier is listed in top-level `images:` so Cloud Build records its
 immutable digest in `results.images` without re-pushing the pre-pushed
-multi-arch runtime manifest list. Core and runtime stay `rc-$COMMIT_SHA`
-outputs published via Buildx `--push` with direct metadata digest capture.
+multi-arch runtime manifest list. Core, runtime, and hosted console stay
+`rc-$COMMIT_SHA` outputs published via Buildx `--push` with direct metadata
+digest capture.
 """
 
 from __future__ import annotations
@@ -34,10 +36,18 @@ _HELPER_IMAGE_DIGEST_REF = re.compile(r".+@sha256:[0-9a-f]{64}$")
 _CARRIER_TAG = "${_ARTIFACT_REPOSITORY}/awf-core-provenance:build-$BUILD_ID"
 _CORE_TAG = "${_ARTIFACT_REPOSITORY}/awf-core:rc-$COMMIT_SHA"
 _RUNTIME_TAG = "${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA"
+_CONSOLE_TAG = "${_ARTIFACT_REPOSITORY}/awf-core-console:rc-$COMMIT_SHA"
+
+_HOSTED_BASE_PATH = "NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH=/workspaces"
+_HOSTED_API_BASE = "NEXT_PUBLIC_AWF_CONSOLE_API_BASE=/workspaces/api/awf"
+_HOSTED_OPERATOR_BASE = "NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE=/workspaces/api/operator"
 
 _FORBIDDEN_AUTH_PRINT = re.compile(
     r"(?i)(echo\s+(\$[A-Z0-9_]*TOKEN|\$[A-Z0-9_]*PASSWORD|\$[A-Z0-9_]*SECRET)|"
     r"printenv\s+[A-Z0-9_]*TOKEN|docker\s+login\s+.*--password[^\-])"
+)
+_FORBIDDEN_SECRET_BUILD_ARG = re.compile(
+    r"(?i)(AWF_API_TOKEN|TOKEN=|PASSWORD=|SECRET=|CREDENTIAL|API_KEY)"
 )
 
 
@@ -68,15 +78,17 @@ def _flatten_args(step: dict[str, Any]) -> str:
     return str(args)
 
 
-def test_cloudbuild_publishes_core_and_runtime_rc_tags() -> None:
+def test_cloudbuild_publishes_core_runtime_and_console_rc_tags() -> None:
     config, text = _load()
 
     assert config["options"]["logging"] == "CLOUD_LOGGING_ONLY"
     assert config["timeout"] == "3600s"
     assert "docker/control-plane.Dockerfile" in text
     assert "docker/agent-runtime.Dockerfile" in text
+    assert "apps/console/Dockerfile" in text
     assert _CORE_TAG in text
     assert _RUNTIME_TAG in text
+    assert _CONSOLE_TAG in text
     assert "kubectl" not in text
     assert "gcloud container" not in text
     assert "aira-agent" not in text
@@ -92,9 +104,10 @@ def test_cloudbuild_images_lists_only_provenance_carrier() -> None:
     # Pre-pushed product tags must not appear in images (manifest-list safety).
     assert _CORE_TAG not in images
     assert _RUNTIME_TAG not in images
+    assert _CONSOLE_TAG not in images
 
 
-def test_cloudbuild_core_and_runtime_push_via_buildx_metadata_file() -> None:
+def test_cloudbuild_core_runtime_and_console_push_via_buildx_metadata_file() -> None:
     config, text = _load()
 
     core = _step_by_id(config, "build-and-push-core")
@@ -112,10 +125,36 @@ def test_cloudbuild_core_and_runtime_push_via_buildx_metadata_file() -> None:
     assert "--metadata-file" in runtime_args
     assert _RUNTIME_TAG in runtime_args
 
+    console = _step_by_id(config, "build-and-push-core-console")
+    console_args = console.get("args", [])
+    assert console_args[0:2] == ["buildx", "build"]
+    assert "--push" in console_args
+    assert "--metadata-file" in console_args
+    assert "/workspace/awf-core-console.metadata.json" in console_args
+    assert _CONSOLE_TAG in console_args
+    assert "apps/console/Dockerfile" in console_args
+    # Single-platform like core — no multi-arch platform flag for console.
+    assert "--platform" not in console_args
+
     # Digests must not be taken from mutable-tag inspect/pull as authority.
     assert "docker inspect" not in text
     assert re.search(r"docker\s+pull\s+.*rc-\$COMMIT_SHA", text) is None
     assert "push-core" not in {step.get("id") for step in _steps(config)}
+
+
+def test_cloudbuild_console_uses_hosted_public_path_build_args() -> None:
+    config, text = _load()
+    console = _step_by_id(config, "build-and-push-core-console")
+    console_args = [str(part) for part in console.get("args", [])]
+
+    assert console_args.count("--build-arg") == 3
+    assert _HOSTED_BASE_PATH in console_args
+    assert _HOSTED_API_BASE in console_args
+    assert _HOSTED_OPERATOR_BASE in console_args
+    # Public path settings only — never tokens/credentials/tenant data.
+    assert _FORBIDDEN_SECRET_BUILD_ARG.search("\n".join(console_args)) is None
+    assert "AWF_API_TOKEN" not in text
+    assert "TOKEN=" not in text
 
 
 def test_cloudbuild_publishes_agent_runtime_multi_arch() -> None:
@@ -160,15 +199,18 @@ def test_cloudbuild_provenance_carrier_validates_then_builds() -> None:
 
     assert "build-and-push-core" in step_ids
     assert "build-and-push-agent-runtime" in step_ids
+    assert "build-and-push-core-console" in step_ids
     assert "prepare-provenance-carrier" in step_ids
     assert "build-provenance-carrier" in step_ids
 
     core_idx = step_ids.index("build-and-push-core")
     runtime_idx = step_ids.index("build-and-push-agent-runtime")
+    console_idx = step_ids.index("build-and-push-core-console")
     prepare_idx = step_ids.index("prepare-provenance-carrier")
     build_idx = step_ids.index("build-provenance-carrier")
     assert prepare_idx > core_idx
     assert prepare_idx > runtime_idx
+    assert prepare_idx > console_idx
     assert build_idx > prepare_idx
 
     prepare = _step_by_id(config, "prepare-provenance-carrier")
@@ -181,6 +223,8 @@ def test_cloudbuild_provenance_carrier_validates_then_builds() -> None:
     assert "--metadata-file" in text  # digests come from metadata files
     assert "awf-core.metadata.json" in text
     assert "awf-agent-runtime.metadata.json" in text
+    assert "awf-core-console.metadata.json" in text
+    assert "--console-metadata" in prepare_blob
     assert "$BUILD_ID" in prepare_blob or "BUILD_ID" in prepare_blob
     assert "$COMMIT_SHA" in prepare_blob or "COMMIT_SHA" in prepare_blob
     assert "REPO_FULL_NAME" in prepare_blob
@@ -207,6 +251,7 @@ def test_cloudbuild_documents_carrier_schema() -> None:
         "awf.source.repository",
         "awf.core.digest",
         "awf.agent.runtime.digest",
+        "awf.core.console.digest",
         "awf-core-provenance",
     ):
         assert key in text
