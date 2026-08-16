@@ -124,8 +124,8 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.144.1" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.206" in dockerfile
+    assert "ARG CODEX_VERSION=0.147.0" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.226" in dockerfile
     assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
@@ -202,7 +202,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     assert "codex --version || true" not in dockerfile
     assert (
         "codex exec --dangerously-bypass-approvals-and-sandbox "
-        "--model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+        "--model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile

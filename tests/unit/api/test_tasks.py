@@ -152,7 +152,7 @@ class TestTaskList:
         items_by_workspace = {item["workspace_id"]: item for item in response.json()["items"]}
         legacy = items_by_workspace[legacy_workspace_id]
         attempt = items_by_workspace[attempt_workspace_id]
-        assert legacy["agent_model"] == "gpt-5.5"
+        assert legacy["agent_model"] == "gpt-5.6-sol"
         assert legacy["agent_effort"] == "xhigh"
         assert legacy["agent_model_source"] == "default"
         assert legacy["agent_effort_source"] == "default"
