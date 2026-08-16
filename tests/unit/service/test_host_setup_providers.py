@@ -1481,3 +1481,65 @@ def test_unselected_unknown_provider_preserved_during_targeted_recheck(tmp_path:
     assert updated_config.providers["future_extension"].credential_ref == "env://FUTURE_KEY"
     assert "codex" in updated_config.providers
     assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_existing_antigravity_keyring_degraded_without_gemini_api_key(
+    tmp_path: Path,
+) -> None:
+    """Existing canonical antigravity keyring entry is degraded when GEMINI_API_KEY is missing."""
+    config = HostSetupConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                credential_ref="keyring://awf/antigravity",
+                backend="keyring",
+                source="captured",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].backend == "keyring"
+    assert updated_config.providers["antigravity"].status == "unavailable"
+
+
+@pytest.mark.unit
+def test_existing_antigravity_invalid_env_ref_degraded(tmp_path: Path) -> None:
+    """Existing canonical antigravity entry with retired env ref (e.g. ANTIGRAVITY_API_KEY) is degraded."""
+    config = HostSetupConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                credential_ref="env://ANTIGRAVITY_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN, "ANTIGRAVITY_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].credential_ref == "env://ANTIGRAVITY_API_KEY"
+    assert updated_config.providers["antigravity"].status == "unavailable"

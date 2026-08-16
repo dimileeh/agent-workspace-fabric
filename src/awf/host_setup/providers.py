@@ -179,19 +179,22 @@ def _prune_and_migrate_provider_config(
         if legacy_name in result:
             legacy_cfg = result.pop(legacy_name)
             if target_name not in result:
-                spec = _SPEC_BY_NAME.get(target_name)
-                if spec is not None:
-                    if legacy_cfg.backend == "env_ref":
-                        valid_refs = {f"env://{var}" for var in spec.env_ref_vars}
-                        if legacy_cfg.credential_ref not in valid_refs or (
-                            environ is not None
-                            and _as_setup_status(legacy_cfg.status) == "ready"
-                            and _first_present(environ, spec.env_ref_vars) is None
-                        ):
-                            legacy_cfg = legacy_cfg.model_copy(update={"status": "unavailable"})
-                    else:
-                        legacy_cfg = legacy_cfg.model_copy(update={"status": "unavailable"})
                 result[target_name] = legacy_cfg
+        if target_name in result:
+            spec = _SPEC_BY_NAME.get(target_name)
+            if spec is not None:
+                target_cfg = result[target_name]
+                if target_cfg.backend == "env_ref":
+                    valid_refs = {f"env://{var}" for var in spec.env_ref_vars}
+                    if target_cfg.credential_ref not in valid_refs or (
+                        environ is not None
+                        and _as_setup_status(target_cfg.status) == "ready"
+                        and _first_present(environ, spec.env_ref_vars) is None
+                    ):
+                        target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
+                else:
+                    target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
+                result[target_name] = target_cfg
     if not is_targeted:
         for name in list(result):
             if name not in _SPEC_BY_NAME:
