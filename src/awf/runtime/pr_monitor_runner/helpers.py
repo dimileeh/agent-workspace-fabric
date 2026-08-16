@@ -1232,8 +1232,10 @@ def _awf_verdict_leading_fixed_absorbs_later_marker(
 
 # Explicit self-correction before a later same-line marker
 # (``…; correction: AWF-VERDICT: …`` / ``…; corrected to: AWF-VERDICT: …``).
+# Bare past-participle ``corrected:`` is ordinary reason prose and must not
+# split (PRRT_kwDOSJAM6s6Znq6K).
 _EXPLICIT_VERDICT_CORRECTION_SEPARATOR = re.compile(
-    r"(?is)(?:^|[\s;,.:—–-])(?:correction|corrected(?:\s+to)?)\s*:\s*\Z"
+    r"(?is)(?:^|[\s;,.:—–-])(?:correction|corrected\s+to)\s*:\s*\Z"
 )
 
 

@@ -2024,6 +2024,31 @@ class TestParseVerdict:
         assert result.reason == "applied the real fix"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_bare_corrected_prose_stays_absorbed(
+        self,
+    ) -> None:
+        # Bare past-participle ``corrected:`` is ordinary reason prose, not an
+        # explicit self-correction separator (``correction:`` / ``corrected to:``).
+        # Matching it would split a later same-line citation and let FIXED without
+        # HEAD advance clear as false_positive, or DEFER skip tracking
+        # (#822 PRRT_kwDOSJAM6s6Znq6K).
+        fixed_result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: the bug was corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+        defer_result = _parse_verdict_result(
+            "AWF-VERDICT: DEFER: already corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+
+        assert fixed_result.verdict == "fix_committed"
+        assert fixed_result.reason == (
+            "the bug was corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+        assert defer_result.verdict == "defer"
+        assert defer_result.reason == (
+            "already corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+
+    @pytest.mark.unit
     def test_private_awf_verdict_quoted_correction_separator_stays_absorbed(
         self,
     ) -> None:
