@@ -258,6 +258,62 @@ class TestPullRequestMonitorAdoptionServicePart003:
             assert task.external_id == already_superseded_external_id
 
     @pytest.mark.unit
+    async def test_supersede_previous_adoption_preserves_shared_source_task_external_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Do not rewrite a joined same-scope task's identity on supersession."""
+        logical_key = _canonical_key()
+        shared_external_id = "CLOUD-SHARED-TASK-42"
+        source_task_key = "source-workspace-idempotency"
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert result.task_id is not None
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+            # Simulate joining an existing same-scope source task that adoption
+            # does not own (different idempotency key, shared external_id).
+            task.idempotency_key = source_task_key
+            task.external_id = shared_external_id
+            workspace.task_external_id = shared_external_id
+            await session.flush()
+
+            await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.task_external_id == (
+                adoption_module._superseded_adoption_external_id(
+                    external_id=shared_external_id,
+                    workspace_id=result.workspace_id,
+                )
+            )
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            assert task.idempotency_key == source_task_key
+            assert task.external_id == shared_external_id
+
+    @pytest.mark.unit
     async def test_supersede_previous_adoption_tolerates_missing_task_row(
         self,
         factory: async_sessionmaker[AsyncSession],

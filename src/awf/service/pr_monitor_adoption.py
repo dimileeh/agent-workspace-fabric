@@ -254,9 +254,11 @@ class PullRequestMonitorAdoptionService:
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
         if attempt is not None:
             task = await TaskRepository(self._session).get(attempt.task_id)
-            if task is not None:
-                if task.idempotency_key == idempotency_key:
-                    task.idempotency_key = superseded_idempotency_key
+            if task is not None and task.idempotency_key == idempotency_key:
+                # Only rewrite identity on adoption-owned tasks. A joined
+                # same-scope source task keeps its external_id / key so prior
+                # attempts and future lookups stay intact.
+                task.idempotency_key = superseded_idempotency_key
                 task.external_id = _release_superseded_adoption_external_id(
                     task.external_id,
                     workspace_id=workspace.id,
