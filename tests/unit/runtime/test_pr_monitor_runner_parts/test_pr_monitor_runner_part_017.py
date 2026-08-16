@@ -682,6 +682,35 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         "final_line",
         [
+            "Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure",
+            "Verdict: AWF-VERDICT: SHIPPED: done",
+            "Result: AWF-VERDICT: NEEDS_HUMAN: unsure",
+            "Result: AWF-VERDICT: SHIPPED: done",
+            "VERDICT: AWF-VERDICT: NEEDS_HUMAN: unsure",
+            "result - AWF-VERDICT: SHIPPED: done",
+            # Nested Markdown + Verdict:/Result: must strip repeatedly.
+            "> Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure",
+            "- Result: AWF-VERDICT: SHIPPED: done",
+            "**Verdict: AWF-VERDICT: NEEDS_HUMAN: unsure**",
+            "### Result: AWF-VERDICT: SHIPPED: done",
+        ],
+    )
+    def test_private_awf_verdict_verdict_result_label_prefixed_final_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # Obvious Verdict:/Result: wrappers leave the marker mid-segment, so a
+        # start-only attempt check ignores them and an earlier resolvable
+        # verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmPRr).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
             "**AWF-VERDICT: NEEDS_HUMAN: unsure**",
             "__AWF-VERDICT: NEEDS_HUMAN: unsure__",
             "*AWF-VERDICT: NEEDS_HUMAN: unsure*",
