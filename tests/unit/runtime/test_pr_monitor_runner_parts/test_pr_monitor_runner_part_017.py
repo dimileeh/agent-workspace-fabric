@@ -267,6 +267,26 @@ class TestParseVerdict:
         assert result.reason == "fixed_placeholder_echo"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_fixed_reason_keeps_inline_angle_bracket_term(self) -> None:
+        # Prompt-template detection must not treat ordinary mid-reason tags such as
+        # HTML-ish ``<summary>`` as a whole-reason placeholder echo (#822 Greptile).
+        result = _parse_verdict_result("AWF-VERDICT: FIXED: added the <summary> section")
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "added the <summary> section"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_false_positive_reason_keeps_inline_angle_bracket_term(
+        self,
+    ) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: docs already document the <reason> field"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "docs already document the <reason> field"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 

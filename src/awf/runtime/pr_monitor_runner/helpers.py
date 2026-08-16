@@ -207,8 +207,11 @@ _BARE_VERDICT_LINE = re.compile(
     r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
     re.IGNORECASE,
 )
+# Match only when the *entire* reason is a prompt-template echo. An unanchored
+# search falsely strips legitimate mid-reason tags such as ``<summary>``.
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
-    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
+    r"^\s*<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
+    r"\b[^>\n\r]{0,80}>\s*$",
     re.IGNORECASE,
 )
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
