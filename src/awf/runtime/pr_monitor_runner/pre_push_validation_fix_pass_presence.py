@@ -47,6 +47,61 @@ _DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-
 _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
 
 
+def _advance_string_or_block_comment_state(
+    chunk: str,
+    *,
+    in_block_comment: bool,
+    in_triple_double: bool,
+    in_triple_single: bool,
+) -> tuple[bool, bool, bool]:
+    """Advance ``/*`` / triple-quote state through ``chunk`` (may include newlines).
+
+    Binding scanners use this so Google-style docstring prose
+    (``timeout: Seconds…``) is not treated as a YAML-style rebind
+    (PRRT_kwDOSJAM6s6ZqPO9). Matches the opener/closer vocabulary that
+    ``_prefix_leaves_open_disabling_context`` already tracks for prepend checks;
+    ``#if`` depth is intentionally omitted here (dead-code rebinds stay fail-closed).
+    """
+    i = 0
+    n = len(chunk)
+    while i < n:
+        if in_block_comment:
+            if chunk.startswith("*/", i):
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_triple_double:
+            if chunk.startswith('"""', i):
+                in_triple_double = False
+                i += 3
+                continue
+            i += 1
+            continue
+        if in_triple_single:
+            if chunk.startswith("'''", i):
+                in_triple_single = False
+                i += 3
+                continue
+            i += 1
+            continue
+        if chunk.startswith("/*", i):
+            in_block_comment = True
+            i += 2
+            continue
+        if chunk.startswith('"""', i):
+            in_triple_double = True
+            i += 3
+            continue
+        if chunk.startswith("'''", i):
+            in_triple_single = True
+            i += 3
+            continue
+        i += 1
+    return in_block_comment, in_triple_double, in_triple_single
+
+
 def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
     """Parse ``mode type oid`` from an ``ls-tree`` metadata token."""
     mode, sep, rest = entry.partition(" ")
@@ -235,7 +290,9 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
     count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
     and ``define`` is allowed, matching open-``#if`` scanning;
-    PRRT_kwDOSJAM6s6Zp_sv).
+    PRRT_kwDOSJAM6s6Zp_sv). Callers must also skip lines that start inside an
+    open ``/*`` or triple-quoted string so docstring prose is not treated as a
+    YAML-style rebind (PRRT_kwDOSJAM6s6ZqPO9).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//"):
@@ -263,13 +320,27 @@ def _binding_names(text: str) -> set[str]:
     blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, or YAML
     ``feature_enabled: true`` then ``feature_enabled: false``), which keeps a
     line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqNAk).
+    PRRT_kwDOSJAM6s6ZqNAk). Lines that start inside ``/*`` or a triple-quoted
+    string are skipped so Google-style docstring Args prose cannot falsely
+    supersede (PRRT_kwDOSJAM6s6ZqPO9).
     """
     names: set[str] = set()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
     for raw_line in text.splitlines():
-        name = _binding_name_for_line(raw_line)
-        if name is not None:
-            names.add(name)
+        if not (in_block_comment or in_triple_double or in_triple_single):
+            name = _binding_name_for_line(raw_line)
+            if name is not None:
+                names.add(name)
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
     return names
 
 
@@ -357,14 +428,28 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
 
     Keys are qualified by enclosing def/class/function scopes (``A.ok``) so
     same-named methods on different classes do not collide
-    (PRRT_kwDOSJAM6s6ZqKN3).
+    (PRRT_kwDOSJAM6s6ZqKN3). Lines that start inside ``/*`` or a triple-quoted
+    string are ignored so docstring prose does not invent bindings
+    (PRRT_kwDOSJAM6s6ZqPO9).
     """
     lines = text.splitlines()
     last_start: dict[str, int] = {}
     # (indent, name) stack for nestable declaration openers.
     scope_stack: list[tuple[int, str]] = []
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
     for idx, raw_line in enumerate(lines):
-        if raw_line.strip() == "":
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or raw_line.strip() == "":
             continue
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
@@ -402,14 +487,30 @@ def _tip_extra_line_indices(*, commit_blob: str, head_blob: str) -> set[int]:
 
 
 def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[str]:
-    """Return scoped binding keys whose opener lines fall in ``line_indices``."""
+    """Return scoped binding keys whose opener lines fall in ``line_indices``.
+
+    Lines that start inside ``/*`` or a triple-quoted string are ignored so
+    tip-extra docstring prose cannot look like a rebind (PRRT_kwDOSJAM6s6ZqPO9).
+    """
     if not line_indices:
         return set()
     lines = text.splitlines()
     keys: set[str] = set()
     scope_stack: list[tuple[int, str]] = []
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
     for idx, raw_line in enumerate(lines):
-        if raw_line.strip() == "":
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or raw_line.strip() == "":
             continue
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:

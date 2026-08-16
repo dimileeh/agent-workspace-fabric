@@ -115,6 +115,36 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="feature_enabled: true\n",
         head_blob="feature_enabled: true\nother_key: 1\n",
     )
+    # Docstring / block-comment prose that reuses a salvage assignment name
+    # (Google-style ``Args:`` / ``timeout: Seconds…``) must not count as a
+    # YAML-style rebind; otherwise benign documentation drops FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZqPO9).
+    assert _added_salvage_blob_retained(
+        commit_blob="timeout = 30\n",
+        head_blob=(
+            "timeout = 30\n"
+            '"""Client options.\n'
+            "\n"
+            "Args:\n"
+            "    timeout: Seconds until the request fails.\n"
+            '"""\n'
+        ),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="timeout = 30\n",
+        head_blob=("timeout = 30\n/*\ntimeout: Seconds until the request fails.\n*/\n"),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="timeout = 30\n",
+        head_blob=(
+            "timeout = 30\n"
+            "'''Client options.\n"
+            "\n"
+            "Args:\n"
+            "    timeout: Seconds until the request fails.\n"
+            "'''\n"
+        ),
+    )
     # Spaced ``# define`` is a real preprocessor binding (whitespace between ``#``
     # and the keyword is allowed, same as open-``#if`` scanning). Skipping it as
     # a comment would keep a line-aligned prefix and reuse stale salvage evidence
@@ -333,6 +363,21 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_yaml,
         commit_blob=commit_yaml,
         head_blob="x: 1\nfeature_enabled: true\ny: 2\n# feature_enabled: false\n",
+    )
+    # Tip-extra Google-style docstring prose must not supersede a real salvage
+    # assignment rebind (PRRT_kwDOSJAM6s6ZqPO9).
+    parent_timeout = "x = 1\ntimeout = 10\ny = 2\n"
+    commit_timeout = "x = 1\ntimeout = 30\ny = 2\n"
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_timeout,
+        commit_blob=commit_timeout,
+        head_blob=(
+            "x = 1\ntimeout = 30\ny = 2\n"
+            '"""\n'
+            "Args:\n"
+            "    timeout: Seconds until the request fails.\n"
+            '"""\n'
+        ),
     )
     # Unrelated append / later hunk must not look like supersession.
     assert not _tip_extra_can_supersede_modified_salvage(
