@@ -294,12 +294,16 @@ _HTML_TYPE6_BLOCK_OPEN = re.compile(
     rf"^ {{0,3}}</?(?:{_HTML_TYPE6_BLOCK_TAGS})(?=[\s/>]|$)",
     re.IGNORECASE,
 )
-# Type 7: a complete open or closing tag (not type 1) on its own line, optional
-# trailing whitespace only. Custom elements such as ``<custom-example>`` land
-# here; type-6 tags may also match but are recognized first. Attribute values
-# follow CommonMark (unquoted / single- / double-quoted) so a quoted ``>``
-# (``data-value=">">``) does not truncate the open tag and skip the blank-line
-# shield (PRRT_kwDOSJAM6s6ZnYwM).
+# Type 7: a complete open or closing tag on its own line, optional trailing
+# whitespace only. CommonMark excludes type-1 names only for **open** tags —
+# a standalone ``</pre>`` / ``</script>`` (etc.) still starts blank-terminated
+# type 7. Keep the open-tag exclusion so type-1 openers stay on the close-tag
+# path above; do not exclude closers or an example after ``</pre>`` overrides
+# an earlier hard block (PRRT_kwDOSJAM6s6Zn6x4). Custom elements such as
+# ``<custom-example>`` land here; type-6 tags may also match but are
+# recognized first. Attribute values follow CommonMark (unquoted / single- /
+# double-quoted) so a quoted ``>`` (``data-value=">">``) does not truncate
+# the open tag and skip the blank-line shield (PRRT_kwDOSJAM6s6ZnYwM).
 _HTML_TYPE7_ATTR = (
     r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
     r"(?:\s*=\s*(?:"
@@ -310,7 +314,7 @@ _HTML_TYPE7_ATTR = (
 )
 _HTML_TYPE7_BLOCK_OPEN = re.compile(
     r"^ {0,3}(?:"
-    r"</(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*\s*>"
+    r"</[A-Za-z][A-Za-z0-9:-]*\s*>"
     r"|"
     r"<(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*"
     rf"{_HTML_TYPE7_ATTR}*"
@@ -573,8 +577,10 @@ def _html_type7_block_opens(line: str) -> bool:
     """Return whether ``line`` opens a CommonMark type-7 HTML block.
 
     Complete open/close tags (including custom elements) continue until a
-    blank line. Type-1 tags are excluded; normalize containers like other
-    raw-HTML openers (PRRT_kwDOSJAM6s6ZnUxZ).
+    blank line. Type-1 **open** tags are excluded (handled by the close-tag
+    path); standalone type-1 **closers** still enter type 7
+    (PRRT_kwDOSJAM6s6ZnUxZ / PRRT_kwDOSJAM6s6Zn6x4). Normalize containers
+    like other raw-HTML openers.
     """
     return _HTML_TYPE7_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
 

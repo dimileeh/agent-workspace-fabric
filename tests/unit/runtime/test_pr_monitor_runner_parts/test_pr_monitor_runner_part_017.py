@@ -749,6 +749,32 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "closer",
+        ["</pre>", "</code>", "</script>", "</style>", "</textarea>"],
+        ids=["close_pre", "close_code", "close_script", "close_style", "close_textarea"],
+    )
+    def test_private_awf_verdict_ignores_markers_after_standalone_type1_closer(
+        self,
+        closer: str,
+    ) -> None:
+        # CommonMark type 7 allows any complete closing tag (including type-1
+        # names). Openers stay on the type-1 path; a naked ``</pre>`` /
+        # ``</script>`` must enter blank-terminated type-7 shielding or an
+        # example FALSE POSITIVE overrides NEEDS_HUMAN (PRRT_kwDOSJAM6s6Zn6x4).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            f"{closer}\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "opener",
         [
             '<custom-example data-value=">">',
