@@ -710,9 +710,14 @@ def _retry_task_policy(
         coordination_warnings,
     )
     policy, target_agent = _prune_and_migrate_retired_agent(policy, current_agent=source.agent)
-    if planning_scope_context is not None and planning_scope_context.fallback_model is not None:
+    effective_agent = target_agent or source.agent
+    if (
+        planning_scope_context is not None
+        and planning_scope_context.fallback_model is not None
+        and effective_agent == source.agent
+    ):
         policy["agent_model"] = planning_scope_context.fallback_model["model"]
-    return policy, target_agent or source.agent
+    return policy, effective_agent
 
 
 def _planning_scope_recovery_payload(
