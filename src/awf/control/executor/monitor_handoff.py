@@ -189,13 +189,6 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
-    if await self._reject_unsupported_agent_runtime(
-        workspace_id=workspace_id,
-        workspace=ws,
-        from_status=WorkspaceStatus.monitoring_pr,
-    ):
-        return None
-
     if not ws.remote_push_branch and ws.task_kind == "feature_branch_pr" and ws.branch_name:
         recovered_remote_push_branch = await self._recover_feature_branch_remote_push_branch(
             workspace_id=workspace_id,
@@ -346,9 +339,15 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
         if monitor is None and self._pr_monitor_factory is not None:
-            agent = AgentRuntime(ws.agent)
-            defaults = self._defaults_for(agent)
-            adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
+            agent: AgentRuntime | str
+            try:
+                agent = AgentRuntime(ws.agent)
+            except ValueError:
+                agent = ws.agent
+            defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
+            adapter_defaults = (
+                _agent_defaults_for_workspace(ws, defaults) if defaults is not None else None
+            )
             adapter = get_adapter(
                 agent,
                 runner=self._runner,
@@ -1253,9 +1252,15 @@ async def _build_handoff_pr_monitor(
         ):
             return None
         if monitor is None and self._pr_monitor_factory is not None:
-            agent = AgentRuntime(workspace.agent)
-            defaults = self._defaults_for(agent)
-            adapter_defaults = _agent_defaults_for_workspace(workspace, defaults)
+            agent: AgentRuntime | str
+            try:
+                agent = AgentRuntime(workspace.agent)
+            except ValueError:
+                agent = workspace.agent
+            defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
+            adapter_defaults = (
+                _agent_defaults_for_workspace(workspace, defaults) if defaults is not None else None
+            )
             adapter = get_adapter(
                 agent,
                 runner=self._runner,

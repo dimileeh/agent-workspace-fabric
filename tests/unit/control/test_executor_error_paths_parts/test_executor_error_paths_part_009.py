@@ -607,7 +607,7 @@ class TestTaskKindFailFast:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
-    async def test_resume_pr_monitor_fails_fast_on_unsupported_agent_runtime(
+    async def test_resume_pr_monitor_allows_unsupported_agent_runtime(
         self,
         agent: str,
         fake: FakeCommandRunner,
@@ -615,25 +615,46 @@ class TestTaskKindFailFast:
         tmp_path: Path,
     ) -> None:
         """A legacy workspace with an unsupported agent runtime in monitoring_pr must
-        fail fast on resume_pr_monitor.
+        allow monitor construction so clean PRs can complete, deferring failures to run().
         """
-        ws_id = await _seed_monitoring_pr(factory, agent=agent)
+        from awf.adapters.base import AgentRunError
 
-        def _monitor_factory(*_args: Any) -> object:
-            raise AssertionError("resume must not build a monitor for unsupported runtimes")
+        ws_id = await _seed_monitoring_pr(factory, agent=agent)
+        monitor_runs: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                monitor_runs.append(workspace_id)
+
+        captured_adapter: list[Any] = []
+
+        def _monitor_factory(adapter: Any, *_args: Any) -> object:
+            captured_adapter.append(adapter)
+            return _Monitor()
 
         executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
 
         await executor.resume_pr_monitor(ws_id)
 
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert f"agent runtime {agent!r} is not supported" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+        assert monitor_runs == [ws_id]
+        assert len(captured_adapter) == 1
+        adapter = captured_adapter[0]
+
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project="p",
+                compose_file=tmp_path / "compose.yml",
+                prompt="fix review feedback",
+                workspace_id=ws_id,
+            )
+        assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+        assert f"agent runtime {agent!r} is not supported" in exc_info.value.result.stderr
 
     @pytest.mark.unit
     @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])

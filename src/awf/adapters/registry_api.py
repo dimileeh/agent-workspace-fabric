@@ -28,7 +28,7 @@ def register_adapter[T](cls: type[T]) -> type[T]:
 
 
 def get_adapter(
-    runtime: AgentRuntime,
+    runtime: AgentRuntime | str,
     *,
     runner: AsyncCommandRunner,
     default_model: str | None = None,
@@ -41,7 +41,26 @@ def get_adapter(
     runtime_executor: AgentRuntimeExecutor | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime."""
-    cls: Any = _REGISTRY[runtime]
+    if isinstance(runtime, str) and not isinstance(runtime, AgentRuntime):
+        import contextlib
+
+        with contextlib.suppress(ValueError):
+            runtime = AgentRuntime(runtime)
+    cls: Any = _REGISTRY.get(runtime)  # type: ignore[arg-type]
+    if cls is None:
+        from awf.adapters.base import RetiredAgentAdapter
+
+        return RetiredAgentAdapter(
+            runtime,
+            runner=runner,
+            default_model=default_model,
+            default_effort=default_effort,
+            log_store=log_store,
+            agent_wall_timeout_seconds=agent_wall_timeout_seconds,
+            agent_idle_timeout_seconds=agent_idle_timeout_seconds,
+            usage_sampler=usage_sampler,
+            runtime_executor=runtime_executor,
+        )
     if defaults is not None:
         default_model = defaults.model
         default_effort = defaults.effort
