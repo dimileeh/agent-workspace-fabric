@@ -1277,6 +1277,42 @@ class TestRuntimeExecutorSeam:
         assert len(log_store.open_calls) == 1
         assert log_store.sinks.closed is True
 
+    @pytest.mark.unit
+    async def test_hosted_request_construction_failure_closes_sinks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When build_hosted_exec_request fails, open sinks must still be closed."""
+
+        async def _failing_build_request(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("helper failure during request construction")
+
+        monkeypatch.setattr(
+            "awf.adapters.base.build_hosted_exec_request",
+            _failing_build_request,
+        )
+
+        class _DummyExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                raise NotImplementedError
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=_DummyExecutor(),
+        )
+
+        with pytest.raises(RuntimeError, match="helper failure during request construction"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_request_build_failed",
+            )
+
+        assert len(log_store.open_calls) == 1
+        assert log_store.sinks.closed is True
+
 
 class TestAgentAdapterBaseDefaults:
     """Base ``AgentAdapter`` property defaults that concrete adapters inherit.

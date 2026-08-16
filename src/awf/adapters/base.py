@@ -800,41 +800,40 @@ class AgentAdapter(ABC):
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
-
-        streamed_stdout_chunks: list[str] = []
-        streamed_stderr_chunks: list[str] = []
-
-        async def _on_stdout(data: str) -> None:
-            streamed_stdout_chunks.append(data)
-            if sinks is not None:
-                await sinks.write_stdout(data)
-
-        async def _on_stderr(data: str) -> None:
-            streamed_stderr_chunks.append(data)
-            if sinks is not None:
-                await sinks.write_stderr(data)
-
-        on_stdout_cb: StreamCallback | None = _on_stdout
-        on_stderr_cb: StreamCallback | None = _on_stderr
-
-        request = await build_hosted_exec_request(
-            self,
-            compose_file=compose_file,
-            compose_project=compose_project,
-            prompt_input=prompt_input,
-            cli_args=cli_args,
-            selected_model=selected_model,
-            workspace_id=workspace_id,
-            log_source=log_source,
-            hosted_pr_identity=hosted_pr_identity,
-            git_preparation=git_preparation,
-            profile=profile,
-            worktree_path=worktree_path,
-            read_only=read_only,
-            on_stdout_cb=on_stdout_cb,
-            on_stderr_cb=on_stderr_cb,
-        )
         try:
+            streamed_stdout_chunks: list[str] = []
+            streamed_stderr_chunks: list[str] = []
+
+            async def _on_stdout(data: str) -> None:
+                streamed_stdout_chunks.append(data)
+                if sinks is not None:
+                    await sinks.write_stdout(data)
+
+            async def _on_stderr(data: str) -> None:
+                streamed_stderr_chunks.append(data)
+                if sinks is not None:
+                    await sinks.write_stderr(data)
+
+            on_stdout_cb: StreamCallback | None = _on_stdout
+            on_stderr_cb: StreamCallback | None = _on_stderr
+
+            request = await build_hosted_exec_request(
+                self,
+                compose_file=compose_file,
+                compose_project=compose_project,
+                prompt_input=prompt_input,
+                cli_args=cli_args,
+                selected_model=selected_model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+                hosted_pr_identity=hosted_pr_identity,
+                git_preparation=git_preparation,
+                profile=profile,
+                worktree_path=worktree_path,
+                read_only=read_only,
+                on_stdout_cb=on_stdout_cb,
+                on_stderr_cb=on_stderr_cb,
+            )
             if self._usage_sampler is not None:
                 _log.info(
                     "agent.run.hosted.usage_sampling_skipped",
