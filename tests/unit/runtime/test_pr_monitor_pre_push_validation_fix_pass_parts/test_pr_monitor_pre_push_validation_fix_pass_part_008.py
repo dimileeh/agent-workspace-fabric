@@ -504,6 +504,20 @@ def test_parse_ls_tree_meta_accepts_valid_and_rejects_malformed() -> None:
 
 
 @pytest.mark.unit
+def test_git_mode_file_kind_maps_regular_symlink_gitlink_and_unknown() -> None:
+    """File-kind mapping must collapse chmod bits and keep symlink/gitlink distinct."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _git_mode_file_kind,
+    )
+
+    assert _git_mode_file_kind("100644") == "file"
+    assert _git_mode_file_kind("100755") == "file"
+    assert _git_mode_file_kind("120000") == "symlink"
+    assert _git_mode_file_kind("160000") == "gitlink"
+    assert _git_mode_file_kind("040000") == "040000"
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_accepts_preserved_and_rejects_revert(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1586,6 +1600,91 @@ async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
         worktree_path=worktree,
         commit=commit,
         head=head,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_symlink_kind_swap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Content-only salvage must not retain when HEAD swaps file→symlink.
+
+    Salvage writes pathname bytes into a regular file. A later tip replaces that
+    file with a symlink to the same path: Git stores both as type blob with the
+    same OID. Skipping mode equality for content-only salvage must still reject
+    the kind change so a no-change FIXED retry cannot reuse stale evidence
+    (PRRT_kwDOSJAM6s6Znm-O).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    path = repo / "linkish"
+    path.write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "linkish")
+    _git(repo, "commit", "-qm", "base regular file")
+    path.write_text("target", encoding="utf-8")
+    _git(repo, "add", "linkish")
+    _git(repo, "commit", "-qm", "salvage content pathname")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "rm", "-q", "linkish")
+    path.symlink_to("target")
+    _git(repo, "add", "linkish")
+    (repo / "unrelated.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-qm", "replace with symlink and add unrelated")
+    kind_swapped = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: keep regular-file kind while adding an unrelated path — still present.
+    _git(repo, "checkout", "-q", "-B", "kind-preserved", salvage)
+    (repo / "other.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-qm", "unrelated while kind preserved")
+    kind_preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: content-only salvage still tolerates same-kind chmod on a later tip.
+    _git(repo, "checkout", "-q", "-B", "chmod-later", salvage)
+    _git(repo, "update-index", "--chmod=+x", "linkish")
+    (repo / "chmod-extra.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "linkish", "chmod-extra.txt")
+    _git(repo, "commit", "-qm", "chmod +x while content retained")
+    chmod_later = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=kind_preserved,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=chmod_later,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=kind_swapped,
     )
 
 

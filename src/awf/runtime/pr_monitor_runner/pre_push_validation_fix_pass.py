@@ -217,6 +217,23 @@ def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
     return mode, obj_type, oid
 
 
+def _git_mode_file_kind(mode: str) -> str:
+    """Return the Git tree-entry kind encoded in ``mode``.
+
+    Regular files share kind ``file`` whether or not the executable bit is set
+    (``100644`` / ``100755``). Symlinks (``120000``) and gitlinks (``160000``)
+    are distinct kinds. Unknown modes compare as themselves so mismatched
+    unknowns fail closed.
+    """
+    if mode.startswith("100"):
+        return "file"
+    if mode == "120000":
+        return "symlink"
+    if mode == "160000":
+        return "gitlink"
+    return mode
+
+
 def _bytes_unsafe_for_text_merge(raw: bytes) -> bool:
     """Return True when merge-file / string containment cannot be trusted.
 
@@ -399,8 +416,14 @@ async def _commit_changes_present_in_head(
         parent_meta = _parse_ls_tree_meta(parent_entry) if parent_entry else None
         # Mode retention: when salvage changed mode (or added the path), HEAD must
         # still carry the salvage mode. Content-only salvage may tolerate later
-        # mode-neutral edits on other hunks without forcing mode equality.
+        # same-kind mode bits (e.g. chmod ±x) without forcing full mode equality.
         if (parent_meta is None or parent_meta[0] != commit_mode) and head_mode != commit_mode:
+            return False
+        # File kind must still match even for content-only salvage. Git stores
+        # symlink targets as blobs, so a tip can replace a regular file whose
+        # content is a pathname with a same-OID symlink and falsely pass the
+        # OID fast path below (PRRT_kwDOSJAM6s6Znm-O).
+        if _git_mode_file_kind(head_mode) != _git_mode_file_kind(commit_mode):
             return False
 
         if commit_oid == head_oid:
