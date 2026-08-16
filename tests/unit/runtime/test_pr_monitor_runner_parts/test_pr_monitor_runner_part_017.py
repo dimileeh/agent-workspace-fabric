@@ -884,6 +884,49 @@ class TestParseVerdict:
         assert result.reason == "real fix landed"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "nested_blank",
+        ["> >", ">>", "> > ", ">>   "],
+        ids=["gt_space_gt", "gt_gt", "gt_space_gt_spaces", "gt_gt_spaces"],
+    )
+    def test_private_awf_verdict_nested_blockquote_blank_does_not_end_single_level_html_type6(
+        self,
+        nested_blank: str,
+    ) -> None:
+        # Full blockquote-prefix stripping would treat nested ``> >`` / ``>>`` as
+        # a blank terminator for a single-level ``> <div>`` shield and let a
+        # later FALSE POSITIVE override NEEDS_HUMAN (PRRT_kwDOSJAM6s6ZnblF).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "> <div>\n"
+            "> AWF-VERDICT: FALSE POSITIVE: example\n"
+            f"{nested_blank}\n"
+            "AWF-VERDICT: FALSE POSITIVE: would override\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_double_blockquote_html_type6_gt_blank_ends_shield(
+        self,
+    ) -> None:
+        # Depth-2 openers still terminate on a matching ``>>`` content blank.
+        stdout = (
+            ">> <div>\n"
+            ">> AWF-VERDICT: FALSE POSITIVE: example\n"
+            ">>\n"
+            "AWF-VERDICT: FIXED: real fix landed\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real fix landed"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_toplevel_html_type6_gt_line_does_not_end_shield(
         self,
     ) -> None:

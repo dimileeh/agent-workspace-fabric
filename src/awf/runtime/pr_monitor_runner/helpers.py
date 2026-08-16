@@ -595,23 +595,34 @@ def _html_type7_block_opens(line: str) -> bool:
     return _HTML_TYPE7_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
 
 
-def _html_blank_terminated_block_closes(line: str, *, blockquote_container: bool = False) -> bool:
+def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0) -> bool:
     """Return whether ``line`` is a blank line ending a type-6/7 HTML block.
 
     Blockquote-nested type-6/7 blocks also terminate on ``>`` / ``>   `` content
-    blank lines; strip the matching blockquote container before the blank check
-    (PRRT_kwDOSJAM6s6ZnYwP). Top-level blocks must not treat a bare ``>`` as
-    blank.
+    blank lines; peel exactly ``blockquote_depth`` single ``>`` container markers
+    (and intervening list markers) before the blank check (PRRT_kwDOSJAM6s6ZnYwP).
+    Do not use full blockquote-prefix stripping — nested ``> >`` / ``>>`` must
+    not falsely end a single-level ``> <div>`` shield (PRRT_kwDOSJAM6s6ZnblF).
+    Top-level blocks must not treat a bare ``>`` as blank.
     """
     if _HTML_BLANK_LINE.match(line) is not None:
         return True
-    if not blockquote_container:
+    if blockquote_depth <= 0:
         return False
     rest = line.lstrip(" \t")
-    stripped = _MARKDOWN_BLOCKQUOTE_PREFIX.sub("", rest, count=1)
-    if stripped == rest:
+    remaining = blockquote_depth
+    while remaining > 0:
+        bq = re.match(r"^>[ \t]?", rest)
+        if bq is not None:
+            rest = rest[bq.end() :]
+            remaining -= 1
+            continue
+        lst = _MARKDOWN_LIST_PREFIX.match(rest)
+        if lst is not None:
+            rest = rest[lst.end() :]
+            continue
         return False
-    return _HTML_BLANK_LINE.match(stripped) is not None
+    return _HTML_BLANK_LINE.match(rest) is not None
 
 
 def _markdown_fence_closes(
@@ -696,7 +707,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_declaration_blockquote_depth = 0
     html_cdata = False
     html_blank_terminated = False
-    html_blank_terminated_blockquote = False
+    html_blank_terminated_blockquote_depth = 0
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(
@@ -732,10 +743,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             continue
         if html_blank_terminated:
             if _html_blank_terminated_block_closes(
-                line, blockquote_container=html_blank_terminated_blockquote
+                line, blockquote_depth=html_blank_terminated_blockquote_depth
             ):
                 html_blank_terminated = False
-                html_blank_terminated_blockquote = False
+                html_blank_terminated_blockquote_depth = 0
             continue
         if _MARKDOWN_INDENTED_CODE_LINE.match(line):
             continue
@@ -772,12 +783,14 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             continue
         if _html_type6_block_opens(line) or _html_type7_block_opens(line):
             # Type 6/7 continue until a blank line (same-line wrappers still
-            # skip the opener line itself). Track blockquote nesting so ``>``
-            # / ``>   `` content blanks can terminate (PRRT_kwDOSJAM6s6ZnYwP).
-            opened_in_bq = _markdown_fence_opened_in_blockquote(line)
-            if not _html_blank_terminated_block_closes(line, blockquote_container=opened_in_bq):
+            # skip the opener line itself). Track opener blockquote depth so
+            # matching ``>`` / ``>   `` content blanks can terminate without
+            # treating nested ``> >`` / ``>>`` as blanks (PRRT_kwDOSJAM6s6ZnYwP /
+            # PRRT_kwDOSJAM6s6ZnblF).
+            opened_bq_depth = _markdown_blockquote_container_depth(line)
+            if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
                 html_blank_terminated = True
-                html_blank_terminated_blockquote = opened_in_bq
+                html_blank_terminated_blockquote_depth = opened_bq_depth
             continue
         opened = _markdown_fence_open_marker(line)
         if opened is not None:
