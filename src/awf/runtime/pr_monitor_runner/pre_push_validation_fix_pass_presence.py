@@ -336,13 +336,16 @@ def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set
 
     Spans include declaration bodies, not only opener lines, so body-only
     function/class edits count as changed bindings (PRRT_kwDOSJAM6s6ZqHvh).
+    Parent-only names (deleted by salvage) also count so a tip that
+    reintroduces them can supersede (PRRT_kwDOSJAM6s6ZqKGY).
     """
     parent_spans = _last_binding_spans(parent_blob)
-    changed: set[str] = set()
-    for name, span in _last_binding_spans(commit_blob).items():
-        if parent_spans.get(name) != span:
-            changed.add(name)
-    return changed
+    commit_spans = _last_binding_spans(commit_blob)
+    return {
+        name
+        for name in parent_spans.keys() | commit_spans.keys()
+        if parent_spans.get(name) != commit_spans.get(name)
+    }
 
 
 def _tip_extra_can_supersede_modified_salvage(
@@ -361,7 +364,8 @@ def _tip_extra_can_supersede_modified_salvage(
     same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
     full-line multiset would over-reject surplus salvage assignment copies
     (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
-    bindings (PRRT_kwDOSJAM6s6ZqHvh).
+    bindings (PRRT_kwDOSJAM6s6ZqHvh). Parent-only (deleted) salvage names also
+    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:

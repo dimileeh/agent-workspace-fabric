@@ -438,6 +438,25 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=commit,
     )
+    # Salvage that deletes a parent binding must still mark the name changed.
+    # Iterating only commit spans would omit it; a tip that reintroduces the
+    # binding after unrelated content can then cleanly merge-file-match HEAD
+    # while falsely retaining FIXED evidence (PRRT_kwDOSJAM6s6ZqKGY).
+    parent_deleted = "x = 1\nFEATURE_ENABLED = False\ny = 2\n"
+    commit_deleted = "x = 1\ny = 2\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_deleted, commit_blob=commit_deleted
+    ) == {"FEATURE_ENABLED"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_deleted,
+        commit_blob=commit_deleted,
+        head_blob="x = 1\ny = 2\nFEATURE_ENABLED = False\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_deleted,
+        commit_blob=commit_deleted,
+        head_blob="x = 1\ny = 2\nother = 1\n",
+    )
 
 
 @pytest.mark.unit
