@@ -284,6 +284,38 @@ _HTML_DECLARATION_OPEN = re.compile(r"^ {0,3}<![A-Za-z]")
 _HTML_DECLARATION_CLOSE = re.compile(r">")
 _HTML_CDATA_OPEN = re.compile(r"^ {0,3}<!\[CDATA\[")
 _HTML_CDATA_CLOSE = re.compile(r"\]\]>")
+# CommonMark HTML blocks type 6 (block tags) and type 7 (complete open/close
+# tags, including custom elements). Both continue until a blank line — not a
+# matching close tag — so agents can wrap example verdicts in ``<div>`` /
+# ``<custom-…>`` and override an earlier hard block unless we shield through
+# the terminating blank line (PRRT_kwDOSJAM6s6ZnUxZ). Type-1 tags stay on the
+# close-tag path above; peel list/blockquote containers on openers like
+# other raw-HTML starts.
+_HTML_TYPE6_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+    "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+    "footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|"
+    "link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|"
+    "section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+)
+_HTML_TYPE6_BLOCK_OPEN = re.compile(
+    rf"^ {{0,3}}</?(?:{_HTML_TYPE6_BLOCK_TAGS})(?=[\s/>]|$)",
+    re.IGNORECASE,
+)
+# Type 7: a complete open or closing tag (not type 1) on its own line, optional
+# trailing whitespace only. Custom elements such as ``<custom-example>`` land
+# here; type-6 tags may also match but are recognized first.
+_HTML_TYPE7_BLOCK_OPEN = re.compile(
+    r"^ {0,3}(?:"
+    r"</(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*\s*>"
+    r"|"
+    r"<(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*"
+    r"(?:\s[^>]*)?"
+    r"\s*/?>"
+    r")[ \t]*$",
+    re.IGNORECASE,
+)
+_HTML_BLANK_LINE = re.compile(r"^[ \t]*$")
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -338,13 +370,13 @@ def _normalize_markdown_fence_line(line: str) -> str:
     """Strip container indent, blockquotes, and list markers for open matching.
 
     List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` /
-    ``- <pre>`` / ``- <!--`` / ``- <?`` / ``- <![CDATA[`` are not top-level
-    fence, HTML-code, HTML-comment, or type-3–5 raw-HTML lines, and
-    continuation content is often only two-space indented (so it misses the
-    indented-code check). Normalize before matching so those regions stay
-    shielded from verdict selection. Closers must not use this helper —
-    peeling a list or blockquote marker would treat ``- ``` `` / ``> ``` ``
-    inside a top-level fence as a closer.
+    ``- <pre>`` / ``- <!--`` / ``- <?`` / ``- <![CDATA[`` / ``- <div>`` are not
+    top-level fence, HTML-code, HTML-comment, type-3–5, or type-6/7 raw-HTML
+    lines, and continuation content is often only two-space indented (so it
+    misses the indented-code check). Normalize before matching so those
+    regions stay shielded from verdict selection. Closers must not use this
+    helper — peeling a list or blockquote marker would treat ``- ``` `` /
+    ``> ``` `` inside a top-level fence as a closer.
     """
     rest = line.lstrip(" \t")
     # Peel blockquote and list in either order (``> - ``` `` / ``- > ``` ``).
@@ -532,6 +564,31 @@ def _html_cdata_closes(line: str) -> bool:
     return _HTML_CDATA_CLOSE.search(line) is not None
 
 
+def _html_type6_block_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark type-6 HTML block.
+
+    Block tags such as ``div`` continue until a blank line. Normalize
+    list/blockquote containers first so ``- <div>`` / ``> <div>`` enter
+    shielding (PRRT_kwDOSJAM6s6ZnUxZ).
+    """
+    return _HTML_TYPE6_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_type7_block_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark type-7 HTML block.
+
+    Complete open/close tags (including custom elements) continue until a
+    blank line. Type-1 tags are excluded; normalize containers like other
+    raw-HTML openers (PRRT_kwDOSJAM6s6ZnUxZ).
+    """
+    return _HTML_TYPE7_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_blank_terminated_block_closes(line: str) -> bool:
+    """Return whether ``line`` is a blank line ending a type-6/7 HTML block."""
+    return _HTML_BLANK_LINE.match(line) is not None
+
+
 def _markdown_fence_closes(
     line: str,
     *,
@@ -592,14 +649,17 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     tab), raw HTML type-1 / example code blocks (``pre`` / ``code`` /
     ``script`` / ``style`` / ``textarea``, including list- and
     blockquote-nested openers), HTML comment blocks (``<!-- … -->``,
-    including nested openers), and CommonMark type-3–5 raw HTML blocks
+    including nested openers), CommonMark type-3–5 raw HTML blocks
     (processing instruction ``<?…?>``, declaration ``<!Letter…>``, CDATA
-    ``<![CDATA[…]]>``, including nested openers) so quoted example markers
-    cannot override an authoritative unfenced verdict. Same-line wrapped
-    fences (`` ```verdict``` ``) are still yielded so
+    ``<![CDATA[…]]>``, including nested openers), and CommonMark type-6/7
+    raw HTML blocks (block tags such as ``div`` and complete custom tags,
+    continuing through their terminating blank line) so quoted example
+    markers cannot override an authoritative unfenced verdict. Same-line
+    wrapped fences (`` ```verdict``` ``) are still yielded so
     ``_CODE_FORMATTED_VERDICT_LINE`` can accept them; same-line HTML wrappers
     and comments are skipped entirely. Unclosed fences, HTML code blocks,
-    HTML comments, or type-3–5 raw HTML blocks shield every subsequent line.
+    HTML comments, type-3–5 raw HTML blocks, or type-6/7 blank-terminated
+    blocks shield every subsequent line.
     """
     fence: str | None = None
     fence_container_indent = 0
@@ -610,6 +670,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_declaration = False
     html_declaration_blockquote_depth = 0
     html_cdata = False
+    html_blank_terminated = False
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(
@@ -643,6 +704,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             if _html_code_block_closes(line, html_tag):
                 html_tag = None
             continue
+        if html_blank_terminated:
+            if _html_blank_terminated_block_closes(line):
+                html_blank_terminated = False
+            continue
         if _MARKDOWN_INDENTED_CODE_LINE.match(line):
             continue
         if _html_comment_opens(line):
@@ -675,6 +740,12 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             # example wrapper, not an accepted formatted-verdict form — skip it.
             if not _html_code_block_closes(line, opened_html):
                 html_tag = opened_html
+            continue
+        if _html_type6_block_opens(line) or _html_type7_block_opens(line):
+            # Type 6/7 continue until a blank line (same-line wrappers still
+            # skip the opener line itself).
+            if not _html_blank_terminated_block_closes(line):
+                html_blank_terminated = True
             continue
         opened = _markdown_fence_open_marker(line)
         if opened is not None:

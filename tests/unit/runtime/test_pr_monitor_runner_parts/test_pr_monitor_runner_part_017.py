@@ -709,6 +709,122 @@ class TestParseVerdict:
         assert result.reason == "real fix landed"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_html_type6_div_block(
+        self,
+    ) -> None:
+        # CommonMark type-6 blocks (``div``, etc.) end on a blank line, not a
+        # close tag. Without shielding, an example inside overrides NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZnUxZ).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<div>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</div>\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_html_type7_custom_tag(
+        self,
+    ) -> None:
+        # Type-7 complete custom tags also continue until a blank line
+        # (PRRT_kwDOSJAM6s6ZnUxZ).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<custom-example>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</custom-example>\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "- <div>\n"
+                "  AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <div>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> - <custom-example>\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                "\n"
+            ),
+        ],
+        ids=["list_html_div", "blockquote_html_div", "blockquote_list_custom_tag"],
+    )
+    def test_private_awf_verdict_ignores_list_blockquote_nested_html_type6_type7(
+        self,
+        stdout: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unclosed_html_type6_shields_trailing_markers(
+        self,
+    ) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<div>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_html_type6_blank_line_ends_shield(self) -> None:
+        stdout = (
+            "<div>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</div>\n"
+            "\n"
+            "AWF-VERDICT: FIXED: real fix landed\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real fix landed"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_same_line_html_type6_wrapper(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<div>AWF-VERDICT: FALSE POSITIVE: example</div>\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "stdout",
         [
