@@ -998,6 +998,7 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     thread = thread_node(tid="T_manual_fix", author="human-reviewer")
@@ -1005,7 +1006,7 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-    adapter.queue(stdout="fixed it")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: addressed manual-merge review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
@@ -1022,6 +1023,11 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
         worktrees_root=tmp_path / "worktrees",
         auto_merge=False,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     with structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,

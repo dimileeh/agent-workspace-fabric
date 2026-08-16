@@ -294,6 +294,7 @@ class TestMonitorActionLogging:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T_recov", author="reviewer")
@@ -301,7 +302,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed it")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: addressed recovery review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
@@ -323,6 +324,11 @@ class TestMonitorActionLogging:
             worktrees_root=tmp_path / "worktrees",
             log_store=log_store,
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
 
         await runner.run(
             workspace_id=ws_id,
@@ -432,6 +438,7 @@ class TestMonitorActionLogging:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         late_thread = thread_node(
@@ -448,7 +455,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
-        adapter.queue(stdout="fixed")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: addressed late review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle re-poll
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
@@ -466,6 +473,11 @@ class TestMonitorActionLogging:
             worktrees_root=tmp_path / "worktrees",
             auto_merge=False,
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         with structlog.testing.capture_logs() as captured:
             await runner.run(
                 workspace_id=ws_id,
@@ -496,6 +508,7 @@ class TestMonitorActionLogging:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         blocking_comment = issue_comment_node(
@@ -530,7 +543,7 @@ class TestMonitorActionLogging:
             returncode=0,
             stdout=pr_payload(comments=[blocking_comment], threads=[late_thread]),
         )
-        adapter.queue(stdout="fixed")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: addressed later review thread")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
@@ -547,6 +560,11 @@ class TestMonitorActionLogging:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         with structlog.testing.capture_logs() as captured:
             await runner.run(
                 workspace_id=ws_id,
@@ -695,6 +713,7 @@ class TestMonitorActionLogging:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T1", author="cr")
@@ -702,7 +721,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed it")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: addressed review thread T1")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
@@ -720,6 +739,11 @@ class TestMonitorActionLogging:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         with structlog.testing.capture_logs() as captured:
             await runner.run(
                 workspace_id=ws_id,
@@ -741,6 +765,7 @@ class TestMonitorActionLogging:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A fixed-but-still-unresolved thread must not be filtered out forever.
 
@@ -756,7 +781,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed first")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: first repair commit")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
@@ -766,7 +791,7 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed again")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: retry repair after resolve failure")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse
@@ -786,6 +811,11 @@ class TestMonitorActionLogging:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         with structlog.testing.capture_logs() as captured:
             await runner.run(
                 workspace_id=ws_id,
@@ -984,7 +1014,7 @@ class TestMonitorActionLogging:
 
 class TestMonitorDirtyWorktreeSalvage:
     @pytest.mark.unit
-    async def test_comment_agent_failure_with_dirty_changes_is_committed_and_resolved(
+    async def test_comment_agent_failure_with_dirty_changes_stays_unresolved(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -993,6 +1023,7 @@ class TestMonitorDirtyWorktreeSalvage:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Nonzero CLI exit may still salvage dirty edits, but FIXED must not resolve."""
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T_dirty", author="gemini-code-assist")
         worktrees_root = tmp_path / "worktrees"
@@ -1001,7 +1032,10 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-        adapter.queue(stdout="changed files but failed before summary", returncode=1)
+        adapter.queue(
+            stdout="AWF-VERDICT: FIXED: claimed after crash with dirty edits",
+            returncode=1,
+        )
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
@@ -1011,7 +1045,9 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git add -A
         cmd.queue_result(returncode=1)  # git diff --cached --quiet
         cmd.queue_result(returncode=0)  # git commit
-        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stdout="def4567890abcdef\n")  # item end HEAD
+        cmd.queue_result(returncode=0)  # merge-base --is-ancestor (forward)
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch (no new feedback)
         cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
         cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
         cmd.queue_result(
@@ -1019,13 +1055,7 @@ class TestMonitorDirtyWorktreeSalvage:
             stdout=_name_status_z("src/foo.py"),
         )  # pre-push protected-scope diff
         cmd.queue_result(returncode=0)  # push
-        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
-        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
-        cmd.queue_result(returncode=0)  # git fetch origin <base>
-        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
-        cmd.queue_result(returncode=0)  # gh pr merge
-        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge sha
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse after push
 
         runner = make_runner(
             factory=factory,
@@ -1033,6 +1063,7 @@ class TestMonitorDirtyWorktreeSalvage:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=worktrees_root,
+            max_outer_iterations=1,
         )
 
         async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
@@ -1058,10 +1089,15 @@ class TestMonitorDirtyWorktreeSalvage:
             and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
         ]
         assert commit_calls, _call_tail_report(cmd)
-        assert any(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["AddressComments", "Merge"]
+        assert actions == ["AddressComments"]
+        assert "Merge" not in actions
         assert any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)
+        assert not any(
+            call.args[:3] == ["gh", "api", "graphql"]
+            and "resolveReviewThread" in " ".join(call.args)
+            for call in cmd.calls
+        )
 
     @pytest.mark.unit
     async def test_comment_repair_gets_scope_correction_before_committing_protected_file(

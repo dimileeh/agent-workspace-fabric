@@ -314,6 +314,30 @@ async def test_markerless_output_never_upgraded_by_dirty_commit() -> None:
 
 
 @pytest.mark.unit
+async def test_fixed_with_dirty_commit_still_agent_failed_on_cli_nonzero() -> None:
+    """Dirty salvage after a nonzero CLI exit must not resolve FIXED."""
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed after crash with dirty edits",
+        dirty=True,
+        heads=["b" * 40],
+        head_descends=True,
+        returncode=1,
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_dirty_nonzero_fixed",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
+
+    assert result.verdict == "agent_failed"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "expected_verdict", "expected_reason"),
     [
