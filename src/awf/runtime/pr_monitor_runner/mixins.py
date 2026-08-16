@@ -74,6 +74,7 @@ class RunnerDelegatesMixin:
     _load_state = _lifecycle._load_state
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
+    _persist_failed_run_salvage_durably = _lifecycle._persist_failed_run_salvage_durably
     _set_workspace_attention = _merge_attention._set_workspace_attention
     _set_workspace_attention_with_merge_block_marker = (
         _merge_attention._set_workspace_attention_with_merge_block_marker

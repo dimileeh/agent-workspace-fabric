@@ -674,9 +674,28 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     )
     failed_runner._worktrees_root = tmp_path
 
-    async def _persist_state(_workspace_id: str, persisted: MonitorState) -> None:
-        persisted_snapshots.append(dict(persisted.threads_addressed_ids))
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        # Simulate merge-only durable write: only the three salvage keys for this item.
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
 
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        raise AssertionError("cancel salvage must not call full _persist_state")
+
+    failed_runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
     failed_runner._persist_state = _persist_state
 
     with pytest.raises(type(sink_exc)):
@@ -742,9 +761,11 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
 
     On Python 3.11+, catching ``CancelledError`` leaves cancellation pending, so
     a naive post-sink ``await`` would re-raise before salvage is recorded. Shield
-    HEAD capture + retention + ``_persist_state``, then propagate cancellation
-    (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ). Assert durability via a
-    simulated DB reload — in-memory-only keys would vanish after restart.
+    HEAD capture + retention + selective salvage persist, then propagate
+    cancellation (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ). Assert durability
+    via a simulated DB reload — in-memory-only keys would vanish after restart.
+    Full ``_persist_state`` must not run: mid-burst unconfirmed verdicts must not
+    flush (PRRT_kwDOSJAM6s6Zmur3).
     """
     import asyncio
 
@@ -759,9 +780,13 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     item_id = "PRRT_salvage_sink_task_cancel"
     body_hash = "feedback_body_hash_sink_task_cancel"
     workspace_id = "ws_salvage_sink_task_cancel"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_fix"
     (tmp_path / workspace_id).mkdir()
     state = MonitorState()
+    # Mid-burst earlier item marked addressed but not yet pushed/resolved.
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
     persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
 
     entered_sink = asyncio.Event()
     runner = _evidence_runner(
@@ -781,10 +806,29 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
         await asyncio.Event().wait()
         return True
 
-    async def _persist_state(_workspace_id: str, persisted: MonitorState) -> None:
-        persisted_snapshots.append(dict(persisted.threads_addressed_ids))
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
 
     runner._commit_dirty_worktree = _commit_dirty_worktree_then_hang
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
     runner._persist_state = _persist_state
 
     task = asyncio.create_task(
@@ -806,14 +850,19 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    assert persist_state_calls == 0
     assert persisted_snapshots
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
     assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
     assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    # In-memory unconfirmed marker remains; only salvage keys were durably written.
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
 
     # Worker restart: discard the live object and reload from the durable snapshot.
     reloaded = MonitorState()
     reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
     assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert (
         reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
@@ -844,6 +893,142 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     assert retry.reason == "confirmed salvaged fix after sink cancel"
     assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_persist_failed_run_salvage_durably_merges_only_salvage_keys(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cancel salvage persist must merge only ``__salvaged_fix_*`` keys onto DB.
+
+    Mid-burst unconfirmed ``fix_committed`` markers in memory must not flush
+    (PRRT_kwDOSJAM6s6Zmur3 / #305).
+    """
+    from awf.db.repositories import WorkspaceRepository
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    item_id = "PRRT_cancel_salvage_only"
+    head_key = _salvaged_fix_head_state_key(item_id)
+    body_key = _salvaged_fix_body_hash_state_key(item_id)
+    start_key = _salvaged_fix_start_state_key(item_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            "already_confirmed": "false_positive",
+            head_key: "stale_head",
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            "PRRT_unconfirmed": "fix_committed",
+            head_key: "b" * 40,
+            body_key: "body_hash",
+            start_key: "a" * 40,
+        }
+    )
+    await runner._persist_failed_run_salvage_durably(
+        workspace_id,
+        state,
+        salvage_item_id=item_id,
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        persisted = ws.monitor_threads_addressed or {}
+        assert persisted.get("already_confirmed") == "false_positive"
+        assert "PRRT_unconfirmed" not in persisted
+        assert persisted.get(head_key) == "b" * 40
+        assert persisted.get(body_key) == "body_hash"
+        assert persisted.get(start_key) == "a" * 40
+
+    # Already-equal values: no-op write (coverage for unchanged merge branch).
+    await runner._persist_failed_run_salvage_durably(
+        workspace_id,
+        state,
+        salvage_item_id=item_id,
+    )
+
+
+@pytest.mark.unit
+async def test_persist_failed_run_salvage_durably_clears_absent_keys_and_noops(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Clear path removes stale salvage keys; missing workspace / no-op are safe."""
+    from awf.db.repositories import WorkspaceRepository
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    item_id = "PRRT_cancel_salvage_clear"
+    head_key = _salvaged_fix_head_state_key(item_id)
+    body_key = _salvaged_fix_body_hash_state_key(item_id)
+    start_key = _salvaged_fix_start_state_key(item_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            head_key: "old_head",
+            body_key: "old_body",
+            start_key: "old_start",
+            "keep_me": "defer",
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # In-memory salvage cleared (e.g. explicit false_positive during cancel retain).
+    state = MonitorState(threads_addressed_ids={"unrelated": "needs_human"})
+    await runner._persist_failed_run_salvage_durably(
+        workspace_id,
+        state,
+        salvage_item_id=item_id,
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        persisted = ws.monitor_threads_addressed or {}
+        assert head_key not in persisted
+        assert body_key not in persisted
+        assert start_key not in persisted
+        assert persisted.get("keep_me") == "defer"
+        assert "unrelated" not in persisted
+
+    # Missing workspace: no-op.
+    await runner._persist_failed_run_salvage_durably(
+        "ws_does_not_exist",
+        state,
+        salvage_item_id=item_id,
+    )
+    # Already-absent keys: second clear is a no-op write.
+    await runner._persist_failed_run_salvage_durably(
+        workspace_id,
+        state,
+        salvage_item_id=item_id,
+    )
 
 
 @pytest.mark.unit

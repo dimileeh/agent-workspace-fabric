@@ -150,6 +150,10 @@ async def _retain_failed_run_salvage_despite_cancellation(
     evaluate+retain+persist work so a later no-change FIXED at the tip does not
     become ``fixed_without_head_advance`` after a worker reload
     (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ).
+
+    Persist ONLY the item's ``__salvaged_fix_*`` keys (merged onto DB state) —
+    never full ``_persist_state``, which would flush mid-burst unconfirmed
+    verdicts that ``CancelledError`` skips rolling back (PRRT_kwDOSJAM6s6Zmur3).
     """
 
     async def _capture_retain_and_persist() -> None:
@@ -170,12 +174,12 @@ async def _retain_failed_run_salvage_despite_cancellation(
             retain_for_failed_run=True,
         )
         # In-memory keys alone are lost when the monitor reloads from the DB after
-        # cancellation (worker restart / new cycle). Persist cancellation-safely
-        # before the caller re-raises (PRRT_kwDOSJAM6s6ZmsZQ).
-        if state is not None:
-            persist = getattr(runner, "_persist_state", None)
+        # cancellation (worker restart / new cycle). Persist only salvage keys
+        # before the caller re-raises (PRRT_kwDOSJAM6s6ZmsZQ, PRRT_kwDOSJAM6s6Zmur3).
+        if state is not None and salvage_item_id is not None:
+            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
             if callable(persist):
-                await persist(workspace_id, state)
+                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
 
     retain_task = asyncio.create_task(_capture_retain_and_persist())
     while True:
