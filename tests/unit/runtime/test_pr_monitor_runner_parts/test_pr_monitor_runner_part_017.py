@@ -415,6 +415,14 @@ class TestParseVerdict:
             ">> AWF-VERDICT: NEEDS_HUMAN: actually unsure",
             "> AWF-VERDICT: SHIPPED: done",
             "> - AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            # Combined list+blockquote (either order / nested) must strip
+            # repeatedly — one-pass blockquote-then-list leaves ``> AWF-…``
+            # after ``- >`` and ignores the blocker (#822 PRRT_kwDOSJAM6s6Zlnby).
+            "- > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "* > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "1. > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "- >> AWF-VERDICT: SHIPPED: done",
+            "> - > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
         ],
     )
     def test_private_awf_verdict_blockquoted_final_fail_closed(

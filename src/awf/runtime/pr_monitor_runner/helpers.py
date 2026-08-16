@@ -718,6 +718,21 @@ def _ascii_apostrophe_is_leading_elision(verdict_line: str, index: int) -> bool:
     return suffix in _ASCII_LEADING_ELISION_SUFFIXES
 
 
+def _strip_markdown_attempt_prefixes(segment: str) -> str:
+    """Strip leading Markdown list/blockquote markers until neither applies.
+
+    Agents may nest them in either order (``- > AWF-VERDICT: …``,
+    ``> - > AWF-VERDICT: …``). One-pass blockquote-then-list leaves a residual
+    ``>`` after ``- >``, so the marker no longer looks like a leading attempt.
+    """
+    normalized = segment.lstrip()
+    while True:
+        stripped = _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+        if stripped == normalized:
+            return normalized
+        normalized = stripped
+
+
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     """Return whether ``segment`` is a leading/split ``AWF-VERDICT:`` attempt.
 
@@ -727,9 +742,7 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     are stripped first so ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …``
     still count as garbled finals.
     """
-    normalized = _strip_markdown_blockquote_prefix(segment.lstrip())
-    normalized = _strip_markdown_list_prefix(normalized)
-    return _AWF_VERDICT_MARKER.match(normalized) is not None
+    return _AWF_VERDICT_MARKER.match(_strip_markdown_attempt_prefixes(segment)) is not None
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
