@@ -737,20 +737,32 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
-    def test_private_awf_verdict_same_line_unquoted_marker_in_defer_reason_keeps_defer(
+    def test_private_awf_verdict_same_line_leading_defer_then_needs_human(
         self,
     ) -> None:
-        # Same hard-block preservation for DEFER reasons that cite another marker
-        # without quotes (#822 PRRT_kwDOSJAM6s6Zl4Ra).
+        # DEFER is resolvable/non-blocking — same-line absorption is NEEDS_HUMAN
+        # only. A later unquoted NEEDS_HUMAN must win (fail closed), not be
+        # swallowed as DEFER reason prose (#822 PRRT_kwDOSJAM6s6Zl4Ra repair).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: DEFER: maybe use AWF-VERDICT: NEEDS_HUMAN: actually block"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "actually block"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_leading_defer_then_false_positive_wins(
+        self,
+    ) -> None:
+        # Leading DEFER keeps normal later-marker / final-marker handling
+        # (parity with multiline DEFER then FALSE POSITIVE).
         result = _parse_verdict_result(
             "AWF-VERDICT: DEFER: track whether to emit "
             "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
         )
 
-        assert result.verdict == "defer"
-        assert result.reason == (
-            "track whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
-        )
+        assert result.verdict == "false_positive"
+        assert result.reason == "reviewer is wrong."
 
     @pytest.mark.unit
     def test_private_awf_verdict_same_line_curly_quoted_marker_keeps_needs_human(

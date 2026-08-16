@@ -596,15 +596,17 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     markers look like leading attempts (mid-prose option lists must not
     override an earlier real verdict).
 
-    When the leading marker is already a hard block (``NEEDS_HUMAN`` /
-    ``DEFER``), keep the whole line as one unit as well. Later markers — quoted
-    or unquoted — are treated as reason prose citations so they cannot resolve
-    a thread the agent explicitly blocked (PRRT_kwDOSJAM6s6Zl4Ra).
+    When the leading marker is already a hard block (``NEEDS_HUMAN``), keep the
+    whole line as one unit as well. Later markers — quoted or unquoted — are
+    treated as reason prose citations so they cannot resolve a thread the agent
+    explicitly blocked (PRRT_kwDOSJAM6s6Zl4Ra). ``DEFER`` is resolvable /
+    non-blocking and must retain normal later-marker / final-marker handling so
+    a same-line ``NEEDS_HUMAN`` is not swallowed as DEFER reason prose.
 
     Subsequent markers embedded in quoted reason prose after a resolvable
-    leading verdict (for example a ``FIXED`` reason that cites the marker
-    grammar inside ASCII/curly quotes or Markdown backticks) are not split into
-    new attempts — only unquoted trailing markers are.
+    leading verdict (for example a ``FIXED`` or ``DEFER`` reason that cites the
+    marker grammar inside ASCII/curly quotes or Markdown backticks) are not
+    split into new attempts — only unquoted trailing markers are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
@@ -630,16 +632,17 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
 
 
 def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool:
-    """Return whether the leading same-line marker is ``NEEDS_HUMAN`` or ``DEFER``.
+    """Return whether the leading same-line marker is ``NEEDS_HUMAN``.
 
-    Hard-block leaders absorb later same-line markers into the reason so unquoted
-    prose citations cannot override the block.
+    Only ``NEEDS_HUMAN`` leaders absorb later same-line markers into the reason
+    so unquoted prose citations cannot override the block. ``DEFER`` must not
+    absorb — it stays on the normal later-marker path.
     """
     leading = _AWF_VERDICT.match(verdict_line, match_start)
     if leading is None:
         return False
     normalized_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
-    return normalized_label in {"needs human", "defer"}
+    return normalized_label == "needs human"
 
 
 def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:
