@@ -586,6 +586,7 @@ def test_decide_provider_recovery_skips_placeholder_fallback_without_consuming_b
         "provider_recovery": task_policy["provider_recovery"],
         "provider_recovery_state": {
             "fallback_attempt_number": 2,
+            "launched_fallback_attempts": 1,
         },
     }
     metadata_next = provider_recovery_metadata_from_failure(
