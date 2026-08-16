@@ -372,6 +372,22 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_trailing_prose_marker_quote_keeps_earlier_verdict(
+        self,
+    ) -> None:
+        # Mid-prose quotes of the marker grammar after a valid canonical line must
+        # not clear last_awf_mention_recognized / drop the earlier verdict (#822).
+        stdout = (
+            "AWF-VERDICT: FIXED: committed a regression test\n"
+            'Re-reading: "print AWF-VERDICT: FIXED: <one-sentence summary> and exit."'
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed a regression test"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_trailing_garbled_marker_fail_closed(
         self,
     ) -> None:

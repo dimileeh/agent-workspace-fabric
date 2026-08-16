@@ -311,16 +311,19 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 if _AWF_VERDICT_MARKER.search(segment):
                     saw_awf_mention = True
                     awf_match = _AWF_VERDICT.fullmatch(segment)
-                    last_awf_mention_recognized = awf_match is not None
                     if awf_match is not None:
+                        last_awf_mention_recognized = True
                         awf_verdicts.append(
                             _verdict_result_from_match(
                                 label=awf_match.group("label"),
                                 reason=awf_match.group("reason"),
                             )
                         )
-                else:
-                    awf_match = None
+                    elif _awf_verdict_segment_is_attempt(segment):
+                        # Leading / split-marker attempts that fail fullmatch are
+                        # authoritative garbled finals. Mid-prose quotes of the
+                        # marker grammar must not clear a prior recognized verdict.
+                        last_awf_mention_recognized = False
                 bare_match = _BARE_VERDICT_LINE.fullmatch(segment)
                 if bare_match is not None:
                     bare_verdicts.append(
@@ -329,8 +332,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                             reason=bare_match.group("reason"),
                         )
                     )
-    # A garbled final ``AWF-VERDICT:`` marker fails closed even when an earlier
-    # recognized verdict exists — the agent's last marker is authoritative.
+    # A garbled final leading ``AWF-VERDICT:`` attempt fails closed even when an
+    # earlier recognized verdict exists — the agent's last marker attempt is
+    # authoritative. Embedded prose quotes of the marker do not count.
     if saw_awf_mention and not last_awf_mention_recognized:
         return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
     if awf_verdicts:
@@ -487,6 +491,16 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
         if segment:
             segments.append(segment)
     return segments or [verdict_line]
+
+
+def _awf_verdict_segment_is_attempt(segment: str) -> bool:
+    """Return whether ``segment`` is a leading/split ``AWF-VERDICT:`` attempt.
+
+    Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
+    attempts; only segments that begin with the marker count toward the
+    final-marker fail-closed gate.
+    """
+    return _AWF_VERDICT_MARKER.match(segment.lstrip()) is not None
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
