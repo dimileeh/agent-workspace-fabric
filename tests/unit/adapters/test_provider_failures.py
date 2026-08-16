@@ -345,3 +345,21 @@ def test_classifies_service_unhealthy_on_timeout() -> None:
     assert classification is not None
     assert classification.reason_code == AGENT_SERVICE_UNHEALTHY
     assert classification.failure_type == "runtime_unhealthy"
+
+
+def test_classifies_unsupported_agent_runtime() -> None:
+    from awf.adapters.provider_failures import UNSUPPORTED_AGENT_RUNTIME
+
+    classification = classify_provider_failure(
+        reason_code=UNSUPPORTED_AGENT_RUNTIME,
+        stdout="",
+        stderr="agent runtime 'gemini' is not supported",
+        provider="unsupported",
+        model=None,
+    )
+    assert classification is not None
+    assert classification.reason_code == UNSUPPORTED_AGENT_RUNTIME
+    assert classification.failure_type == "unsupported_runtime"
+    assert classification.retryable is True
+    assert classification.cooldown_seconds == 0
+    assert classification.fallback_allowed is True

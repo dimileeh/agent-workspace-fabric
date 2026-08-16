@@ -1050,7 +1050,12 @@ class TestRegistry:
 
         assert exc_info.value.agent == "unknown_custom_runtime"
         assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
-        assert exc_info.value.details == {"agent": "unknown_custom_runtime"}
+        assert exc_info.value.details["agent"] == "unknown_custom_runtime"
+        assert (
+            exc_info.value.details["provider_recovery"]["reason_code"]
+            == "UNSUPPORTED_AGENT_RUNTIME"
+        )
+        assert exc_info.value.details["provider_recovery"]["retryable"] is True
 
     @pytest.mark.asyncio
     @pytest.mark.unit

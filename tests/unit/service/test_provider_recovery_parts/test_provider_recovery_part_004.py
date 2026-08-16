@@ -343,3 +343,63 @@ def test_skipped_placeholder_slot_remains_free_across_decisions() -> None:
     assert decision3.action == "terminal"
     assert decision3.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
     assert decision3.launched_fallback_attempts == 2
+
+
+def test_retired_agent_runtime_routes_to_fallback() -> None:
+    from datetime import UTC, datetime
+
+    from awf.adapters.base import AgentRunError, RetiredAgentAdapter
+    from awf.common.commands import FakeCommandRunner
+    from awf.service.provider_recovery import (
+        decide_provider_recovery,
+        provider_recovery_metadata_from_failure,
+    )
+
+    adapter = RetiredAgentAdapter(runtime="gemini", runner=FakeCommandRunner())
+    with pytest.raises(AgentRunError) as exc_info:
+        import asyncio
+        from pathlib import Path
+
+        asyncio.run(
+            adapter.run(
+                compose_project="ws_test",
+                compose_file=Path("/tmp/compose.yml"),
+                prompt="fix issue",
+            )
+        )
+
+    err = exc_info.value
+    assert err.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+            ],
+            "max_fallback_attempts": 1,
+        }
+    }
+
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=err.reason_code,
+        message=err.result.stderr,
+        details=err.details,
+        task_policy=task_policy,
+    )
+
+    assert metadata is not None
+    assert metadata["reason_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+    assert metadata["fallback_allowed"] is True
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy=task_policy,
+        current_agent="gemini",
+        current_model=None,
+        now=datetime.now(UTC),
+    )
+
+    assert decision.action == "fallback"
+    assert decision.target_agent == "claude_code"
+    assert decision.target_model == "claude-3-7-sonnet"
+    assert decision.reason_code == "PROVIDER_FALLBACK_SELECTED"
