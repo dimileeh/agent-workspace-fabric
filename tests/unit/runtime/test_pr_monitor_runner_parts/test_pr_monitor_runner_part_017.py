@@ -290,6 +290,99 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_html_pre_block(self) -> None:
+        # Raw Markdown HTML <pre> examples are not fenced/indented code; without
+        # tracking them the example overrides an earlier NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZnEAt).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<pre>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</pre>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_html_code_block(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</code>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_same_line_html_pre_wrapper(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<pre>AWF-VERDICT: FALSE POSITIVE: example</pre>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_html_pre_only_quote_is_markerless(self) -> None:
+        stdout = "<pre>\nAWF-VERDICT: FALSE POSITIVE: example\n</pre>\n"
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unclosed_html_pre_shields_trailing_markers(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<pre>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unfenced_after_closed_html_pre_still_wins(self) -> None:
+        stdout = (
+            "<pre>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</pre>\n"
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_html_pre_placeholder_does_not_poison_final(self) -> None:
+        stdout = (
+            "AWF-VERDICT: FIXED: committed the html skip\n"
+            "<pre>\n"
+            "AWF-VERDICT: FIXED: <one-sentence summary>\n"
+            "</pre>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the html skip"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_markers_in_indented_code_block(self) -> None:
         # Markdown also represents code without fences (four-space indent). An
         # unconditional strip would promote the example to the final verdict and
