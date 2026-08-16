@@ -69,6 +69,18 @@ def _outdated_resolve_requeued_key(thread_id: str) -> str:
     return f"__awf_outdated_resolve_requeued__:{thread_id}"
 
 
+def _salvaged_fix_head_state_key(item_id: str) -> str:
+    """Persisted SHA of a dirty-salvage commit after a nonzero CLI exit.
+
+    When the comment agent crashes after leaving a valid dirty fix,
+    ``_commit_dirty_worktree`` still commits it and the invocation returns
+    ``agent_failed``. The settle loop retries the same item with that salvage as
+    the new start HEAD; a successful FIXED without another tree change must be
+    able to confirm the prior salvage without accepting the failed run's verdict.
+    """
+    return f"__salvaged_fix_head__:{item_id}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 

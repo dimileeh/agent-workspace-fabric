@@ -16,6 +16,7 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
@@ -153,12 +154,17 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_source_mirror: Path | None = None,
     read_only: bool = False,
     require_fix_evidence: bool = True,
+    evidence_item_id: str | None = None,
 ) -> VerdictResult:
     """Run the monitor agent and parse its verdict without losing reason details.
 
     ``require_fix_evidence`` (default True) enforces per-item HEAD/dirty
     evidence for FIXED claims. Operator hints pass False so GitHub-side /
     no-code directives can complete without a local commit.
+
+    ``evidence_item_id`` scopes dirty-salvage retention so a later successful
+    FIXED retry for the same thread/comment can confirm a prior failed-run
+    salvage without accepting that failed invocation's verdict.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -167,6 +173,7 @@ async def _invoke_cli_for_verdict_result(
     command_evidence: list[str] = []
     if state is not None:
         state.hosted_terminal_head_advanced = False
+    salvage_item_id = (evidence_item_id or "").strip() or None
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
     mirror_path: Path | None = None
@@ -399,6 +406,37 @@ async def _invoke_cli_for_verdict_result(
     dirty_fix_evidence = bool(committed_dirty_changes) and not local_ancestry_evaluable
     item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
 
+    # Failed runs may still leave a contentful salvage commit. Retain that SHA
+    # for this item so a later successful FIXED can confirm it once HEAD is
+    # still at the salvage tip — without resolving from the failed invocation.
+    if (
+        cli_failed
+        and state is not None
+        and salvage_item_id is not None
+        and local_head_advanced
+        and item_end_head is not None
+    ):
+        state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
+
+    retained_salvage_evidence = False
+    if (
+        not item_fix_evidence
+        and not cli_failed
+        and state is not None
+        and salvage_item_id is not None
+        and item_end_head is not None
+    ):
+        retained_head = (
+            state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id)) or ""
+        ).strip()
+        if retained_head and retained_head.lower() == item_end_head.lower():
+            retained_salvage_evidence = True
+    item_fix_evidence = item_fix_evidence or retained_salvage_evidence
+
+    def _clear_retained_salvage() -> None:
+        if state is not None and salvage_item_id is not None:
+            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
+
     parsed = _parse_verdict_result(result_stdout)
     if parsed.verdict in {"false_positive", "defer"}:
         # Never upgrade an explicit non-fix marker because dirty or hosted head
@@ -406,6 +444,7 @@ async def _invoke_cli_for_verdict_result(
         # the run did not complete — do not resolve/defer from a pre-crash marker.
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
+        _clear_retained_salvage()
         return parsed
     if parsed.verdict == "needs_human":
         # Keep explicit NEEDS_HUMAN (and successful fail-closed parses). Only map
@@ -413,6 +452,8 @@ async def _invoke_cli_for_verdict_result(
         # so crashes still retry instead of parking a human escalation.
         if cli_failed and parsed.reason in _FAIL_CLOSED_VERDICT_REASONS:
             return VerdictResult(verdict="agent_failed")
+        if not cli_failed:
+            _clear_retained_salvage()
         return parsed
     if parsed.verdict == "fix_committed":
         # Hosted recovery may sync a terminal SHA and set advance evidence before
@@ -420,13 +461,16 @@ async def _invoke_cli_for_verdict_result(
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
         if item_fix_evidence:
+            _clear_retained_salvage()
             return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt
             # documents FIXED without a code change for that path.
+            _clear_retained_salvage()
             return parsed
         reason = redact_audit_text("fixed_without_head_advance")
         return VerdictResult(verdict="needs_human", reason=reason or "fixed_without_head_advance")
     if cli_failed:
         return VerdictResult(verdict="agent_failed")
+    _clear_retained_salvage()
     return parsed

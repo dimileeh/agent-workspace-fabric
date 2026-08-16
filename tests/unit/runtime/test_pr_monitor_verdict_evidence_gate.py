@@ -435,6 +435,129 @@ async def test_fixed_with_dirty_commit_still_agent_failed_on_cli_nonzero() -> No
 
 
 @pytest.mark.unit
+async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
+    tmp_path: Path,
+) -> None:
+    """Failed salvage must not resolve; successful FIXED retry may confirm it."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_retry"
+    workspace_id = "ws_salvage_retry"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
+    tmp_path: Path,
+) -> None:
+    """Another item must not inherit a prior item's retained salvage head."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    workspace_id = "ws_salvage_leak"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id="item_one",
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key("item_one")) == salvaged
+
+    other_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: unrelated item no change",
+        dirty=False,
+        heads=[salvaged],
+    )
+    other_runner._worktrees_root = tmp_path
+
+    other = await comments._invoke_cli_for_verdict_result(
+        other_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id="item_two",
+    )
+    assert other.verdict == "needs_human"
+    assert other.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key("item_one")) == salvaged
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "expected_verdict", "expected_reason"),
     [

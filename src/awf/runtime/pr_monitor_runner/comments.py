@@ -757,6 +757,7 @@ async def _address_thread(
         state=state,
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
+        evidence_item_id=thread.thread_id,
     )
     result = await _enforce_needs_human_reason(
         runner,
@@ -891,6 +892,7 @@ async def _address_review_comment_result(
         state=state,
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
+        evidence_item_id=comment.comment_id,
     )
     return await _enforce_needs_human_reason(
         runner,
@@ -1228,6 +1230,7 @@ async def _enforce_needs_human_reason(
                 reask_worktree.source_mirror if reask_worktree is not None else None
             ),
             read_only=hosted_read_only,
+            evidence_item_id=item_id,
         )
     except (
         ProviderRecoveryAuthError,
@@ -1392,6 +1395,7 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_source_mirror: Path | None = None,
     read_only: bool = False,
     require_fix_evidence: bool = True,
+    evidence_item_id: str | None = None,
 ) -> VerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -1411,6 +1415,7 @@ async def _invoke_cli_for_verdict_result(
         isolated_worktree_source_mirror=isolated_worktree_source_mirror,
         read_only=read_only,
         require_fix_evidence=require_fix_evidence,
+        evidence_item_id=evidence_item_id,
     )
 
 
