@@ -1323,6 +1323,44 @@ def test_retired_gemini_entry_pruned_during_targeted_recheck(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_unselected_antigravity_config_preserved_during_targeted_recheck(tmp_path: Path) -> None:
+    """Targeted recheck of another provider preserves existing ready antigravity config.
+
+    Regression test for PR #814 review thread PRRT_kwDOSJAM6s6Zmj4U: when a targeted
+    recheck selects another provider (e.g. codex) and GEMINI_API_KEY is not in
+    environ, an existing valid, ready env://GEMINI_API_KEY antigravity entry must
+    not be downgraded to unavailable.
+    """
+    existing_config = HostSetupConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=existing_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].status == "ready"
+    assert updated_config.providers["antigravity"].credential_ref == "env://GEMINI_API_KEY"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
 def test_retired_gemini_entry_migrated_and_ready_during_targeted_recheck(tmp_path: Path) -> None:
     """Targeted recheck migrates retired gemini key and preserves ready status when env var is present."""
     legacy_config = HostSetupConfig(

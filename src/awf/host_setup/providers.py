@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -172,6 +172,7 @@ def _prune_and_migrate_provider_config(
     environ: Mapping[str, str] | None = None,
     *,
     is_targeted: bool = False,
+    target_names: Container[str] | None = None,
 ) -> dict[str, ProviderConfig]:
     """Prune retired providers and migrate legacy provider entries to canonical names."""
     result = dict(providers)
@@ -188,8 +189,14 @@ def _prune_and_migrate_provider_config(
                 target_cfg = result[target_name]
                 if target_cfg.backend == "env_ref":
                     valid_refs = {f"env://{var}" for var in spec.env_ref_vars}
+                    should_check_degradation = (
+                        not is_targeted
+                        or (target_names is not None and target_name in target_names)
+                        or migrated_legacy_cfg is not None
+                    )
                     if target_cfg.credential_ref not in valid_refs or (
-                        environ is not None
+                        should_check_degradation
+                        and environ is not None
                         and _as_setup_status(target_cfg.status) == "ready"
                         and _first_present(environ, spec.env_ref_vars) is None
                     ):
@@ -337,7 +344,7 @@ def orchestrate_provider_setup(
     )
 
     providers_config = _prune_and_migrate_provider_config(
-        config.providers, environ=env, is_targeted=is_targeted
+        config.providers, environ=env, is_targeted=is_targeted, target_names=target_names
     )
     results: list[ProviderSetupResult] = []
     # Iterate registry order (not selection order) for a deterministic summary.
