@@ -10,3 +10,4 @@ test-results/
 
 # Local design-system specimen (sign-off preview, not shipped)
 design-preview.html
+.next-hosted/

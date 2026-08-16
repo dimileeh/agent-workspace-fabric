@@ -198,6 +198,10 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["executor_kwargs"]["agent_runtime_executor"] is None
     assert created["executor_kwargs"]["hosted_validation"] is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
+    assert (
+        created["provisioner_kwargs"]["config"].agent_defaults
+        == created["executor_kwargs"]["config"].agent_defaults
+    )
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
 

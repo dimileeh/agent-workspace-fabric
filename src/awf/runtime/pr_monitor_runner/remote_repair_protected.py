@@ -465,6 +465,7 @@ async def _post_protected_block_notification(
                 pr_number=pr_number,
                 head_sha=pr_head_sha,
                 blocker_reason=blocker_reason,
+                preserve_full_blocker_reason=True,
             ),
         )
     except ForgeClientError as exc:

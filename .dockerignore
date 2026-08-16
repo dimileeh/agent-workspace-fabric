@@ -15,6 +15,7 @@ __pycache__/
 
 apps/console/.env.local
 apps/console/.next/
+apps/console/.next-hosted/
 apps/console/node_modules/
 apps/console/tsconfig.tsbuildinfo
 

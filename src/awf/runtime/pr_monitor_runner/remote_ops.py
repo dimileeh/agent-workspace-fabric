@@ -510,19 +510,25 @@ async def _count_base_behind(self: Any, *, worktree_path: Path, base_branch: str
         ) from exc
 
 
-async def _rev_parse_head(self: Any, worktree_path: Path) -> str | None:
+async def _rev_parse_head(
+    self: Any,
+    worktree_path: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> str | None:
     """Resolve the current worktree HEAD SHA, returning None on failure."""
-    result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "rev-parse",
-            "HEAD",
-        ],
-        env=git_env_without_object_lookup_overrides(),
-    )
+    command = [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "rev-parse",
+        "HEAD",
+    ]
+    kwargs: dict[str, Any] = {"env": git_env_without_object_lookup_overrides()}
+    if timeout_seconds is not None:
+        kwargs["timeout_seconds"] = timeout_seconds
+    result = await self._deps.runner.run(command, **kwargs)
     if not result.ok:
         return None
     value = result.stdout.strip()

@@ -463,6 +463,13 @@ async def _mark_failed(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 payload={"message": safe_message[:1000]},
             )
+        # Same as operator cancel/stop and PRMonitorRunner._terminate_failed:
+        # monitoring_pr→failed (including resume_pr_monitor_handoff before the
+        # runner starts) must clear HUMAN_WAIT attention so a persisted episode
+        # does not strand awaiting_human_since / skip attention_cleared
+        # (PRRT_kwDOSJAM6s6XdyUu).
+        if from_status == WorkspaceStatus.monitoring_pr:
+            await repo.clear_workspace_attention(workspace_id)
         await session.commit()
 
 

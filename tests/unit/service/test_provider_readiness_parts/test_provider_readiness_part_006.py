@@ -173,18 +173,22 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
             assert isinstance(subprocess_env, dict)
             assert subprocess_env["GH_TOKEN"] == github_secret
             return _completed(stdout="logged in\n")
-        assert args == [
+        assert args[:6] == [
             "docker",
             "run",
             "--rm",
             "--entrypoint",
             "sh",
             "awf-agent-runtime:latest",
-            "-lc",
-            "command -v cursor-agent",
         ]
-        assert kwargs["env"]["CURSOR_API_KEY"] == cursor_secret
-        return _completed(stdout="/usr/local/bin/cursor-agent\n")
+        assert args[6] == "-lc"
+        assert args[7] in {"command -v cursor-agent", "command -v agy"}
+        subprocess_env = kwargs["env"]
+        assert isinstance(subprocess_env, dict)
+        assert subprocess_env["CURSOR_API_KEY"] == cursor_secret
+        assert subprocess_env["GEMINI_API_KEY"] == gemini_secret
+        executable = "cursor-agent" if "cursor-agent" in args[7] else "agy"
+        return _completed(stdout=f"/usr/local/bin/{executable}\n")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -200,6 +204,7 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
         "codex",
         "claude_code",
         "cursor",
+        "antigravity",
         "gemini",
         "opencode",
         "grok",
@@ -218,6 +223,16 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
             "awf-agent-runtime:latest",
             "-lc",
             "command -v cursor-agent",
+        ],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v agy",
         ],
     ]
     serialized = json.dumps(payload, sort_keys=True)

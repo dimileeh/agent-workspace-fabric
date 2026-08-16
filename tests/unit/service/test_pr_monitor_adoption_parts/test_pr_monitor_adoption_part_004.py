@@ -243,6 +243,10 @@ class TestPullRequestMonitorAdoptionServicePart004:
                 branch_base=metadata.base_ref,
                 task_title=metadata.title,
                 task_prompt="existing adoption",
+                task_external_id=adoption_module._adoption_external_id(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=metadata.number,
+                ),
                 agent="codex",
                 test_commands=[],
                 task_policy={

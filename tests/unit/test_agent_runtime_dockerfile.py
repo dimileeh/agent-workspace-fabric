@@ -124,12 +124,25 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.144.1" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.206" in dockerfile
+    assert "ARG CODEX_VERSION=0.147.0" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.226" in dockerfile
     assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
     assert "ARG GROK_VERSION=0.2.94" in dockerfile
+    assert "ARG ANTIGRAVITY_VERSION=1.1.13" in dockerfile
+    assert (
+        "ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9"
+        in dockerfile
+    )
+    assert (
+        "ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8"
+        in dockerfile
+    )
+    assert "github.com/google-antigravity/antigravity-cli/releases/download/" in dockerfile
+    assert "install -m 0755 /tmp/antigravity /usr/local/bin/agy" in dockerfile
+    assert "test -x /usr/local/bin/agy" in dockerfile
+    assert "agy --version" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
@@ -154,14 +167,6 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
     ) < dockerfile.index("ARG CURSOR_VERSION=2026.07.20-8cc9c0b")
-    assert (
-        "USER agent\n"
-        "WORKDIR /workspace\n\n"
-        "RUN set -eux; \\\n"
-        "    command -v cursor-agent; \\\n"
-        "    test -x /usr/local/bin/cursor-agent; \\\n"
-        "    cursor-agent --version"
-    ) in dockerfile
     assert "npm install -g cursor-agent" not in dockerfile
     assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
     assert "https://x.ai/cli/install.sh" not in dockerfile
@@ -175,6 +180,18 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "gemini --version" in dockerfile
     assert "opencode --version" in dockerfile
     assert "grok --version" in dockerfile
+    assert "agy --version" in dockerfile
+    assert (
+        "USER agent\n"
+        "WORKDIR /workspace\n\n"
+        "RUN set -eux; \\\n"
+        "    command -v cursor-agent; \\\n"
+        "    test -x /usr/local/bin/cursor-agent; \\\n"
+        "    cursor-agent --version; \\\n"
+        "    command -v agy; \\\n"
+        "    test -x /usr/local/bin/agy; \\\n"
+        "    agy --version"
+    ) in dockerfile
 
 
 @pytest.mark.unit
@@ -185,7 +202,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     assert "codex --version || true" not in dockerfile
     assert (
         "codex exec --dangerously-bypass-approvals-and-sandbox "
-        "--model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+        "--model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile
@@ -198,6 +215,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
         'grok -p "" --always-approve --no-alt-screen --no-auto-update '
         "--output-format plain --model grok-build --help >/dev/null"
     ) in dockerfile
+    assert "agy --help >/dev/null" in dockerfile
 
 
 @pytest.mark.unit

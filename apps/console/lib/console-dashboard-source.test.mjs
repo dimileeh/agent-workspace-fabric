@@ -91,6 +91,19 @@ test("operator action state is guarded by current workspace selection", () => {
   assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
 });
 
+test("dashboard paths go through the console URL builder", () => {
+  assert.match(dashboardSource.dashboard, /from "@\/lib\/console-urls"/);
+  assert.match(dashboardSource.dashboard, /awfPath\(/);
+  assert.doesNotMatch(dashboardSource.dashboard, /["'`]\/api\/awf/);
+  assert.match(dashboardSource.shared, /from "@\/lib\/console-urls"/);
+  assert.match(dashboardSource.shared, /operatorPath\(/);
+  assert.match(dashboardSource.shared, /awfPath\(/);
+  assert.doesNotMatch(dashboardSource.shared, /["'`]\/api\/(?:awf|operator)/);
+  assert.match(dashboardSource.logs, /from "@\/lib\/console-urls"/);
+  assert.match(dashboardSource.logs, /awfPath\(/);
+  assert.doesNotMatch(dashboardSource.logs, /["'`]\/api\/awf/);
+});
+
 test("extractPrNumberFromHref regex is forge-neutral (GitHub + Bitbucket)", () => {
   assert.match(dashboardSource.shared, /pull\(\?:-requests\)\?/);
 });

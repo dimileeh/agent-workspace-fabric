@@ -111,6 +111,8 @@ def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
             "base_ref": request.git_preparation.base_ref,
             "expected_base_sha": request.git_preparation.expected_base_sha,
         }
+    if request.read_only:
+        payload["read_only"] = True
     if request.profile is not None:
         agent_profile = request.profile.model_copy(deep=True)
         agent_profile.phases.setup = []

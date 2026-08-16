@@ -14,7 +14,14 @@ export type WorkspaceStatus =
   | "destroying"
   | "destroyed";
 
-export type AgentRuntime = "codex" | "claude_code" | "gemini" | "opencode";
+export type AgentRuntime =
+  | "codex"
+  | "claude_code"
+  | "cursor"
+  | "antigravity"
+  | "gemini"
+  | "opencode"
+  | "grok";
 
 export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
 export type NetworkPosture = "offline" | "restricted" | "open";

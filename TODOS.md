@@ -41,7 +41,7 @@
 
 - **What:** Move `MergeCandidate` creation earlier so that any workspace holding a `pr_url` also holds
   a candidate row, instead of creating it only on the `-> monitoring_pr` transition
-  (`db/repositories/workspace_repo.py:1036-1050`).
+  (`WorkspaceRepository._sync_merge_candidate_lifecycle`).
 - **Why:** This is the root cause behind the stale merge-queue rows fixed in
   `plans/MERGE_QUEUE_TERMINAL_ROWS_PLAN.md`. PR adoption stamps `pr_url` at workspace creation, but the
   candidate is only created at monitor handoff. A workspace that dies in between (5 did, on 2026-07-21,
@@ -64,7 +64,7 @@
 - **What:** Delete `merged_at` from `MergeQueueItemResponse` (`api/schemas.py:1300`), regenerate
   `openapi.json`, and update the MCP schema mirror plus console types.
 - **Why:** Verified during the merge-queue review: `merged_at` is structurally always null on this
-  endpoint. `mark_workspace_merged` (`db/repositories/quality_repo.py:516-519`) sets `status="merged"`
+  endpoint. `MergeCandidateRepository.mark_workspace_merged` sets `status="merged"`
   and `merged_at` in the same operation, and the queue only ever returns `open` candidates. Live DB
   confirms it: `open|3|0`, `closed|61|0`, `merged|500|500`. The contract advertises a field it can
   never populate.
@@ -97,3 +97,82 @@
   rather than being settled by accident inside a bugfix.
 - **Depends on / blocked by:** Best done after candidate-at-adoption-time, which would make the legacy
   path genuinely legacy and shrink this question considerably.
+
+## Diff-budget scope governor (pause runaway deliveries)
+
+- **What:** Pause a workspace (protected-file-style block → guide resume) when its working diff
+  exceeds a configurable multiple of the task's declared footprint (files/lines, workspace.yml).
+- **Why:** PR #808's 4-file task became 125 files (+26.7k lines) over 72h with no mechanism noticing.
+  Scope is a protected resource; the pause-for-operator pattern already exists and works.
+- **Pros:** Bounds runaway deliveries at the source; reuses the proven block/guide flow.
+- **Cons:** Footprint declaration is fuzzy (tests legitimately multiply lines); bad thresholds nag.
+- **Context:** Lesson 1 of the #808 incident (2026-08-09..12; operator watched a 30x diff with only
+  directives available). Minted by the dev→main promotion review.
+- **Depends on / blocked by:** nothing.
+
+## Review-thread triage tier: out_of_scope → file issue
+
+- **What:** New agent verdict `out_of_scope` for bot review threads: AWF replies with rationale,
+  files a tracking issue, resolves the thread, changes no code. Unlike defer/needs_human it does not
+  block merge once the issue exists. Guardrails: per-PR cap + operator-visible audit.
+- **Why:** #808's reviewer filed 323 threads, all treated as must-address; threads like "support
+  Google web-identity overrides" drove architecture that belonged in issues.
+- **Pros:** Breaks the reviewer→scope-growth feedback loop; preserves signal in the tracker.
+- **Cons:** Over-use ships under-reviewed code; needs the cap + visibility guardrails.
+- **Context:** Lesson 2 of the #808 incident — the arms race ended only when the reviewer ran dry.
+- **Depends on / blocked by:** nothing; complements the scope governor.
+
+## CI-starvation priority inversion in the monitor
+
+- **What:** After N consecutive comment-repair cycles with a standing CI failure whose logs exist
+  from a completed run, dispatch the CI repair first for one turn, folding open threads into that
+  same run's prompt.
+- **Why:** #808: 208 comment repairs vs ~2 effective CI-repair turns over 40h — each push cancelled
+  the in-flight run, starving the only prompt that carries pytest logs.
+- **Pros:** Converges the actual bottleneck; operator directive #2 during the incident was exactly
+  this and it worked — productize it.
+- **Cons:** Touches decide()'s ordering — the most invariant-sensitive monitor code; gate carefully.
+- **Context:** Lesson 3 of the #808 incident.
+- **Depends on / blocked by:** nothing.
+
+## Pathology-based operator summons (livelock/thrash detectors)
+
+- **What:** NotifyHuman on delivery pathology, not just rule breaches: sustained pushes/hour above X;
+  K consecutive CI runs cancelled pre-completion; same test failing across M repair pushes; monitor
+  age beyond Y hours. All computable from existing workspace events.
+- **Why:** #808's pathology was metric-visible from hour 6; the summons came at hour 70 via a rule
+  breach. A human reading event streams was the actual detector.
+- **Pros:** Cheap (events exist); the enriched needs-human comment now carries itemized context.
+- **Cons:** Threshold tuning; false summons erode signal trust.
+- **Context:** Lesson 4 of the #808 incident; pairs with the scope governor.
+- **Depends on / blocked by:** nothing.
+
+## Plan-consistency checking (contradictory requirements)
+
+- **What:** Explicit consistency pass in plan review (gstack skill and/or AWF conformance):
+  enumerate binding requirements, check pairwise for contradiction against the codebase before
+  execution.
+- **Why:** ROOT cause of #808's 72h: "reuse the repair invocation machinery" vs "re-ask must be
+  read-only" (repair container mounts the worktree RW) — decidable at review time; two reviews
+  checked each requirement individually, neither checked them against each other. The agent resolved
+  the contradiction its own way, at maximal scope.
+- **Pros:** Kills the incident class furthest upstream; pilotable as a review step immediately.
+- **Cons:** Hardest of the five to make deterministic; risks becoming a checkbox.
+- **Context:** Lesson 5 of the #808 incident.
+- **Depends on / blocked by:** nothing.
+
+## Clarification subsystem: evidence-revisit (condition of the keep-as-is verdict)
+
+- **What:** After 1–2 months of real re-asks: (a) trim the AWS-profile/external-account rewrite
+  machinery if usage shows it dead (may need a usage counter first); (b) switch git object-directory
+  staging from copy to hardlink where filesystems allow (adapters/base_isolated_reask.py);
+  (c) pre-split adapters/base.py and service/provider_readiness_helpers.py — both sit AT the
+  1500-line guard; (d) extend the entrypoint-execution test matrix (test_compose_manager.py)
+  beyond codex/claude/aws to the remaining provider targets.
+- **Why:** The dev→main promotion review kept the 72h subsystem unchanged on the explicit condition
+  of revisiting from evidence, not aesthetics. Known fixed already: the .aws config-copy gap
+  (288283f76).
+- **Pros:** Converts the review watchlist into a scheduled decision; items are small and independent.
+- **Cons:** (a) needs re-ask usage telemetry.
+- **Context:** Issue 1-A of the promotion review; codex outside voice contributed (a) and (d).
+- **Depends on / blocked by:** promotion + control-plane rebuild putting the subsystem in production.

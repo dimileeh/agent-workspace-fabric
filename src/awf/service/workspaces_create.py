@@ -252,6 +252,14 @@ async def create_workspace_row(
     )
     await _record_provider_readiness_preflight(repo, ws, preflight)
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
+    from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
+
+    await emit_agent_deprecated_event(
+        repo,
+        ws,
+        agent=payload.task.agent,
+        selection_path="workspace_create",
+    )
     await session.flush()
     return ws
 

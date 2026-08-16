@@ -213,6 +213,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # ``stop_stack=True`` runs a FULL compose down (containers + network +
         # host port freed), not a bare ``docker stop`` (issue #588 / #583).
         cleanup_result = await self._release_runtime_stack(workspace) if stop_stack else None
+        leaving_blocked = workspace.status == WorkspaceStatus.blocked.value
         if (
             workspace.status != WorkspaceStatus.cancelled.value
             and WorkspaceStateMachine.can_transition(
@@ -226,6 +227,14 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
+            if leaving_blocked:
+                await _emit_blocked_attention_cleared(repo, workspace)
+            # Terminal exit from monitoring_pr with an active HUMAN_WAIT episode
+            # must clear awaiting_human_since (and emit monitoring-source
+            # attention_cleared). Remonitor/guide already clear; cancel previously
+            # only handled leaving_blocked (PRRT_kwDOSJAM6s6XYW1j). Guarded no-op
+            # when no episode is open.
+            await repo.clear_workspace_attention(workspace_id)
         else:
             await repo.add_event(
                 workspace,
@@ -335,8 +344,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # per-workspace network, and the host port are released (issue #588 /
         # #583) — never a bare ``docker stop`` that leaves them ``Exited``.
         cleanup_result = await self._release_runtime_stack(workspace)
-        if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
-            WorkspaceStatus(workspace.status),
+        current_status = WorkspaceStatus(workspace.status)
+        leaving_blocked = current_status == WorkspaceStatus.blocked
+        if _is_active(current_status) and WorkspaceStateMachine.can_transition(
+            current_status,
             WorkspaceStatus.cancelled,
         ):
             await repo.transition(
@@ -345,6 +356,12 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
+            if leaving_blocked:
+                await _emit_blocked_attention_cleared(repo, workspace)
+            # Same as cancel: clear monitoring-source HUMAN_WAIT attention on
+            # terminal exit so awaiting_human_since is not stranded
+            # (PRRT_kwDOSJAM6s6XYW1j).
+            await repo.clear_workspace_attention(workspace_id)
         elif cleanup_result.ok:
             # ``stack_stopped`` asserts the runtime was actually stopped, so it
             # is only emitted once the compose down succeeds. A failed teardown
@@ -937,12 +954,19 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         if _is_active(current) and WorkspaceStateMachine.can_transition(
             current, WorkspaceStatus.cancelled
         ):
+            leaving_blocked = current == WorkspaceStatus.blocked
             await repo.transition(
                 workspace,
                 to=WorkspaceStatus.cancelled,
                 reason_code=_OPERATOR_DESTROY_REASON_CODE,
                 payload=event_payload,
             )
+            if leaving_blocked:
+                await _emit_blocked_attention_cleared(repo, workspace)
+            # Same as cancel/stop: clear monitoring-source HUMAN_WAIT attention on
+            # the active→cancelled hop so force-destroy does not leave a stranded
+            # awaiting_human_since episode (PRRT_kwDOSJAM6s6XYW1j).
+            await repo.clear_workspace_attention(workspace_id)
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
             await repo.transition(
@@ -1354,6 +1378,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _control_response,
     _control_warning_payloads,
     _docker_process,
+    _emit_blocked_attention_cleared,
     _event_payload,
     _find_active_operation,
     _finish_stack_stop_failed_operation,

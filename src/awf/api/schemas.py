@@ -16,6 +16,7 @@ from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
@@ -157,6 +158,28 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
             ),
         ),
     ] = None
+    external_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create. Omit to use the "
+                "generated repo/PR adoption identity. Changing this on a live "
+                "adoption returns PR_ADOPTION_POLICY_CONFLICT; an id owned by "
+                "another task scope returns TASK_EXTERNAL_ID_CONFLICT."
+            ),
+        ),
+    ] = None
+    task_class: TaskClass | None = Field(
+        default=None,
+        description=(
+            "Optional task class for scheduling and policy parity with workspace "
+            "create. Omit to leave unset. Changing this on a live adoption returns "
+            "PR_ADOPTION_POLICY_CONFLICT."
+        ),
+    )
     reason: Annotated[str | None, Field(default=None, max_length=512)] = None
 
     @field_validator("task_tag")
@@ -164,6 +187,12 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     def _validate_task_tag(cls, value: str | None) -> str | None:
         """Normalize and validate an optional task tag; ``None`` when absent."""
         return validate_task_tag(value)
+
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -286,6 +315,12 @@ class WorkspaceTask(BaseModel):
         everywhere.
         """
         return validate_task_tag(value)
+
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
 
     @field_validator("kind")
     @classmethod
@@ -1215,6 +1250,33 @@ class WorkspaceOverviewListResponse(BaseModel):
     has_more: bool = False
     limit: int = 50
     cursor: str | None = None
+
+
+class WorkspaceOverviewBatchRequest(BaseModel):
+    """Bounded batch lookup for known workspace IDs (hosted projection)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    workspace_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        Field(
+            min_length=1,
+            max_length=200,
+            json_schema_extra={"uniqueItems": True},
+        ),
+    ]
+
+    @field_validator("workspace_ids")
+    @classmethod
+    def _workspace_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("workspace_ids must be unique")
+        return value
+
+
+class WorkspaceOverviewBatchResponse(BaseModel):
+    items: list[WorkspaceOverviewResponse]
+    missing_workspace_ids: list[str]
 
 
 StaleReasonStatus = Literal["active", "resolved"]

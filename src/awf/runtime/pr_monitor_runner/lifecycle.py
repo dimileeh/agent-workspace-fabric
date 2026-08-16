@@ -619,6 +619,12 @@ async def _terminate_completed(
         if pr_merge_sha:
             ws.pr_merge_sha = pr_merge_sha
         await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
+        # Same as operator cancel/stop and ``_terminate_failed``: clear
+        # monitoring-source HUMAN_WAIT attention on this terminal exit so an
+        # externally merged PR (or other completed ShortCircuit) does not
+        # strand awaiting_human_since / skip attention_cleared after a prior
+        # NotifyHuman episode (issuecomment-5225662425 / PR #805).
+        await repo.clear_workspace_attention(workspace_id)
         await s.commit()
     if repo_url and base_branch:
         await self._reconcile_target_branch_after_merge(
@@ -1188,4 +1194,9 @@ async def _terminate_failed(
         if details is not None:
             payload["details"] = redact_audit_value(dict(details))
         await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc, payload=payload)
+        # Same as operator cancel/stop: clear monitoring-source HUMAN_WAIT attention
+        # on this terminal exit so awaiting_human_since is not stranded after a
+        # permanent NotifyHuman forge fault (or any other monitor fail) that already
+        # emitted attention_required (PRRT_kwDOSJAM6s6XY5JH).
+        await repo.clear_workspace_attention(workspace_id)
         await s.commit()
