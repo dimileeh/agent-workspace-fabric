@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from awf.runtime.pr_monitor_runner.helpers import (
+    _html_code_close_appears_later,
     _parse_verdict,
     _parse_verdict_result,
 )
@@ -408,6 +409,64 @@ class TestParseVerdict:
 
         assert result.verdict == "fix_committed"
         assert result.reason == "real trailing fix"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_many_unclosed_html_code_openers_stay_linear(
+        self,
+    ) -> None:
+        # Repeated blank-separated unclosed ``<code>`` openers must not
+        # rescan the remaining suffix on every opener (PRRT_kwDOSJAM6s6ZpaIp).
+        # Behavior stays blank-terminated so a trailing FIXED after the last
+        # blank remains authoritative.
+        repeated = "".join("<code>\n\n" for _ in range(200))
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            f"{repeated}"
+            "AWF-VERDICT: FIXED: real trailing fix\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real trailing fix"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_many_html_code_openers_with_late_closer(
+        self,
+    ) -> None:
+        # Precomputed look-ahead must still enable hybrid close-tag + blank-tail
+        # when a later ``</code>`` exists after many prior openers
+        # (PRRT_kwDOSJAM6s6ZpaIp / PRRT_kwDOSJAM6s6ZpLqP).
+        repeated = "".join("<code>\n\n" for _ in range(50))
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            f"{repeated}"
+            "<code>\n"
+            "example inside\n"
+            "</code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "\n"
+            "AWF-VERDICT: FIXED: real trailing fix\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real trailing fix"
+
+    @pytest.mark.unit
+    def test_html_code_close_appears_later_single_query_helper(self) -> None:
+        # Iterator uses the precomputed table; keep the single-query helper
+        # correct for out-of-range and suffix look-ahead (PRRT_kwDOSJAM6s6ZpaIp).
+        lines = ["<code>", "body", "</code>", "after"]
+
+        assert _html_code_close_appears_later(lines, 0) is True
+        assert _html_code_close_appears_later(lines, 2) is True
+        assert _html_code_close_appears_later(lines, 3) is False
+        assert _html_code_close_appears_later(lines, 4) is False
+        assert _html_code_close_appears_later(lines, -1) is False
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

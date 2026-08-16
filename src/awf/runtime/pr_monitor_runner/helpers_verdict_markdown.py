@@ -594,13 +594,34 @@ def _html_complete_code_self_closes(line: str) -> bool:
     return _HTML_COMPLETE_CODE_SELF_CLOSING.match(_normalize_markdown_fence_line(line)) is not None
 
 
+def _precompute_html_code_close_appears_from(lines: Sequence[str]) -> tuple[bool, ...]:
+    """Return whether a ``</code>`` appears at or after each index (O(n)).
+
+    Reverse scan once so complete ``<code>`` openers can O(1)-check for a later
+    closer instead of rescanning the remaining suffix on every opener
+    (PRRT_kwDOSJAM6s6ZpaIp).
+    """
+    n = len(lines)
+    appears_from = [False] * n
+    seen_close = False
+    for i in range(n - 1, -1, -1):
+        if _html_code_block_closes(lines[i], "code"):
+            seen_close = True
+        appears_from[i] = seen_close
+    return tuple(appears_from)
+
+
 def _html_code_close_appears_later(lines: Sequence[str], start: int) -> bool:
     """Return whether a ``</code>`` closer appears at or after ``start``.
 
     Used so never-closed complete ``<code>`` openers keep type-7 blank
     termination instead of hybrid forever-shielding (PRRT_kwDOSJAM6s6ZpTPI).
+    Prefer ``_precompute_html_code_close_appears_from`` inside the line
+    iterator so repeated openers stay linear (PRRT_kwDOSJAM6s6ZpaIp).
     """
-    return any(_html_code_block_closes(later, "code") for later in lines[start:])
+    if start < 0 or start >= len(lines):
+        return False
+    return _precompute_html_code_close_appears_from(lines)[start]
 
 
 def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0) -> bool:
@@ -783,6 +804,9 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_blank_terminated_blockquote_depth = 0
     html_code_blank_tail = False
     lines = stdout.splitlines()
+    # One reverse pass: later ``</code>`` lookups stay O(1) per opener so
+    # blank-separated unclosed ``<code>`` lines stay linear (PRRT_kwDOSJAM6s6ZpaIp).
+    html_code_close_from = _precompute_html_code_close_appears_from(lines)
     for idx, line in enumerate(lines):
         if fence is not None:
             if _markdown_fence_closes(
@@ -876,8 +900,11 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 # stays a one-line skip, matching the prior hybrid gate.
                 if _html_code_block_closes(line, "code"):
                     continue
-                if not _html_complete_code_self_closes(line) and _html_code_close_appears_later(
-                    lines, idx + 1
+                next_idx = idx + 1
+                if (
+                    not _html_complete_code_self_closes(line)
+                    and next_idx < len(html_code_close_from)
+                    and html_code_close_from[next_idx]
                 ):
                     html_tag = "code"
                     html_code_blank_tail = True
