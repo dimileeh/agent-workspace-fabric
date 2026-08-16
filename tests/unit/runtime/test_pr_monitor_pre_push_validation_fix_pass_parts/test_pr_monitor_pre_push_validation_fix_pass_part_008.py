@@ -123,6 +123,11 @@ async def test_head_descends_from_disables_replace_and_graft_overrides(
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
+    # Mark the fixture repo before poisoning GIT_* so init/commit do not inherit
+    # a broken object directory (CI: git commit SIGABRT under GIT_OBJECT_DIRECTORY).
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     monkeypatch.setenv("GIT_GRAFT_FILE", "/tmp/agent-grafts")
@@ -130,8 +135,6 @@ async def test_head_descends_from_disables_replace_and_graft_overrides(
     # A poisoned host env must not leave replace objects enabled.
     monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
 
-    worktree = tmp_path / "worktrees" / "workspace"
-    _mark_git_worktree(worktree)
     ancestor = "1" * 40
     descendant = "2" * 40
     cmd = FakeCommandRunner()
@@ -255,14 +258,17 @@ async def test_commit_trees_differ_disables_replace_and_graft_overrides(
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 
+    # Mark the fixture repo before poisoning GIT_* so init/commit do not inherit
+    # a broken object directory (CI: git commit SIGABRT under GIT_OBJECT_DIRECTORY).
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     monkeypatch.setenv("GIT_GRAFT_FILE", "/tmp/agent-grafts")
     monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/replace")
     monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
 
-    worktree = tmp_path / "worktrees" / "workspace"
-    _mark_git_worktree(worktree)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
