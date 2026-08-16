@@ -886,3 +886,106 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert fresh_workspace.task_external_id == long_external_id
             assert fresh_task.external_id == long_external_id
             assert await _count(session, Task) == 2
+
+    @pytest.mark.unit
+    async def test_terminal_readoption_dodges_occupied_superseded_idempotency_key(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Preferred superseded idempotency slot may already be owned; allocate alternate.
+
+        After a terminal adoption's workspace id is visible, another row can claim
+        ``{adoption-key}:superseded:{workspace-id}``. Rewriting into that occupied
+        slot must not loop on the same collision and surface TASK_EXTERNAL_ID_CONFLICT.
+        """
+        canonical_key = adoption_module.pr_adoption_idempotency_key(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            preferred_superseded = adoption_module._superseded_adoption_idempotency_key(
+                idempotency_key=canonical_key,
+                workspace_id=first.workspace_id,
+            )
+            await WorkspaceRepository(session).create(
+                repo_url="https://github.com/other/repo.git",
+                branch_base="main",
+                task_title="occupies preferred superseded idempotency",
+                task_prompt="unrelated prompt",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=preferred_superseded,
+            )
+            await TaskRepository(session).create_or_get(
+                repo_url="https://github.com/other/repo.git",
+                base_branch="main",
+                title="occupies preferred superseded task key",
+                prompt="unrelated prompt",
+                external_id="unrelated-superseded-idem-ext",
+                idempotency_key=preferred_superseded,
+                task_class="docs_task",
+                owned_paths=[],
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        alternate = adoption_module._superseded_adoption_idempotency_key(
+            idempotency_key=canonical_key,
+            workspace_id=first.workspace_id,
+            collision_nonce=1,
+        )
+        async with factory() as session:
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert fresh_workspace is not None
+            assert old_workspace.idempotency_key == alternate
+            assert old_task.idempotency_key == alternate
+            assert alternate != preferred_superseded
+            assert len(alternate) <= 128
+            assert fresh_workspace.idempotency_key == canonical_key
+
+    @pytest.mark.unit
+    def test_superseded_idempotency_key_stays_within_column_bounds(self) -> None:
+        workspace_id = "ws_" + ("b" * 24)
+        logical_key = "pr-adopt:" + ("c" * 48)
+        preferred = adoption_module._superseded_adoption_idempotency_key(
+            idempotency_key=logical_key,
+            workspace_id=workspace_id,
+        )
+        assert preferred == f"{logical_key}:superseded:{workspace_id}"
+        salted = adoption_module._superseded_adoption_idempotency_key(
+            idempotency_key=logical_key,
+            workspace_id=workspace_id,
+            collision_nonce=1,
+        )
+        assert salted != preferred
+        assert len(salted) <= 128
+        assert salted.endswith(f":superseded:{workspace_id}")

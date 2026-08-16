@@ -689,15 +689,59 @@ def _task_external_id_conflict_error(exc: TaskExternalIdConflictError) -> PRMoni
     )
 
 
-def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: str) -> str:
-    return f"{idempotency_key}:superseded:{workspace_id}"
-
-
-# Matches Workspace.task_external_id / Task.external_id String(128) columns.
+# Matches Workspace/Task idempotency_key and external_id String(128) columns.
 _ADOPTION_EXTERNAL_ID_MAX_LENGTH = 128
 _SUPERSEDED_EXTERNAL_ID_MARKER = ":superseded:"
-# Prefer nonce 0, then salt until an unoccupied uq_tasks_external_id slot is found.
+# Prefer nonce 0, then salt until an unoccupied unique slot is found.
 _SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS = 32
+
+
+def _encode_superseded_slot(
+    *,
+    base: str,
+    workspace_id: str,
+    collision_nonce: int = 0,
+) -> str:
+    """Encode a superseded identity slot that always fits String(128).
+
+    The naive ``{base}:superseded:{workspace_id}`` form is preferred for short
+    bases. Longer bases (or salted variants) use a digest prefix that still ends
+    with ``:superseded:{workspace_id}`` (or a digest of it) for detection.
+
+    ``collision_nonce`` > 0 salts the preferred/digest forms so allocation can
+    dodge an already-occupied unique-constraint candidate.
+    """
+    if collision_nonce == 0:
+        prefix = base
+        digest_material = f"{base}\0{workspace_id}"
+    else:
+        prefix = f"{base}:c{collision_nonce}"
+        digest_material = f"{base}\0{workspace_id}\0{collision_nonce}"
+    candidate = f"{prefix}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if len(candidate) <= _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
+        return candidate
+    digest = hashlib.sha256(digest_material.encode()).hexdigest()
+    suffix = f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if len(suffix) < _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
+        budget = _ADOPTION_EXTERNAL_ID_MAX_LENGTH - len(suffix)
+        return f"{digest[:budget]}{suffix}"
+    # Pathological workspace_id: fold both sides into a fixed-width encoding.
+    workspace_digest = hashlib.sha256(workspace_id.encode()).hexdigest()
+    return f"{digest[:40]}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}"
+
+
+def _superseded_adoption_idempotency_key(
+    *,
+    idempotency_key: str,
+    workspace_id: str,
+    collision_nonce: int = 0,
+) -> str:
+    """Return a superseded idempotency slot that always fits String(128)."""
+    return _encode_superseded_slot(
+        base=idempotency_key,
+        workspace_id=workspace_id,
+        collision_nonce=collision_nonce,
+    )
 
 
 def _superseded_adoption_external_id(
@@ -717,23 +761,11 @@ def _superseded_adoption_external_id(
     ``collision_nonce`` > 0 salts the preferred/digest forms so allocation can
     dodge an already-occupied ``uq_tasks_external_id`` candidate.
     """
-    if collision_nonce == 0:
-        prefix = external_id
-        digest_material = f"{external_id}\0{workspace_id}"
-    else:
-        prefix = f"{external_id}:c{collision_nonce}"
-        digest_material = f"{external_id}\0{workspace_id}\0{collision_nonce}"
-    candidate = f"{prefix}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
-    if len(candidate) <= _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
-        return candidate
-    digest = hashlib.sha256(digest_material.encode()).hexdigest()
-    suffix = f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
-    if len(suffix) < _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
-        budget = _ADOPTION_EXTERNAL_ID_MAX_LENGTH - len(suffix)
-        return f"{digest[:budget]}{suffix}"
-    # Pathological workspace_id: fold both sides into a fixed-width encoding.
-    workspace_digest = hashlib.sha256(workspace_id.encode()).hexdigest()
-    return f"{digest[:40]}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}"
+    return _encode_superseded_slot(
+        base=external_id,
+        workspace_id=workspace_id,
+        collision_nonce=collision_nonce,
+    )
 
 
 def _is_superseded_adoption_external_id(external_id: str, *, workspace_id: str) -> bool:
@@ -753,6 +785,60 @@ def _is_superseded_adoption_external_id(external_id: str, *, workspace_id: str) 
 async def _task_external_id_occupied(session: AsyncSession, external_id: str) -> bool:
     stmt = select(Task.id).where(Task.external_id == external_id).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _workspace_idempotency_key_occupied(session: AsyncSession, key: str) -> bool:
+    stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _task_idempotency_key_occupied(session: AsyncSession, key: str) -> bool:
+    stmt = select(Task.id).where(Task.idempotency_key == key).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _superseded_adoption_idempotency_key_occupied(
+    session: AsyncSession,
+    key: str,
+) -> bool:
+    """True when *key* is taken under either idempotency unique constraint."""
+    return await _workspace_idempotency_key_occupied(
+        session, key
+    ) or await _task_idempotency_key_occupied(session, key)
+
+
+async def _allocate_superseded_adoption_idempotency_key(
+    session: AsyncSession,
+    *,
+    idempotency_key: str,
+    workspace_id: str,
+) -> str:
+    """Return an unoccupied superseded idempotency key for *workspace_id*.
+
+    Prefers the deterministic nonce-0 encoding; if another workspace or task
+    already owns that value, try salted candidates rather than flushing into
+    ``uq_workspaces_idempotency_key`` / ``uq_tasks_idempotency_key``.
+
+    The occupancy probe is best-effort: a concurrent insert can still claim the
+    candidate before the caller's flush. ``_supersede_previous_adoption`` recovers
+    that race inside a savepoint and retries allocation.
+    """
+    for collision_nonce in range(_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS):
+        candidate = _superseded_adoption_idempotency_key(
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id,
+            collision_nonce=collision_nonce,
+        )
+        if not await _superseded_adoption_idempotency_key_occupied(session, candidate):
+            return candidate
+    raise PRMonitorAdoptionError(
+        error_code="TASK_EXTERNAL_ID_CONFLICT",
+        message=(
+            "Unable to allocate a free superseded idempotency key slot; "
+            "retry after clearing colliding idempotency keys."
+        ),
+        detail={"workspace_id": workspace_id},
+    )
 
 
 async def _allocate_superseded_adoption_external_id(
@@ -1269,12 +1355,17 @@ __all__ = (
     "_adoption_external_id_policy_conflicts",
     "_task_external_id_conflict_error",
     "_superseded_adoption_idempotency_key",
+    "_encode_superseded_slot",
     "_ADOPTION_EXTERNAL_ID_MAX_LENGTH",
     "_SUPERSEDED_EXTERNAL_ID_MARKER",
     "_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS",
     "_superseded_adoption_external_id",
     "_is_superseded_adoption_external_id",
     "_task_external_id_occupied",
+    "_workspace_idempotency_key_occupied",
+    "_task_idempotency_key_occupied",
+    "_superseded_adoption_idempotency_key_occupied",
+    "_allocate_superseded_adoption_idempotency_key",
     "_allocate_superseded_adoption_external_id",
     "_release_superseded_adoption_external_id",
     "_adoption_generation_external_id",
