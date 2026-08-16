@@ -986,6 +986,26 @@ _RESOLVABLE_PLACEHOLDER_LABELS = {
 }
 
 
+def _verdict_reason_is_template_placeholder(reason: str) -> bool:
+    """Return whether ``reason`` is a prompt-template placeholder echo.
+
+    Whole-reason matches cover the common case. Same-line absorption can also
+    fold later ``AWF-VERDICT`` citations into a leading placeholder prefix; that
+    must still fail closed even though the absorbed markers prevent a
+    whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-shaped tags
+    that continue with real prose (no absorbed marker) stay usable.
+    """
+    cleaned = reason.strip()
+    if not cleaned:
+        return False
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+        return True
+    marker = _AWF_VERDICT_MARKER.search(cleaned)
+    if marker is None or marker.start() == 0:
+        return False
+    return _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned[: marker.start()]) is not None
+
+
 def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict) -> bool:
     """Return whether the final AWF line for ``verdict`` is a template-placeholder echo."""
     wanted = _RESOLVABLE_PLACEHOLDER_LABELS.get(verdict)
@@ -1009,7 +1029,7 @@ def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict)
     cleaned = (last_reason or "").strip()
     if not cleaned:
         return False
-    return _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned) is not None
+    return _verdict_reason_is_template_placeholder(cleaned)
 
 
 def _fail_closed_resolvable_placeholder_if_needed(
@@ -1569,7 +1589,7 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
         return None
     if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
         return None
-    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+    if _verdict_reason_is_template_placeholder(cleaned):
         return None
     if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
         return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"

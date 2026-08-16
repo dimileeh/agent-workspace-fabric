@@ -1409,6 +1409,43 @@ class TestParseVerdict:
         ("stdout", "expected_reason"),
         [
             (
+                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification> "
+                "AWF-VERDICT: FIXED: cited",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification> and exit. "
+                "AWF-VERDICT: DEFER: track later",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FIXED: <one-sentence summary> AWF-VERDICT: FALSE POSITIVE: cite",
+                "fixed_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: DEFER: <what to track> AWF-VERDICT: FALSE POSITIVE: cite",
+                "verdict_placeholder_echo",
+            ),
+        ],
+    )
+    def test_private_awf_placeholder_with_absorbed_same_line_citation_fail_closed(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        # Same-line absorption must not let a template-placeholder prefix evade
+        # the whole-reason placeholder check by folding later FIXED/DEFER/
+        # FALSE POSITIVE citations into the reason (#822 PRRT_kwDOSJAM6s6Znin1).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            (
                 "AWF-VERDICT: FALSE POSITIVE: prior rationale\n"
                 "AWF-VERDICT: FALSE POSITIVE: <one-sentence justification>",
                 "verdict_placeholder_echo",
