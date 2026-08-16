@@ -320,16 +320,18 @@ def _markdown_fence_open_marker(line: str) -> str | None:
 def _markdown_fence_closes(line: str, *, fence: str) -> bool:
     """Return whether ``line`` closes a code fence opened with ``fence``.
 
-    Strip container indent only. Do not peel list markers: a line like
-    ``- ``` `` inside an open fence is fence content, not a closer.
+    CommonMark allows at most three leading spaces on a closing fence. Do not
+    peel list markers: a line like ``- ``` `` inside an open fence is fence
+    content, not a closer. Do not unrestricted-lstrip: four-space-indented
+    content that looks like a fence must stay inside the open region.
     """
     # List-continuation closers (``  ``` ``) and CommonMark's optional 0–3
-    # space indent both reduce to a bare fence after lstrip.
-    stripped = line.lstrip(" \t")
+    # space indent are matched explicitly — unlimited strip would treat
+    # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
     return (
         re.match(
-            rf"^{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
-            stripped,
+            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
+            line,
         )
         is not None
     )

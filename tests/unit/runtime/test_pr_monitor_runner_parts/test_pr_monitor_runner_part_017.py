@@ -411,6 +411,28 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_four_space_indent_inside_fence_does_not_close(
+        self,
+    ) -> None:
+        # CommonMark permits at most three leading spaces on a closing fence.
+        # Unrestricted lstrip would treat four-space-indented content as a
+        # closer and let a later example override NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZmqRo).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "```\n"
+            "example closer:\n"
+            "    ```\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_tilde_fenced_example(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
