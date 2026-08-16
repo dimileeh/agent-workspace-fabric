@@ -648,6 +648,14 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     non-blocking and must retain normal later-marker / final-marker handling so
     a same-line ``NEEDS_HUMAN`` is not swallowed as DEFER reason prose.
 
+    When the leading marker is ``FIXED``, later resolvable markers cited in the
+    reason (quoted or unquoted) stay rationale unless they are an unambiguously
+    separate trailing attempt after a closed quote/code span — otherwise a
+    ``FALSE POSITIVE`` citation would win and bypass the HEAD-advance evidence
+    gate (PRRT_kwDOSJAM6s6Zmggp). Later ``NEEDS_HUMAN`` / unrecognized labels
+    still split (fail closed). ``DEFER`` leaders keep normal later-marker
+    handling.
+
     Subsequent markers embedded in quoted reason prose after a resolvable
     leading verdict (for example a ``FIXED`` or ``DEFER`` reason that cites the
     marker grammar inside ASCII/curly quotes or Markdown backticks) are not
@@ -663,6 +671,10 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     split_starts = [matches[0].start()]
     for match in matches[1:]:
         if _awf_verdict_marker_embedded_in_reason_prose(verdict_line, match.start()):
+            continue
+        if _awf_verdict_leading_fixed_absorbs_later_marker(
+            verdict_line, matches[0].start(), match.start()
+        ):
             continue
         split_starts.append(match.start())
     if len(split_starts) == 1:
@@ -681,13 +693,113 @@ def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool
 
     Only ``NEEDS_HUMAN`` leaders absorb later same-line markers into the reason
     so unquoted prose citations cannot override the block. ``DEFER`` must not
-    absorb — it stays on the normal later-marker path.
+    absorb — it stays on the normal later-marker path. ``FIXED`` uses
+    :func:`_awf_verdict_leading_fixed_absorbs_later_marker` instead so
+    unambiguous trailing attempts after a closed quote still split.
     """
     leading = _AWF_VERDICT.match(verdict_line, match_start)
     if leading is None:
         return False
     normalized_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
     return normalized_label == "needs human"
+
+
+_FIXED_REASON_ABSORBABLE_LABELS = frozenset({"fixed", "false positive", "defer"})
+
+
+def _awf_verdict_leading_fixed_absorbs_later_marker(
+    verdict_line: str, leading_start: int, later_start: int
+) -> bool:
+    """Return whether a FIXED leader keeps a later same-line marker as rationale.
+
+    Unquoted (or mid-prose) resolvable marker citations inside a FIXED reason
+    must not become the selected verdict — ``false_positive`` would bypass the
+    HEAD-advance evidence gate (PRRT_kwDOSJAM6s6Zmggp). Later ``NEEDS_HUMAN``
+    and unrecognized labels still split (fail closed). Markers that follow a
+    closed quote/code span with only optional whitespace are unambiguously
+    separate trailing attempts and still split.
+    """
+    leading = _AWF_VERDICT.match(verdict_line, leading_start)
+    if leading is None:
+        return False
+    leading_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
+    if leading_label != "fixed":
+        return False
+    later = _AWF_VERDICT.match(verdict_line, later_start)
+    if later is None:
+        return False
+    later_label = re.sub(r"[\s_]+", " ", later.group("label").strip().lower())
+    if later_label not in _FIXED_REASON_ABSORBABLE_LABELS:
+        return False
+    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
+
+
+def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_start: int) -> bool:
+    """Return whether ``match_start`` follows a closed quote with only whitespace.
+
+    Distinguishes a real trailing verdict jammed against a finished citation
+    span (``cite "x"AWF-VERDICT: …``) from mid-reason marker-grammar prose.
+    """
+    if match_start <= 0:
+        return False
+    last_close_end = -1
+    inside_ascii_double = False
+    inside_ascii_single = False
+    inside_backtick = False
+    backtick_open_len = 0
+    inside_curly_double = False
+    inside_curly_single = False
+    skip_until = 0
+    prefix = verdict_line[:match_start]
+    for index, char in enumerate(prefix):
+        if index < skip_until:
+            continue
+        if char == '"':
+            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
+                if inside_ascii_double:
+                    last_close_end = index + 1
+                inside_ascii_double = not inside_ascii_double
+        elif char == "'":
+            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
+                if inside_ascii_single:
+                    last_close_end = index + 1
+                inside_ascii_single = not inside_ascii_single
+        elif char == "`":
+            run_len = 1
+            while index + run_len < match_start and prefix[index + run_len] == "`":
+                run_len += 1
+            if inside_backtick:
+                if run_len == backtick_open_len:
+                    inside_backtick = False
+                    backtick_open_len = 0
+                    last_close_end = index + run_len
+            else:
+                inside_backtick = True
+                backtick_open_len = run_len
+            skip_until = index + run_len
+        elif char == "“":
+            inside_curly_double = True
+        elif char == "”":
+            if inside_curly_double:
+                last_close_end = index + 1
+            inside_curly_double = False
+        elif char == "‘":
+            inside_curly_single = True
+        elif char == "’":
+            if inside_curly_single:
+                last_close_end = index + 1
+            inside_curly_single = False
+    if last_close_end < 0:
+        return False
+    if (
+        inside_ascii_double
+        or inside_ascii_single
+        or inside_backtick
+        or inside_curly_double
+        or inside_curly_single
+    ):
+        return False
+    return not verdict_line[last_close_end:match_start].strip()
 
 
 def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:

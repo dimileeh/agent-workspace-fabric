@@ -895,6 +895,20 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_unquoted_marker_in_fixed_reason_keeps_fixed(
+        self,
+    ) -> None:
+        # Unquoted marker-grammar citations inside a FIXED reason must stay rationale.
+        # Splitting them lets false_positive win and bypass the HEAD-advance gate
+        # (#822 PRRT_kwDOSJAM6s6Zmggp).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: stopped emitting AWF-VERDICT: FALSE POSITIVE: for valid findings"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == ("stopped emitting AWF-VERDICT: FALSE POSITIVE: for valid findings")
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_leading_defer_then_needs_human(
         self,
     ) -> None:
@@ -1267,13 +1281,33 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_same_line_second_valid_marker_wins(self) -> None:
+    def test_private_awf_verdict_same_line_fixed_absorbs_unquoted_later_resolvable(
+        self,
+    ) -> None:
+        # FIXED reasons may cite later resolvable marker grammar without quotes;
+        # those stay rationale so false_positive cannot bypass HEAD-advance
+        # (#822 PRRT_kwDOSJAM6s6Zmggp). Unambiguous trailing attempts after a
+        # closed quote still split (see adjacent-quote trailing tests).
         result = _parse_verdict_result(
             "AWF-VERDICT: FIXED: interim note AWF-VERDICT: FALSE POSITIVE: final rationale"
         )
 
-        assert result.verdict == "false_positive"
-        assert result.reason == "final rationale"
+        assert result.verdict == "fix_committed"
+        assert result.reason == ("interim note AWF-VERDICT: FALSE POSITIVE: final rationale")
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_fixed_then_unquoted_needs_human_still_wins(
+        self,
+    ) -> None:
+        # FIXED absorbs resolvable citations, but a later unquoted NEEDS_HUMAN
+        # must still split and fail closed.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: maybe cite AWF-VERDICT: FALSE POSITIVE: x but "
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must decide"
 
     @pytest.mark.unit
     def test_private_awf_verdict_fixed_reason_keeps_inline_angle_bracket_term(self) -> None:
