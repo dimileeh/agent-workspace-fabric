@@ -1465,6 +1465,109 @@ async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
 
 
 @pytest.mark.unit
+async def test_isolated_clarification_worktree_does_not_plant_salvage_keys(
+    tmp_path: Path,
+) -> None:
+    """Reason-only isolated checkouts must not retain __salvaged_fix_* keys.
+
+    Clarification reasks run in a disposable worktree whose commits are discarded
+    on cleanup. Binding evidence ids would plant orphan salvage SHAs that later
+    primary-worktree FIXED retries could mis-attribute (PRRT_kwDOSJAM6s6ZmikP).
+    """
+    from awf.adapters.base import AgentRunError
+    from awf.db.enums import AgentRuntime
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    isolated_tip = "b" * 40
+    item_id = "PRRT_isolated_reask_salvage"
+    body_hash = "feedback_body_hash_isolated_reask"
+    workspace_id = "ws_isolated_reask_salvage"
+    isolated = tmp_path / ".awf-needs-human-reask-test"
+    isolated.mkdir()
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    stdout = "AWF-VERDICT: FIXED: claimed during isolated crash"
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        raise AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(returncode=1, stdout=stdout, stderr="fail"),
+            reason_code="AGENT_CLI_FAILED",
+        )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return isolated_tip
+
+    async def _head_descends_from(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        return ancestor.lower() != descendant.lower()
+
+    async def _commit_trees_differ(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+    ) -> bool:
+        del worktree_path
+        return left.lower() != right.lower()
+
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: object,
+        *,
+        state: object | None = None,
+    ) -> None:
+        del state
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _rev_parse_head=_rev_parse_head,
+        _head_descends_from=_head_descends_from,
+        _commit_trees_differ=_commit_trees_differ,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+    )
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="state the reason",
+        commit_message="fix: address thread",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        commit_dirty_changes=False,
+        isolated_worktree_host_path=isolated,
+        isolated_worktree_ref=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "expected_verdict", "expected_reason"),
     [

@@ -175,6 +175,8 @@ async def _invoke_cli_for_verdict_result(
     accepting that failed invocation's verdict. ``evidence_body_hash`` binds
     that salvage to the feedback body that produced it so an edited thread
     cannot reuse stale salvage while ``agent_failed`` skips stale-body cleanup.
+    Salvage is never retained for ``isolated_worktree_host_path`` runs: those
+    tips are discarded with the clarification checkout.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -444,6 +446,10 @@ async def _invoke_cli_for_verdict_result(
         and local_head_advanced
         and item_end_head is not None
         and item_start_head is not None
+        # Isolated clarification checkouts are discarded on cleanup; retaining
+        # their tip would orphan __salvaged_fix_* keys on the primary worktree
+        # (PRRT_kwDOSJAM6s6ZmikP).
+        and isolated_worktree_host_path is None
     ):
         state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
         state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)

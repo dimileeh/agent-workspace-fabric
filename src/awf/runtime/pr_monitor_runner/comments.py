@@ -1214,6 +1214,10 @@ async def _enforce_needs_human_reason(
 
     needs_human_reason_code = _NEEDS_HUMAN_REASON_MISSING
     try:
+        # Clarification is reason-only: never bind salvage evidence ids. A crashed
+        # reask that advances the disposable checkout would otherwise plant
+        # __salvaged_fix_* keys for discarded isolated commits
+        # (PRRT_kwDOSJAM6s6ZmikP).
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=needs_human_reason_reask_prompt(original_prompt=original_prompt),
@@ -1232,8 +1236,6 @@ async def _enforce_needs_human_reason(
                 reask_worktree.source_mirror if reask_worktree is not None else None
             ),
             read_only=hosted_read_only,
-            evidence_item_id=item_id,
-            evidence_body_hash=item_body_hash,
         )
     except (
         ProviderRecoveryAuthError,
