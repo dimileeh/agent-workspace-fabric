@@ -899,7 +899,9 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         "dirty_worktree_pre_commit",
         "dirty_worktree_post_commit_succeeded",
     ]
-    assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
+    # Sink may raise after commit; comment_verdict then rev-parses HEAD for
+    # salvage retention before re-raising (PRRT_kwDOSJAM6s6ZmirT).
+    assert any(call.args[-3:] == ["commit", "-m", "fix: review"] for call in cmd.calls)
 
 
 @pytest.mark.unit

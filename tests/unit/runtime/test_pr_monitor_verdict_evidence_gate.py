@@ -51,6 +51,7 @@ def _evidence_runner(
     commit_trees_differ: bool | None = None,
     commit_changes_present: bool | None = None,
     provider_recovery_raise: BaseException | None = None,
+    commit_dirty_raises: BaseException | None = None,
 ) -> SimpleNamespace:
     """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
     head_iter = iter(heads or [])
@@ -71,6 +72,8 @@ def _evidence_runner(
         return AgentRunResult(returncode=0, stdout=stdout, stderr="")
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        if commit_dirty_raises is not None:
+            raise commit_dirty_raises
         return dirty
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
@@ -600,6 +603,104 @@ async def test_salvage_retained_before_provider_recovery_retry_raise(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after recovery"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "sink_kind",
+    ["post_commit_ownership_repair", "protected_scope_provider_recovery"],
+)
+async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
+    tmp_path: Path,
+    sink_kind: str,
+) -> None:
+    """Dirty salvage must persist when ``_commit_dirty_worktree`` raises after HEAD advances.
+
+    Post-commit ownership repair failure and protected-scope repair self-commit
+    followed by provider recovery both advance HEAD inside the sink, then raise
+    before the success-path salvage block. Without retaining evidence from that
+    exception path, a later no-change FIXED at the tip becomes
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT).
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import (
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+    )
+
+    sink_exc: BaseException
+    if sink_kind == "post_commit_ownership_repair":
+        sink_exc = _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+    else:
+        sink_exc = ProviderRecoveryRetryError()
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_sink_raise"
+    body_hash = "feedback_body_hash_sink_raise"
+    workspace_id = "ws_salvage_sink_raise"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed before sink raised",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+        commit_dirty_raises=sink_exc,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    with pytest.raises(type(sink_exc)):
+        await comments._invoke_cli_for_verdict_result(
+            failed_runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after sink raise",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after sink raise"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
 

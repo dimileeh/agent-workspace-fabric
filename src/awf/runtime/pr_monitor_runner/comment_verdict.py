@@ -77,6 +77,109 @@ def _is_synthetic_needs_human_reason(reason: str | None) -> bool:
     return reason is not None and reason in _SYNTHETIC_NEEDS_HUMAN_REASONS
 
 
+def _should_clear_salvage_for_parsed_verdict(
+    *,
+    verdict: Verdict,
+    reason: str | None,
+) -> bool:
+    """Return whether an explicit non-FIXED claim must drop retained salvage."""
+    return verdict in {"false_positive", "defer"} or (
+        verdict == "needs_human" and reason not in _FAIL_CLOSED_VERDICT_REASONS
+    )
+
+
+async def _evaluate_local_head_advance(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+) -> tuple[str | None, bool, object, object]:
+    """Return end HEAD, local advance flag, and ancestry helpers for reuse."""
+    item_end_head: str | None = None
+    rev_parse_end = getattr(runner, "_rev_parse_head", None)
+    if callable(rev_parse_end) and worktree_path.exists():
+        item_end_head = await rev_parse_end(worktree_path)
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    local_ancestry_evaluable = (
+        item_start_head is not None
+        and item_end_head is not None
+        and callable(descends)
+        and worktree_path.exists()
+    )
+    local_head_advanced = False
+    if local_ancestry_evaluable:
+        assert item_start_head is not None
+        assert item_end_head is not None
+        assert callable(descends)
+        if item_end_head.lower() != item_start_head.lower() and await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=item_end_head,
+        ):
+            local_head_advanced = bool(
+                callable(trees_differ)
+                and await trees_differ(
+                    worktree_path=worktree_path,
+                    left=item_start_head,
+                    right=item_end_head,
+                )
+            )
+    return item_end_head, local_head_advanced, descends, trees_differ
+
+
+def _retain_or_clear_failed_run_salvage(
+    *,
+    state: MonitorState | None,
+    salvage_item_id: str | None,
+    salvage_body_hash: str | None,
+    local_head_advanced: bool,
+    item_end_head: str | None,
+    item_start_head: str | None,
+    isolated_worktree_host_path: Path | None,
+    result_stdout: str,
+    retain_for_failed_run: bool,
+) -> None:
+    """Retain contentful failed-run salvage, or clear explicit non-FIXED claims.
+
+    Isolated clarification checkouts are discarded on cleanup; retaining their tip
+    would orphan ``__salvaged_fix_*`` keys on the primary worktree
+    (PRRT_kwDOSJAM6s6ZmikP).
+    """
+    from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
+
+    def _clear() -> None:
+        if state is not None and salvage_item_id is not None:
+            state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
+            state.threads_addressed_ids.pop(
+                _salvaged_fix_body_hash_state_key(salvage_item_id), None
+            )
+            state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
+
+    if (
+        retain_for_failed_run
+        and state is not None
+        and salvage_item_id is not None
+        and salvage_body_hash is not None
+        and local_head_advanced
+        and item_end_head is not None
+        and item_start_head is not None
+        and isolated_worktree_host_path is None
+    ):
+        state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
+        state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
+        state.mark_addressed(_salvaged_fix_start_state_key(salvage_item_id), item_start_head)
+
+    if retain_for_failed_run:
+        early_parsed = _parse_verdict_result(result_stdout)
+        if _should_clear_salvage_for_parsed_verdict(
+            verdict=early_parsed.verdict,
+            reason=early_parsed.reason,
+        ):
+            _clear()
+
+
 @dataclass(frozen=True)
 class VerdictResult:
     verdict: Verdict
@@ -314,75 +417,81 @@ async def _invoke_cli_for_verdict_result(
                     **repair_details,
                 )
                 raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        # Unexpected agent crashes still try to sink dirty work. Capture post-sink
+        # HEAD and retain salvage before re-raising — otherwise a later no-change
+        # FIXED at the tip becomes fixed_without_head_advance (same gap as the
+        # main sink path; PRRT_kwDOSJAM6s6ZmirT).
+        unexpected_sink_error: BaseException | None = None
         if commit_dirty_changes:
-            await runner._commit_dirty_worktree(
-                workspace_id=workspace_id,
-                message=commit_message,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                command_evidence=command_evidence,
-                task_tag=task_tag,
-                operation_start_head=operation_start_head,
-            )
+            try:
+                await runner._commit_dirty_worktree(
+                    workspace_id=workspace_id,
+                    message=commit_message,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    state=state,
+                    command_evidence=command_evidence,
+                    task_tag=task_tag,
+                    operation_start_head=operation_start_head,
+                )
+            except Exception as sink_exc:
+                unexpected_sink_error = sink_exc
+        unexpected_end_head, unexpected_local_advanced, _, _ = await _evaluate_local_head_advance(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+        )
+        _retain_or_clear_failed_run_salvage(
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            local_head_advanced=unexpected_local_advanced,
+            item_end_head=unexpected_end_head,
+            item_start_head=item_start_head,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+            retain_for_failed_run=True,
+        )
+        if unexpected_sink_error is not None:
+            raise unexpected_sink_error from None
         raise
 
-    committed_dirty_changes = (
-        await runner._commit_dirty_worktree(
-            workspace_id=workspace_id,
-            message=commit_message,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
-            command_evidence=command_evidence,
-            task_tag=task_tag,
-            operation_start_head=operation_start_head,
-        )
-        if commit_dirty_changes
-        else False
+    # Commit dirty changes, then evaluate HEAD / retain salvage even when the
+    # sink itself raises after advancing HEAD (post-commit ownership repair, or
+    # protected-scope repair self-commit then provider recovery). Recording only
+    # on the success path drops salvage so a later no-change FIXED at the tip
+    # becomes fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmirT). Also retain
+    # before ``_handle_provider_agent_run_error``, which persists then raises.
+    commit_sink_error: BaseException | None = None
+    committed_dirty_changes = False
+    if commit_dirty_changes:
+        try:
+            committed_dirty_changes = bool(
+                await runner._commit_dirty_worktree(
+                    workspace_id=workspace_id,
+                    message=commit_message,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    state=state,
+                    command_evidence=command_evidence,
+                    task_tag=task_tag,
+                    operation_start_head=operation_start_head,
+                )
+            )
+        except Exception as sink_exc:
+            commit_sink_error = sink_exc
+
+    item_end_head, local_head_advanced, descends, trees_differ = await _evaluate_local_head_advance(
+        runner,
+        worktree_path=worktree_path,
+        item_start_head=item_start_head,
     )
-
-    # Evaluate HEAD advance and retain dirty salvage BEFORE provider recovery.
-    # ``_handle_provider_agent_run_error`` persists state then raises on
-    # retry/fallback; recording only after that call would drop salvage from a
-    # failed run that already committed a contentful fix, so a later no-change
-    # FIXED at the salvage tip becomes fixed_without_head_advance.
-    item_end_head: str | None = None
-    rev_parse_end = getattr(runner, "_rev_parse_head", None)
-    if callable(rev_parse_end) and worktree_path.exists():
-        item_end_head = await rev_parse_end(worktree_path)
-
-    descends = getattr(runner, "_head_descends_from", None)
-    trees_differ = getattr(runner, "_commit_trees_differ", None)
     local_ancestry_evaluable = (
         item_start_head is not None
         and item_end_head is not None
         and callable(descends)
         and worktree_path.exists()
     )
-    local_head_advanced = False
-    if local_ancestry_evaluable:
-        # Narrow for type checkers; guarded by local_ancestry_evaluable above.
-        assert item_start_head is not None
-        assert item_end_head is not None
-        assert callable(descends)
-        # SHA inequality alone accepts resets/checkouts to older tips.
-        # Require forward-only ancestry when evaluable; dirty evidence must
-        # not override a known non-descendant move. Forward ancestry alone
-        # still accepts empty commits (unchanged tree); require a tree diff.
-        if item_end_head.lower() != item_start_head.lower() and await descends(
-            worktree_path=worktree_path,
-            ancestor=item_start_head,
-            descendant=item_end_head,
-        ):
-            local_head_advanced = bool(
-                callable(trees_differ)
-                and await trees_differ(
-                    worktree_path=worktree_path,
-                    left=item_start_head,
-                    right=item_end_head,
-                )
-            )
     # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
     # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
     # FIXED via the flag after local ancestry correctly rejected the same move.
@@ -430,6 +539,7 @@ async def _invoke_cli_for_verdict_result(
     # prior feedback while agent_failed skips stale cleanup. Bind the invocation
     # start SHA so descendant reuse verifies the full start..salvage delta when
     # the failed run created multiple commits (PRRT_kwDOSJAM6s6ZmG-B).
+    # A sink raise after HEAD advance is also a failed run for salvage purposes.
     def _clear_retained_salvage() -> None:
         if state is not None and salvage_item_id is not None:
             state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
@@ -438,35 +548,21 @@ async def _invoke_cli_for_verdict_result(
             )
             state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
 
-    if (
-        cli_failed
-        and state is not None
-        and salvage_item_id is not None
-        and salvage_body_hash is not None
-        and local_head_advanced
-        and item_end_head is not None
-        and item_start_head is not None
-        # Isolated clarification checkouts are discarded on cleanup; retaining
-        # their tip would orphan __salvaged_fix_* keys on the primary worktree
-        # (PRRT_kwDOSJAM6s6ZmikP).
-        and isolated_worktree_host_path is None
-    ):
-        state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
-        state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
-        state.mark_addressed(_salvaged_fix_start_state_key(salvage_item_id), item_start_head)
+    retain_for_failed_run = cli_failed or commit_sink_error is not None
+    _retain_or_clear_failed_run_salvage(
+        state=state,
+        salvage_item_id=salvage_item_id,
+        salvage_body_hash=salvage_body_hash,
+        local_head_advanced=local_head_advanced,
+        item_end_head=item_end_head,
+        item_start_head=item_start_head,
+        isolated_worktree_host_path=isolated_worktree_host_path,
+        result_stdout=result_stdout,
+        retain_for_failed_run=retain_for_failed_run,
+    )
 
-    if cli_failed:
-        # Provider recovery may raise retry/fallback/auth and skip later parse
-        # cleanup. Reject explicit non-FIXED salvage here so a later no-change
-        # FIXED cannot reuse a commit from an invocation that made no FIXED claim.
-        # Fail-closed synthetic NEEDS_HUMAN reasons are not agent claims — keep
-        # salvage for those crashes (mirrors the post-parse needs_human path).
-        early_parsed = _parse_verdict_result(result_stdout)
-        if early_parsed.verdict in {"false_positive", "defer"} or (
-            early_parsed.verdict == "needs_human"
-            and early_parsed.reason not in _FAIL_CLOSED_VERDICT_REASONS
-        ):
-            _clear_retained_salvage()
+    if commit_sink_error is not None:
+        raise commit_sink_error from None
 
     if agent_run_err is not None:
         # Persist (including salvage keys above) then maybe raise retry/fallback.
