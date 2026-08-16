@@ -154,13 +154,19 @@ Example `awf_adopt_pull_request_monitor` arguments:
   "pr_number": 123,
   "auto_merge": true,
   "initial_review_grace_period_seconds": 900,
+  "external_id": "CLOUD-TASK-42",
+  "task_class": "test_task",
   "reason": "attach AWF to existing PR"
 }
 ```
 
 Adoption maps to `POST /v1/workspaces/adopt-pr` and returns
-`PullRequestMonitorAdoptionResponse`. AWF derives deterministic repo/PR
-idempotency; callers do not provide an `Idempotency-Key`. See
+`PullRequestMonitorAdoptionResponse`. Optional `external_id` and `task_class`
+match workspace-create identity fields; omit `external_id` for the generated
+repo/PR adoption identity. AWF derives deterministic repo/PR idempotency;
+callers do not provide an `Idempotency-Key`. Changing either identity field on a
+live adoption returns `PR_ADOPTION_POLICY_CONFLICT`; an explicit `external_id`
+owned by another task scope returns `TASK_EXTERNAL_ID_CONFLICT`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub auth readiness,
 monitor policy, terminal adoption retry behavior, console inspection, and the
 mocked-local demo path.

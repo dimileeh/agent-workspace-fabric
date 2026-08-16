@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -14,13 +15,16 @@ from awf.api.app import configure_database, create_app
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
-from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import TaskClass, WorkspaceStatus
+from awf.db.models import Task, TaskAttempt, Workspace
+from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
-from awf.service import pr_monitor_adoption as adoption_mod
-from awf.service.pr_monitor_adoption import pr_adoption_idempotency_key
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
+from awf.service.pr_monitor_adoption import (
+    _adoption_external_id,
+    pr_adoption_idempotency_key,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -289,12 +293,12 @@ async def test_adopt_pr_rejects_hosted_execution_when_worker_delegation_unconfig
         )
 
     monkeypatch.setattr(
-        adoption_mod,
+        adoption_helpers,
         "hosted_delegation_config_from_service_settings",
         _raise_missing_worker_config,
     )
     monkeypatch.setattr(
-        adoption_mod,
+        adoption_helpers,
         "resolve_service_settings",
         lambda _settings: object(),
     )
@@ -683,3 +687,292 @@ async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
     assert len(workspaces) == 1
     assert workspaces[0].id == workspace_id
     assert workspaces[0].idempotency_key == idempotency_key
+
+
+@pytest.mark.unit
+def test_adoption_request_schema_accepts_optional_external_id_and_task_class() -> None:
+    payload = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        external_id="  CLOUD-TASK-42  ",
+        task_class=TaskClass.test_task,
+    )
+    omitted = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+
+    assert payload.external_id == "CLOUD-TASK-42"
+    assert payload.task_class == TaskClass.test_task
+    assert omitted.external_id is None
+    assert omitted.task_class is None
+
+    schema = create_app(use_lifespan=False).openapi()
+    props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
+    external_id_schema = _optional_string_schema(props["external_id"])
+    assert external_id_schema["maxLength"] == 128
+    task_class_schema = props["task_class"]
+    any_of = task_class_schema.get("anyOf")
+    assert isinstance(any_of, list)
+    assert any(
+        isinstance(item, dict) and item.get("$ref", "").endswith("/TaskClass") for item in any_of
+    )
+
+
+@pytest.mark.unit
+def test_adoption_request_schema_rejects_unknown_extra_and_invalid_identity_fields() -> None:
+    with pytest.raises(ValidationError):
+        PullRequestMonitorAdoptionRequest(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+            unexpected_field="nope",
+        )
+    with pytest.raises(ValidationError):
+        PullRequestMonitorAdoptionRequest(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+            external_id="x" * 129,
+        )
+    with pytest.raises(ValidationError):
+        PullRequestMonitorAdoptionRequest(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+            task_class="not_a_real_task_class",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.unit
+async def test_adopt_pr_persists_explicit_external_id_and_task_class(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": "CLOUD-TASK-42",
+            "task_class": "test_task",
+        },
+    )
+
+    assert response.status_code == 202
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+        attempt = (
+            await session.execute(
+                select(TaskAttempt).where(TaskAttempt.workspace_id == workspace.id)
+            )
+        ).scalar_one()
+        task = await session.get(Task, attempt.task_id)
+    assert workspace.task_external_id == "CLOUD-TASK-42"
+    assert workspace.task_class == "test_task"
+    assert task is not None
+    assert task.external_id == "CLOUD-TASK-42"
+    assert task.task_class == "test_task"
+
+
+@pytest.mark.unit
+async def test_adopt_pr_omitted_identity_fields_keep_generated_external_id(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _fetcher = adoption_client
+    expected = _adoption_external_id(repo_slug="dimileeh/aira-web", pr_number=277)
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+
+    assert response.status_code == 202
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.task_external_id == expected
+    assert workspace.task_class is None
+
+
+@pytest.mark.unit
+async def test_adopt_pr_exact_identity_replay_attaches_existing(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+    body = {
+        "repo_slug": "dimileeh/aira-web",
+        "pr_number": 277,
+        "external_id": "CLOUD-TASK-42",
+        "task_class": "test_task",
+    }
+
+    first = await client.post("/v1/workspaces/adopt-pr", headers=headers, json=body)
+    second = await client.post("/v1/workspaces/adopt-pr", headers=headers, json=body)
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["attached_existing"] is True
+    assert second.json()["workspace_id"] == first.json()["workspace_id"]
+    assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+
+@pytest.mark.unit
+async def test_adopt_pr_different_external_id_or_task_class_conflicts_secret_safe(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+    secret_like = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    first = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": secret_like,
+            "task_class": "test_task",
+        },
+    )
+    assert first.status_code == 202
+
+    id_conflict = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": "OTHER-TASK",
+            "task_class": "test_task",
+        },
+    )
+    class_conflict = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": secret_like,
+            "task_class": "docs_task",
+        },
+    )
+
+    assert id_conflict.status_code == 409
+    assert id_conflict.json()["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+    assert secret_like not in id_conflict.text
+    assert class_conflict.status_code == 409
+    assert class_conflict.json()["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+    assert secret_like not in class_conflict.text
+
+
+@pytest.mark.unit
+async def test_adopt_pr_rejects_overlength_external_id_and_unsupported_task_class(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    overlength = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": "x" * 129,
+        },
+    )
+    bad_class = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "task_class": "not_a_real_task_class",
+        },
+    )
+
+    assert overlength.status_code == 422
+    assert bad_class.status_code == 422
+
+
+@pytest.mark.unit
+async def test_adopt_pr_rejects_nul_in_external_id(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    """Control chars in external_id must 422 at the boundary, not fail at flush."""
+    client, _fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": "CLOUD\u0000TASK",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "control characters" in response.text
+
+
+@pytest.mark.unit
+async def test_adopt_pr_colliding_explicit_external_id_leaves_db_unchanged(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    """409 TASK_EXTERNAL_ID_CONFLICT must not persist orphan adoption state."""
+    client, _fetcher = adoption_client
+    colliding_id = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        unrelated = await TaskRepository(session).create_or_get(
+            repo_url="https://github.com/other/repo.git",
+            base_branch="main",
+            title="unrelated owner",
+            prompt="unrelated prompt",
+            external_id=colliding_id,
+            idempotency_key="api-unrelated-task-key",
+            task_class="docs_task",
+            owned_paths=[],
+        )
+        await session.commit()
+        unrelated_id = unrelated.id
+        unrelated_external_id = unrelated.external_id
+        unrelated_title = unrelated.title
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": colliding_id,
+        },
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+    assert colliding_id not in response.text
+
+    canonical_key = pr_adoption_idempotency_key(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    async with session_factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        tasks = list((await session.execute(select(Task))).scalars())
+        task = await session.get(Task, unrelated_id)
+        by_key = await WorkspaceRepository(session).get_by_idempotency_key(canonical_key)
+    assert workspaces == []
+    assert len(tasks) == 1
+    assert task is not None
+    assert task.external_id == unrelated_external_id
+    assert task.title == unrelated_title
+    assert by_key is None
