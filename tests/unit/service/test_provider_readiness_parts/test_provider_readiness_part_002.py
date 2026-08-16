@@ -448,24 +448,6 @@ def test_provider_readiness_claude_reports_copy_for_reserved_char_work_dir(
 
 
 @pytest.mark.unit
-def test_provider_readiness_gemini_file_present(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    (home / ".gemini").mkdir(parents=True)
-    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    gemini = payload["providers"]["gemini"]
-    assert gemini["ok"] is True
-    assert gemini["reason"] == "GEMINI_FILE_AUTH_PRESENT"
-    assert "gemini_file_secret" not in json.dumps(payload, sort_keys=True)
-
-
-@pytest.mark.unit
 def test_provider_readiness_grok_file_present_before_env(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".grok").mkdir(parents=True)
@@ -575,43 +557,6 @@ def test_provider_readiness_cursor_missing_env_fails_when_strict(tmp_path: Path)
     assert cursor["reason"] == "CURSOR_AUTH_MISSING"
     assert cursor["credential_scope"] == "not_observed"
     assert cursor["isolation"] == "none"
-
-
-@pytest.mark.unit
-def test_provider_readiness_gemini_google_application_credentials_visible(
-    tmp_path: Path,
-) -> None:
-    credentials = tmp_path / "google.json"
-    credentials.write_text("google_file_secret")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    gemini = payload["providers"]["gemini"]
-    assert gemini["ok"] is True
-    assert gemini["reason"] == "GEMINI_ENV_AUTH_PRESENT"
-    assert gemini["signals"] == ["GOOGLE_APPLICATION_CREDENTIALS"]
-    assert "google_file_secret" not in json.dumps(payload, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_gemini_missing_google_application_credentials_is_actionable(
-    tmp_path: Path,
-) -> None:
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "missing.json")},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    gemini = payload["providers"]["gemini"]
-    assert gemini["ok"] is False
-    assert gemini["reason"] == "GEMINI_AUTH_MISSING"
-    assert gemini["signals"] == ["GOOGLE_APPLICATION_CREDENTIALS"]
-    assert "file is not visible" in gemini["message"]
 
 
 @pytest.mark.unit

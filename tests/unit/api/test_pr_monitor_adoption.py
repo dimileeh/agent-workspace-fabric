@@ -690,6 +690,83 @@ async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
 
 
 @pytest.mark.unit
+async def test_retired_gemini_adoption_replay_returns_existing_workspace(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _ = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    idempotency_key = pr_adoption_idempotency_key(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.create(
+            repo_url="https://github.com/dimileeh/aira-web",
+            branch_base="development",
+            task_title="Historical gemini adoption",
+            task_prompt="prompt",
+            agent="gemini",
+            test_commands=[],
+            requires_database=False,
+            owned_paths=[],
+            task_policy={
+                "auto_merge_intent": None,
+                "pr_adoption": {
+                    "repo_slug": "dimileeh/aira-web",
+                    "pr_number": 277,
+                    "execution": {"mode": "local"},
+                },
+            },
+            profile_ref="auto",
+            idempotency_key=idempotency_key,
+            task_kind="sync_feature_pr",
+            remote_push_branch="feature/ready",
+        )
+        workspace.pr_number = 277
+        workspace.pr_url = "https://github.com/dimileeh/aira-web/pull/277"
+        workspace.task_external_id = _adoption_external_id(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        await session.commit()
+        workspace_id = workspace.id
+
+    replay = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277, "agent": "gemini"},
+    )
+
+    assert replay.status_code == 202
+    body = replay.json()
+    assert body["workspace_id"] == workspace_id
+    assert body["attached_existing"] is True
+
+
+@pytest.mark.unit
+async def test_retired_gemini_fresh_adoption_is_rejected(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _ = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 999, "agent": "gemini"},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+
+
+@pytest.mark.unit
 def test_adoption_request_schema_accepts_optional_external_id_and_task_class() -> None:
     payload = PullRequestMonitorAdoptionRequest(
         repo_slug="dimileeh/aira-web",

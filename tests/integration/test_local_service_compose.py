@@ -219,7 +219,6 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_host_home}/.codex:{expected_host_home}/.codex:ro",
         f"{expected_host_home}/.claude:{expected_host_home}/.claude:ro",
         f"{expected_host_home}/.claude.json:{expected_host_home}/.claude.json:ro",
-        f"{expected_host_home}/.gemini:{expected_host_home}/.gemini:ro",
         f"{expected_host_home}/.config/opencode:{expected_host_home}/.config/opencode:ro",
         f"{expected_host_home}/.grok:{expected_host_home}/.grok:ro",
         f"{expected_host_home}/.ollama:{expected_host_home}/.ollama:ro",

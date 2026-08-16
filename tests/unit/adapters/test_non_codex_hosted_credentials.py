@@ -21,7 +21,6 @@ import yaml
 import awf.adapters.registry  # noqa: F401 — populate registry
 from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.cursor import CursorAdapter
-from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import OpenCodeAdapter
 from awf.adapters.runtime_executor import (
@@ -74,19 +73,6 @@ _CLAUDE_CODE_BACKEND_AUTH_NAMES = (
 # injecting a dangling env-only path.
 _CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
-_GEMINI_NAMES = (
-    "GEMINI_API_KEY",
-    "GEMINI_API_KEY_AUTH_MECHANISM",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION",
-    # ``GOOGLE_APPLICATION_CREDENTIALS`` intentionally omitted — see
-    # ``_CLAUDE_CODE_BACKEND_AUTH_NAMES`` note above (file-backed credential;
-    # env-only passthrough injects a dangling path on the hosted path).
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-)
 _GROK_NAMES = ("XAI_API_KEY",)
 _OPENCODE_NAMES = (
     "AWF_OPENCODE_OLLAMA_BASE_URL",
@@ -191,99 +177,6 @@ class TestNonCodexHostedCredentials:
         assert "CURSOR_API_KEY" in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_gemini_surfaces_google_env_names(self, tmp_path: Path) -> None:
-        compose_file = _write_compose(tmp_path)
-        adapter = _build(GeminiAdapter)
-        request = await _run(adapter, compose_file=compose_file)
-        assert request.agent_runtime is AgentRuntime.gemini
-        for name in _GEMINI_NAMES:
-            assert name in request.env_passthrough_names, name
-
-    @pytest.mark.unit
-    async def test_gemini_does_not_advertise_file_backed_google_application_credentials(
-        self, tmp_path: Path
-    ) -> None:
-        """``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must not be env-only passthrough.
-
-        Regression for PR #751 thread PRRT_kwDOSJAM6s6Pas4k: the local Compose
-        path bind-mounts the referenced credentials file into the agent
-        container via ``_build_host_auth_mounts`` so the path the env var points
-        at actually exists and ADC/Vertex auth works. The hosted path carries
-        that file-backed signal through ``file_auth_mount_targets`` instead of
-        injecting a dangling env-only path. The value/config names (API keys,
-        Vertex toggles, project/location, access token) are still surfaced
-        because they are not file paths.
-        """
-        compose_file = _write_compose(tmp_path)
-        adapter = _build(GeminiAdapter)
-        request = await _run(adapter, compose_file=compose_file)
-        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
-        # The value/config names that ARE env-safe remain surfaced.
-        for name in _GEMINI_NAMES:
-            assert name in request.env_passthrough_names, name
-
-    @pytest.mark.unit
-    async def test_gemini_carries_google_application_credentials_file_auth_target(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """ADC-only Gemini hosted runs preserve the local file-backed auth target.
-
-        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDzjU: provider readiness
-        accepts a readable ``GOOGLE_APPLICATION_CREDENTIALS`` file and local
-        Compose bind-mounts it, so hosted Gemini must carry the corresponding
-        file-auth mount target instead of launching without ADC.
-        """
-        credentials_target = "/home/agent/.config/gcloud/adc.json"
-        compose_file = _write_compose(
-            tmp_path,
-            environment={"GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}"},
-            volumes=(
-                "/host/worktree:/workspace",
-                f"/host/auth/adc.json:{credentials_target}:ro",
-            ),
-        )
-        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
-
-        adapter = _build(GeminiAdapter)
-        request = await _run(adapter, compose_file=compose_file)
-
-        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
-        assert credentials_target in request.file_auth_mount_targets
-        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
-
-    @pytest.mark.unit
-    async def test_gemini_carries_pass_through_google_application_credentials_file_auth_target(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Compose pass-through ADC slots preserve the same file-auth target."""
-        credentials_target = "/home/agent/.config/gcloud/application_default_credentials.json"
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "agent": {
-                            "image": "agent:latest",
-                            "environment": ["GOOGLE_APPLICATION_CREDENTIALS"],
-                            "volumes": [
-                                "/host/worktree:/workspace",
-                                f"/host/auth/adc.json:{credentials_target}:ro",
-                            ],
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
-
-        adapter = _build(GeminiAdapter)
-        request = await _run(adapter, compose_file=compose_file)
-
-        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
-        assert credentials_target in request.file_auth_mount_targets
-        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
-
     @pytest.mark.unit
     async def test_grok_surfaces_xai_api_key_name(self, tmp_path: Path) -> None:
         compose_file = _write_compose(tmp_path)
@@ -446,14 +339,13 @@ class TestNonCodexHostedCredentials:
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/host/adc.json")
         monkeypatch.setenv("NPM_TOKEN", "npm_worker_secret")
 
-        for adapter_cls in (ClaudeCodeAdapter, GeminiAdapter):
-            adapter = _build(adapter_cls)
-            request = await _run(adapter, compose_file=compose_file)
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
 
-            assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
-            assert "GOOGLE_APPLICATION_CREDENTIALS" not in dict(request.profile_env)
-            assert "NPM_TOKEN" in request.env_passthrough_names
-            assert "NPM_TOKEN" not in dict(request.profile_env)
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in dict(request.profile_env)
+        assert "NPM_TOKEN" in request.env_passthrough_names
+        assert "NPM_TOKEN" not in dict(request.profile_env)
 
     @pytest.mark.unit
     async def test_hosted_request_carries_file_auth_mount_targets(self, tmp_path: Path) -> None:
@@ -474,12 +366,6 @@ class TestNonCodexHostedCredentials:
                 "/host/auth/ws/ollama:/home/agent/.ollama:rw",
                 "/host/auth/ws/grok:/home/agent/.grok:rw",
                 ("/run/awf/hosted-auth-placeholders/run__secrets__npmrc:/run/secrets/npmrc:ro"),
-                {
-                    "type": "bind",
-                    "source": "/host/auth/ws/gemini",
-                    "target": "/home/agent/.gemini",
-                    "read_only": False,
-                },
             ),
         )
         adapter = _build(OpenCodeAdapter)
@@ -491,7 +377,6 @@ class TestNonCodexHostedCredentials:
             "/home/agent/.ollama",
             "/home/agent/.grok",
             "/run/secrets/npmrc",
-            "/home/agent/.gemini",
         )
         blob = "\x00".join(request.file_auth_mount_targets)
         assert "/host/auth" not in blob

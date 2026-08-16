@@ -92,10 +92,12 @@ def test_normalize_provider_accepts_cursor() -> None:
 
 @pytest.mark.unit
 def test_normalize_provider_accepts_antigravity() -> None:
-    """Antigravity is selectable through setup (and via the agy alias)."""
+    """Antigravity is selectable through setup (and via google/gemini/agy aliases)."""
     assert normalize_provider("antigravity") == "antigravity"
     assert "antigravity" in KNOWN_SETUP_PROVIDERS
     assert normalize_provider("agy") == "antigravity"
+    assert normalize_provider("google") == "antigravity"
+    assert normalize_provider("gemini") == "antigravity"
 
 
 @pytest.mark.unit

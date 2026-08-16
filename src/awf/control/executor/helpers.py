@@ -332,7 +332,7 @@ def _nonblank_metadata_str(metadata: Mapping[str, object], key: str) -> str | No
 def _call_pr_monitor_factory(
     factory: Callable[..., _MonitorRunnerProto],
     *,
-    adapter: AgentAdapter,
+    adapter: AgentAdapter | None,
     profile: WorkspaceProfile,
     workspace: Workspace,
     provider_recovery_default_model: str | None = None,
@@ -576,7 +576,7 @@ def _agent_defaults_for_workspace(
 
 def _provider_recovery_default_model_for_monitor_handoff(
     *,
-    adapter: AgentAdapter,
+    adapter: AgentAdapter | None,
     defaults: AgentDefaults | None,
 ) -> str | None:
     """Return the default model metadata to hand to a PR monitor factory.

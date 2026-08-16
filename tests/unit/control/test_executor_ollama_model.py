@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.adapters.base import AgentDefaults
-from awf.adapters.opencode import OPENCODE_OLLAMA_CLOUD_MODELS
+from awf.adapters.opencode import (
+    OPENCODE_OLLAMA_CLOUD_MODELS,
+    _qualified_model,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -325,7 +328,7 @@ async def test_ensure_falls_back_to_adapter_cloud_default_when_no_model_resolved
     )
 
     assert proceed is True
-    assert seen["model"] == OPENCODE_OLLAMA_CLOUD_MODELS[0]
+    assert seen["model"] == _qualified_model(OPENCODE_OLLAMA_CLOUD_MODELS[0])
     snap = await _get_status(factory, workspace_id)
     assert snap.status == WorkspaceStatus.running.value
 

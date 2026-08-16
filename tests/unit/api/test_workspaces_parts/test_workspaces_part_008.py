@@ -260,3 +260,204 @@ class TestCreateWorkspacePart002:
         assert lock_keys == [idempotency_key]
         assert lookup_keys == [idempotency_key]
         assert create_calls == []
+
+    @pytest.mark.unit
+    async def test_retired_gemini_idempotency_replay_returns_existing_workspace(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "agent": "gemini", "task_title": "gemini idempotency replay"}
+        )
+        idempotency_key = "gemini-replay-key"
+        existing = SimpleNamespace(
+            id="ws_gemini_replay",
+            status=WorkspaceStatus.requested.value,
+            version=1,
+            created_at=datetime(2026, 1, 15, tzinfo=UTC),
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_tag=payload.task.task_tag,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            agent="gemini",
+            env_profile=payload.env_profile,
+            test_commands=list(payload.test_commands),
+            requires_database=payload.requires_database,
+            task_attempt=None,
+        )
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            pass
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> object:
+            return existing
+
+        async def fail_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError(
+                "gemini idempotency replay must return existing row without creating"
+            )
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_create)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+
+    @pytest.mark.unit
+    async def test_retired_gemini_fresh_create_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "agent": "gemini", "task_title": "gemini fresh create"}
+        )
+
+        async def fake_lock(_self: WorkspaceRepository, _key: str) -> None:
+            pass
+
+        async def fake_lookup(_self: WorkspaceRepository, _key: str) -> None:
+            return None
+
+        async def fake_rollback() -> None:
+            pass
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", fake_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", fake_lookup)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key="fresh-gemini-key",
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None, rollback=fake_rollback),  # type: ignore[arg-type]
+        )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 409
+        body = json.loads(response.body)
+        assert body["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    async def test_retired_gemini_fallback_idempotency_replay_returns_existing_workspace(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {
+                "repo": _V2_MINIMAL_BODY["repo"],
+                "task": {
+                    **_V2_MINIMAL_BODY["task"],
+                    "title": "gemini fallback idempotency replay",
+                    "agent": "codex",
+                    "provider_recovery": {
+                        "fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]
+                    },
+                },
+            }
+        )
+        idempotency_key = "gemini-fallback-replay-key"
+        existing = SimpleNamespace(
+            id="ws_gemini_fallback_replay",
+            status=WorkspaceStatus.requested.value,
+            version=1,
+            created_at=datetime(2026, 1, 15, tzinfo=UTC),
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_tag=payload.task.task_tag,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            agent="codex",
+            env_profile=payload.env_profile,
+            test_commands=list(payload.test_commands),
+            requires_database=payload.requires_database,
+            task_attempt=None,
+            task_policy={
+                "provider_recovery": {"fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]}
+            },
+        )
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            pass
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> object:
+            return existing
+
+        async def fail_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError(
+                "gemini fallback idempotency replay must return existing row without creating"
+            )
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_create)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+
+    @pytest.mark.unit
+    async def test_retired_gemini_fallback_fresh_create_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {
+                "repo": _V2_MINIMAL_BODY["repo"],
+                "task": {
+                    **_V2_MINIMAL_BODY["task"],
+                    "title": "gemini fallback fresh create",
+                    "agent": "codex",
+                    "provider_recovery": {
+                        "fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]
+                    },
+                },
+            }
+        )
+
+        async def fake_lock(_self: WorkspaceRepository, _key: str) -> None:
+            pass
+
+        async def fake_lookup(_self: WorkspaceRepository, _key: str) -> None:
+            return None
+
+        async def fake_rollback() -> None:
+            pass
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", fake_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", fake_lookup)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key="fresh-gemini-fallback-key",
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None, rollback=fake_rollback),  # type: ignore[arg-type]
+        )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 409
+        body = json.loads(response.body)
+        assert body["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"

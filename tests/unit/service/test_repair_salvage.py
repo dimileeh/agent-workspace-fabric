@@ -11,6 +11,7 @@ import pytest
 from awf.service import repair_salvage as repair_salvage_mod
 from awf.service._git_salvage_utils import (
     GIT_TIMEOUT_SECONDS,
+    git_lines,
     paths_from_ls_files_z,
     paths_from_name_status,
     write_nul_delimited_pathspec_file,
@@ -763,3 +764,9 @@ def test_capture_many_affected_paths_uses_pathspec_from_file(tmp_path: Path) -> 
     diff_calls = [call for call in git_calls if "diff" in call and "--binary" in call]
     assert len(diff_calls) == 1
     assert "--" not in diff_calls[0]
+
+
+def test_git_lines_strips_sorts_and_drops_blank_entries() -> None:
+    raw = "  src/b.py \n\nsrc/a.py\n   \nsrc/c.py\n"
+    assert git_lines(raw) == ["src/a.py", "src/b.py", "src/c.py"]
+    assert git_lines("") == []

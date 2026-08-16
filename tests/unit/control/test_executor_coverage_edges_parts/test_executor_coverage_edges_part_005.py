@@ -637,6 +637,29 @@ def test_agent_defaults_for_workspace_handles_policy_without_base_defaults() -> 
 
 
 @pytest.mark.unit
+def test_executor_defaults_for_historical_runtime_returns_historical_defaults(
+    tmp_path: Path,
+) -> None:
+    from awf.db.enums import AgentRuntime
+
+    executor = WorkspaceExecutor(
+        session_factory=AsyncMock(),
+        runner=FakeCommandRunner(),
+        compose=AsyncMock(),
+        validation=AsyncMock(),
+        pr_creator=AsyncMock(),
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "projects",
+        ),
+    )
+    defaults = executor._defaults_for(AgentRuntime.gemini)
+    assert defaults is not None
+    assert defaults.model == "gemini-3.1-pro-preview"
+    assert defaults.effort == "xhigh"
+
+
+@pytest.mark.unit
 def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
     assert (
         _agent_pr_identity(  # type: ignore[arg-type]

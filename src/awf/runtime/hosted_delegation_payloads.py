@@ -23,6 +23,7 @@ from awf.common.token_patterns import (
     compile_known_token_re,
     compile_provider_ref_re,
 )
+from awf.db.enums import AgentRuntime
 from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_delegation_payload_volumes import (
@@ -84,7 +85,11 @@ _log = get_logger(__name__)
 def _agent_start_payload(request: AgentRuntimeExecRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "workspace_id": request.workspace_id,
-        "agent_runtime": request.agent_runtime.value,
+        "agent_runtime": (
+            request.agent_runtime.value
+            if isinstance(request.agent_runtime, AgentRuntime)
+            else str(request.agent_runtime)
+        ),
         "cli_args": [],
         "prompt_stdin_base64": base64.b64encode(request.prompt_stdin).decode("ascii"),
         "log_source": request.log_source,

@@ -113,11 +113,11 @@ def _green_status() -> dict[str, object]:
                     "reason": "CURSOR_ENV_AUTH_PRESENT",
                     "message": "Cursor auth is visible.",
                 },
-                "gemini": {
+                "antigravity": {
                     "ok": True,
                     "status": "ok",
-                    "reason": "GEMINI_FILE_AUTH_PRESENT",
-                    "message": "Gemini auth files are visible.",
+                    "reason": "ANTIGRAVITY_ENV_AUTH_PRESENT",
+                    "message": "Antigravity auth is visible.",
                 },
                 "opencode": {
                     "ok": True,
@@ -196,7 +196,7 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
         "provider.codex",
         "provider.claude_code",
         "provider.cursor",
-        "provider.gemini",
+        "provider.antigravity",
         "provider.opencode",
         "provider.grok",
         "port.api",
@@ -465,7 +465,7 @@ def test_doctor_network_posture_metadata_surfaces_templates(tmp_path: Path) -> N
         ("codex", "CODEX_AUTH_OK", "Codex auth is usable for agent workspaces."),
         ("claude_code", "CLAUDE_CODE_AUTH_OK", "Claude Code auth is usable for agent workspaces."),
         ("cursor", "CURSOR_AUTH_OK", "Cursor auth is usable for agent workspaces."),
-        ("gemini", "GEMINI_AUTH_OK", "Gemini auth is usable for agent workspaces."),
+        ("antigravity", "ANTIGRAVITY_AUTH_OK", "Antigravity auth is usable for agent workspaces."),
         ("opencode", "OPENCODE_AUTH_OK", "OpenCode/Ollama auth is usable for agent workspaces."),
         ("grok", "GROK_AUTH_OK", "Grok Build auth is usable for agent workspaces."),
     ],
@@ -573,11 +573,11 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
         "reason": "CURSOR_AUTH_MISSING",
         "message": "No Cursor auth signal was visible.",
     }
-    providers["gemini"] = {
+    providers["antigravity"] = {
         "ok": False,
         "status": "fail",
-        "reason": "GEMINI_AUTH_MISSING",
-        "message": "No Gemini auth signal was visible.",
+        "reason": "ANTIGRAVITY_AUTH_MISSING",
+        "message": "No Antigravity auth signal was visible.",
     }
     providers["opencode"] = {
         "ok": False,
@@ -623,7 +623,7 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
     assert diagnostics["provider.codex"]["action"].startswith("Mount ~/.codex")
     assert diagnostics["provider.claude_code"]["reason"] == "CLAUDE_AUTH_MISSING"
     assert diagnostics["provider.cursor"]["action"] == "Set CURSOR_API_KEY before starting AWF."
-    assert diagnostics["provider.gemini"]["reason"] == "GEMINI_AUTH_MISSING"
+    assert diagnostics["provider.antigravity"]["reason"] == "ANTIGRAVITY_AUTH_MISSING"
     assert diagnostics["provider.opencode"]["reason"] == "OPENCODE_OLLAMA_AUTH_MISSING"
     assert diagnostics["provider.grok"]["reason"] == "GROK_AUTH_MISSING"
     assert (
