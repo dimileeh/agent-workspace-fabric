@@ -15,6 +15,29 @@ import awf.service.provider_readiness_helpers as provider_readiness_helpers
 
 
 @pytest.mark.unit
+def test_profile_overlays_accept_legacy_persisted_clarification_service() -> None:
+    """Retry admission must retain profile settings from grandfathered snapshots."""
+    snapshot = {
+        "name": "legacy-profile",
+        "services": [{"name": "clarification", "image": "example:latest"}],
+        "runtime": {
+            "environment": {
+                "OLLAMA_HOST": "http://ollama-sidecar:11434",
+                "OPENAI_API_KEY": "profile-api-key",
+            }
+        },
+    }
+
+    ollama_environ = provider_readiness_helpers.overlay_profile_ollama_base_url({}, snapshot)
+    credential_environ = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {}, snapshot
+    )
+
+    assert ollama_environ["OLLAMA_HOST"] == "http://ollama-sidecar:11434"
+    assert credential_environ["OPENAI_API_KEY"] == "profile-api-key"
+
+
+@pytest.mark.unit
 def test_ollama_url_helpers_normalize_v1_and_host_gateway() -> None:
     env = {"OLLAMA_HOST": "host.docker.internal:11434/v1"}
 

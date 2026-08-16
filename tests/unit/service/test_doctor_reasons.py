@@ -41,6 +41,29 @@ def test_release_sync_forge_not_supported_has_doctor_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_hosted_remote_head_recovery_reasons_have_doctor_guidance() -> None:
+    """Verify hosted remote-head recovery failures map to operator guidance."""
+    expected_codes = {
+        "HOSTED_REMOTE_HEAD_MISSING",
+        "HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+        "HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        "HOSTED_REMOTE_HEAD_MISMATCH",
+        "HOSTED_REMOTE_HEAD_SYNC_FAILED",
+    }
+
+    missing_codes = expected_codes - set(_REASON_TEXT)
+
+    assert not missing_codes
+    for code in expected_codes:
+        reason = _REASON_TEXT[code]
+        assert reason.message
+        assert reason.likely_cause
+        assert reason.action
+        assert reason.related_command
+        assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
 def test_bitbucket_git_auth_not_configured_has_doctor_guidance() -> None:
     """Verify the Bitbucket git-auth preflight reason maps to operator guidance."""
     code = "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"

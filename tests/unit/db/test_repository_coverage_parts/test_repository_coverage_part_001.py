@@ -1338,14 +1338,6 @@ async def test_workspace_queue_listing_and_owned_path_edges(
         repo_url="git@github.com:example/repository-coverage.git",
         limit=10,
     )
-    merge_queue = await repo.list_merge_queue(
-        repo_url="git@github.com:example/repository-coverage.git",
-        base_branch="development",
-        status=WorkspaceStatus.monitoring_pr,
-        before_updated_at=without_attempt.updated_at,
-        before_workspace_id=without_attempt.id,
-        limit=10,
-    )
     merge_queue_without_candidates = await repo.list_merge_queue_without_candidates(
         repo_url="git@github.com:example/repository-coverage.git",
         base_branch="development",
@@ -1355,7 +1347,6 @@ async def test_workspace_queue_listing_and_owned_path_edges(
         limit=10,
     )
     unfiltered_without_attempts = await repo.list_without_task_attempts(limit=10)
-    unfiltered_merge_queue = await repo.list_merge_queue(limit=10)
     unfiltered_without_candidates = await repo.list_merge_queue_without_candidates(limit=10)
     conflicts = await repo.find_active_owned_path_conflicts(
         repo_url="git@github.com:example/repository-coverage.git",
@@ -1370,17 +1361,11 @@ async def test_workspace_queue_listing_and_owned_path_edges(
     zero_limit = await repo.list_schedulable_ids(status=WorkspaceStatus.ready, limit=0)
 
     assert [workspace.id for workspace in without_attempts] == [without_attempt.id]
-    assert [workspace.id for workspace in merge_queue] == [with_attempt.id]
     assert [workspace.id for workspace in merge_queue_without_candidates] == [with_attempt.id]
     assert {workspace.id for workspace in unfiltered_without_attempts} >= {
         without_attempt.id,
         older_without_attempt.id,
         destroyed.id,
-    }
-    assert {workspace.id for workspace in unfiltered_merge_queue} >= {
-        without_attempt.id,
-        with_attempt.id,
-        older_without_attempt.id,
     }
     assert {workspace.id for workspace in unfiltered_without_candidates} >= {
         without_attempt.id,

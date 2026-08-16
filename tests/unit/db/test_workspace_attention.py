@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from tests.postgres import postgres_test_session
@@ -20,7 +20,12 @@ async def session() -> AsyncIterator[AsyncSession]:
         yield s
 
 
-async def _create_workspace(repo: WorkspaceRepository, session: AsyncSession) -> Workspace:
+async def _create_workspace(
+    repo: WorkspaceRepository,
+    session: AsyncSession,
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
+) -> Workspace:
     workspace = await repo.create(
         repo_url="git@github.com:example/app.git",
         branch_base="development",
@@ -29,6 +34,8 @@ async def _create_workspace(repo: WorkspaceRepository, session: AsyncSession) ->
         agent=AgentRuntime.codex.value,
         test_commands=[],
     )
+    # Attention enter is fenced to monitoring_pr; create defaults to requested.
+    workspace.status = status.value
     await session.flush()
     return workspace
 

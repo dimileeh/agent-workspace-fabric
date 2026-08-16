@@ -17,6 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,11 +26,21 @@ from typing import Any, Final, Protocol, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentDefaults
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import redact_audit_value
+from awf.common.auto_merge import (
+    DEFAULT_AUTO_MERGE,
+    auto_merge_intent_from_policy,
+    resolve_auto_merge,
+    task_policy_has_auto_merge_intent,
+)
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
+from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
+from awf.db.enums import AgentRuntime, EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -59,7 +70,7 @@ from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, WorkspaceProfile
 from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
@@ -79,6 +90,9 @@ _egress_plan_destination_category = _provisioner_helpers._egress_plan_destinatio
 _positive_int = _provisioner_helpers._positive_int
 _provision_checkout_base_branch = _provisioner_helpers._provision_checkout_base_branch
 _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
+_provision_profile_auto_merge_is_trusted = (
+    _provisioner_helpers._provision_profile_auto_merge_is_trusted
+)
 _provision_remote_push_branch = _provisioner_helpers._provision_remote_push_branch
 _reconcile_active_reservation_for_profile = (
     _provisioner_helpers._reconcile_active_reservation_for_profile
@@ -155,6 +169,9 @@ class ProvisionerConfig:
     service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
     """How many companion log lines to capture on a service-startup failure (must be > 0)."""
 
+    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
+    """Resolved agent defaults shared with the executor's runtime configuration."""
+
     def __post_init__(self) -> None:
         """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
 
@@ -191,6 +208,20 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+
+    def _effective_agent_model(self, workspace: Workspace) -> str | None:
+        """Resolve the stack model with the executor's default-selection rules."""
+        agent = AgentRuntime(workspace.agent)
+        defaults = self._config.agent_defaults.get(agent)
+        task_policy = workspace.task_policy
+        raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
+        effort = raw_effort.strip() if isinstance(raw_effort, str) else None
+        return selected_runtime_model_for_defaults(
+            agent=agent,
+            explicit_model=agent_model_from_task_policy(task_policy),
+            default_model=defaults.model if defaults is not None else None,
+            effort=effort or (defaults.effort if defaults is not None else None),
+        )
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -295,7 +326,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 )
                 profile = profile_resolution.profile
             else:
-                profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+                profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
             resolved_profile_dict = (
                 profile_resolution.profile.model_dump(mode="json", by_alias=True)
                 if profile_resolution is not None
@@ -304,11 +335,21 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
+            hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
+            effective_agent_model = self._effective_agent_model(ws)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
+            companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+            clarification_enabled = all(
+                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
+            ) and all(
+                companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
+                for companion in companion_specs
+            )
+            if self._stack_launcher is not None:
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
@@ -316,8 +357,28 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     ),
                     companions=companion_specs,
                     docker_mode=profile.docker.mode,
+                    clarification_enabled=clarification_enabled,
                 )
                 companion_graph_prevalidated = True
+            if self._stack_launcher is not None and hosted_pr_adoption:
+                materialized_companions = await self._materialize_companions(
+                    workspace_id=workspace_id,
+                    companions=companion_specs,
+                    default_base_branch=ws.branch_base,
+                )
+                stack_paths = await self._stack_launcher.render(
+                    WorkspaceStackLaunchRequest(
+                        workspace_id=workspace_id,
+                        layout=layout,
+                        profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_model=effective_agent_model,
+                        companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
+                        companion_graph_prevalidated=companion_graph_prevalidated,
+                    )
+                )
+            elif self._stack_launcher is not None:
                 try:
                     await self._check_companion_host_ports(
                         task_policy=ws.task_policy,
@@ -551,7 +612,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
                     )
@@ -794,10 +858,12 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
+            hosted_pr_adoption = pr_adoption_is_hosted(persisted.task_policy)
             persisted.node_id = self._config.node_id
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
-            persisted.compose_project_name = f"awf_{workspace_id}"
+            if not hosted_pr_adoption:
+                persisted.compose_project_name = f"awf_{workspace_id}"
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
                 persisted.remote_push_branch = remote_push_branch
@@ -810,24 +876,25 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
-                companion_secret_metadata = _stack_companion_env_secret_event_payload(
-                    workspace_id=workspace_id,
-                    stack_paths=stack_paths,
-                )
-                if companion_secret_metadata is not None:
-                    await repo.add_event(
-                        persisted,
-                        event_type="workspace.companion_env_secret_metadata",
-                        reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
-                        payload=companion_secret_metadata,
-                    )
-                await SecretLeaseService(session).record_secret_lease_mounts(
-                    persisted,
-                    mount_metadata=_stack_secret_lease_mount_metadata(
+                if not hosted_pr_adoption:
+                    companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,
                         stack_paths=stack_paths,
-                    ),
-                )
+                    )
+                    if companion_secret_metadata is not None:
+                        await repo.add_event(
+                            persisted,
+                            event_type="workspace.companion_env_secret_metadata",
+                            reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
+                            payload=companion_secret_metadata,
+                        )
+                    await SecretLeaseService(session).record_secret_lease_mounts(
+                        persisted,
+                        mount_metadata=_stack_secret_lease_mount_metadata(
+                            workspace_id=workspace_id,
+                            stack_paths=stack_paths,
+                        ),
+                    )
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True
@@ -838,6 +905,53 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 workspace_id=workspace_id,
                 node_id=self._config.node_id,
                 profile=profile,
+                zero_local_capacity=hosted_pr_adoption,
+            )
+
+            # Resolve the FINAL auto-merge flag now that the profile (workspace.yml)
+            # is materialized. This is the single shared call site for both create
+            # and adopt (adoption also provisions through here). task_kind never
+            # affects it; the monitor reads only this persisted column. Precedence:
+            # per-task intent -> monitor.auto_merge.by_base_branch[base] ->
+            # monitor.auto_merge.default -> DEFAULT_AUTO_MERGE (False).
+            #
+            # Legacy in-flight rows persisted before the intent key existed carry no
+            # ``auto_merge_intent`` in task_policy; their persisted ``auto_merge``
+            # column is already the grandfathered authority. Resolving those as a
+            # fresh unset intent would clobber a grandfathered ``True`` with the
+            # profile's new default, so only re-resolve when the intent key is
+            # actually present and otherwise preserve the persisted column.
+            #
+            # Trust boundary: an adopted feature PR resolves its profile from the PR
+            # head checkout, so its ``monitor.auto_merge`` config is attacker-
+            # controlled. It must not authorize auto-merge — only an explicit
+            # operator intent may. When the profile is untrusted and the intent is
+            # unset we short-circuit to ``DEFAULT_AUTO_MERGE`` instead of falling
+            # through to the profile config (AWF owns merge safety; a PR cannot
+            # enable its own merge).
+            if task_policy_has_auto_merge_intent(persisted.task_policy):
+                auto_merge_intent = auto_merge_intent_from_policy(persisted.task_policy)
+                if auto_merge_intent is None and not _provision_profile_auto_merge_is_trusted(
+                    persisted, profile
+                ):
+                    resolved_auto_merge = DEFAULT_AUTO_MERGE
+                else:
+                    resolved_auto_merge = resolve_auto_merge(
+                        auto_merge_intent, profile, persisted.branch_base
+                    )
+            else:
+                auto_merge_intent = None
+                resolved_auto_merge = persisted.auto_merge
+            persisted.auto_merge = resolved_auto_merge
+            await repo.add_event(
+                persisted,
+                event_type="workspace.auto_merge_resolved",
+                reason_code="AUTO_MERGE_RESOLVED",
+                payload={
+                    "intent": auto_merge_intent,
+                    "base_branch": persisted.branch_base,
+                    "resolved": resolved_auto_merge,
+                },
             )
 
             if execution_claim_epoch is not None:

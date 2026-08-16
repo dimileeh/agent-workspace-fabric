@@ -538,6 +538,9 @@ class TestPayloadsMatch:
             test_commands=["x"],
             requires_database=False,
             idempotency_key="k",
+            # The service persists the tri-state auto-merge intent; mirror an
+            # omitted (None) intent so this row reflects a real new-world create.
+            task_policy={"auto_merge_intent": None},
         )
         payload = _payload(
             repo_url="r",

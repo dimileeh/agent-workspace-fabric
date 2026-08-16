@@ -105,7 +105,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_withou
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
-    assert "`workflow` scope for .github/workflows/publish.yml" in body
+    assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)

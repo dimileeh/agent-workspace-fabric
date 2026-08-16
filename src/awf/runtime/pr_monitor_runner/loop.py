@@ -418,7 +418,7 @@ async def _execute(
                     "status": "failed",
                     "outcome": outcome,
                     "reason_code": reason_code,
-                    "pushed": False,
+                    "pushed": push_result.pushed,
                 },
                 error_code=reason_code,
                 error_message=push_result.error_message,

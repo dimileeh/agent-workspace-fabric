@@ -458,7 +458,7 @@ class TestTaskKindFailFast:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "policy_failure"
             assert "deprecated" in (ws.failure_message or "")
-            assert "auto_merge=false" in (ws.failure_message or "")
+            assert "auto_merge defaults to false" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "DEPRECATED_TASK_KIND"
 
     @pytest.mark.unit

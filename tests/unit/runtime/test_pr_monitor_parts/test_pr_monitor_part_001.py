@@ -259,7 +259,7 @@ class TestNoBudgetCaps:
     @pytest.mark.unit
     def test_high_iter_count_with_all_green_still_merges(self) -> None:
         state = MonitorState(iter_count=1000)
-        assert isinstance(decide(_status(), state, MonitorConfig()), Merge)
+        assert isinstance(decide(_status(), state, MonitorConfig(auto_merge=True)), Merge)
 
     @pytest.mark.unit
     def test_unresolved_comments_always_win_over_volume(self) -> None:
@@ -274,7 +274,7 @@ class TestNoBudgetCaps:
     @pytest.mark.unit
     def test_long_wall_clock_does_not_abort(self) -> None:
         state = MonitorState(started_at=time.monotonic() - 48 * 3600)
-        assert isinstance(decide(_status(), state, MonitorConfig()), Merge)
+        assert isinstance(decide(_status(), state, MonitorConfig(auto_merge=True)), Merge)
 
 
 class TestOperatorHints:
@@ -534,14 +534,14 @@ class TestAddressComments:
         t = _thread("T_waiting")
         state = MonitorState(threads_addressed_ids={"T_waiting": "fix_committed"})
         # Gates green except these "unresolved"-per-GraphQL threads.
-        action = decide(_status(inline=(t,)), state, MonitorConfig())
+        action = decide(_status(inline=(t,)), state, MonitorConfig(auto_merge=True))
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
     def test_addressed_filter_applies_to_review_comments_too(self) -> None:
         c = _review("C_done")
         state = MonitorState(threads_addressed_ids={"C_done": "false_positive"})
-        action = decide(_status(reviews=(c,)), state, MonitorConfig())
+        action = decide(_status(reviews=(c,)), state, MonitorConfig(auto_merge=True))
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
@@ -625,7 +625,7 @@ class TestSyncBase:
 
     @pytest.mark.unit
     def test_base_zero_does_not_trigger_sync(self) -> None:
-        action = decide(_status(base_behind=0), MonitorState(), MonitorConfig())
+        action = decide(_status(base_behind=0), MonitorState(), MonitorConfig(auto_merge=True))
         assert isinstance(action, Merge)
 
     @pytest.mark.unit

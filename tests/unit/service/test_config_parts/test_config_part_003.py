@@ -9,15 +9,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from awf.common.config import (
     DEFAULT_MIN_FREE_DISK_BYTES,
     DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
     Settings,
 )
+from awf.runtime.hosted_delegation import HostedDelegationConfigError
+from awf.service import config as config_mod
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_API_TOKEN,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
+    hosted_delegation_config_from_service_settings,
     local_service_environ,
     resolve_service_settings,
     service_config_payload,
@@ -71,6 +75,210 @@ def test_agent_watchdog_settings_flow_from_settings_to_service_settings() -> Non
 
     assert settings.agent_wall_timeout_seconds == 1234
     assert settings.agent_idle_timeout_seconds == 56
+
+
+@pytest.mark.unit
+def test_hosted_delegation_service_settings_match_worker_visible_config() -> None:
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(
+        base,
+        environ={
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": "HOSTED_TOKEN",
+            "HOSTED_TOKEN": "secret-token",
+        },
+    )
+    config = hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert config is not None
+    assert config.base_url == "https://hosted.example.test"
+    assert config.bearer_token == "secret-token"
+
+    unconfigured = resolve_service_settings(Settings(_env_file=None), environ={})
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(unconfigured, required=True)
+    assert excinfo.value.detail() == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
+    }
+
+
+@pytest.mark.unit
+def test_hosted_delegation_service_settings_resolve_env_named_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOSTED_TOKEN", "service-visible-token")
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(base, environ={})
+    config = hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert settings.hosted_delegation_bearer_token is None
+    assert settings.hosted_delegation_bearer_token_env == "HOSTED_TOKEN"
+    assert config.bearer_token == "service-visible-token"
+
+
+@pytest.mark.unit
+def test_hosted_delegation_token_env_ignores_env_file_only_bare_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _module_file = _write_awf_source_checkout(tmp_path)
+    compose_file = checkout / config_mod.LOCAL_SERVICE_INCLUDED_COMPOSE_FILE
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    environment:\n"
+        "      - AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV="
+        "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}\n"
+        "      - ${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-"
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN}\n",
+        encoding="utf-8",
+    )
+    env_file = checkout / config_mod.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    env_file.write_text(
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV=HOSTED_TOKEN\nHOSTED_TOKEN=env-file-token\n",
+        encoding="utf-8",
+    )
+
+    def _asset_path(path: Path) -> Path | None:
+        if path == config_mod.LOCAL_SERVICE_INCLUDED_COMPOSE_FILE:
+            return compose_file
+        if path == config_mod.LOCAL_SERVICE_COMPOSE_ENV_FILE:
+            return env_file
+        return None
+
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV", raising=False)
+    monkeypatch.delenv("HOSTED_TOKEN", raising=False)
+    monkeypatch.setattr(config_mod, "_local_service_asset_path", _asset_path)
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(base)
+
+    assert settings.hosted_delegation_bearer_token is None
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+    assert excinfo.value.detail() == {
+        "missing": ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"]
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("settings_kwargs", "missing"),
+    [
+        (
+            {"hosted_delegation_base_url": "https://hosted.example.test/"},
+            ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"],
+        ),
+        (
+            {"hosted_delegation_bearer_token": "secret-token"},
+            ["AWF_HOSTED_DELEGATION_BASE_URL"],
+        ),
+    ],
+)
+def test_hosted_delegation_service_settings_treat_partial_optional_config_as_unconfigured(
+    settings_kwargs: dict[str, str],
+    missing: list[str],
+) -> None:
+    settings = resolve_service_settings(Settings(_env_file=None, **settings_kwargs), environ={})
+
+    assert hosted_delegation_config_from_service_settings(settings) is None
+
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+    assert excinfo.value.detail() == {"missing": missing}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://hosted.example.test", "ftp://hosted.example.test"],
+)
+def test_hosted_delegation_settings_reject_non_https_base_url(base_url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            hosted_delegation_base_url=base_url,
+            hosted_delegation_bearer_token="secret-token",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user@gateway.example.test/awf",
+        "https://user:token@gateway.example.test/awf",
+    ],
+)
+def test_hosted_delegation_settings_rejects_credentialed_base_url(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            hosted_delegation_base_url=base_url,
+            hosted_delegation_bearer_token="secret-token",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://hosted.example.test/awf?tenant=a",
+        "https://hosted.example.test/awf#agent-runs",
+    ],
+)
+def test_hosted_delegation_settings_rejects_base_url_query_or_fragment(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            hosted_delegation_base_url=base_url,
+            hosted_delegation_bearer_token="secret-token",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://hosted.example.test", "ftp://hosted.example.test"],
+)
+def test_hosted_delegation_service_settings_reject_non_https_before_auth_config(
+    base_url: str,
+) -> None:
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token="secret-token",
+    )
+    settings = replace(
+        resolve_service_settings(base, environ={}),
+        hosted_delegation_base_url=base_url,
+    )
+
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert excinfo.value.detail() == {"missing": ["AWF_HOSTED_DELEGATION_BASE_URL"]}
 
 
 @pytest.mark.unit

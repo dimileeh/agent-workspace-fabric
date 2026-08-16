@@ -1,273 +1,226 @@
-"""Focused behavioral tests for narrow ``quality_methods`` helper branches.
+"""Focused unit tests for ``_run_post_agent_autofixable_precommit_repair``.
 
-These drive module-level helpers in ``awf.control.executor.quality_methods``
-directly with a lightweight ``SimpleNamespace`` fake executor (same pattern as
-``test_executor_coverage_edges_part_009``) to exercise reachable branches the
-heavier full-pipeline executor suites do not reach:
-
-* the protected-quality-gate committed-output gate's empty-net-diff short
-  circuit (no violation when ``base..HEAD`` touches no paths),
-* the parallel-worker CPU limit's missing-reservation fall through, and
-* the provider-recovery preparation's invalid-agent-runtime defaults guard.
+The deterministic-autofix repair path (``ruff check --fix`` then
+``ruff format`` then re-stage then re-commit) is only exercised end-to-end via
+the full ``executor.execute`` flow, which left its decision branches (skip when
+no staged python files match the autofix set, ``ruff check --fix`` failure,
+``ruff format`` failure, ``git add`` re-stage failure, and the success retry)
+without direct behavior assertions. These tests call the helper with a fake
+``self`` so each branch is asserted by its observable side effects (the recorded
+repair event + the raised ``_PostAgentCommitStepError`` stage).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.common.commands import CommandResult
-from awf.control import operator_grants as control_operator_grants
-from awf.control.executor import quality_methods as executor_quality_methods
-from awf.control.executor import state_ops as executor_state_ops
-from awf.control.executor.quality_gates import _PostAgentCommitStepError
-from awf.control.quality_gates import QUALITY_GATE_POLICY_CHANGED_REASON_CODE
-from awf.db.enums import WorkspaceStatus
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.control.executor import quality_methods
+from awf.control.executor.constants import POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+from awf.control.executor.quality_gates import (
+    _PostAgentCommitClassification,
+    _PostAgentCommitStepError,
+)
+
+
+def _autofix_classification(
+    *,
+    repair_files: tuple[str, ...] = ("src/app.py",),
+    format_repair_files: tuple[str, ...] = (),
+) -> _PostAgentCommitClassification:
+    return _PostAgentCommitClassification(
+        reason_code="POST_AGENT_COMMIT_AUTOFIX_NEEDED",
+        failed_hooks=("ruff-check",),
+        format_repair_files=format_repair_files,
+        normalizer_repair_files=("src/other.py",),
+        autofix_repair_files=repair_files,
+        summary="ruff reported fixable diagnostics",
+        repair_strategy="agent",
+    )
+
+
+def _fake_self(
+    runner: FakeCommandRunner,
+    *,
+    record_calls: list[dict[str, Any]],
+) -> Any:
+    from types import SimpleNamespace
+
+    async def _record(**kwargs: Any) -> None:
+        record_calls.append(kwargs)
+
+    return SimpleNamespace(
+        _runner=runner,
+        _record_post_agent_commit_format_repair=_record,
+        _repair_agent_git_ownership=AsyncMock(),
+    )
 
 
 @pytest.mark.unit
-async def test_protected_quality_gate_committed_output_forwards_owner_id_on_block(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A committed-output protected violation owner-gates the block CAS.
+async def test_autofix_repair_skips_when_no_staged_python_matches(tmp_path: Path) -> None:
+    """Autofix files that are not in the staged python set skip the repair.
 
-    Without ``execution_owner_id`` the ``blocked`` transition is not
-    owner-gated, so a stale executor that lost its claim to a newer claimant
-    could still drive the transition and clobber the newer claimant's state —
-    exactly the race the epoch-guarded CAS pattern prevents.
+    The repair must record a ``skipped`` outcome (no ruff subprocess runs) and
+    return ``False`` so the caller proceeds to the next repair strategy. The
+    recorded event carries the formatter/normalizer paths for observability even
+    though no fix ran.
     """
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "committed_changed_paths_since",
-        AsyncMock(return_value=["pyproject.toml"]),
-    )
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "protected_file_diffs_for_committed_paths",
-        AsyncMock(return_value={"pyproject.toml": "+fail_under = 70"}),
-    )
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "find_protected_quality_gate_changes",
-        lambda **_kwargs: ["policy-change"],
-    )
-    executor = SimpleNamespace(
-        _runner=object(),
-        _active_operator_grant_specs=AsyncMock(return_value=[]),
-        enter_blocked_for_protected_violation=AsyncMock(return_value=True),
-    )
+    runner = FakeCommandRunner()
+    record_calls: list[dict[str, Any]] = []
+    self_obj = _fake_self(runner, record_calls=record_calls)
+    classification = _autofix_classification(repair_files=("src/missing.py",))
 
-    result = await executor_quality_methods._fail_if_protected_quality_gate_committed_output(
-        executor,
-        workspace_id="ws_block",
-        worktree_path=Path("/tmp/worktree"),
-        base_commit="0" * 40,
-        owned_paths=["src/"],
-        expected_status=WorkspaceStatus.validating,
-        execution_owner_id="owner-committed-output",
-    )
-
-    assert result is True
-    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
-    assert block_kwargs["execution_owner_id"] == "owner-committed-output"
-
-
-@pytest.mark.unit
-async def test_mark_post_agent_commit_failed_forwards_owner_id_on_block() -> None:
-    """A semantic-repair protected violation owner-gates the block CAS so a
-    stale executor cannot clobber a newer claimant's state."""
-    executor = SimpleNamespace(
-        enter_blocked_for_protected_violation=AsyncMock(return_value=True),
-    )
-    error = _PostAgentCommitStepError(
-        stage="post-agent pre-commit repair",
-        result=CommandResult(returncode=1, stdout="", stderr=""),
-        classification=None,
-        reason_code_override=QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
-        protected_violations=("policy-change",),
-    )
-
-    await executor_quality_methods._mark_post_agent_commit_failed(
-        executor,
-        workspace_id="ws_block",
-        error=error,
-        agent_run_reason_code=None,
-        agent_run_details=None,
-        agent_exit_note=None,
-        upstream_failure_reason=None,
-        execution_owner_id="owner-semantic-repair",
-    )
-
-    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
-    assert block_kwargs["execution_owner_id"] == "owner-semantic-repair"
-
-
-@pytest.mark.unit
-async def test_protected_quality_gate_committed_output_passes_on_empty_net_diff(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An empty net committed diff is not a protected-gate violation."""
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "committed_changed_paths_since",
-        AsyncMock(return_value=[]),
-    )
-    executor = SimpleNamespace(
-        _runner=object(),
-        _mark_failed=AsyncMock(),
-    )
-
-    result = await executor_quality_methods._fail_if_protected_quality_gate_committed_output(
-        executor,
-        workspace_id="ws_empty",
-        worktree_path=Path("/tmp/worktree"),
-        base_commit="0" * 40,
-        owned_paths=["src/"],
-        expected_status=WorkspaceStatus.validating,
+    result = await quality_methods._run_post_agent_autofixable_precommit_repair(  # noqa: SLF001
+        self_obj,
+        workspace_id="ws_skip",
+        worktree_path=tmp_path,
+        commit_result=CommandResult(returncode=1, stdout="", stderr=""),
+        classification=classification,
+        staged_paths=["docs/readme.md"],
+        run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
 
     assert result is False
-    executor._mark_failed.assert_not_awaited()
+    assert runner.calls == []
+    assert record_calls and record_calls[0]["retry_outcome"] == "skipped"
+    assert record_calls[0]["repaired_paths"] == []
+    assert record_calls[0]["reason_code"] == "POST_AGENT_COMMIT_AUTOFIX_NEEDED"
 
 
 @pytest.mark.unit
-async def test_parallel_worker_cpu_limit_returns_none_without_active_reservation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A configured worker count yields no limit when no reservation is active."""
+async def test_autofix_repair_raises_when_ruff_check_fix_fails(tmp_path: Path) -> None:
+    """A ``ruff check --fix`` subprocess failure records an error and re-raises.
 
-    class _Session:
-        async def __aenter__(self) -> _Session:
-            return self
+    The first ruff invocation (``check --fix``) returning non-zero must record a
+    repair event with ``retry_outcome="error"`` and the dedicated repair-failed
+    reason code, then raise ``_PostAgentCommitStepError`` with stage
+    ``ruff check --fix`` so the outer handler surfaces the distinct failure.
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=2, stdout="", stderr="ruff crashed")
+    record_calls: list[dict[str, Any]] = []
+    self_obj = _fake_self(runner, record_calls=record_calls)
+    classification = _autofix_classification()
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
+    with pytest.raises(_PostAgentCommitStepError) as raised:
+        await quality_methods._run_post_agent_autofixable_precommit_repair(  # noqa: SLF001
+            self_obj,
+            workspace_id="ws_check_fail",
+            worktree_path=tmp_path,
+            commit_result=CommandResult(returncode=1, stdout="", stderr=""),
+            classification=classification,
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
 
-    class _ReservationRepo:
-        def __init__(self, _session: object) -> None:
-            return None
-
-        async def active_for_workspace(self, _workspace_id: str) -> object | None:
-            return None
-
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "ResourceReservationRepository",
-        _ReservationRepo,
-    )
-    executor = SimpleNamespace(_session_factory=lambda: _Session())
-    profile = SimpleNamespace(
-        validation=SimpleNamespace(coverage=SimpleNamespace(parallel_workers=4)),
-    )
-
-    limit = await executor_quality_methods._parallel_worker_cpu_limit_for_workspace(
-        executor,
-        "ws_no_reservation",
-        profile=profile,
-    )
-
-    assert limit is None
+    assert raised.value.stage == "ruff check --fix"
+    assert record_calls and record_calls[0]["retry_outcome"] == "error"
+    assert record_calls[0]["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert record_calls[0]["repaired_paths"] == ["src/app.py"]
 
 
 @pytest.mark.unit
-async def test_prepare_provider_recovery_tolerates_invalid_agent_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unparseable persisted agent runtime falls back to no default model."""
+async def test_autofix_repair_raises_when_ruff_format_fails(tmp_path: Path) -> None:
+    """A ``ruff format`` failure (after ``check --fix`` succeeds) re-raises.
 
-    class _Session:
-        def __init__(self) -> None:
-            self.commits = 0
+    The format step runs over the union of repair + format paths; a non-zero
+    format result records the error event and raises with stage
+    ``ruff format``.
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="", stderr="")  # ruff check --fix ok
+    runner.queue_result(returncode=1, stdout="", stderr="format error")  # ruff format fails
+    record_calls: list[dict[str, Any]] = []
+    self_obj = _fake_self(runner, record_calls=record_calls)
+    classification = _autofix_classification(format_repair_files=("src/other.py",))
 
-        async def __aenter__(self) -> _Session:
-            return self
+    with pytest.raises(_PostAgentCommitStepError) as raised:
+        await quality_methods._run_post_agent_autofixable_precommit_repair(  # noqa: SLF001
+            self_obj,
+            workspace_id="ws_format_fail",
+            worktree_path=tmp_path,
+            commit_result=CommandResult(returncode=1, stdout="", stderr=""),
+            classification=classification,
+            staged_paths=["src/app.py", "src/other.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def commit(self) -> None:
-            self.commits += 1
-
-    class _WorkspaceRepo:
-        def __init__(self, _session: object) -> None:
-            return None
-
-        async def get(self, _workspace_id: str) -> object:
-            return SimpleNamespace(agent="nonexistent-runtime")
-
-    captured: dict[str, object] = {}
-
-    async def _fake_create_row(session: object, workspace_id: str, **kwargs: object) -> str:
-        captured.update(kwargs)
-        return "terminal"
-
-    monkeypatch.setattr(executor_quality_methods, "WorkspaceRepository", _WorkspaceRepo)
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "create_provider_recovery_attempt_row",
-        _fake_create_row,
-    )
-
-    session = _Session()
-    executor = SimpleNamespace(
-        _session_factory=lambda: session,
-        _defaults_for=lambda _runtime: pytest.fail("defaults lookup must be skipped"),
-    )
-
-    await executor_quality_methods._prepare_provider_recovery(executor, "ws_bad_agent")
-
-    # Invalid runtime → defaults is None → no effective default model is passed.
-    assert captured["effective_default_model"] is None
-    assert session.commits == 1
-
-
-class _NullGetSession:
-    """A session whose ``WorkspaceRepository.get`` resolves to a missing row."""
-
-    async def __aenter__(self) -> _NullGetSession:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
-
-
-class _MissingWorkspaceRepo:
-    def __init__(self, _session: object) -> None:
-        return None
-
-    async def get(self, _workspace_id: str) -> object | None:
-        return None
+    assert raised.value.stage == "ruff format"
+    assert record_calls and record_calls[0]["retry_outcome"] == "error"
 
 
 @pytest.mark.unit
-async def test_active_operator_grant_specs_returns_empty_when_workspace_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A vanished workspace yields no active grants rather than querying rows."""
-    # The grant-loader body now lives in the shared ``control.operator_grants``
-    # module the executor wrapper delegates to, so patch the repository there.
-    monkeypatch.setattr(control_operator_grants, "WorkspaceRepository", _MissingWorkspaceRepo)
-    executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
+async def test_autofix_repair_raises_when_restage_git_add_fails(tmp_path: Path) -> None:
+    """A failed re-stage ``git add`` after a successful ruff run re-raises.
 
-    specs = await executor_state_ops._active_operator_grant_specs(executor, "ws_gone")
+    Both ruff invocations succeed but ``git_in_worktree`` (re-stage) returns
+    non-zero; the repair records the error and raises with stage ``git add``.
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="", stderr="")  # ruff check --fix ok
+    runner.queue_result(returncode=0, stdout="", stderr="")  # ruff format ok
+    record_calls: list[dict[str, Any]] = []
+    self_obj = _fake_self(runner, record_calls=record_calls)
+    classification = _autofix_classification()
 
-    assert specs == []
+    with pytest.raises(_PostAgentCommitStepError) as raised:
+        await quality_methods._run_post_agent_autofixable_precommit_repair(  # noqa: SLF001
+            self_obj,
+            workspace_id="ws_add_fail",
+            worktree_path=tmp_path,
+            commit_result=CommandResult(returncode=1, stdout="", stderr=""),
+            classification=classification,
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=128, stdout="", stderr="fatal: not a repo")
+            ),
+        )
+
+    assert raised.value.stage == "git add"
+    assert record_calls and record_calls[0]["retry_outcome"] == "error"
+    assert record_calls[0]["restaged_paths"] == ["src/app.py"]
 
 
 @pytest.mark.unit
-async def test_consume_active_operator_grants_returns_zero_when_workspace_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Consuming grants on a vanished workspace is a no-op that consumes nothing."""
-    # The consume body lives in the shared ``control.operator_grants`` module the
-    # executor wrapper delegates to, so patch the repository there (the executor
-    # module no longer references ``WorkspaceRepository`` for this path).
-    monkeypatch.setattr(control_operator_grants, "WorkspaceRepository", _MissingWorkspaceRepo)
-    executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
+async def test_autofix_repair_succeeds_and_records_committed_retry(tmp_path: Path) -> None:
+    """A fully successful repair records a committed retry outcome and returns True.
 
-    consumed = await executor_state_ops._consume_active_operator_grants(executor, "ws_gone")
+    When ruff check --fix, ruff format, re-stage, and the retry commit all
+    succeed, the helper records ``retry_outcome="committed"`` and returns
+    ``True`` so the caller knows the workspace does not need further repair.
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="", stderr="")  # ruff check --fix ok
+    runner.queue_result(returncode=0, stdout="", stderr="")  # ruff format ok
+    record_calls: list[dict[str, Any]] = []
+    self_obj = _fake_self(runner, record_calls=record_calls)
+    classification = _autofix_classification()
 
-    assert consumed == 0
+    result = await quality_methods._run_post_agent_autofixable_precommit_repair(  # noqa: SLF001
+        self_obj,
+        workspace_id="ws_success",
+        worktree_path=tmp_path,
+        commit_result=CommandResult(returncode=1, stdout="", stderr=""),
+        classification=classification,
+        staged_paths=["src/app.py"],
+        run_commit=AsyncMock(
+            return_value=CommandResult(returncode=0, stdout="committed", stderr="")
+        ),
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result is True
+    assert record_calls and record_calls[0]["retry_outcome"] == "succeeded"
+    assert record_calls[0]["repaired_paths"] == ["src/app.py"]

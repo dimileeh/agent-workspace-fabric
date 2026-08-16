@@ -532,6 +532,7 @@ async def _run_ci_fix(
             log_source="recovery",
             command_evidence=command_evidence,
             operation_start_head=operation_start_head,
+            state=state,
         )
     except AgentRunError as exc:
         agent_run_err = exc

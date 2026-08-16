@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -511,6 +512,84 @@ async def test_protected_scope_repair_repairs_mirror_before_launch(
 
 
 @pytest.mark.unit
+async def test_protected_scope_repair_passes_command_evidence_to_service_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.runner.queue_result(returncode=0, stdout="")
+    violation = _protected_workflow_violation()
+    captured_command_evidence: list[list[str]] = []
+    violation_calls = 0
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        nonlocal violation_calls
+        violation_calls += 1
+        return (violation,) if violation_calls == 1 else ()
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _run_monitor_agent_with_service_recovery(**kwargs: object) -> object:
+        command_evidence = kwargs["command_evidence"]
+        assert isinstance(command_evidence, list)
+        command_evidence.append("agent stdout")
+        captured_command_evidence.append(command_evidence)
+        return AgentRunResult(returncode=0, stdout="agent stdout", stderr="")
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: None,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    result = await runner._repair_protected_scope_changes_before_commit(
+        workspace_id="ws_delta",
+        status_stdout=" M .github/workflows/ci.yml\n",
+        compose_project="awf_ws_delta",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+    )
+
+    assert result == CommandResult(returncode=0, stdout="", stderr="")
+    assert captured_command_evidence == [["agent stdout"]]
+
+
+@pytest.mark.unit
 async def test_protected_scope_repair_fails_closed_when_prelaunch_mirror_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -657,6 +736,10 @@ async def test_protected_scope_repair_cleans_mirror_before_provider_retry(
             "HEAD object missing during protected-scope repair recovery",
         ),
         _MonitorMirrorHooksPathRepairFailedError(),
+        _MonitorPolicyBlockedError(
+            "supply-chain policy blocked protected-scope repair",
+            reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+        ),
     ],
 )
 async def test_protected_scope_repair_propagates_recovery_guard_errors_without_cleanup_masking(

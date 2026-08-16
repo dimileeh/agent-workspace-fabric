@@ -21,14 +21,9 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
-from awf.common.git_identity import (
-    git_identity_config_args,
-    git_safe_directory_config_args,
-)
-from awf.common.task_tag import (
-    commit_message_with_task_tag,
-    strip_leading_task_tag,
-)
+from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
+from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
@@ -36,7 +31,10 @@ from awf.control.executor.agent_service_recovery import (
     _build_agent_service_recovery_callbacks,
     _run_agent_task_with_service_recovery,
 )
-from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+from awf.control.executor.constants import (
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PR_MONITOR_SETUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
@@ -47,10 +45,8 @@ from awf.control.executor.git_ops import (
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
-    _call_pr_monitor_factory,
     _failure_reason_for_phase,
     _profile_for_workspace,
-    _provider_recovery_default_model_for_monitor_handoff,
 )
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -63,19 +59,17 @@ from awf.control.executor.mirror_hooks_repair import (
 )
 from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.pre_push_policy import run_pre_push_policy_checks
-from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
     _is_nothing_to_commit,
     _log,
     _PostAgentCommitStepError,
 )
+from awf.control.executor.recovery_handoff import handle_recovery_pr_handoff_after_validation
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
-    _recovery_needs_existing_pr_push,
-    _validate_only_recovery_target_head_sha,
 )
 from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
@@ -92,7 +86,6 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
-from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
@@ -100,6 +93,7 @@ from awf.node.git_manager import (
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -240,6 +234,10 @@ async def execute(
     post_agent_mirror_repair_done = False
     mirror_path = mirror_path_for_worktree(worktree_path)
     recovery_active = recovery is not None
+    hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
+    hosted_pr_identity: dict[str, object] | None = (
+        hosted_pr_identity_for_workspace(ws) if hosted_pr_adoption else None
+    )
 
     _repair_mirror_hooks_path_or_mark_failed = partial(
         repair_mirror_hooks_path_or_mark_failed,
@@ -313,6 +311,7 @@ async def execute(
             agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
+            runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
         )
         # Ignore checkout-local agent scratch dirs before validation cleanliness
         # can treat them as dirty worktree state.
@@ -379,8 +378,41 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
+        setup_validation_runner = self._validation
+        setup_run_kwargs: dict[str, Any] = {}
+        if hosted_pr_adoption:
+            setup_validation_runner = getattr(self, "_hosted_validation", None)
+            if setup_validation_runner is None:
+                setup_missing_message = (
+                    "hosted profile setup failed: no hosted validation runner configured"
+                )
+                setup_missing_reason_code = (
+                    "MONITOR_RECOVERY_SETUP_FAILED"
+                    if recovery is not None
+                    else PR_MONITOR_SETUP_FAILED_REASON_CODE
+                )
+                if recovery is not None:
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code=setup_missing_reason_code,
+                        error_message=setup_missing_message,
+                    )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=setup_missing_message,
+                    reason_code=setup_missing_reason_code,
+                )
+                return
+            setup_run_kwargs = {
+                "include_coverage": False,
+                "pr_identity": hosted_pr_identity,
+            }
         # A directive resume reuses the warm env + skips flaky ``setup`` when a
-        # probe passes; grant/normal runs re-run it (#743).
+        # probe passes; grant/normal runs re-run it (#743). Probe the same local
+        # or hosted environment that will execute the selected setup phases.
         setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
         if resume_from_blocked and not resume_skip_agent:
             setup_phase_names = await self._blocked_resume_setup_phase_names(
@@ -388,15 +420,19 @@ async def execute(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                validation=setup_validation_runner,
+                worktree_path=worktree_path,
+                pr_identity=hosted_pr_identity,
             )
         try:
-            setup_result = await self._validation.run_profile_phases(
+            setup_result = await setup_validation_runner.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
                 phase_names=setup_phase_names,
                 worktree_path=worktree_path,
+                **setup_run_kwargs,
             )
         except ComposeExecCleanupError as exc:
             if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -470,13 +506,14 @@ async def execute(
             failure_stage="after successful profile setup"
         ):
             return
-        await self._record_runtime_toolchain_findings_safe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-        )
-        profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
+        if not hosted_pr_adoption:
+            await self._record_runtime_toolchain_findings_safe(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+        profile_preflight = getattr(setup_validation_runner, "run_profile_tool_preflight", None)
         profile_preflight_result = (
             await profile_preflight(workspace_id=workspace_id, profile=profile)
             if callable(profile_preflight)
@@ -507,7 +544,7 @@ async def execute(
             )
             return
         if recovery is None and not resume_skip_agent:
-            if not await self._run_agent_git_writability_preflight(
+            if not hosted_pr_adoption and not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -544,6 +581,11 @@ async def execute(
                     profile=profile,
                     reuse=baseline_coverage,
                     skip_measure=resume_from_blocked,
+                    worktree_path=worktree_path,
+                    coverage_runner=(setup_validation_runner if hosted_pr_adoption else None),
+                    coverage_run_kwargs=(
+                        {"pr_identity": hosted_pr_identity} if hosted_pr_adoption else None
+                    ),
                 )
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -580,6 +622,7 @@ async def execute(
                     model=run_model,
                     command_evidence=agent_command_evidence,
                     workspace_id=workspace_id,
+                    hosted_pr_identity=hosted_pr_identity,
                     execution_owner_id=execution_owner_id,
                     before_mark_failed=_deposit_planning_artifacts,
                     before_agent_retry=before_agent_retry,
@@ -1011,6 +1054,7 @@ async def execute(
                                 ws=ws,
                                 profile=profile,
                                 command_evidence=agent_command_evidence,
+                                hosted_pr_identity=hosted_pr_identity,
                                 execution_owner_id=execution_owner_id,
                                 before_mark_failed=_deposit_planning_artifacts,
                                 before_agent_retry=before_agent_retry,
@@ -1294,136 +1338,22 @@ async def execute(
         validation_result.successful_validation_workspace_head_sha
     )
 
-    # ── Recovery skip-push guard ───────────────────────────────────────
-    # Recovery for a workspace that already has an open PR must NOT
-    # re-create the PR. Clean validate-only recovery does not push; if a
-    # fix pass or handoff report created a new validated local commit,
-    # update the existing PR branch before handing back to the monitor.
-    # Rebase-only recovery already pushed the rebased branch above, but
-    # later validation work can still advance local HEAD.
-    if recovery is not None and ws.pr_url:
-        recovery_requires_pr_update = _recovery_needs_existing_pr_push(
-            recovery,
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-            rebase_recovery_result=rebase_recovery_result,
-        )
-        if rebase_recovery_result is not None and successful_validation_run_id is not None:
-            try:
-                await self._set_validation_run_target_head_sha(
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=rebase_recovery_result.head_sha,
-                )
-                await self._clear_rebase_recovery_staleness(
-                    workspace_id=workspace_id,
-                )
-            except Exception:
-                _log.exception(
-                    "executor.rebase_recovery_staleness_clear_failed",
-                    workspace_id=workspace_id,
-                    validation_run_id=successful_validation_run_id,
-                )
-        validate_only_target_head_sha = _validate_only_recovery_target_head_sha(
-            recovery,
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-        )
-        if (
-            rebase_recovery_result is None
-            and successful_validation_run_id is not None
-            and validate_only_target_head_sha is not None
-        ):
-            try:
-                await self._set_validation_run_target_head_sha(
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=validate_only_target_head_sha,
-                    workspace_head_sha=successful_validation_workspace_head_sha,
-                )
-            except Exception:
-                _log.exception(
-                    "executor.validate_only_recovery_target_head_sha_update_failed",
-                    workspace_id=workspace_id,
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=validate_only_target_head_sha,
-                )
-        if not recovery_requires_pr_update:
-            if not await _repair_mirror_hooks_path_or_mark_failed(
-                failure_stage="before recovery skip-push handoff",
-                failure_from_status=WorkspaceStatus.validating,
-            ):
-                return
-            if not await self._recheck_status(
-                workspace_id,
-                expected=WorkspaceStatus.validating,
-                action="recovery_skip_push",
-            ):
-                return
-            async with self._session_factory() as session:
-                repo = WorkspaceRepository(session)
-                persisted = await repo.get(workspace_id)
-                if persisted is None:  # pragma: no cover - destroyed mid-flight
-                    return
-                if persisted.status != WorkspaceStatus.validating.value:
-                    await self._record_stale_action_skip(
-                        repo,
-                        persisted,
-                        action="recovery_skip_push",
-                        expected=WorkspaceStatus.validating,
-                        reason_code="EXECUTOR_STALE_STATUS",
-                    )
-                    await session.commit()
-                    return
-                has_monitor = self._pr_monitor is not None or self._pr_monitor_factory is not None
-                await repo.transition(
-                    persisted,
-                    to=WorkspaceStatus.monitoring_pr if has_monitor else WorkspaceStatus.completed,
-                    reason_code="RECOVERY_VALIDATION_OK",
-                )
-                await session.commit()
-            _log.info(
-                "executor.recovery_skip_push",
-                workspace_id=workspace_id,
-                pr_url=ws.pr_url,
-                has_monitor=has_monitor,
-            )
-            if has_monitor:
-                _monitor: _MonitorRunnerProto | None = self._pr_monitor
-                if _monitor is None and self._pr_monitor_factory is not None:
-                    _monitor = _call_pr_monitor_factory(
-                        self._pr_monitor_factory,
-                        adapter=adapter,
-                        profile=profile,
-                        workspace=persisted,
-                        provider_recovery_default_model=(
-                            _provider_recovery_default_model_for_monitor_handoff(
-                                adapter=adapter,
-                                defaults=defaults,
-                            )
-                        ),
-                    )
-                if _monitor is not None:
-                    _log.info(
-                        "executor.recovery_handoff_to_pr_monitor",
-                        workspace_id=workspace_id,
-                        pr_url=ws.pr_url,
-                    )
-                    if not await self._recheck_status(
-                        workspace_id,
-                        expected=WorkspaceStatus.monitoring_pr,
-                        action="run_pr_monitor",
-                    ):
-                        return
-                    await _monitor.run(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                    )
-            return
-        _log.info(
-            "executor.recovery_existing_pr_update_required",
-            workspace_id=workspace_id,
-            pr_url=ws.pr_url,
-            source_head_sha=recovery.get("source_head_sha"),
-            validated_workspace_head_sha=successful_validation_workspace_head_sha,
-        )
+    if await handle_recovery_pr_handoff_after_validation(
+        self,
+        workspace_id=workspace_id,
+        ws=ws,
+        recovery=recovery,
+        rebase_recovery_result=rebase_recovery_result,
+        successful_validation_run_id=successful_validation_run_id,
+        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+        repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
+        adapter=adapter,
+        profile=profile,
+        defaults=defaults,
+        compose_project=compose_project,
+        compose_file=compose_file,
+    ):
+        return
 
     if await run_pre_push_policy_checks(
         self,

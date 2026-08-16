@@ -16,6 +16,7 @@ from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _realign_profile_from_resolved_profile_snapshot,
+    _validation_command_count,
 )
 from awf.control.executor.state_ops import (
     _persist_resolved_profile_snapshot_if_missing,
@@ -449,6 +450,7 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
 
         async def _begin_execution(
             self,
@@ -495,7 +497,7 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
 
     def fake_get_adapter(*args: object, **kwargs: object) -> object:
         events.append("adapter")
-        return SimpleNamespace(runtime_scratch_paths=())
+        return SimpleNamespace(runtime_scratch_paths=(), is_hosted=False)
 
     async def fail_sync_resolved_profile(*args: object, **kwargs: object) -> WorkspaceProfile:
         raise AssertionError("frozen resolved_profile should skip persistence sync")
@@ -692,6 +694,38 @@ def test_profile_for_workspace_resolves_without_stamping_runtime_snapshot(
 
     assert profile.name == "repo-auto"
     assert workspace.resolved_profile is None
+
+
+@pytest.mark.unit
+def test_executor_persisted_profile_consumers_allow_legacy_clarification_service(
+    tmp_path: Path,
+) -> None:
+    snapshot = {
+        "name": "legacy",
+        "services": [{"name": "clarification", "image": "example:latest"}],
+        "phases": {"validate": ["pytest -q"]},
+    }
+    workspace = Workspace(
+        id="ws_runtime",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Read a legacy profile snapshot.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=snapshot,
+    )
+
+    profile = _profile_for_workspace(workspace, worktree_path=tmp_path)
+    realigned = _realign_profile_from_resolved_profile_snapshot(workspace, snapshot)
+
+    assert profile.services[0].name == "clarification"
+    assert _validation_command_count(workspace) == 1
+    assert realigned is not None
+    assert realigned.services[0].name == "clarification"
 
 
 @pytest.mark.unit

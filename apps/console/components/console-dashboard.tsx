@@ -13,6 +13,7 @@ useTransition,
 import { WorkspaceInspector } from "./workspace-inspector";
 
 import { capacityUtilizationPct,compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
+import { awfPath } from "@/lib/console-urls";
 import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import {
 DEFAULT_OPERATOR_PREFERENCES,
@@ -201,21 +202,21 @@ const searchParams = useSearchParams();
   }, []);
 
   const overviewPath = useMemo(() => {
-    const params = new URLSearchParams({ limit: "100" });
+    const params: Record<string, string | number> = { limit: 100 };
     if (statusFilters.length === 1) {
-      params.set("status", statusFilters[0]);
+      params.status = statusFilters[0];
     }
     if (agentFilters.length === 1) {
-      params.set("agent", agentFilters[0]);
+      params.agent = agentFilters[0];
     }
     if (repoFilter.trim()) {
-      params.set("repo_url", repoFilter.trim());
+      params.repo_url = repoFilter.trim();
     }
-    return `/api/awf/workspaces/overview?${params}`;
+    return awfPath("workspaces/overview", params);
   }, [agentFilters, repoFilter, statusFilters]);
 
   const loadOverview = useCallback(async () => {
-    const health = await apiGet<{ status: string }>("/api/awf/health");
+    const health = await apiGet<{ status: string }>(awfPath("health"));
     setApiState(health.ok ? "ok" : "error");
 
     const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
@@ -242,7 +243,7 @@ const searchParams = useSearchParams();
   }, [overviewPath, setSelectedId]);
 
   const loadResourceSaturation = useCallback(async () => {
-    const result = await apiGet<ResourceSaturationSummary>("/api/awf/metrics/resources/saturation");
+    const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
     if (!result.ok) {
       setResourceError(result.message);
       return;
@@ -252,7 +253,7 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadWorkspaceSummary = useCallback(async () => {
-    const result = await apiGet<WorkspaceReliabilitySummary>("/api/awf/metrics/workspaces/summary");
+    const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
     if (!result.ok) {
       setWorkspaceSummaryError(result.message);
       return;
@@ -262,7 +263,9 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadMergeQueue = useCallback(async () => {
-    const result = await apiGet<ListEnvelope<MergeQueueItem>>(`/api/awf/merge-queue?limit=${mergeQueueLimit}`);
+    const result = await apiGet<ListEnvelope<MergeQueueItem>>(
+      awfPath("merge-queue", { limit: mergeQueueLimit }),
+    );
     if (!result.ok) {
       setMergeQueueError(result.message);
       setMergeQueueStatus("error");
@@ -275,7 +278,7 @@ const searchParams = useSearchParams();
   }, []);
 
   const loadFailureSummary = useCallback(async () => {
-    const result = await apiGet<FailureSummaryResponse>("/api/awf/metrics/failures/summary");
+    const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
     if (!result.ok) {
       if (result.status === 404 || result.status === 503) {
         setFailureSummaryStatus("unavailable");
@@ -292,11 +295,15 @@ const searchParams = useSearchParams();
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const [workspace, runtime, events, operations, streams] = await Promise.all([
-      apiGet<Workspace>(`/api/awf/workspaces/${workspaceId}`),
-      apiGet<WorkspaceRuntime>(`/api/awf/workspaces/${workspaceId}/runtime`),
-      apiGet<ListEnvelope<WorkspaceEvent>>(`/api/awf/workspaces/${workspaceId}/events?limit=100`),
-      apiGet<ListEnvelope<Operation>>(`/api/awf/workspaces/${workspaceId}/operations?limit=50`),
-      apiGet<ListEnvelope<WorkspaceLogStream>>(`/api/awf/workspaces/${workspaceId}/logs`),
+      apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
+      apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`)),
+      apiGet<ListEnvelope<WorkspaceEvent>>(
+        awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
+      ),
+      apiGet<ListEnvelope<Operation>>(
+        awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
+      ),
+      apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`)),
     ]);
 
     if (selectedIdRef.current !== workspaceId) {
@@ -344,7 +351,7 @@ const searchParams = useSearchParams();
     }
     setRetryState({ status: "submitting" });
     const result = await apiPost<WorkspaceRetryResponse>(
-      `/api/awf/workspaces/${encodeURIComponent(workspaceId)}/retry`,
+      awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
     );
     if (!result.ok) {
       if (selectedIdRef.current !== workspaceId) {
@@ -439,9 +446,10 @@ const searchParams = useSearchParams();
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
-        `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(
-          stream.stream_id,
-        )}?offset=${offset}&limit_bytes=65536`,
+        awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
+          offset,
+          limit_bytes: 65536,
+        }),
       );
       if (!result.ok) {
         setLogEntries((current) =>
@@ -570,7 +578,10 @@ const searchParams = useSearchParams();
     }
     setStreamState("connecting");
     const source = new EventSource(
-      `/api/awf/workspaces/${selectedId}/stream?channels=events,agent,validation,services&tail_bytes=65536`,
+      awfPath(`workspaces/${selectedId}/stream`, {
+        channels: "events,agent,validation,services",
+        tail_bytes: 65536,
+      }),
     );
     let closedByServer = false;
     let terminalError = false;

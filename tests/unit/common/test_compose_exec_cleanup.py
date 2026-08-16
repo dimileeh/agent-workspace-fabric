@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 import awf.common.compose_exec as compose_exec
-from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
+from awf.common.commands import (
+    COMMAND_TIMEOUT_REASON,
+    AsyncioSubprocessRunner,
+    CommandResult,
+    FakeCommandRunner,
+)
 from awf.common.compose_exec import (
     ComposeExecCleanupError,
     build_cleanup_compose_exec,
@@ -199,6 +204,19 @@ def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
             source="agent",
             label="codex",
             invocation_id="bad;id",
+        )
+
+
+def test_isolated_run_rejects_empty_agent_command() -> None:
+    """A clarification container must never start without its agent command."""
+    with pytest.raises(ValueError, match="cli_args"):
+        compose_exec.build_isolated_tracked_compose_run(
+            compose_project="awf_ws_123",
+            compose_file=Path("/tmp/ws/compose.yml"),
+            cli_args=[],
+            source="clarification",
+            label="codex",
+            worktree_host_path=Path("/tmp/ws/reask"),
         )
 
 
@@ -499,3 +517,184 @@ def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:
 
     wrapper = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
     assert "unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES" in wrapper
+
+
+def test_isolated_compose_run_uses_restricted_clarification_service() -> None:
+    """A re-ask uses the restricted service with only its child worktree mount."""
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="reask_mount_test",
+        preserve_stdin=True,
+    )
+
+    run_idx = invocation.args.index("run")
+    assert invocation.args[run_idx : run_idx + 10] == [
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--name",
+        invocation.container_name,
+        "-w",
+        "/workspace",
+        "-v",
+        "/worktrees/ws_123/.awf-needs-human-reask-test:/workspace",
+    ]
+    assert invocation.args[run_idx + 10] == "clarification"
+    assert invocation.service == "clarification"
+    assert "-e" not in invocation.args
+    assert "/workspace/.awf-needs-human-reask-test" not in invocation.args
+    assert invocation.cleanup_args == [
+        "docker",
+        "container",
+        "rm",
+        "--force",
+        invocation.container_name,
+    ]
+
+
+def test_persistent_isolated_compose_run_monitors_agent_via_docker_exec() -> None:
+    """A retained clarification container keeps final sampling out of agent argv."""
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="reask_persistent_test",
+        preserve_stdin=True,
+        keep_container_running=True,
+    )
+
+    assert invocation.startup_args is not None
+    run_idx = invocation.startup_args.index("run")
+    assert invocation.startup_args[run_idx : run_idx + 8] == [
+        "run",
+        "--detach",
+        "--no-deps",
+        "-T",
+        "--name",
+        invocation.container_name,
+        "-w",
+        "/workspace",
+    ]
+    assert "--rm" not in invocation.startup_args
+    assert "codex" not in invocation.startup_args
+    assert invocation.args[:7] == [
+        "docker",
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        invocation.container_name,
+        "sh",
+    ]
+    assert invocation.args[-3:] == ["codex", "exec", "-"]
+
+
+def test_isolated_compose_run_mounts_linked_git_metadata_read_only() -> None:
+    """A re-ask exposes its backing linked-worktree metadata without write access."""
+    mirror_path = Path("/worktrees/mirrors/owner-repo.git")
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["gemini", "-p", "explain"],
+        source="review-reask",
+        label="gemini",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        read_only_volume_binds=((mirror_path, str(mirror_path)),),
+    )
+
+    run_idx = invocation.args.index("run")
+    service_idx = invocation.args.index("clarification", run_idx)
+    assert invocation.args[service_idx - 2 : service_idx] == [
+        "-v",
+        "/worktrees/mirrors/owner-repo.git:/worktrees/mirrors/owner-repo.git:ro",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    (
+        (0, ""),
+        (1, "Error response from daemon: No such container: awf-reask-awf_absent"),
+    ),
+)
+async def test_isolated_compose_run_cleanup_removes_only_its_container(
+    returncode: int,
+    stderr: str,
+) -> None:
+    """A completed `--rm` cleanup race is harmless and cannot affect the primary agent."""
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=returncode, stderr=stderr)
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_absent",
+    )
+
+    result = await cleanup_compose_exec_invocation(
+        runner,
+        invocation,
+        workspace_id="ws_123",
+    )
+
+    assert result.returncode == returncode
+    assert runner.calls[0].args == invocation.cleanup_args
+    assert "agent" not in runner.calls[0].args
+
+
+@pytest.mark.unit
+async def test_isolated_compose_run_cleanup_raises_when_container_remains() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="daemon unavailable")
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_cleanup_failure",
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="daemon unavailable"):
+        await cleanup_compose_exec_invocation(runner, invocation)
+
+
+@pytest.mark.unit
+async def test_isolated_compose_run_cleanup_times_out_as_cleanup_error() -> None:
+    """A stalled Docker daemon cannot indefinitely block isolated cleanup."""
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=124,
+        stderr="command timed out after 30s\n",
+        reason_code=COMMAND_TIMEOUT_REASON,
+    )
+    invocation = compose_exec.build_isolated_tracked_compose_run(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="review-reask",
+        label="codex",
+        worktree_host_path=Path("/worktrees/ws_123/.awf-needs-human-reask-test"),
+        invocation_id="awf_cleanup_timeout",
+    )
+
+    with pytest.raises(ComposeExecCleanupError, match="command timed out") as exc_info:
+        await cleanup_compose_exec_invocation(runner, invocation)
+
+    assert runner.calls[0].timeout_seconds == compose_exec.ISOLATED_CLEANUP_TIMEOUT_SECONDS
+    assert exc_info.value.cleanup_result is not None
+    assert exc_info.value.cleanup_result.reason_code == COMMAND_TIMEOUT_REASON

@@ -17,12 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
+from awf.adapters.defaults import defaults_with_model_overrides
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.forge import ForgeClient, concrete_forge_for_repo, make_forge_client
 from awf.common.git_auth import add_git_config_entries as _add_git_config_entries
 from awf.common.git_auth import apply_bitbucket_git_auth
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import TaskKind
@@ -38,6 +40,11 @@ from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver, WorkspaceRuntimeDriver
+from awf.runtime.hosted_delegation import (
+    HostedAgentRuntimeExecutor,
+    HostedDelegationConfig,
+    HostedValidationDelegate,
+)
 from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import (
@@ -49,7 +56,7 @@ from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
-from awf.service.config import ServiceSettings
+from awf.service.config import ServiceSettings, hosted_delegation_config_from_service_settings
 from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
@@ -93,6 +100,14 @@ class WorkerRuntime:
 # here until they finish so the event loop does not GC a pending close mid-flight
 # (the close is fire-and-forget on the error path; nothing else awaits it).
 _PENDING_FORGE_CLIENT_CLOSERS: set[asyncio.Task[None]] = set()
+
+
+def _hosted_delegation_config_for_worker(
+    settings: ServiceSettings,
+) -> HostedDelegationConfig | None:
+    """Return hosted delegation config for the worker when fully configured."""
+
+    return hosted_delegation_config_from_service_settings(settings)
 
 
 def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
@@ -147,6 +162,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         artifacts_dir=work_dir / "artifacts",
         log_store=log_store,
     )
+    hosted_delegation_config = _hosted_delegation_config_for_worker(settings)
+    hosted_agent_runtime_executor = (
+        HostedAgentRuntimeExecutor(hosted_delegation_config)
+        if hosted_delegation_config is not None
+        else None
+    )
+    hosted_validation_delegate = (
+        HostedValidationDelegate(
+            hosted_delegation_config,
+            artifacts_dir=work_dir / "artifacts",
+        )
+        if hosted_delegation_config is not None
+        else None
+    )
     pr_creator = PullRequestCreator(runner)
     open_pr_resolver = BranchOpenPullRequestResolver(runner)
     target_branch_reconciler = TargetBranchReconcileMonitor(
@@ -200,6 +229,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         secret_lease_resolver=secret_lease_resolver,
         companion_image_builder=companion_image_builder,
     )
+    executor_config = ExecutorConfig(
+        worktrees_root=work_dir / "git" / "worktrees",
+        # Matches ComposeManager(work_dir=work_dir): render path is
+        # <work_dir>/compose/<workspace_id>/compose.yml. The executor first
+        # uses Workspace.compose_file_path persisted by the provisioner, so
+        # this is only a legacy-row fallback.
+        compose_projects_root=work_dir / "compose",
+        agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
+        agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
+        planning_max_iterations_default=settings.planning_max_iterations_default,
+    )
     node_id = effective_service_node_id(settings)
     provisioner = Provisioner(
         session_factory=session_factory,
@@ -210,6 +250,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
             service_startup_log_tail_lines=settings.service_startup_log_tail_lines,
+            agent_defaults=defaults_with_model_overrides(
+                executor_config.default_models,
+                base=executor_config.agent_defaults,
+            ),
         ),
     )
 
@@ -220,16 +264,21 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         *,
         provider_recovery_default_model: str | None = None,
     ) -> Any:
-        # sync_release_pr's contract is "auto_merge forced False; never merges"
-        # (TaskKind.sync_release_pr). Bind the release monitor to the task kind so
-        # the human-gated guarantee can't hinge on the persisted auto_merge flag
-        # being False at every monitor (re)build.
-        force_release_monitor = workspace.task_kind == TaskKind.sync_release_pr.value
+        # Monitor selection is a pure function of the persisted, resolved
+        # ``workspace.auto_merge`` flag — task_kind never affects it. The flag is
+        # authoritative by design: it is resolved once at provision time from the
+        # per-task intent + the repo profile (``monitor.auto_merge``) and written
+        # to the column the monitor reads. True -> feature monitor (squash-merge on
+        # green); a False/NULL/falsy flag -> release/manual monitor (NotifyHuman on
+        # green, never merges), which is the safe default for legacy rows too.
         monitor_builder = (
-            build_feature_pr_monitor
-            if workspace.auto_merge and not force_release_monitor
-            else build_release_pr_monitor
+            build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
         )
+        workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
+        if workspace_is_hosted and hosted_validation_delegate is None:
+            raise RuntimeError(
+                "hosted PR adoption requested but hosted validation is not configured"
+            )
         # Build the forge client from the persisted resolved forge (reconstructed,
         # never re-resolved). github → GitHubClient; bitbucket → BitbucketClient
         # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
@@ -255,7 +304,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "runner": runner,
             "adapter": adapter,
             "gh": gh,
-            "validation": validation,
+            "validation": hosted_validation_delegate if workspace_is_hosted else validation,
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
@@ -271,7 +320,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
             "workspace_runtime_context": render_workspace_runtime_context(profile),
+            "workspace_profile": profile,
             "provider_recovery_default_model": provider_recovery_default_model,
+            # A ``sync_release_pr`` head is the long-lived release source branch
+            # (normally ``development``). When such a workspace resolves
+            # ``auto_merge=True`` it runs the feature monitor, whose merge would
+            # otherwise ``--delete-branch`` its head and break subsequent release
+            # syncs — so keep the source branch on that path (PRRT_kwDOSJAM6s6U3YAS).
+            # Feature branches (``awf/<id>``) stay deletable.
+            "delete_source_branch_on_merge": (
+                getattr(workspace, "task_kind", None) != TaskKind.sync_release_pr.value
+            ),
         }
         try:
             return monitor_builder(**monitor_kwargs)
@@ -289,20 +348,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         compose=compose,
         validation=validation,
         pr_creator=pr_creator,
-        config=ExecutorConfig(
-            worktrees_root=work_dir / "git" / "worktrees",
-            # Matches ComposeManager(work_dir=work_dir): render path is
-            # <work_dir>/compose/<workspace_id>/compose.yml. The executor
-            # first uses Workspace.compose_file_path persisted by the
-            # provisioner, so this is only a legacy-row fallback.
-            compose_projects_root=work_dir / "compose",
-            agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
-            agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
-            planning_max_iterations_default=settings.planning_max_iterations_default,
-        ),
+        config=executor_config,
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,
+        # Cloud-neutral hosted execution seam. None in Core: local AWF keeps
+        # the exact tracked docker compose exec path. A hosted AWF Cloud
+        # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)
+        # so PR monitor repair is not hard-wired to Docker Compose. The
+        # worker does NOT build a Kubernetes executor here.
+        agent_runtime_executor=hosted_agent_runtime_executor,
+        hosted_validation=hosted_validation_delegate,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

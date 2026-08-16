@@ -1049,8 +1049,7 @@ def test_notify_human_reason_and_artifact_surface_bot_needs_human_thread() -> No
     status = _status_for_helpers(threads=(bot_thread,))
 
     reason = _notify_human_reason(status, state)
-    assert reason is not None
-    assert "needs human input" in reason
+    assert reason == "review feedback needs human input and remains unresolved on GitHub"
 
     bot_items, human_items = _collect_defer_items(status, state)
     assert [item["id"] for item in bot_items] == ["T_nh"]

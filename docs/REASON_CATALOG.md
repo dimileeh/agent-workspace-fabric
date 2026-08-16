@@ -18,6 +18,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
 
+### ANTIGRAVITY_AUTH_MISSING
+**Problem:** No Antigravity auth signal was visible.
+**Likely Cause:** Missing Antigravity API credentials.
+**Operator Fix:** Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_missing](#antigravity_auth_missing)
+
+### ANTIGRAVITY_AUTH_REJECTED
+**Problem:** Antigravity rejected the configured API credentials.
+**Likely Cause:** Antigravity API key rejected by the provider.
+**Operator Fix:** Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_rejected](#antigravity_auth_rejected)
+
+### ANTIGRAVITY_QUOTA_EXHAUSTED
+**Problem:** Antigravity quota or rate limit is exhausted.
+**Likely Cause:** Antigravity provider quota exhausted.
+**Operator Fix:** Wait for quota reset or switch providers, then re-check readiness.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_quota_exhausted](#antigravity_quota_exhausted)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.
@@ -333,6 +354,48 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.x.ai/build/cli](https://docs.x.ai/build/cli)
 
+### HOSTED_DELEGATION_NOT_CONFIGURED
+**Problem:** Hosted PR monitor adoption was requested, but hosted delegation settings are incomplete.
+**Likely Cause:** The AWF service is missing a hosted delegation base URL or bearer token configuration.
+**Operator Fix:** Configure the hosted delegation service environment, then retry the adoption request.
+**Related Command:** `awf workspace adopt-pr --execution hosted`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_delegation_not_configured](#hosted_delegation_not_configured)
+
+### HOSTED_REMOTE_HEAD_FETCH_FAILED
+**Problem:** AWF could not fetch the hosted PR head after a hosted repair completed.
+**Likely Cause:** Git fetch of the PR head repository/ref failed due to credentials, network availability, a deleted branch, or remote rejection.
+**Operator Fix:** Inspect the monitor log for git fetch stderr, verify remote access and that the PR head branch still exists, then remonitor.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_fetch_failed](#hosted_remote_head_fetch_failed)
+
+### HOSTED_REMOTE_HEAD_IDENTITY_MISSING
+**Problem:** AWF could not sync a hosted repair because PR head repository or branch metadata was missing.
+**Likely Cause:** Stored PR identity lacked a usable head repository URL or head ref, so AWF could not fetch the hosted repair result safely.
+**Operator Fix:** Verify the adopted PR metadata includes the head repository and head ref, then re-adopt or remonitor the PR.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_identity_missing](#hosted_remote_head_identity_missing)
+
+### HOSTED_REMOTE_HEAD_MISMATCH
+**Problem:** AWF refused to sync the hosted worktree because fetched PR head did not match the reported terminal head.
+**Likely Cause:** The hosted agent reported one terminal commit, but fetching the PR head returned a different SHA, so syncing would risk using stale or wrong content.
+**Operator Fix:** Verify the hosted provider terminal head and PR head state, then remonitor once they agree.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_mismatch](#hosted_remote_head_mismatch)
+
+### HOSTED_REMOTE_HEAD_MISSING
+**Problem:** Hosted PR monitor repair completed without reporting the terminal head commit.
+**Likely Cause:** The hosted agent returned success but omitted the terminal head SHA AWF needs before syncing the local worktree to the PR head.
+**Operator Fix:** Inspect the hosted agent result and monitor log, then remonitor after the provider reports `terminal_head_sha`.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_missing](#hosted_remote_head_missing)
+
+### HOSTED_REMOTE_HEAD_SYNC_FAILED
+**Problem:** AWF fetched the hosted terminal head but could not reset the local worktree to it.
+**Likely Cause:** The final `git reset --hard` failed after fetching the expected PR head, usually due to worktree corruption, permissions, or local git state.
+**Operator Fix:** Inspect the monitor log and worktree git state, repair local permissions or recreate the workspace, then remonitor.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#hosted_remote_head_sync_failed](#hosted_remote_head_sync_failed)
+
 ### HOST_PORT_CONFLICT
 **Problem:** AWF rejected a workspace create or retry because a host port needed by the new workspace is already in use by another active or unreleased workspace.
 **Likely Cause:** Another workspace's profile services or companions bind the same Docker host port and its compose stack is still running, or the workspace is terminal but has not yet released its runtime resources (no `workspace.terminal_runtime_released` event exists). For auto-resolved profiles, the conflict may also be detected at provision time by the provisioner's host-port re-check (``_check_auto_resolved_profile_host_ports``) rather than at dispatch, surfacing as an ``INFRASTRUCTURE_FAILURE`` instead of a 409.
@@ -458,6 +521,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** No action is usually required if another recovery operation is already running. If the workspace is stuck without an active monitor, remonitor it.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
+
+### NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
+**Problem:** A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.
+**Likely Cause:** AWF could not complete the read-only clarification follow-up because the hosted executor rejected or failed the isolated run, or the local worktree could not be prepared as an isolated checkout.
+**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_clarification_unavailable](#needs_human_reason_clarification_unavailable)
+
+### NEEDS_HUMAN_REASON_MISSING
+**Problem:** A review-repair agent requested human input without saying what to decide.
+**Likely Cause:** The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.
+**Operator Fix:** Read the unresolved review item and make the decision, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#needs_human_reason_missing](#needs_human_reason_missing)
 
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
