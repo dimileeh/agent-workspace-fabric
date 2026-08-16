@@ -261,6 +261,37 @@ async def test_fixed_claim_with_backward_head_move_stays_unresolved(
 
 
 @pytest.mark.unit
+async def test_fixed_claim_backward_head_with_dirty_commit_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Known non-descendant HEAD must not be accepted via committed_dirty_changes."""
+    start = "b" * 40
+    older = "a" * 40
+    workspace_id = "ws_fixed_backward_dirty"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reset then left dirty edits",
+        dirty=True,
+        heads=[older],
+        head_descends=False,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_markerless_output_never_upgraded_by_dirty_commit() -> None:
     runner = _evidence_runner(
         stdout="Committed a fix without a marker",

@@ -322,17 +322,23 @@ async def _invoke_cli_for_verdict_result(
     if callable(rev_parse_end) and worktree_path.exists():
         item_end_head = await rev_parse_end(worktree_path)
 
-    local_head_advanced = False
-    if (
+    descends = getattr(runner, "_head_descends_from", None)
+    local_ancestry_evaluable = (
         item_start_head is not None
         and item_end_head is not None
-        and item_end_head.lower() != item_start_head.lower()
-    ):
-        # SHA inequality alone accepts resets/checkouts to older tips. Require a
-        # forward-only ancestor relationship when the runner can verify it;
-        # otherwise fail closed and rely on dirty-commit / hosted evidence.
-        descends = getattr(runner, "_head_descends_from", None)
-        if callable(descends) and worktree_path.exists():
+        and callable(descends)
+        and worktree_path.exists()
+    )
+    local_head_advanced = False
+    if local_ancestry_evaluable:
+        # Narrow for type checkers; guarded by local_ancestry_evaluable above.
+        assert item_start_head is not None
+        assert item_end_head is not None
+        assert callable(descends)
+        if item_end_head.lower() != item_start_head.lower():
+            # SHA inequality alone accepts resets/checkouts to older tips.
+            # Require forward-only ancestry when evaluable; dirty evidence must
+            # not override a known non-descendant move.
             local_head_advanced = bool(
                 await descends(
                     worktree_path=worktree_path,
@@ -350,19 +356,22 @@ async def _invoke_cli_for_verdict_result(
             item_start_head is not None
             and synced_head is not None
             and synced_head.lower() != item_start_head.lower()
+            and callable(descends)
+            and worktree_path.exists()
         ):
-            descends = getattr(runner, "_head_descends_from", None)
-            if callable(descends) and worktree_path.exists():
-                hosted_head_advanced = bool(
-                    await descends(
-                        worktree_path=worktree_path,
-                        ancestor=item_start_head,
-                        descendant=synced_head,
-                    )
+            hosted_head_advanced = bool(
+                await descends(
+                    worktree_path=worktree_path,
+                    ancestor=item_start_head,
+                    descendant=synced_head,
                 )
-    # Dirty commit attributable to this invocation is also item-scoped evidence when
-    # HEAD comparison is unavailable (stub runners / missing worktree).
-    item_fix_evidence = local_head_advanced or hosted_head_advanced or bool(committed_dirty_changes)
+            )
+    # Dirty commit is item-scoped evidence only when local HEAD/ancestry cannot
+    # be evaluated (stub runners / missing worktree / missing heads). When both
+    # heads are known, ancestry (or equal SHAs) is authoritative — never accept
+    # FIXED via dirty after a known non-descendant move.
+    dirty_fix_evidence = bool(committed_dirty_changes) and not local_ancestry_evaluable
+    item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
 
     parsed = _parse_verdict_result(result_stdout)
     if parsed.verdict in {"false_positive", "defer"}:
