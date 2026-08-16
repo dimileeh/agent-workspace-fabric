@@ -1390,6 +1390,55 @@ class TestParseVerdict:
         assert result.reason == "closed nested ordered-list fence"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "reason"),
+        [
+            (
+                (
+                    "-\t-\t~~~text\n"
+                    "        AWF-VERDICT: FALSE POSITIVE: example\n"
+                    "        ~~~\n"
+                    "AWF-VERDICT: FIXED: closed nested tab-padded list fence\n"
+                ),
+                "closed nested tab-padded list fence",
+            ),
+            (
+                (
+                    "-\t-\t~~~text\n"
+                    "        AWF-VERDICT: FALSE POSITIVE: example\n"
+                    "\t\t~~~\n"
+                    "AWF-VERDICT: FIXED: closed nested tab-padded list fence via tabs\n"
+                ),
+                "closed nested tab-padded list fence via tabs",
+            ),
+            (
+                (
+                    "-\t~~~text\n"
+                    "    AWF-VERDICT: FALSE POSITIVE: example\n"
+                    "    ~~~\n"
+                    "AWF-VERDICT: FIXED: closed tab-padded list fence\n"
+                ),
+                "closed tab-padded list fence",
+            ),
+        ],
+        ids=["nested_spaces_closer", "nested_tabs_closer", "single_tab_marker"],
+    )
+    def test_private_awf_verdict_list_fence_tab_padded_marker_container_indent(
+        self,
+        stdout: str,
+        reason: str,
+    ) -> None:
+        # Tab-padded list markers occupy four CommonMark columns each, but
+        # character-based ``lst.end()`` counted ``-\t`` as width 2. Nested
+        # ``-\t-\t~~~text`` therefore recorded container_indent 4 (max closer
+        # indent 7) instead of 8, rejecting the valid eight-column closer and
+        # shielding a later top-level FIXED (PRRT_kwDOSJAM6s6ZopxJ).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == reason
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ordered_list_blockquote_fence_indented_closer(
         self,
     ) -> None:

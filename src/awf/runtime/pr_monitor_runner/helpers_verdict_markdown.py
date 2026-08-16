@@ -283,9 +283,15 @@ def _markdown_fence_list_container_indent(line: str) -> int:
     CommonMark's optional 0–3 spaces relative to the container
     (PRRT_kwDOSJAM6s6ZmsZS, PRRT_kwDOSJAM6s6Zn6x6). Blockquote width is
     tracked separately and stripped before this indent is applied on closers.
+    Expand tabs to column stops of four before measuring so tab-padded
+    markers such as ``-\\t-\\t~~~text`` record width 8, not character-count 4
+    (PRRT_kwDOSJAM6s6ZopxJ).
     """
-    rest = line.lstrip(" \t")
-    leading_ws = len(line) - len(rest)
+    # CommonMark expands tabs before indentation is counted; measuring
+    # ``lst.end()`` on raw ``-\\t`` under-counts each marker as two columns.
+    expanded = line.expandtabs(4)
+    rest = expanded.lstrip(" ")
+    leading_ws = len(expanded) - len(rest)
     had_blockquote = False
     list_width = 0
     while True:
