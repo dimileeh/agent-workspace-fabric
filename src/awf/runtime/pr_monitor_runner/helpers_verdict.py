@@ -445,13 +445,14 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
 
 
 def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
-    """Peel balanced outer quote/backtick/strong wrappers from a verdict reason.
+    """Peel balanced outer quote/backtick/strong/strike wrappers from a reason.
 
     Agents often echo prompt placeholders inside inline code, quotes, or
-    Markdown strong/emphasis markers (`` `<one-sentence justification>` `` /
-    ``"<…>"`` / ``**<…>**`` / ``__<…>__`` / ``*<…>*`` / ``_<…>_``). Those
-    wrappers must not defeat whole-reason placeholder detection
-    (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU).
+    Markdown strong/emphasis/strikethrough markers
+    (`` `<one-sentence justification>` `` / ``"<…>"`` / ``**<…>**`` /
+    ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_``). Those wrappers must
+    not defeat whole-reason placeholder detection (PRRT_kwDOSJAM6s6Zn-VK,
+    PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZopxG).
     """
     cleaned = reason.strip()
     while cleaned:

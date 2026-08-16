@@ -92,19 +92,22 @@ _VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
     r'^(?:"\s*(?P<dq>.*?)\s*"|\'\s*(?P<sq>.*?)\s*\'|'
     r"“\s*(?P<cdq>.*?)\s*”|‘\s*(?P<csq>.*?)\s*’)$"
 )
-# Balanced Markdown strong/emphasis wrappers around a reason (``**<…>**``,
-# ``__<…>__``, and single ``*<…>*`` / ``_<…>_``). Same peel loop as ticks/quotes
-# so template-placeholder echoes still fail closed (PRRT_kwDOSJAM6s6ZoAz9).
-# Strong is always peeled; single emphasis is peeled only when the enclosed
-# value is placeholder-shaped (whole-reason or absorbed same-line citation)
-# so snake_case / ``_name_`` identifiers stay intact (PRRT_kwDOSJAM6s6ZoDQU,
-# PRRT_kwDOSJAM6s6ZoGYD). Whole-reason Python dunders (``__init__``,
-# ``__name__``) also match ``__…__``; those are skipped in the peel loop
-# (PRRT_kwDOSJAM6s6ZoC7B). Strong alts must precede single-emphasis alts.
+# Balanced Markdown strong/emphasis/strikethrough wrappers around a reason
+# (``**<…>**``, ``__<…>__``, ``~~<…>~~``, and single ``*<…>*`` / ``_<…>_``).
+# Same peel loop as ticks/quotes so template-placeholder echoes still fail
+# closed (PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG). Strong and GFM
+# strikethrough are always peeled; single emphasis is peeled only when the
+# enclosed value is placeholder-shaped (whole-reason or absorbed same-line
+# citation) so snake_case / ``_name_`` identifiers stay intact
+# (PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZoGYD). Whole-reason Python dunders
+# (``__init__``, ``__name__``) also match ``__…__``; those are skipped in the
+# peel loop (PRRT_kwDOSJAM6s6ZoC7B). Strong/strike alts must precede
+# single-emphasis alts.
 _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r"^(?:"
     r"\*\*\s*(?P<strong_star>.*?)\s*\*\*|"
     r"__\s*(?P<strong_under>.*?)\s*__|"
+    r"~~\s*(?P<strike>.*?)\s*~~|"
     r"\*\s*(?P<em_star>.*?)\s*\*|"
     r"_\s*(?P<em_under>.*?)\s*_"
     r")$"

@@ -126,17 +126,21 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: *<one-sentence justification>*",
             "AWF-VERDICT: FALSE POSITIVE: _<one-sentence justification>_",
             "AWF-VERDICT: FALSE POSITIVE: *`<one-sentence justification>`*",
+            "AWF-VERDICT: FALSE POSITIVE: ~~<one-sentence justification>~~",
+            "AWF-VERDICT: FALSE POSITIVE: ~~<reason>~~",
+            "AWF-VERDICT: FALSE POSITIVE: ~~`<one-sentence justification>`~~",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
             "AWF-VERDICT: FIXED: **<one-sentence summary>**",
             "AWF-VERDICT: FIXED: *<one-sentence summary>*",
+            "AWF-VERDICT: FIXED: ~~<one-sentence summary>~~",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
-        # Balanced quote/backtick/Markdown-strong wrappers around a template
-        # placeholder must not leave the echo as a usable reason
-        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9). Single emphasis is
-        # peeled only when the enclosed value is placeholder-shaped
-        # (PRRT_kwDOSJAM6s6ZoDQU).
+        # Balanced quote/backtick/Markdown-strong/strikethrough wrappers around a
+        # template placeholder must not leave the echo as a usable reason
+        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG).
+        # Single emphasis is peeled only when the enclosed value is
+        # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -158,6 +162,7 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: `stale review boilerplate`",
             "AWF-VERDICT: FALSE POSITIVE: **stale review boilerplate**",
             "AWF-VERDICT: FALSE POSITIVE: __stale review boilerplate__",
+            "AWF-VERDICT: FALSE POSITIVE: ~~stale review boilerplate~~",
         ],
     )
     def test_private_awf_formatted_real_reason_still_usable(self, stdout: str) -> None:
