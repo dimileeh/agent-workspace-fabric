@@ -17,7 +17,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.service import pr_monitor_adoption as adoption_mod
@@ -897,3 +897,60 @@ async def test_adopt_pr_rejects_overlength_external_id_and_unsupported_task_clas
 
     assert overlength.status_code == 422
     assert bad_class.status_code == 422
+
+
+@pytest.mark.unit
+async def test_adopt_pr_colliding_explicit_external_id_leaves_db_unchanged(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    """409 TASK_EXTERNAL_ID_CONFLICT must not persist orphan adoption state."""
+    client, _fetcher = adoption_client
+    colliding_id = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        unrelated = await TaskRepository(session).create_or_get(
+            repo_url="https://github.com/other/repo.git",
+            base_branch="main",
+            title="unrelated owner",
+            prompt="unrelated prompt",
+            external_id=colliding_id,
+            idempotency_key="api-unrelated-task-key",
+            task_class="docs_task",
+            owned_paths=[],
+        )
+        await session.commit()
+        unrelated_id = unrelated.id
+        unrelated_external_id = unrelated.external_id
+        unrelated_title = unrelated.title
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": colliding_id,
+        },
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+    assert colliding_id not in response.text
+
+    canonical_key = pr_adoption_idempotency_key(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    async with session_factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        tasks = list((await session.execute(select(Task))).scalars())
+        task = await session.get(Task, unrelated_id)
+        by_key = await WorkspaceRepository(session).get_by_idempotency_key(canonical_key)
+    assert workspaces == []
+    assert len(tasks) == 1
+    assert task is not None
+    assert task.external_id == unrelated_external_id
+    assert task.title == unrelated_title
+    assert by_key is None

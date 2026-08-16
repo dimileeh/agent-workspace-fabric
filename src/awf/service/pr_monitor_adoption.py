@@ -199,28 +199,32 @@ class PullRequestMonitorAdoptionService:
             self._session,
             adoption_history,
         )
-        superseded_adoption: dict[str, Any] | None = None
-        superseded_workspace: Workspace | None = None
-        if existing is not None:
-            superseded_adoption = await self._supersede_previous_adoption(
-                workspace=existing,
-                idempotency_key=idempotency_key,
-                repo=repo,
-                pr_number=pr_number,
-            )
-            superseded_workspace = existing
+        # Mutating supersede + create must be atomic: a domain conflict after
+        # partial writes must not survive commit (REST JSONResponse / MCP). Use a
+        # savepoint so the outer advisory lock stays held until the request txn ends.
         try:
-            workspace = await self._create_adoption_workspace(
-                request=request,
-                repo=repo,
-                metadata=metadata,
-                idempotency_key=idempotency_key,
-                logical_idempotency_key=idempotency_key,
-                previous_terminal_adoptions=previous_terminal_adoptions,
-                superseded_adoption=superseded_adoption,
-                superseded_workspace=superseded_workspace,
-                effective_external_id=effective_external_id,
-            )
+            async with self._session.begin_nested():
+                superseded_adoption: dict[str, Any] | None = None
+                superseded_workspace: Workspace | None = None
+                if existing is not None:
+                    superseded_adoption = await self._supersede_previous_adoption(
+                        workspace=existing,
+                        idempotency_key=idempotency_key,
+                        repo=repo,
+                        pr_number=pr_number,
+                    )
+                    superseded_workspace = existing
+                workspace = await self._create_adoption_workspace(
+                    request=request,
+                    repo=repo,
+                    metadata=metadata,
+                    idempotency_key=idempotency_key,
+                    logical_idempotency_key=idempotency_key,
+                    previous_terminal_adoptions=previous_terminal_adoptions,
+                    superseded_adoption=superseded_adoption,
+                    superseded_workspace=superseded_workspace,
+                    effective_external_id=effective_external_id,
+                )
         except TaskExternalIdConflictError as exc:
             raise _task_external_id_conflict_error(exc) from exc
         return await self._response(workspace, attached_existing=False)

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.db.enums import TaskClass, WorkspaceStatus
-from awf.db.models import Task
+from awf.db.models import Task, Workspace
 from awf.db.repositories import TaskRepository, WorkspaceRepository
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service.pr_monitor_adoption import (
@@ -368,7 +368,9 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
                         external_id=secret_like,
                     )
                 )
-            await session.rollback()
+            # Commit after the domain error (mirrors get_db_session / careless
+            # callers). Savepoint atomicity must leave no orphan adoption rows.
+            await session.commit()
 
         assert excinfo.value.error_code == "TASK_EXTERNAL_ID_CONFLICT"
         assert secret_like not in str(excinfo.value.detail)
@@ -378,6 +380,72 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert task is not None
             assert task.external_id == unrelated_external_id
             assert task.title == unrelated_title
+            assert await _count(session, Workspace) == 0
+            assert await _count(session, Task) == 1
+
+    @pytest.mark.unit
+    async def test_terminal_readoption_collision_does_not_supersede_or_orphan(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Colliding explicit ID during terminal re-adopt must not supersede."""
+        colliding_id = "shared-external-collision"
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id="prior-adoption-id",
+                )
+            )
+            terminal = await WorkspaceRepository(session).get(first.workspace_id)
+            assert terminal is not None
+            terminal_idempotency_key = terminal.idempotency_key
+            terminal_external_id = terminal.task_external_id
+            terminal.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            await TaskRepository(session).create_or_get(
+                repo_url="https://github.com/other/repo.git",
+                base_branch="main",
+                title="unrelated owner",
+                prompt="unrelated prompt",
+                external_id=colliding_id,
+                idempotency_key="unrelated-collision-key",
+                task_class="docs_task",
+                owned_paths=[],
+            )
+            await session.commit()
+
+        async with factory() as session:
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=_MetadataFetcher(_metadata(title="feature: retry")),
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        external_id=colliding_id,
+                    )
+                )
+            await session.commit()
+
+        assert excinfo.value.error_code == "TASK_EXTERNAL_ID_CONFLICT"
+        async with factory() as session:
+            terminal = await WorkspaceRepository(session).get(first.workspace_id)
+            terminal_task = await session.get(Task, first.task_id)
+            assert terminal is not None
+            assert terminal_task is not None
+            assert terminal.idempotency_key == terminal_idempotency_key
+            assert terminal.task_external_id == terminal_external_id
+            assert terminal_task.external_id == terminal_external_id
+            assert await _count(session, Workspace) == 1
+            assert await _count(session, Task) == 2
 
     @pytest.mark.unit
     def test_superseded_external_id_stays_within_column_bounds(self) -> None:
