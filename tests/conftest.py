@@ -80,13 +80,24 @@ def _pytest_arg_collection_path(arg: str, rootpath: Path) -> Path | None:
     return path.resolve()
 
 
+def _collection_file_is_under_broader_path(collection_path: Path, requested_path: Path) -> bool:
+    return requested_path != collection_path and collection_path.is_relative_to(requested_path)
+
+
 def _explicitly_requested_collection_file(collection_path: Path, config: pytest.Config) -> bool:
     rootpath = Path(config.rootpath).resolve()
     resolved_collection_path = collection_path.resolve()
-    return any(
-        requested_path == resolved_collection_path
-        for requested_path in (_pytest_arg_collection_path(arg, rootpath) for arg in config.args)
+    requested_paths = tuple(
+        path
+        for path in (_pytest_arg_collection_path(arg, rootpath) for arg in config.args)
+        if path is not None
     )
+    if any(
+        _collection_file_is_under_broader_path(resolved_collection_path, requested_path)
+        for requested_path in requested_paths
+    ):
+        return False
+    return any(requested_path == resolved_collection_path for requested_path in requested_paths)
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:

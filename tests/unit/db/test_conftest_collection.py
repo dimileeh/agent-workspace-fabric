@@ -118,6 +118,13 @@ def test_compatibility_shims_are_ignored_only_for_default_discovery(
         )
         is None
     )
+    assert (
+        root_conftest.pytest_ignore_collect(
+            collection_path,
+            _FakeConfig(tmp_path, ["tests/unit", str(shim_path)]),  # type: ignore[arg-type]
+        )
+        is True
+    )
 
 
 def test_collection_modifyitems_extends_docker_test_timeout(tmp_path: Path) -> None:
