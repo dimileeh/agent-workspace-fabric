@@ -217,6 +217,32 @@ def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
     return mode, obj_type, oid
 
 
+def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
+    """Return True when an added salvage blob remains applied in ``head_blob``.
+
+    Empty-base ``git merge-file`` conflicts on benign append/prepend, so additions
+    use contiguous retention instead. Raw ``commit_blob in head_blob`` is too weak:
+    commenting out an added call (``enable_guard()`` → ``# enable_guard()``) still
+    contains the salvage bytes as a mid-line substring and would reuse stale
+    evidence (PRRT_kwDOSJAM6s6Zm6F1). Require a line-boundary-aligned occurrence:
+    the match must start at file start or after a newline, and if the salvage
+    lacks a trailing newline it must end at EOF or before a newline — so the
+    added patch remains a whole-line block, not a modified occurrence.
+    """
+    if not commit_blob:
+        return True
+    start = 0
+    while True:
+        idx = head_blob.find(commit_blob, start)
+        if idx < 0:
+            return False
+        if idx == 0 or head_blob[idx - 1] == "\n":
+            end = idx + len(commit_blob)
+            if commit_blob.endswith("\n") or end == len(head_blob) or head_blob[end] == "\n":
+                return True
+        start = idx + 1
+
+
 async def _commit_changes_present_in_head(
     self: Any,
     *,
@@ -236,9 +262,11 @@ async def _commit_changes_present_in_head(
     as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs with a baseline is
     checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
     result equals head. A no-baseline addition (new path) cannot use that
-    3-way model; retain when the salvage blob text remains a contiguous
-    substring of the tip blob so append/prepend keep evidence while overwrites
-    fail closed (PRRT_kwDOSJAM6s6Zm0PC). ``baseline`` defaults to the tip's
+    3-way model; retain when the salvage blob remains a line-boundary-aligned
+    contiguous block in the tip blob so append/prepend keep evidence while
+    mid-line modifications (e.g. commenting out an added call) and overwrites
+    fail closed (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1). ``baseline``
+    defaults to the tip's
     first parent; callers that retain a failed-run tip must pass the invocation
     start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is checked as
     the full ``start..tip`` delta — otherwise a later tip that reverts H1 while
@@ -336,8 +364,9 @@ async def _commit_changes_present_in_head(
         if parent_meta is None:
             # Addition without a baseline blob: later tips may append/prepend
             # while leaving the added bytes intact (OID changes). Exact OID is
-            # sufficient but not required — require contiguous retention of the
-            # salvage blob text (PRRT_kwDOSJAM6s6Zm0PC).
+            # sufficient but not required — require line-boundary-aligned
+            # contiguous retention of the salvage blob (PRRT_kwDOSJAM6s6Zm0PC,
+            # PRRT_kwDOSJAM6s6Zm6F1).
             head_blob = await _blob_text(head_oid)
             commit_blob = await _blob_text(commit_oid)
             if head_blob is None or commit_blob is None:
@@ -347,10 +376,7 @@ async def _commit_changes_present_in_head(
             # invalid bytes (exact OID already failed above).
             if any("\0" in blob or "\ufffd" in blob for blob in (head_blob, commit_blob)):
                 return False
-            # Empty addition: path+mode retention above is enough.
-            if not commit_blob:
-                return True
-            return commit_blob in head_blob
+            return _added_salvage_blob_retained(commit_blob=commit_blob, head_blob=head_blob)
 
         _, parent_type, parent_oid = parent_meta
         # Mode-only salvage (same blob as baseline): content is retained once mode

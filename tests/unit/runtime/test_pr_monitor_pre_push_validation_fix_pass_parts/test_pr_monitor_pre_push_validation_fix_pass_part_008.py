@@ -899,6 +899,107 @@ async def test_commit_changes_present_in_head_accepts_addition_later_edit(
 
 
 @pytest.mark.unit
+def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> None:
+    """Commenting out an added call must not count as retained salvage bytes.
+
+    ``enable_guard()\\n`` is a contiguous substring of ``# enable_guard()\\n``, so
+    raw containment would reuse stale addition evidence after the functional call
+    was disabled (PRRT_kwDOSJAM6s6Zm6F1).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _added_salvage_blob_retained,
+    )
+
+    assert _added_salvage_blob_retained(
+        commit_blob="enable_guard()\n",
+        head_blob="enable_guard()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="enable_guard()\n",
+        head_blob="enable_guard()\nextra\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="enable_guard()\n",
+        head_blob="prefix\nenable_guard()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard()\n",
+        head_blob="# enable_guard()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard()",
+        head_blob="x_enable_guard()",
+    )
+    assert _added_salvage_blob_retained(commit_blob="", head_blob="anything\n")
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_commented_out_addition(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Later tip that comments out an added salvage call must fail closed.
+
+    Salvage adds ``enable_guard()``. A subsequent edit to ``# enable_guard()``
+    still contains the salvage bytes mid-line; substring retention would reuse
+    stale evidence on a no-change FIXED retry (PRRT_kwDOSJAM6s6Zm6F1).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.py").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.py")
+    _git(repo, "commit", "-qm", "base without new file")
+
+    (repo / "guard.py").write_text("enable_guard()\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "salvage adds enable_guard")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "guard.py").write_text("# enable_guard()\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "later tip comments out addition")
+    commented = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: append after the added call keeps a line-aligned salvage block.
+    _git(repo, "checkout", "-q", "-B", "append-tip", salvage)
+    (repo / "guard.py").write_text("enable_guard()\nextra()\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "later tip appends after addition")
+    appended = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=appended,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=commented,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_invalid_utf8_replace_collapse(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
