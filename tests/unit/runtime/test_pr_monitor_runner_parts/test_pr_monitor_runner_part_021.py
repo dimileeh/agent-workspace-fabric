@@ -158,6 +158,15 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: &amp;amp;amp;lt;reason&amp;amp;amp;gt;",
             "AWF-VERDICT: FIXED: &amp;lt;one-sentence summary&amp;gt;",
             "AWF-VERDICT: DEFER: &amp;lt;what to track&amp;gt;",
+            # CommonMark backslash-escaped whole-reason placeholders
+            # (PRRT_kwDOSJAM6s6ZpA-z).
+            r"AWF-VERDICT: FALSE POSITIVE: \<reason\>",
+            r"AWF-VERDICT: FALSE POSITIVE: \<one-sentence justification\>",
+            r"AWF-VERDICT: FALSE POSITIVE: `\<reason\>`",
+            r"AWF-VERDICT: FIXED: \<one-sentence summary\>",
+            r"AWF-VERDICT: DEFER: \<what to track\>",
+            # Nested backslash escapes still decode to a placeholder.
+            r"AWF-VERDICT: FALSE POSITIVE: \\\<reason\\\>",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
@@ -170,6 +179,7 @@ class TestParseVerdict:
         # including image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M).
         # HTML entity-escaped whole-reason echoes must also fail closed
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
+        # CommonMark backslash escapes (``\<reason\>``) likewise (PRRT_kwDOSJAM6s6ZpA-z).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -214,6 +224,11 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: added the &amp;lt;summary&amp;gt; section",
                 "added the &amp;lt;summary&amp;gt; section",
             ),
+            # CommonMark backslash mid-reason tags stay usable (PRRT_kwDOSJAM6s6ZpA-z).
+            (
+                r"AWF-VERDICT: FALSE POSITIVE: added the \<summary\> section",
+                r"added the \<summary\> section",
+            ),
         ],
     )
     def test_private_awf_entity_escaped_mid_reason_tag_still_usable(
@@ -221,6 +236,7 @@ class TestParseVerdict:
     ) -> None:
         # Anchored placeholder detection must not treat mid-reason entity-escaped
         # tags as whole-reason template echoes (PRRT_kwDOSJAM6s6Zoyj2).
+        # Same for CommonMark backslash escapes (PRRT_kwDOSJAM6s6ZpA-z).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "false_positive"

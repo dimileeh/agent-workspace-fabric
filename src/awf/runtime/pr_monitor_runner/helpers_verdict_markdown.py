@@ -75,8 +75,9 @@ _BARE_VERDICT_LINE = re.compile(
 # stored echoes normalize away. Whole-reason ellipsis echoes of the prompt form
 # ``FIXED: …`` are also treated as placeholders — not ``...real content``.
 # Callers that check reasons also decode HTML entities (``&lt;reason&gt;``,
-# nested ``&amp;lt;…&amp;gt;``) against this same anchored pattern
-# (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG).
+# nested ``&amp;lt;…&amp;gt;``) and CommonMark backslash escapes
+# (``\<reason\>``) against this same anchored pattern
+# (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z).
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"^\s*(?:"
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
