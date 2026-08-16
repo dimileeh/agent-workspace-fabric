@@ -842,6 +842,65 @@ class TestParseVerdict:
         assert result.reason == "real fix landed"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "> <div>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">\n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+            (
+                "> <div>\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">   \n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+            (
+                "> - <custom-example>\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">\n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+        ],
+        ids=[
+            "blockquote_gt_blank",
+            "blockquote_gt_spaces_blank",
+            "blockquote_list_gt_blank",
+        ],
+    )
+    def test_private_awf_verdict_blockquote_html_type6_gt_blank_ends_shield(
+        self,
+        stdout: str,
+    ) -> None:
+        # Blockquote-nested type-6/7 blocks terminate on ``>`` / ``>   ``
+        # content blank lines; without stripping the container the parser
+        # stays in html_blank_terminated mode and suppresses FIXED
+        # (PRRT_kwDOSJAM6s6ZnYwP).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real fix landed"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_toplevel_html_type6_gt_line_does_not_end_shield(
+        self,
+    ) -> None:
+        # A bare ``>`` is not a blank terminator for top-level type-6/7 blocks.
+        stdout = (
+            "<div>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            ">\n"
+            "AWF-VERDICT: FIXED: must stay shielded\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_same_line_html_type6_wrapper(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
