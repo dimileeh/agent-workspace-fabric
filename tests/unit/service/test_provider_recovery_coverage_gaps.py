@@ -1182,6 +1182,45 @@ def test_parse_provider_recovery_state_counts_active_targets_in_legacy_state() -
     assert state_zero.launched_fallback_attempts == 0
 
 
+def test_parse_provider_recovery_state_legacy_state_with_multiple_attempts_and_pruned_targets() -> (
+    None
+):
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "max_fallback_attempts": 2,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+                {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 2,
+        },
+    }
+
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 2
+    assert state.launched_fallback_attempts == 2
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "terminal"
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
 def test_has_existing_provider_recovery_event_matches_retired_runtime_fingerprint() -> None:
     import asyncio
     from pathlib import Path

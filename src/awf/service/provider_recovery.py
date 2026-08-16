@@ -832,19 +832,7 @@ def parse_provider_recovery_state(
         launched_fallback_attempts = _nonnegative_int(raw_launched, default=0)
     else:
         # Reconstruct launched_fallback_attempts for legacy state written before the field existed.
-        # Count non-None valid slots up to fallback_attempt_number. If fallback_attempt_number is 1
-        # but that single slot was pruned/invalid (count == 0), retain 1 attempt so legacy single-attempt
-        # state does not lose its recorded attempt budget.
-        policy = parse_provider_recovery_policy(task_policy)
-        if policy.fallbacks and fallback_attempt_number > 0:
-            count = sum(
-                1 for target in policy.fallbacks[:fallback_attempt_number] if target is not None
-            )
-            launched_fallback_attempts = (
-                1 if (fallback_attempt_number == 1 and count == 0) else count
-            )
-        else:
-            launched_fallback_attempts = fallback_attempt_number
+        launched_fallback_attempts = fallback_attempt_number
 
     return ProviderRecoveryState(
         failure_fingerprints=fingerprint_values,
