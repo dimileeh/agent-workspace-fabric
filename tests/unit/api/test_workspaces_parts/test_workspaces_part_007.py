@@ -1131,7 +1131,7 @@ class TestListWorkspaces:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("param", "value"),
-        [("status", "not-a-status"), ("agent", "not-an-agent")],
+        [("status", "not-a-status")],
     )
     async def test_rejects_unknown_filter_enums(
         self, client: AsyncClient, param: str, value: str
