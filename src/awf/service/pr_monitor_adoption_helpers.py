@@ -1014,10 +1014,13 @@ def _raise_if_existing_workspace_is_not_requested_adoption(
 
     # History matching requires structured pr_adoption identity, so legacy rows
     # with None / non-object task_policy fall through to this idempotency-key
-    # path. The canonical key already encodes repo+PR; accept when the row is
-    # still an adoption task kind so replay can treat missing agent policy as
-    # empty instead of spuriously conflicting on identity.
-    if not adoption and workspace.task_kind == PR_ADOPTION_TASK_KIND:
+    # path. Accept only with independent persisted column proof of the same
+    # forge/repo/PR — never on task_kind / external_id / key alone.
+    if not adoption and _legacy_workspace_matches_requested_pr_identity(
+        workspace,
+        repo=repo,
+        pr_number=pr_number,
+    ):
         return
 
     raise PRMonitorAdoptionError(
@@ -1034,6 +1037,42 @@ def _raise_if_existing_workspace_is_not_requested_adoption(
             "existing_pr_adoption_repo_slug": existing_repo_slug,
             "existing_pr_adoption_pr_number": existing_pr_number,
         },
+    )
+
+
+def _legacy_workspace_matches_requested_pr_identity(
+    workspace: Workspace,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+) -> bool:
+    """True when persisted workspace columns independently prove PR identity.
+
+    Used only for legacy rows missing structured ``pr_adoption`` policy. Fail
+    closed on absent, malformed, or mismatched ``pr_url`` / ``pr_number`` /
+    ``repo_url``.
+    """
+    if workspace.task_kind != PR_ADOPTION_TASK_KIND:
+        return False
+    if workspace.pr_number != pr_number:
+        return False
+    pr_url = workspace.pr_url
+    if not isinstance(pr_url, str) or not pr_url.strip():
+        return False
+    try:
+        parsed_repo, parsed_pr = parse_github_pull_request_url(pr_url)
+    except ValueError:
+        return False
+    if parsed_pr != pr_number:
+        return False
+    if parsed_repo.forge != repo.forge or parsed_repo.slug().lower() != repo.slug().lower():
+        return False
+    try:
+        workspace_repo = RepoRef.from_url(workspace.repo_url)
+    except ValueError:
+        return False
+    return (
+        workspace_repo.forge == repo.forge and workspace_repo.slug().lower() == repo.slug().lower()
     )
 
 
@@ -1385,6 +1424,7 @@ __all__ = (
     "_adoption_workspace_forge",
     "_raise_if_adoption_forge_mismatch",
     "_raise_if_existing_workspace_is_not_requested_adoption",
+    "_legacy_workspace_matches_requested_pr_identity",
     "_raise_if_policy_conflicts",
     "_adoption_auto_merge_intent",
     "_adoption_auto_merge_conflicts",
