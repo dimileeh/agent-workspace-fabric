@@ -311,15 +311,18 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        # Empty salvage entry is a deletion: accept only when the parent still
-        # had the path and head remains absent. Both-missing (bogus/C-quoted
-        # path) fails closed because the parent lookup is empty too
-        # (PRRT_kwDOSJAM6s6ZmEAd).
+        # Distinguish deletions with full parent/commit/head entries. Empty
+        # commit+head is retained salvage only when the parent still had a
+        # concrete entry; bogus/C-quoted paths miss parent and commit alike;
+        # any re-add at head fails closed (PRRT_kwDOSJAM6s6ZmEAd / ZmEG6).
+        parent_entry = await _tree_entry_at(parent, path)
         commit_entry = await _tree_entry_at(commit_sha, path)
         head_entry = await _tree_entry_at(head_sha, path)
-        if commit_entry != head_entry:
-            return False
-        if not commit_entry and not await _tree_entry_at(parent, path):
+        if not commit_entry:
+            if not parent_entry or head_entry:
+                return False
+            continue
+        if head_entry != commit_entry:
             return False
     return True
 

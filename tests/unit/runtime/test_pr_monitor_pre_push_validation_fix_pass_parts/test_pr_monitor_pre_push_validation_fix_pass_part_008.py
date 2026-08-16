@@ -829,6 +829,70 @@ async def test_commit_changes_present_in_head_accepts_preserved_deletion(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_preserved_newline_deletion(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """NUL-parsed newline pathnames must retain deletion salvage like plain paths.
+
+    Salvage deletes a legal pathname containing a newline. A later tip that keeps
+    the path absent must reuse evidence; recreating the file must fail closed
+    (operator hint op_c7b81dcfeeda494596a261f7 / PRRT_kwDOSJAM6s6ZmEAd).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    weird_name = "weird\nname.txt"
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (repo / weird_name).write_text("delete-me\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base with newline pathname")
+    _git(repo, "rm", "-q", "--", weird_name)
+    _git(repo, "commit", "-qm", "salvage deletes newline pathname")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "later.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-qm", "later tip preserving newline deletion")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / weird_name).write_text("recreated\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "re-add newline pathname")
+    readded = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=readded,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -858,9 +922,9 @@ async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
     cmd.queue_result(returncode=0, stdout=f"{parent}\n")  # commit^
     cmd.queue_result(returncode=0, stdout=f"{parent_tree}\n")  # parent^{tree}
     cmd.queue_result(returncode=0, stdout=f"{bogus_path}\0")  # diff-tree -z
+    cmd.queue_result(returncode=0, stdout="")  # ls-tree parent (missing)
     cmd.queue_result(returncode=0, stdout="")  # ls-tree commit (missing)
     cmd.queue_result(returncode=0, stdout="")  # ls-tree head (missing)
-    cmd.queue_result(returncode=0, stdout="")  # ls-tree parent (missing)
 
     runner = make_runner(
         factory=factory,
