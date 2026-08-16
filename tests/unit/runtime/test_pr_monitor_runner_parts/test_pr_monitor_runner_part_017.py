@@ -2024,6 +2024,64 @@ class TestParseVerdict:
         assert result.reason == "applied the real fix"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_explicit_correction_to_false_positive(
+        self,
+    ) -> None:
+        # NEEDS_HUMAN leaders must still honor explicit self-corrections; the
+        # hard-block early return must not absorb ``correction:`` before
+        # separator logic runs (#822 PRRT_kwDOSJAM6s6ZnrAH).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: initially unsure; correction: "
+            "AWF-VERDICT: FALSE POSITIVE: existing behavior handles it"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "existing behavior handles it"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_corrected_to_fixed(
+        self,
+    ) -> None:
+        # Same separator gate for a corrected FIXED after NEEDS_HUMAN so valid
+        # commit evidence is not trapped behind the hard block
+        # (#822 PRRT_kwDOSJAM6s6ZnrAH).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: first pass unsure; corrected to: "
+            "AWF-VERDICT: FIXED: changed the implementation"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "changed the implementation"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_quote_exit_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        # Quote-exit trailing attempts after NEEDS_HUMAN are unambiguous
+        # separate verdicts, same as after resolvable leaders
+        # (#822 PRRT_kwDOSJAM6s6ZnrAH).
+        result = _parse_verdict_result(
+            'AWF-VERDICT: NEEDS_HUMAN: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_bare_corrected_prose_stays_absorbed(
+        self,
+    ) -> None:
+        # Bare past-participle ``corrected:`` remains ordinary reason prose after
+        # NEEDS_HUMAN (parity with FIXED/DEFER, #822 PRRT_kwDOSJAM6s6Znq6K).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: already corrected: "
+            "AWF-VERDICT: FALSE POSITIVE: cited grammar"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("already corrected: AWF-VERDICT: FALSE POSITIVE: cited grammar")
+
+    @pytest.mark.unit
     def test_private_awf_verdict_bare_corrected_prose_stays_absorbed(
         self,
     ) -> None:
@@ -2131,8 +2189,7 @@ class TestParseVerdict:
     ) -> None:
         # Matching double-backtick close must leave the parser outside so a real
         # trailing marker still wins after a resolvable leading verdict
-        # (#822 PRRT_kwDOSJAM6s6Zlnbx). Hard-block leaders keep the whole line
-        # (PRRT_kwDOSJAM6s6Zl4Ra); use FIXED here to isolate quote-exit splitting.
+        # (#822 PRRT_kwDOSJAM6s6Zlnbx).
         result = _parse_verdict_result(
             "AWF-VERDICT: FIXED: cite ``something``AWF-VERDICT: FALSE POSITIVE: real trailing"
         )
@@ -2176,8 +2233,6 @@ class TestParseVerdict:
     ) -> None:
         # A closing quote immediately before a real trailing marker is outside the
         # quote — must not be treated as still embedded (#822 PRRT_kwDOSJAM6s6ZlTEh).
-        # Leading resolvable verdict isolates quote-exit splitting from hard-block
-        # same-line absorption (PRRT_kwDOSJAM6s6Zl4Ra).
         result = _parse_verdict_result(
             'AWF-VERDICT: FIXED: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
         )

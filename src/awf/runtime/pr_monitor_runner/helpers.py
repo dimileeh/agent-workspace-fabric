@@ -1129,10 +1129,12 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     markers look like leading attempts (mid-prose option lists must not
     override an earlier real verdict).
 
-    When the leading marker is already a hard block (``NEEDS_HUMAN``), keep the
-    whole line as one unit as well. Later markers — quoted or unquoted — are
-    treated as reason prose citations so they cannot resolve a thread the agent
-    explicitly blocked (PRRT_kwDOSJAM6s6Zl4Ra).
+    When the leading marker is already a hard block (``NEEDS_HUMAN``), later
+    markers — quoted or unquoted mid-reason citations — stay reason prose so
+    they cannot resolve a thread the agent explicitly blocked
+    (PRRT_kwDOSJAM6s6Zl4Ra). Explicit self-corrections and unambiguous trailing
+    attempts after a closed quote/code span still split
+    (``correction:`` / ``corrected to:``, PRRT_kwDOSJAM6s6ZnrAH).
 
     When the leading marker is ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``,
     later resolvable markers cited in the reason (quoted or unquoted) stay
@@ -1156,11 +1158,13 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
         return [verdict_line]
     if verdict_line[: matches[0].start()].strip():
         return [verdict_line]
-    if _awf_verdict_leading_hard_block(verdict_line, matches[0].start()):
-        return [verdict_line]
     split_starts = [matches[0].start()]
     for match in matches[1:]:
         if _awf_verdict_marker_embedded_in_reason_prose(verdict_line, match.start()):
+            continue
+        if _awf_verdict_leading_hard_block_absorbs_later_marker(
+            verdict_line, matches[0].start(), match.start()
+        ):
             continue
         if _awf_verdict_leading_fixed_absorbs_later_marker(
             verdict_line, matches[0].start(), match.start()
@@ -1179,20 +1183,28 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
 
 
 def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool:
-    """Return whether the leading same-line marker is ``NEEDS_HUMAN``.
-
-    Only ``NEEDS_HUMAN`` leaders absorb *all* later same-line markers into the
-    reason so unquoted prose citations cannot override the block. ``FIXED`` /
-    ``DEFER`` / ``FALSE POSITIVE`` use
-    :func:`_awf_verdict_leading_fixed_absorbs_later_marker` instead so
-    unambiguous trailing attempts after a closed quote or explicit correction
-    still split and later blockers still fail closed.
-    """
+    """Return whether the leading same-line marker is ``NEEDS_HUMAN``."""
     leading = _AWF_VERDICT.match(verdict_line, match_start)
     if leading is None:
         return False
     normalized_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
     return normalized_label == "needs human"
+
+
+def _awf_verdict_leading_hard_block_absorbs_later_marker(
+    verdict_line: str, leading_start: int, later_start: int
+) -> bool:
+    """Return whether a ``NEEDS_HUMAN`` leader keeps a later same-line marker as rationale.
+
+    Mid-reason citations (quoted or unquoted) stay absorbed so they cannot
+    resolve a blocked thread (PRRT_kwDOSJAM6s6Zl4Ra). Markers that follow a
+    closed quote/code span with only optional whitespace, or an explicit
+    correction/separator, are unambiguous trailing attempts and still split
+    (PRRT_kwDOSJAM6s6ZnrAH).
+    """
+    if not _awf_verdict_leading_hard_block(verdict_line, leading_start):
+        return False
+    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
 
 
 _FIXED_REASON_ABSORBABLE_LABELS = frozenset({"fixed", "false positive", "defer"})
