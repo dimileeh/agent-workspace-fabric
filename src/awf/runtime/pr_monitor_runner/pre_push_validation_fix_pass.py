@@ -233,21 +233,24 @@ async def _commit_changes_present_in_head(
     salvaged patch at ``head`` — not necessarily a byte-identical tree entry
     (mode+type+OID). A later tip may edit a different hunk of the same file
     (OID differs) while the salvage hunk remains applied; that must still count
-    as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs is checked via a
-    clean 3-way ``git merge-file`` of parent/head/commit whose result equals
-    head. ``baseline`` defaults to the tip's first parent; callers that retain a
-    failed-run tip must pass the invocation start SHA so a multi-commit salvage
-    (H1 fix + H2 unrelated) is checked as the full ``start..tip`` delta —
-    otherwise a later tip that reverts H1 while preserving H2 falsely retains
-    evidence (PRRT_kwDOSJAM6s6ZmG-B). A deleted path is an empty entry: it counts
-    as present only when the baseline still had the path and ``head`` remains
-    absent (both-missing bogus lookups fail closed). A third-content overwrite
-    (A→B salvage, later tip to C) must fail closed even though C≠A — otherwise a
-    no-change FIXED retry can reuse stale salvage after B is gone. Mode-only
-    salvage (e.g. chmod +x) that a later tip reverts must likewise fail closed,
-    because Git stores mode separately from the object id. Partial or full
-    reverts and revert-then-unrelated tips fail closed. Root commits and
-    unresolved objects also fail closed.
+    as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs with a baseline is
+    checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
+    result equals head. A no-baseline addition (new path) cannot use that
+    3-way model; retain when the salvage blob text remains a contiguous
+    substring of the tip blob so append/prepend keep evidence while overwrites
+    fail closed (PRRT_kwDOSJAM6s6Zm0PC). ``baseline`` defaults to the tip's
+    first parent; callers that retain a failed-run tip must pass the invocation
+    start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is checked as
+    the full ``start..tip`` delta — otherwise a later tip that reverts H1 while
+    preserving H2 falsely retains evidence (PRRT_kwDOSJAM6s6ZmG-B). A deleted
+    path is an empty entry: it counts as present only when the baseline still
+    had the path and ``head`` remains absent (both-missing bogus lookups fail
+    closed). A third-content overwrite (A→B salvage, later tip to C) must fail
+    closed even though C≠A — otherwise a no-change FIXED retry can reuse stale
+    salvage after B is gone. Mode-only salvage (e.g. chmod +x) that a later tip
+    reverts must likewise fail closed, because Git stores mode separately from
+    the object id. Partial or full reverts and revert-then-unrelated tips fail
+    closed. Root commits and unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -327,16 +330,32 @@ async def _commit_changes_present_in_head(
         if (parent_meta is None or parent_meta[0] != commit_mode) and head_mode != commit_mode:
             return False
 
-        # Addition without a baseline blob: require exact content OID after mode.
+        if commit_oid == head_oid:
+            return True
+
         if parent_meta is None:
-            return commit_oid == head_oid
+            # Addition without a baseline blob: later tips may append/prepend
+            # while leaving the added bytes intact (OID changes). Exact OID is
+            # sufficient but not required — require contiguous retention of the
+            # salvage blob text (PRRT_kwDOSJAM6s6Zm0PC).
+            head_blob = await _blob_text(head_oid)
+            commit_blob = await _blob_text(commit_oid)
+            if head_blob is None or commit_blob is None:
+                return False
+            # Same unsafe-text gate as the baseline path: containment is not
+            # trustworthy once decode(replace) may have collapsed distinct
+            # invalid bytes (exact OID already failed above).
+            if any("\0" in blob or "\ufffd" in blob for blob in (head_blob, commit_blob)):
+                return False
+            # Empty addition: path+mode retention above is enough.
+            if not commit_blob:
+                return True
+            return commit_blob in head_blob
 
         _, parent_type, parent_oid = parent_meta
         # Mode-only salvage (same blob as baseline): content is retained once mode
         # checks passed.
         if commit_oid == parent_oid:
-            return True
-        if commit_oid == head_oid:
             return True
         if parent_type != "blob":
             return False
@@ -353,7 +372,7 @@ async def _commit_changes_present_in_head(
         # if we only gated on NUL. Valid UTF-8 (including non-ASCII) round-trips
         # through decode(replace) → encode("utf-8") without introducing U+FFFD.
         if any("\0" in blob or "\ufffd" in blob for blob in (parent_blob, head_blob, commit_blob)):
-            return commit_oid == head_oid
+            return False
 
         with tempfile.TemporaryDirectory(prefix="awf-salvage-merge-", dir="/tmp") as tmp:
             tmp_dir = Path(tmp)

@@ -800,6 +800,105 @@ async def test_commit_changes_present_in_head_accepts_same_file_later_hunk(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_addition_later_edit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No-baseline file addition must retain when later tips keep added bytes.
+
+    Salvage adds a new path. A later tip that appends (or prepends) changes the
+    blob OID while the original added content remains contiguous; exact-OID
+    equality would discard that salvage and block a no-change FIXED retry
+    (PRRT_kwDOSJAM6s6Zm0PC). Overwriting or deleting the added bytes must still
+    fail closed.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.py").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.py")
+    _git(repo, "commit", "-qm", "base without new file")
+
+    (repo / "new.py").write_text(
+        "line1-added\nline2-salvaged\nline3-added\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "new.py")
+    _git(repo, "commit", "-qm", "salvage adds new.py")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "new.py").write_text(
+        "line1-added\nline2-salvaged\nline3-added\nline4-appended\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "new.py")
+    _git(repo, "commit", "-qm", "later tip appends to addition")
+    appended = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "checkout", "-q", "-B", "prepend-tip", salvage)
+    (repo / "new.py").write_text(
+        "line0-prepended\nline1-added\nline2-salvaged\nline3-added\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "new.py")
+    _git(repo, "commit", "-qm", "later tip prepends to addition")
+    prepended = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "checkout", "-q", "-B", "overwrite-tip", salvage)
+    (repo / "new.py").write_text("completely-different\n", encoding="utf-8")
+    _git(repo, "add", "new.py")
+    _git(repo, "commit", "-qm", "overwrite added content")
+    overwritten = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "checkout", "-q", "-B", "delete-tip", salvage)
+    _git(repo, "rm", "-q", "new.py")
+    _git(repo, "commit", "-qm", "delete added file")
+    deleted = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=appended,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=prepended,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=overwritten,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=deleted,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_invalid_utf8_replace_collapse(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
