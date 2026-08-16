@@ -717,6 +717,7 @@ class TestPushUsesExplicitRefspec:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(
             factory, branch_name="awf/feature-x", remote_push_branch="awf/feature-x"
@@ -732,7 +733,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed in commit abc")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
         cmd.queue_result(returncode=0, stderr="")  # git push (under inspection)
         cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
@@ -755,6 +756,11 @@ class TestPushUsesExplicitRefspec:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",

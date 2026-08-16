@@ -531,12 +531,13 @@ async def test_non_transient_bitbucket_human_notification_comment_error_raises(
 async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
     workspace_id = await seed_monitoring_workspace(factory)
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout="{}")
@@ -547,6 +548,11 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_retry",
         path="src/foo.py",
@@ -592,12 +598,13 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
 async def test_resolve_thread_transient_failure_requeues_thread_safely(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -609,6 +616,11 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_resolve",
         path="src/foo.py",
@@ -672,6 +684,7 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
 async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Bitbucket workspaces resolve threads via BitbucketClient, which raises
     # BitbucketClientError (not GitHubClientError). A transient blip (rate limit)
@@ -682,7 +695,7 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -702,6 +715,11 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_resolve",
         path="src/foo.py",
@@ -763,6 +781,7 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
 async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A permanent Bitbucket fault during resolve_thread must forward the
     # forge-native reason code and clear the addressed marker WITHOUT escaping the
@@ -775,7 +794,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -795,6 +814,11 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_resolve",
         path="src/foo.py",
@@ -856,6 +880,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
 async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Bitbucket workspaces re-poll the PR during the settle window via
     # BitbucketClient, which raises BitbucketClientError (not GitHubClientError).
@@ -866,7 +891,7 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout="{}")
     runner = make_runner(
@@ -885,6 +910,11 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_settle",
         path="src/foo.py",
@@ -934,13 +964,14 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
 async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A permanent Bitbucket fault (403, token lacks the scope) during the settle
     # re-poll must propagate like the GitHub arm's non-transient branch rather than
     # being swallowed.
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -956,6 +987,11 @@ async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_settle_perm",
         path="src/foo.py",
@@ -983,10 +1019,11 @@ async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
 async def test_fix_cycle_reraises_non_transient_settle_poll_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=1, stderr="bad credentials")
     runner = make_runner(
         factory=factory,
@@ -995,6 +1032,11 @@ async def test_fix_cycle_reraises_non_transient_settle_poll_error(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_auth",
         path="src/foo.py",

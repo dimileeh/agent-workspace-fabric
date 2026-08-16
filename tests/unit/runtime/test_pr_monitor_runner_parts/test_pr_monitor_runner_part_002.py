@@ -1285,6 +1285,7 @@ async def test_review_comment_false_positive_is_recorded_by_pr_identity(
 async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
@@ -1300,6 +1301,11 @@ async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
     comment = ReviewComment(
         comment_id="issue:4391271818",
