@@ -610,7 +610,11 @@ async def test_salvage_retained_before_provider_recovery_retry_raise(
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "sink_kind",
-    ["post_commit_ownership_repair", "protected_scope_provider_recovery"],
+    [
+        "post_commit_ownership_repair",
+        "protected_scope_provider_recovery",
+        "cancelled_after_commit",
+    ],
 )
 async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     tmp_path: Path,
@@ -620,10 +624,14 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
 
     Post-commit ownership repair failure and protected-scope repair self-commit
     followed by provider recovery both advance HEAD inside the sink, then raise
-    before the success-path salvage block. Without retaining evidence from that
-    exception path, a later no-change FIXED at the tip becomes
-    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT).
+    before the success-path salvage block. ``CancelledError`` is a BaseException,
+    so cancellation during post-commit ownership repair has the same gap unless
+    salvage is retained before propagating (PRRT_kwDOSJAM6s6Zmn1b). Without
+    retaining evidence from that exception path, a later no-change FIXED at the
+    tip becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmirT).
     """
+    import asyncio
+
     from awf.runtime.monitor_state_keys import (
         _salvaged_fix_body_hash_state_key,
         _salvaged_fix_head_state_key,
@@ -639,6 +647,8 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
         sink_exc = _MonitorAgentRuntimeOwnershipRepairFailedError(
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
         )
+    elif sink_kind == "cancelled_after_commit":
+        sink_exc = asyncio.CancelledError()
     else:
         sink_exc = ProviderRecoveryRetryError()
 
@@ -701,6 +711,101 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after sink raise"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advance(
+    tmp_path: Path,
+) -> None:
+    """Task cancel mid-sink after commit must still retain item-bound salvage.
+
+    On Python 3.11+, catching ``CancelledError`` leaves cancellation pending, so
+    a naive post-sink ``await`` would re-raise before salvage is recorded. Shield
+    HEAD capture + retention, then propagate cancellation (PRRT_kwDOSJAM6s6Zmn1b).
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_sink_task_cancel"
+    body_hash = "feedback_body_hash_sink_task_cancel"
+    workspace_id = "ws_salvage_sink_task_cancel"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    entered_sink = asyncio.Event()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed before sink cancelled",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _commit_dirty_worktree_then_hang(**_kwargs: object) -> bool:
+        # Commit already advanced HEAD (rev-parse returns ``salvaged``); hang in
+        # post-commit ownership repair until the worker cancels the task.
+        entered_sink.set()
+        await asyncio.Event().wait()
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty_worktree_then_hang
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_sink.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after sink cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after sink cancel"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -127,6 +128,55 @@ async def _evaluate_local_head_advance(
                 )
             )
     return item_end_head, local_head_advanced, descends, trees_differ
+
+
+async def _retain_failed_run_salvage_despite_cancellation(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    salvage_item_id: str | None,
+    salvage_body_hash: str | None,
+    isolated_worktree_host_path: Path | None,
+    result_stdout: str,
+) -> None:
+    """Capture post-sink HEAD and retain salvage while cancellation is pending.
+
+    ``asyncio.CancelledError`` bypasses ``except Exception`` around the dirty
+    commit sink. On Python 3.11+, catching cancellation leaves it pending, so a
+    direct post-sink await would re-raise before salvage is recorded. Shield the
+    evaluate+retain work so a later no-change FIXED at the tip does not become
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zmn1b).
+    """
+
+    async def _capture_and_retain() -> None:
+        item_end_head, local_head_advanced, _, _ = await _evaluate_local_head_advance(
+            runner,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+        )
+        _retain_or_clear_failed_run_salvage(
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            local_head_advanced=local_head_advanced,
+            item_end_head=item_end_head,
+            item_start_head=item_start_head,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+            retain_for_failed_run=True,
+        )
+
+    retain_task = asyncio.create_task(_capture_and_retain())
+    while True:
+        try:
+            await asyncio.shield(retain_task)
+            return
+        except asyncio.CancelledError:
+            if retain_task.done():
+                retain_task.result()
+                return
 
 
 def _retain_or_clear_failed_run_salvage(
@@ -420,7 +470,8 @@ async def _invoke_cli_for_verdict_result(
         # Unexpected agent crashes still try to sink dirty work. Capture post-sink
         # HEAD and retain salvage before re-raising — otherwise a later no-change
         # FIXED at the tip becomes fixed_without_head_advance (same gap as the
-        # main sink path; PRRT_kwDOSJAM6s6ZmirT).
+        # main sink path; PRRT_kwDOSJAM6s6ZmirT). Cancellation after the sink
+        # commit must retain salvage the same way (PRRT_kwDOSJAM6s6Zmn1b).
         unexpected_sink_error: BaseException | None = None
         if commit_dirty_changes:
             try:
@@ -436,6 +487,18 @@ async def _invoke_cli_for_verdict_result(
                 )
             except Exception as sink_exc:
                 unexpected_sink_error = sink_exc
+            except asyncio.CancelledError:
+                await _retain_failed_run_salvage_despite_cancellation(
+                    runner,
+                    worktree_path=worktree_path,
+                    item_start_head=item_start_head,
+                    state=state,
+                    salvage_item_id=salvage_item_id,
+                    salvage_body_hash=salvage_body_hash,
+                    isolated_worktree_host_path=isolated_worktree_host_path,
+                    result_stdout=result_stdout,
+                )
+                raise
         unexpected_end_head, unexpected_local_advanced, _, _ = await _evaluate_local_head_advance(
             runner,
             worktree_path=worktree_path,
@@ -462,6 +525,8 @@ async def _invoke_cli_for_verdict_result(
     # on the success path drops salvage so a later no-change FIXED at the tip
     # becomes fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmirT). Also retain
     # before ``_handle_provider_agent_run_error``, which persists then raises.
+    # ``CancelledError`` bypasses ``except Exception``; retain before propagating
+    # cancellation (PRRT_kwDOSJAM6s6Zmn1b).
     commit_sink_error: BaseException | None = None
     committed_dirty_changes = False
     if commit_dirty_changes:
@@ -480,6 +545,18 @@ async def _invoke_cli_for_verdict_result(
             )
         except Exception as sink_exc:
             commit_sink_error = sink_exc
+        except asyncio.CancelledError:
+            await _retain_failed_run_salvage_despite_cancellation(
+                runner,
+                worktree_path=worktree_path,
+                item_start_head=item_start_head,
+                state=state,
+                salvage_item_id=salvage_item_id,
+                salvage_body_hash=salvage_body_hash,
+                isolated_worktree_host_path=isolated_worktree_host_path,
+                result_stdout=result_stdout,
+            )
+            raise
 
     item_end_head, local_head_advanced, descends, trees_differ = await _evaluate_local_head_advance(
         runner,
