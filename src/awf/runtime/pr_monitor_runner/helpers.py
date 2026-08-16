@@ -264,6 +264,14 @@ _HTML_CODE_BLOCK_OPEN = re.compile(
     r"^ {0,3}<(?P<tag>pre|code)(?=[\s>]|$)",
     re.IGNORECASE,
 )
+# CommonMark HTML comment blocks (type 2): optional 0–3 spaces then ``<!--``,
+# ending on the first subsequent line that contains ``-->``. Agents paste
+# example verdicts inside comments; without shielding a clean marker line
+# inside ``<!-- … -->`` overrides an earlier hard block
+# (PRRT_kwDOSJAM6s6ZnN2F). Peel list/blockquote containers on openers like
+# ``<pre>`` / fences so ``- <!--`` / ``> <!--`` still enter comment mode.
+_HTML_COMMENT_OPEN = re.compile(r"^ {0,3}<!--")
+_HTML_COMMENT_CLOSE = re.compile(r"-->")
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -318,12 +326,12 @@ def _normalize_markdown_fence_line(line: str) -> str:
     """Strip container indent, blockquotes, and list markers for open matching.
 
     List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` /
-    ``- <pre>`` are not top-level fence or HTML-code lines, and continuation
-    content is often only two-space indented (so it misses the indented-code
-    check). Normalize before matching so those regions stay shielded from
-    verdict selection. Closers must not use this helper — peeling a list or
-    blockquote marker would treat ``- ``` `` / ``> ``` `` inside a top-level
-    fence as a closer.
+    ``- <pre>`` / ``- <!--`` are not top-level fence, HTML-code, or HTML-comment
+    lines, and continuation content is often only two-space indented (so it
+    misses the indented-code check). Normalize before matching so those regions
+    stay shielded from verdict selection. Closers must not use this helper —
+    peeling a list or blockquote marker would treat ``- ``` `` / ``> ``` ``
+    inside a top-level fence as a closer.
     """
     rest = line.lstrip(" \t")
     # Peel blockquote and list in either order (``> - ``` `` / ``- > ``` ``).
@@ -407,6 +415,22 @@ def _html_code_block_closes(line: str, tag: str) -> bool:
     return re.search(rf"</{re.escape(tag)}\s*>", line, re.IGNORECASE) is not None
 
 
+def _html_comment_opens(line: str) -> bool:
+    """Return whether ``line`` opens a CommonMark HTML comment block.
+
+    Normalize list/blockquote containers first (same as fence / ``<pre>``
+    openers) so ``- <!--`` / ``> <!--`` enter comment shielding; otherwise a
+    clean marker line inside the comment overrides an earlier hard block
+    (PRRT_kwDOSJAM6s6ZnN2F).
+    """
+    return _HTML_COMMENT_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_comment_closes(line: str) -> bool:
+    """Return whether ``line`` contains an HTML comment closer (``-->``)."""
+    return _HTML_COMMENT_CLOSE.search(line) is not None
+
+
 def _markdown_fence_closes(
     line: str,
     *,
@@ -464,17 +488,20 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     Skips multiline fenced blocks (including list- and blockquote-nested
     openers after normalizing container prefixes), CommonMark indented-code
     lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
-    tab), and raw HTML ``<pre>`` / ``<code>`` blocks (including list- and
-    blockquote-nested openers) so quoted example markers cannot override an
+    tab), raw HTML ``<pre>`` / ``<code>`` blocks (including list- and
+    blockquote-nested openers), and HTML comment blocks (``<!-- … -->``,
+    including nested openers) so quoted example markers cannot override an
     authoritative unfenced verdict. Same-line wrapped fences
     (`` ```verdict``` ``) are still yielded so ``_CODE_FORMATTED_VERDICT_LINE``
-    can accept them; same-line HTML wrappers are skipped entirely. Unclosed
-    fences or HTML code blocks shield every subsequent line.
+    can accept them; same-line HTML wrappers and comments are skipped entirely.
+    Unclosed fences, HTML code blocks, or HTML comments shield every
+    subsequent line.
     """
     fence: str | None = None
     fence_container_indent = 0
     fence_blockquote_container = False
     html_tag: str | None = None
+    html_comment = False
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(
@@ -487,11 +514,20 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 fence_container_indent = 0
                 fence_blockquote_container = False
             continue
+        if html_comment:
+            if _html_comment_closes(line):
+                html_comment = False
+            continue
         if html_tag is not None:
             if _html_code_block_closes(line, html_tag):
                 html_tag = None
             continue
         if _MARKDOWN_INDENTED_CODE_LINE.match(line):
+            continue
+        if _html_comment_opens(line):
+            # Same-line ``<!-- … -->`` is an example wrapper — skip it.
+            if not _html_comment_closes(line):
+                html_comment = True
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
@@ -580,9 +616,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     last_awf_mention_recognized = False
     saw_awf_mention = False
-    # Skip fenced, indented, and raw HTML <pre>/<code> regions so quoted
-    # example verdicts cannot override an authoritative unfenced marker
-    # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt).
+    # Skip fenced, indented, raw HTML <pre>/<code>, and HTML comment regions so
+    # quoted example verdicts cannot override an authoritative unfenced marker
+    # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
+    # PRRT_kwDOSJAM6s6ZnN2F).
     for stripped in _iter_non_fenced_verdict_lines(stdout):
         for verdict_line in _verdict_line_candidates(stripped):
             # Multiple markers on one line are separate verdict units — do not

@@ -321,6 +321,99 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_inside_html_comment(self) -> None:
+        # HTML comments are not <pre>/<code>; without shielding, a clean
+        # marker line inside <!-- … --> overrides an earlier NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZnN2F).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<!--\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "-->\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_same_line_html_comment_wrapper(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "<!-- AWF-VERDICT: FALSE POSITIVE: example -->\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "- <!--\n"
+                "  AWF-VERDICT: FALSE POSITIVE: example\n"
+                "  -->\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> <!--\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> -->\n"
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "> - <!--\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">   -->\n"
+            ),
+        ],
+        ids=[
+            "list_html_comment",
+            "blockquote_html_comment",
+            "blockquote_list_html_comment",
+        ],
+    )
+    def test_private_awf_verdict_ignores_list_blockquote_nested_html_comment(
+        self,
+        stdout: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unclosed_html_comment_shields_trailing_markers(
+        self,
+    ) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n<!--\nAWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_unfenced_after_closed_html_comment_still_wins(
+        self,
+    ) -> None:
+        stdout = (
+            "<!--\nAWF-VERDICT: FALSE POSITIVE: example\n-->\nAWF-VERDICT: FIXED: real fix landed\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real fix landed"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "stdout",
         [
