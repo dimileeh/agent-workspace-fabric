@@ -819,6 +819,7 @@ async def test_unknown_agent_runtime_tolerance_in_projections(
 ) -> None:
     """Ensure parse_agent_runtime and workspace overview/tasks builders tolerate unknown runtime strings."""
     assert parse_agent_runtime("codex") == AgentRuntime.codex
+    assert parse_agent_runtime(AgentRuntime.codex) == AgentRuntime.codex
     assert parse_agent_runtime("unknown_agent_xyz") == "unknown_agent_xyz"
 
     async with factory() as session:
