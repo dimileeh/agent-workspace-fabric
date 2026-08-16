@@ -563,6 +563,33 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         "final_line",
         [
+            "✅ AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "❌ AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "⚠️ AWF-VERDICT: SHIPPED: done",
+            "✓ AWF-VERDICT: FIXED: committed the fix",
+            "✅AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            # Unknown word wrappers must also fail closed — closed allowlists
+            # leave search() finding the marker while is_attempt stays false.
+            "Status: AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "Note: AWF-VERDICT: SHIPPED: done",
+        ],
+    )
+    def test_private_awf_verdict_emoji_or_unknown_prefix_final_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # Decorative / unknown prefixes leave the marker mid-segment so a closed
+        # allowlist attempt check ignores them and an earlier resolvable verdict
+        # stays selected (#822 PRRT_kwDOSJAM6s6ZmTD6).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
             "- AWF-VERDICT: SHIPPED: done",
             "* AWF-VERDICT: SHIPPED: done",
             "+ AWF-VERDICT: SHIPPED: done",
@@ -793,12 +820,13 @@ class TestParseVerdict:
         assert result.reason == "committed a regression test"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_mid_prose_multi_marker_option_list_keeps_earlier_verdict(
+    def test_private_awf_verdict_mid_prose_multi_marker_option_list_fail_closed(
         self,
     ) -> None:
-        # Splitting multi-marker lines must not drop leading prose — otherwise
-        # later quoted markers become leading attempts and can override an
-        # earlier real verdict (#822 PRRT_kwDOSJAM6s6ZlPBt).
+        # Unquoted mid-prose option markers after a real verdict must fail closed
+        # rather than resolve to a later FALSE POSITIVE / DEFER (#822
+        # PRRT_kwDOSJAM6s6ZlPBt / PRRT_kwDOSJAM6s6ZmTD6). Quoted citations still
+        # keep the earlier verdict; unquoted ones are garbled finals.
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose checkout policy\n"
             "Decide among: (1) AWF-VERDICT: FALSE POSITIVE: stale nit "
@@ -808,7 +836,7 @@ class TestParseVerdict:
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
-        assert result.reason == "maintainer must choose checkout policy"
+        assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
     def test_private_awf_verdict_same_line_quoted_marker_in_reason_keeps_needs_human(

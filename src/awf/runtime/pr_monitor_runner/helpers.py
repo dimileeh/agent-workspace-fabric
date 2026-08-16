@@ -931,18 +931,25 @@ def _strip_markdown_attempt_prefixes(segment: str) -> str:
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     """Return whether ``segment`` is a leading/split ``AWF-VERDICT:`` attempt.
 
-    Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
-    attempts; only segments that begin with the marker count toward the
-    final-marker fail-closed gate. Leading Markdown blockquote, list,
-    task-list checkbox, emphasis, ATX heading, ``Final answer:``, and
-    ``Verdict:`` / ``Result:`` wrappers are stripped first so
-    ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …`` /
-    ``- [ ] AWF-VERDICT: …`` / ``Final answer: AWF-VERDICT: …`` /
-    ``Verdict: AWF-VERDICT: …`` / ``Result: AWF-VERDICT: …`` /
-    ``**AWF-VERDICT: …**`` / ``### AWF-VERDICT: …`` still count as garbled
-    finals.
+    Mid-prose *quoted* citations of the marker grammar (prompt echoes in chat)
+    are not attempts. Any other marker occurrence — including decorative emoji
+    prefixes (``✅ AWF-VERDICT: …``) and unknown wrappers (``Status: …``) —
+    counts toward the final-marker fail-closed gate so a closed prefix
+    allowlist cannot leave an earlier resolvable verdict selected
+    (PRRT_kwDOSJAM6s6ZmTD6). Leading Markdown blockquote, list, task-list
+    checkbox, emphasis, ATX heading, ``Final answer:``, and ``Verdict:`` /
+    ``Result:`` wrappers are stripped first so those forms still match at the
+    start when present.
     """
-    return _AWF_VERDICT_MARKER.match(_strip_markdown_attempt_prefixes(segment)) is not None
+    stripped = _strip_markdown_attempt_prefixes(segment)
+    match = _AWF_VERDICT_MARKER.search(stripped)
+    if match is None:
+        return False
+    if match.start() == 0:
+        return True
+    # Unquoted later markers fail closed; only confident quote/backtick
+    # embeddings are treated as prose citations of the grammar.
+    return not _awf_verdict_marker_embedded_in_reason_prose(stripped, match.start())
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
