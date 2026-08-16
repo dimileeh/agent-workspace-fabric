@@ -46,6 +46,12 @@ class _FakeSession:
         self.items = items
 
 
+class _FakeConfig:
+    def __init__(self, rootpath: Path, args: list[str]) -> None:
+        self.rootpath = rootpath
+        self.args = args
+
+
 class _FakeCollectionItem(_FakeItem):
     def __init__(
         self,
@@ -82,6 +88,36 @@ def test_collection_finish_skips_cleanup_for_source_only_helper_mentions(
     monkeypatch.setattr(postgres_mod, cleanup_name, fail_cleanup)
 
     root_conftest.pytest_collection_finish(_FakeSession([_FakeItem(test_file)]))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "shim_path",
+    [
+        Path("tests/unit/api/routes/test_health.py"),
+        Path("tests/unit/control/worker/test_worker_coverage_edges_part_001.py"),
+        Path("tests/unit/control/worker/test_worker_coverage_edges_part_002.py"),
+    ],
+)
+def test_compatibility_shims_are_ignored_only_for_default_discovery(
+    shim_path: Path,
+    tmp_path: Path,
+) -> None:
+    collection_path = tmp_path / shim_path
+
+    assert (
+        root_conftest.pytest_ignore_collect(
+            collection_path,
+            _FakeConfig(tmp_path, ["tests"]),  # type: ignore[arg-type]
+        )
+        is True
+    )
+    assert (
+        root_conftest.pytest_ignore_collect(
+            collection_path,
+            _FakeConfig(tmp_path, [str(shim_path)]),  # type: ignore[arg-type]
+        )
+        is None
+    )
 
 
 def test_collection_modifyitems_extends_docker_test_timeout(tmp_path: Path) -> None:
