@@ -725,7 +725,9 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_agent_failed"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
+    cmd.queue_result(returncode=0, stdout="")  # dirty status
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # end head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -743,7 +745,9 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     )
 
     assert verdict == "agent_failed"
-    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert any(
+        call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
@@ -770,7 +774,8 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
     )
     workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")  # dirty status
+    cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # end head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -807,7 +812,9 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
     assert state.last_push_sha == terminal_head_sha
     assert state.hosted_terminal_head_advanced
     assert sync_calls
-    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert any(
+        call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
@@ -821,6 +828,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_post_commit_ownership"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
     cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
     cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)

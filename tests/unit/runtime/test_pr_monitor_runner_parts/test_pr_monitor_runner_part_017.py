@@ -176,8 +176,9 @@ class TestParseVerdict:
 
         result = _parse_verdict_result(stdout)
 
-        assert result.verdict == "fix_committed"
-        assert result.reason is None
+        # Inline prompt echoes are not a fullmatch verdict line; fail closed.
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
     def test_private_awf_verdict_placeholder_only_needs_human_has_no_reason(self) -> None:
@@ -252,11 +253,11 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
-    def test_private_awf_verdict_fixed_placeholder_only_has_no_reason(self) -> None:
+    def test_private_awf_verdict_fixed_placeholder_only_fail_closed(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: <one-sentence summary>")
 
-        assert result.verdict == "fix_committed"
-        assert result.reason is None
+        assert result.verdict == "needs_human"
+        assert result.reason == "fixed_placeholder_echo"
 
     @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
@@ -281,8 +282,39 @@ class TestParseVerdict:
         assert _parse_verdict("DEFER: needs human judgement") == "defer"
 
     @pytest.mark.unit
-    def test_plain_reply_counts_as_fix_committed(self) -> None:
-        assert _parse_verdict("Committed fix in abc1234: renamed variable.") == "fix_committed"
+    def test_plain_reply_fail_closed_as_needs_human(self) -> None:
+        result = _parse_verdict_result("Committed fix in abc1234: renamed variable.")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
+
+    @pytest.mark.unit
+    def test_whitespace_only_stdout_needs_human(self) -> None:
+        result = _parse_verdict_result("   \n\t  ")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "empty_verdict_output"
+
+    @pytest.mark.unit
+    def test_empty_stdout_includes_fail_closed_reason(self) -> None:
+        result = _parse_verdict_result("")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "empty_verdict_output"
+
+    @pytest.mark.unit
+    def test_garbled_awf_verdict_marker_fail_closed(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: COMPLETELY_BOGUS: not a real label")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_unrecognized_awf_verdict_label_fail_closed(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: SHIPPED: done")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
     def test_later_defer_does_not_overwrite_prior_false_positive_marker(self) -> None:

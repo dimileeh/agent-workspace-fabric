@@ -46,6 +46,18 @@ _log = get_logger(__name__)
 # (and tests) can match against a closed set.
 Verdict = Literal["fix_committed", "false_positive", "defer", "needs_human", "agent_failed"]
 
+# Fail-closed parser reasons. When the CLI also exited non-zero, prefer
+# ``agent_failed`` so the monitor retries instead of parking a human escalation
+# on a crash that produced no explicit NEEDS_HUMAN claim.
+_FAIL_CLOSED_VERDICT_REASONS = frozenset(
+    {
+        "empty_verdict_output",
+        "unrecognized_or_markerless_verdict",
+        "garbled_verdict_marker",
+        "fixed_placeholder_echo",
+    }
+)
+
 
 @dataclass(frozen=True)
 class VerdictResult:
@@ -139,8 +151,17 @@ async def _invoke_cli_for_verdict_result(
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
     mirror_path: Path | None = None
+    worktree_path = (
+        isolated_worktree_host_path
+        if isolated_worktree_host_path is not None
+        else runner._worktrees_root / workspace_id
+    )
+    item_start_head = (operation_start_head or "").strip() or None
+    if item_start_head is None and worktree_path.exists():
+        rev_parse = getattr(runner, "_rev_parse_head", None)
+        if callable(rev_parse):
+            item_start_head = await rev_parse(worktree_path)
     if isolated_worktree_host_path is None:
-        worktree_path = runner._worktrees_root / workspace_id
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,
@@ -289,9 +310,40 @@ async def _invoke_cli_for_verdict_result(
             returncode=agent_run_err.result.returncode,
         )
 
-    if committed_dirty_changes or (state is not None and state.hosted_terminal_head_advanced):
-        parsed = _parse_verdict_result(result_stdout)
-        return VerdictResult(verdict="fix_committed", reason=parsed.reason)
+    item_end_head: str | None = None
+    rev_parse_end = getattr(runner, "_rev_parse_head", None)
+    if callable(rev_parse_end) and worktree_path.exists():
+        item_end_head = await rev_parse_end(worktree_path)
+
+    local_head_advanced = (
+        item_start_head is not None
+        and item_end_head is not None
+        and item_end_head.lower() != item_start_head.lower()
+    )
+    hosted_head_advanced = bool(state is not None and state.hosted_terminal_head_advanced)
+    # Dirty commit attributable to this invocation is also item-scoped evidence when
+    # HEAD comparison is unavailable (stub runners / missing worktree).
+    item_fix_evidence = local_head_advanced or hosted_head_advanced or bool(committed_dirty_changes)
+
+    parsed = _parse_verdict_result(result_stdout)
+    if parsed.verdict in {"false_positive", "defer"}:
+        # Never upgrade an explicit non-fix marker because dirty or hosted head
+        # advanced (strand prevention over guessing).
+        return parsed
+    if parsed.verdict == "needs_human":
+        # Keep explicit NEEDS_HUMAN (and successful fail-closed parses). Only map
+        # fail-closed synthetic reasons to agent_failed when the CLI itself failed,
+        # so crashes still retry instead of parking a human escalation.
+        if cli_failed and parsed.reason in _FAIL_CLOSED_VERDICT_REASONS:
+            return VerdictResult(verdict="agent_failed")
+        return parsed
+    if parsed.verdict == "fix_committed":
+        if item_fix_evidence:
+            return parsed
+        if cli_failed:
+            return VerdictResult(verdict="agent_failed")
+        reason = redact_audit_text("fixed_without_head_advance")
+        return VerdictResult(verdict="needs_human", reason=reason or "fixed_without_head_advance")
     if cli_failed:
         return VerdictResult(verdict="agent_failed")
-    return _parse_verdict_result(result_stdout)
+    return parsed

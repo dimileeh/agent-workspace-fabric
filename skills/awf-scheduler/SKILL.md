@@ -325,14 +325,19 @@ the feature branch before merge.
 ### Per-comment verdict grammar the CLI produces
 
 When the monitor hands a thread to the CLI, it expects one of these markers
-(canonical form is the `AWF-VERDICT:` prefix):
+(canonical form is the `AWF-VERDICT:` prefix). Markerless, empty, garbled, or
+template-placeholder echoes **fail closed** — AWF never guesses FIXED from
+unmarked stdout. `FIXED` is only accepted when that same review item shows a
+verified local (or hosted) HEAD/commit advance:
 
 | Marker | Meaning | What AWF does |
 |---|---|---|
-| `AWF-VERDICT: FIXED: <summary>` (or any output without a recognized marker) | CLI committed the fix locally | pushes after the burst settles, then resolves the thread |
+| `AWF-VERDICT: FIXED: <summary>` **and** a committed change for this item | CLI committed the fix for this thread | pushes after the burst settles, then resolves the thread |
+| `AWF-VERDICT: FIXED: …` with **no** HEAD advance for this item | Claim without evidence | stays unresolved (`needs_human`); does not resolve |
+| Empty / markerless / garbled / placeholder-echo output | No usable verdict | stays unresolved (`needs_human` or `agent_failed` on CLI crash) — never treated as FIXED |
 | `AWF-VERDICT: FALSE POSITIVE: <reason>` | CLI disagrees, replies inline | resolves with the reply posted |
 | `AWF-VERDICT: DEFER: <what to track>` | needs follow-up, not blocking | captures a tracking note, resolves |
-| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** (also the sink for empty/garbled output) — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
+| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
 
 The CLI also posts the reply on GitHub itself; AWF's resolve happens after the
 reply is visible.

@@ -213,8 +213,8 @@ _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_aw
 _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_conformance_satisfied"
 
 # Fail-safe fallback for a bare ``NEEDS_HUMAN:`` (no ``AWF-VERDICT:`` prefix).
-# Without it, such output would fall through to ``fix_committed`` and the thread
-# would be resolved/merged — the exact unsafe direction #305 guards against.
+# Without it, such output would fail closed as markerless ``needs_human`` rather
+# than a considered block — still merge-safe, but loses the explicit reason.
 _AWF_VERDICT = re.compile(
     r"\bAWF-VERDICT\s*:\s*"
     # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also

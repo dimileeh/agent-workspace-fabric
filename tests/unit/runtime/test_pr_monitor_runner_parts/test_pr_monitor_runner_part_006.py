@@ -748,6 +748,7 @@ async def test_generic_push_failure_preserves_review_comment_needs_human_after_l
 async def test_workflow_scope_push_failure_requeues_fix_committed_thread(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify workflow-scope push failures leave committed fixes retryable."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -769,6 +770,11 @@ async def test_workflow_scope_push_failure_requeues_fix_committed_thread(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     thread = ReviewThread(
         thread_id="T_workflow",
         path=".github/workflows/publish.yml",
@@ -808,6 +814,7 @@ async def test_workflow_scope_push_failure_requeues_fix_committed_thread(
 async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify workflow-scope failures requeue inline verdicts needing resolution."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -830,6 +837,11 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     false_positive_thread = ReviewThread(
         thread_id="T_false_positive",
         path="src/awf/runtime/example.py",
@@ -1147,6 +1159,11 @@ async def test_later_generic_push_failure_keeps_workflow_scope_requeued_defer_re
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     deferred_thread = ReviewThread(
         thread_id="T_defer",
         path="src/awf/runtime/example.py",

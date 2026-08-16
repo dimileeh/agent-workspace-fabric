@@ -253,7 +253,8 @@ def _parse_verdict(stdout: str) -> Verdict:
     """Map the CLI's final message to a structured verdict.
 
     The prompt templates instruct the CLI to report a structured stdout
-    verdict. Anything else counts as a fix commit (the default happy path).
+    verdict. Markerless, empty, garbled, and FIXED placeholder-echo output
+    fail closed to ``needs_human`` — never guess ``fix_committed``.
     """
     return _parse_verdict_result(stdout).verdict
 
@@ -265,7 +266,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # instead of
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
-        return VerdictResult(verdict="needs_human")
+        return VerdictResult(verdict="needs_human", reason="empty_verdict_output")
     # AWF-prefixed verdicts are canonical and must win over bare fallback lines,
     # even when bare lines appear later in output. When multiple AWF verdicts are
     # present, the final AWF line wins. If that line omits a reason, preserve an
@@ -276,6 +277,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # no-reason final verdict is otherwise the agent's last word and must not be
     # trumped by an earlier non-blocking verdict (e.g. false_positive).
     # Blocking final verdicts remain authoritative even with no usable reason.
+    # Standalone FIXED placeholder echoes fail closed (never ``fix_committed``).
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
@@ -298,7 +300,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                     )
                 )
     verdicts = awf_verdicts or bare_verdicts
-    if verdicts is awf_verdicts:
+    if verdicts is awf_verdicts and awf_verdicts:
         latest = verdicts[-1]
         if latest.reason is None:
             latest_verdict = latest.verdict
@@ -316,7 +318,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             )
             if bare_blocking is not None:
                 return bare_blocking
-            return latest
+            return _fail_closed_fixed_placeholder_if_needed(stdout, latest)
         return latest
     selected_bare = _select_bare_verdict(
         bare_verdicts,
@@ -324,7 +326,47 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     )
     if selected_bare is not None:
         return selected_bare
-    return VerdictResult(verdict="fix_committed")
+    if _stdout_mentions_awf_verdict(stdout):
+        return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
+    return VerdictResult(verdict="needs_human", reason="unrecognized_or_markerless_verdict")
+
+
+def _stdout_mentions_awf_verdict(stdout: str) -> bool:
+    return bool(re.search(r"\bAWF-VERDICT\s*:", stdout, re.IGNORECASE))
+
+
+def _last_awf_fixed_reason_is_placeholder(stdout: str) -> bool:
+    """Return whether the final AWF FIXED line is a template-placeholder echo."""
+    last_reason: str | None = None
+    found_fixed = False
+    for line in stdout.splitlines():
+        for verdict_line in _verdict_line_candidates(line.strip()):
+            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
+            if awf_match is None:
+                continue
+            normalized_label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
+            if normalized_label != "fixed":
+                continue
+            found_fixed = True
+            last_reason = awf_match.group("reason")
+    if not found_fixed:
+        return False
+    cleaned = (last_reason or "").strip()
+    if not cleaned:
+        return False
+    return _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned) is not None
+
+
+def _fail_closed_fixed_placeholder_if_needed(
+    stdout: str,
+    result: VerdictResult,
+) -> VerdictResult:
+    """Convert a standalone FIXED placeholder echo into fail-closed needs_human."""
+    if result.verdict != "fix_committed" or result.reason is not None:
+        return result
+    if not _last_awf_fixed_reason_is_placeholder(stdout):
+        return result
+    return VerdictResult(verdict="needs_human", reason="fixed_placeholder_echo")
 
 
 def _select_bare_verdict(
