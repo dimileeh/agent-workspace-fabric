@@ -890,6 +890,8 @@ async def _invoke_cli_for_verdict_result(
             # cancelled paths — so a no-change FIXED retry still has evidence
             # (PRRT_kwDOSJAM6s6Znz-0). Skip when no head key is present (e.g.
             # isolated clarification tips that must not bind salvage).
+            # Shield the write itself: cancel mid-await otherwise drops tip
+            # evidence while HEAD already advanced (PRRT_kwDOSJAM6s6ZoXc9).
             if (
                 state is not None
                 and salvage_item_id is not None
@@ -897,7 +899,21 @@ async def _invoke_cli_for_verdict_result(
             ):
                 persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
                 if callable(persist):
-                    await persist(workspace_id, state, salvage_item_id=salvage_item_id)
+                    persist_task = asyncio.create_task(
+                        persist(workspace_id, state, salvage_item_id=salvage_item_id)
+                    )
+                    cancellation: asyncio.CancelledError | None = None
+                    while True:
+                        try:
+                            await asyncio.shield(persist_task)
+                            break
+                        except asyncio.CancelledError as exc:
+                            cancellation = exc
+                            if persist_task.done():
+                                persist_task.result()
+                                break
+                    if cancellation is not None:
+                        raise cancellation
             return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt

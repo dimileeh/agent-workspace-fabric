@@ -724,6 +724,132 @@ async def test_successful_fixed_tip_evidence_persisted_before_return(
 
 
 @pytest.mark.unit
+async def test_successful_fixed_tip_persist_shielded_from_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid-persist on successful FIXED must still durable-write tip keys.
+
+    Failed/cancelled paths shield retain+persist via
+    ``_retain_failed_run_salvage_despite_cancellation``. The successful FIXED
+    selective write was a bare ``await``; cancel during that DB operation drops
+    tip evidence while HEAD already advanced, so a later no-change FIXED
+    becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZoXc9).
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    tip = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6ZoXc9"
+    body_hash = "feedback_body_hash_successful_persist_shield"
+    workspace_id = "ws_successful_fixed_tip_persist_shield"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_successful_persist_shield"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    entered_persist = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: ordinary successful commit",
+        dirty=True,
+        heads=[tip],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        entered_persist.set()
+        await release_persist.wait()
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_persist.wait()
+    task.cancel()
+    release_persist.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots, "successful FIXED tip persist must complete under cancel"
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == tip
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed tip after mid-persist cancel reload",
+        dirty=False,
+        heads=[tip],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=tip,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed tip after mid-persist cancel reload"
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == tip
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("synthetic_stdout", "synthetic_reason"),
     [
