@@ -191,7 +191,7 @@ def upgrade_persisted_clarification_service(
         try:
             runtime_enum = AgentRuntime(agent_runtime)
         except ValueError:
-            runtime_enum = AgentRuntime.gemini
+            runtime_enum = AgentRuntime.antigravity
     selected_mounts = _clarification_auth_mounts(
         provider_auth_mounts,
         agent_environment=agent_environment_items,

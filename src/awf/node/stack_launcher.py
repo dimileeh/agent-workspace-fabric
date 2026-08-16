@@ -448,7 +448,7 @@ def _clarification_model_provider_environment_names(
             | _CLARIFICATION_PROVIDER_CONNECTION_ENV_NAMES
         )
 
-    provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES[agent_runtime])
+    provider_names = set(_CLARIFICATION_RUNTIME_ENV_NAMES.get(agent_runtime, frozenset()))
     if agent_runtime is AgentRuntime.opencode:
         provider_names.update(
             _CLARIFICATION_OPENCODE_PROVIDER_ENV_NAMES.get(
@@ -803,7 +803,9 @@ def _clarification_model_provider_auth_mount_targets(
         agent_runtime=agent_runtime,
         agent_model=agent_model,
     )
-    runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS[agent_runtime]
+    runtime_auth_mount_targets = _CLARIFICATION_RUNTIME_AUTH_MOUNT_TARGETS.get(
+        agent_runtime, frozenset()
+    )
     if (
         agent_runtime is AgentRuntime.claude_code
         and _clarification_claude_code_environment_names(dict(agent_environment))
