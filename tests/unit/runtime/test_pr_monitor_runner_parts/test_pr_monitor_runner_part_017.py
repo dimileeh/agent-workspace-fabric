@@ -749,6 +749,36 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "opener",
+        [
+            '<custom-example data-value=">">',
+            "<custom-example data-value='>'>",
+            "<custom-example title=\"a > b\" class='x>y'>",
+        ],
+        ids=["double_quoted_gt", "single_quoted_gt", "mixed_quoted_gt"],
+    )
+    def test_private_awf_verdict_ignores_markers_inside_html_type7_quoted_attr(
+        self,
+        opener: str,
+    ) -> None:
+        # Quoted ``>`` inside type-7 attribute values must not abort the open
+        # tag match (PRRT_kwDOSJAM6s6ZnYwM); otherwise an example FALSE
+        # POSITIVE inside the blank-line-terminated block overrides NEEDS_HUMAN.
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            f"{opener}\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "</custom-example>\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "stdout",
         [
             (

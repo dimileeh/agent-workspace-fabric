@@ -304,13 +304,24 @@ _HTML_TYPE6_BLOCK_OPEN = re.compile(
 )
 # Type 7: a complete open or closing tag (not type 1) on its own line, optional
 # trailing whitespace only. Custom elements such as ``<custom-example>`` land
-# here; type-6 tags may also match but are recognized first.
+# here; type-6 tags may also match but are recognized first. Attribute values
+# follow CommonMark (unquoted / single- / double-quoted) so a quoted ``>``
+# (``data-value=">">``) does not truncate the open tag and skip the blank-line
+# shield (PRRT_kwDOSJAM6s6ZnYwM).
+_HTML_TYPE7_ATTR = (
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:"
+    r"[^\s\"'=<>`]+|"
+    r"'[^']*'|"
+    r'"[^"]*"'
+    r"))?)"
+)
 _HTML_TYPE7_BLOCK_OPEN = re.compile(
     r"^ {0,3}(?:"
     r"</(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*\s*>"
     r"|"
     r"<(?!(?:pre|code|script|style|textarea)\b)[A-Za-z][A-Za-z0-9:-]*"
-    r"(?:\s[^>]*)?"
+    rf"{_HTML_TYPE7_ATTR}*"
     r"\s*/?>"
     r")[ \t]*$",
     re.IGNORECASE,
