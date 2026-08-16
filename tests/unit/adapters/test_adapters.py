@@ -1012,5 +1012,8 @@ class TestRegistry:
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok
         assert AgentRuntime.gemini not in DEFAULT_AGENT_DEFAULTS
-        with pytest.raises(KeyError):
-            get_adapter(AgentRuntime.gemini, runner=runner)
+        from awf.adapters.base import RetiredAgentAdapter
+
+        gemini = get_adapter(AgentRuntime.gemini, runner=runner)
+        assert isinstance(gemini, RetiredAgentAdapter)
+        assert gemini.name == AgentRuntime.gemini
