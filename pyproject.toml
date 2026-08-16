@@ -21,7 +21,7 @@ classifiers = [
 
 dependencies = [
     "fastapi>=0.139.0",
-    "uvicorn[standard]>=0.50.0",
+    "uvicorn[standard]>=0.51.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "sqlalchemy[asyncio]>=2.0.51",
@@ -31,7 +31,7 @@ dependencies = [
     "typer>=0.27.1",
     "jinja2>=3.1.0",
     "keyring>=24",
-    "docker>=7.0.0",
+    "docker>=7.2.0",
     "mcp>=1.28.1,<2",
     "python-dotenv>=1.0.0",
     "structlog>=26.1.0",
