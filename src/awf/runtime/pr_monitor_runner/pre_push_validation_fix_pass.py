@@ -215,11 +215,13 @@ async def _commit_changes_present_in_head(
 
     Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
     reuse therefore requires either an identical tree at ``head``, or that
-    **every** path changed by ``commit`` vs its first parent still differs from the
-    parent blob at ``head``. A partial or full revert (any salvaged path back to
-    the parent state), including revert-then-unrelated-edit tips, fails closed —
-    one surviving collateral path must not reuse evidence after the fix path is
-    gone. Root commits and unresolved objects also fail closed.
+    **every** path changed by ``commit`` vs its first parent still carries the
+    salvage commit's blob at ``head`` (not merely a blob that differs from the
+    parent). A third-content overwrite (A→B salvage, later tip to C) must fail
+    closed even though C≠A — otherwise a no-change FIXED retry can reuse stale
+    salvage after B is gone. Partial or full reverts and revert-then-unrelated
+    tips likewise fail closed. Root commits and unresolved objects also fail
+    closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -231,7 +233,7 @@ async def _commit_changes_present_in_head(
         return result.stdout.strip() if result.ok else ""
 
     async def _blob_at(ref: str, path: str) -> str:
-        # Missing path → empty token so parent/head absence compares equal.
+        # Missing path → empty token so absence compares equal across refs.
         return await _rev_parse(f"{ref}:{path}")
 
     commit_sha = commit.strip()
@@ -276,7 +278,7 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        if await _blob_at(head_sha, path) == await _blob_at(parent, path):
+        if await _blob_at(head_sha, path) != await _blob_at(commit_sha, path):
             return False
     return True
 

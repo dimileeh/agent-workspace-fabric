@@ -643,6 +643,58 @@ async def test_commit_changes_present_in_head_rejects_partial_multi_path_revert(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_third_content_overwrite(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Salvaged blob B must remain; differing from parent A alone is not enough.
+
+    Salvage changes a path A→B; a later tip overwrites to C. C≠A would pass a
+    parent-blob-only check even though B is gone — fail closed so a no-change
+    FIXED retry cannot reuse the stale salvage (PRRT_kwDOSJAM6s6Zl8_a).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.txt").write_text("base-a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "base")
+    (repo / "a.txt").write_text("salvaged-b\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "salvage A to B")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.txt").write_text("later-c\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "overwrite B with C")
+    third_content = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=third_content,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_fail_closed_on_unresolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
