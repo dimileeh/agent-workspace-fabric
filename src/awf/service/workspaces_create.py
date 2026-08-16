@@ -122,6 +122,10 @@ async def create_workspace_row(
     """
     _assert_supported_direct_create_task_kind(payload.task.kind)
     _assert_supported_agent_runtime(payload.task.agent)
+    if payload.task.provider_recovery is not None:
+        for fallback in payload.task.provider_recovery.fallbacks:
+            _assert_supported_agent_runtime(fallback.agent)
+
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)

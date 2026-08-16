@@ -865,6 +865,21 @@ class TestCreateWorkspacePolicyMetadata:
         assert create.json()["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
 
     @pytest.mark.unit
+    async def test_fallback_unsupported_agent_runtime_rejection(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(title="fallback gemini runtime rejection")
+        payload["task"] = {
+            **payload["task"],  # type: ignore[index]
+            "provider_recovery": {"fallbacks": [{"agent": "gemini", "model": "gemini-1.5-pro"}]},
+        }
+
+        create = await client.post("/v1/workspaces", json=payload)
+        assert create.status_code == 409
+        assert create.json()["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
     async def test_legacy_v1_workspace_exposes_default_effective_identity(
         self,
         client: AsyncClient,
