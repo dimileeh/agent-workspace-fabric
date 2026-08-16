@@ -204,6 +204,82 @@ async def _commit_trees_differ(
     return left_tree.lower() != right_tree.lower()
 
 
+async def _commit_changes_present_in_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    commit: str,
+    head: str,
+) -> bool:
+    """Return True when ``commit``'s first-parent changes still appear in ``head``.
+
+    Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
+    reuse therefore requires either an identical tree at ``head``, or at least one
+    path changed by ``commit`` vs its first parent that still differs from the
+    parent blob at ``head``. A full revert (every salvaged path back to the parent
+    state), including revert-then-unrelated-edit tips, fails closed. Root commits
+    and unresolved objects also fail closed.
+    """
+    git_env = _git_env_for_merge_safety_object_lookup()
+
+    async def _rev_parse(ref: str) -> str:
+        result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "rev-parse", ref),
+            env=git_env,
+        )
+        return result.stdout.strip() if result.ok else ""
+
+    async def _blob_at(ref: str, path: str) -> str:
+        # Missing path → empty token so parent/head absence compares equal.
+        return await _rev_parse(f"{ref}:{path}")
+
+    commit_sha = commit.strip()
+    head_sha = head.strip()
+    if not commit_sha or not head_sha:
+        return False
+    if commit_sha.lower() == head_sha.lower():
+        return True
+
+    commit_tree = await _rev_parse(f"{commit_sha}^{{tree}}")
+    head_tree = await _rev_parse(f"{head_sha}^{{tree}}")
+    if not commit_tree or not head_tree:
+        return False
+    if commit_tree.lower() == head_tree.lower():
+        return True
+
+    parent = await _rev_parse(f"{commit_sha}^")
+    if not parent:
+        return False
+    parent_tree = await _rev_parse(f"{parent}^{{tree}}")
+    if not parent_tree:
+        return False
+    if parent_tree.lower() == head_tree.lower():
+        return False
+
+    paths_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            parent,
+            commit_sha,
+        ),
+        env=git_env,
+    )
+    if not paths_result.ok:
+        return False
+    paths = [line.strip() for line in paths_result.stdout.splitlines() if line.strip()]
+    if not paths:
+        return False
+
+    for path in paths:
+        if await _blob_at(head_sha, path) != await _blob_at(parent, path):
+            return True
+    return False
+
+
 async def _reparent_fix_pass_commit(
     self: Any,
     *,

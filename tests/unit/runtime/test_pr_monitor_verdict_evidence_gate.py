@@ -49,6 +49,7 @@ def _evidence_runner(
     returncode: int = 0,
     head_descends: bool | None = None,
     commit_trees_differ: bool | None = None,
+    commit_changes_present: bool | None = None,
 ) -> SimpleNamespace:
     """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
     head_iter = iter(heads or [])
@@ -100,6 +101,18 @@ def _evidence_runner(
         # Default: distinct SHAs imply a contentful advance for legacy stubs.
         return left.lower() != right.lower()
 
+    async def _commit_changes_present_in_head(
+        *,
+        worktree_path: Path,
+        commit: str,
+        head: str,
+    ) -> bool:
+        del worktree_path, commit, head
+        if commit_changes_present is not None:
+            return commit_changes_present
+        # Default: descendant tips preserve salvage content for legacy stubs.
+        return True
+
     async def _handle_provider_agent_run_error(
         _workspace_id: str,
         _exc: object,
@@ -115,6 +128,7 @@ def _evidence_runner(
         _rev_parse_head=_rev_parse_head,
         _head_descends_from=_head_descends_from,
         _commit_trees_differ=_commit_trees_differ,
+        _commit_changes_present_in_head=_commit_changes_present_in_head,
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -647,6 +661,156 @@ async def test_salvaged_fix_evidence_survives_later_head_advance(
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after burst"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_descendant_that_reverts_salvage(
+    tmp_path: Path,
+) -> None:
+    """Ancestry alone must not accept a tip that undoes the salvaged change.
+
+    Item A salvages at H1; item B creates descendant H2 that reverts H1's
+    content. A no-change retry of A at H2 must not resolve FIXED, and the
+    undone salvage tip must be invalidated.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    reverted = "c" * 40
+    item_id = "PRRT_salvage_reverted_descendant"
+    body_hash = "feedback_body_hash_reverted"
+    workspace_id = "ws_salvage_reverted_descendant"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Later tip descends from salvage but undoes its content; no-change retry.
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse reverted salvage descendant",
+        dirty=False,
+        heads=[reverted],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_changes_present=False,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=reverted,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_fail_closed_without_content_helper(
+    tmp_path: Path,
+) -> None:
+    """Descendant salvage reuse must not accept ancestry when content helper is absent."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_no_content_helper"
+    body_hash = "feedback_body_hash_no_helper"
+    workspace_id = "ws_salvage_no_content_helper"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: ancestry without content proof",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+    del retry_runner._commit_changes_present_in_head
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
 
 
 @pytest.mark.unit

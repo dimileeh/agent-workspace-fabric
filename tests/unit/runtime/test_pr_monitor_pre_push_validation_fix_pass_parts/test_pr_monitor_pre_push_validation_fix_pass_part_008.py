@@ -488,3 +488,209 @@ async def test_commit_trees_differ_rejects_empty_commit_with_replace_forgery(
         left=start,
         right=empty_tip,
     )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_preserved_and_rejects_revert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Salvage content must remain detectable after later tips; reverts fail."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "a.txt").write_text("salvaged\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "salvage")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "commit", "--allow-empty", "-qm", "empty on salvage")
+    empty_on_salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "b.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-qm", "later preserving salvage")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "revert salvage content")
+    reverted = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "c.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-qm", "unrelated after full revert")
+    reverted_then_unrelated = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Pure revert tip: same tree as pre-salvage parent.
+    _git(repo, "checkout", "-q", "-B", "pure-revert", salvage)
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "pure revert to parent tree")
+    pure_reverted = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=empty_on_salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=reverted,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=reverted_then_unrelated,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=pure_reverted,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=base,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_fail_closed_on_unresolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stdout="", stderr="missing")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit="1" * 40,
+        head="2" * 40,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit="",
+        head="2" * 40,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_fail_closed_on_empty_diff_or_missing_parent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    commit = "1" * 40
+    head = "2" * 40
+    commit_tree = "a" * 40
+    head_tree = "b" * 40
+
+    # Distinct trees, but first-parent resolution fails → fail closed.
+    missing_parent = FakeCommandRunner()
+    missing_parent.queue_result(returncode=0, stdout=f"{commit_tree}\n")
+    missing_parent.queue_result(returncode=0, stdout=f"{head_tree}\n")
+    missing_parent.queue_result(returncode=1, stdout="", stderr="root")
+    runner = make_runner(
+        factory=factory,
+        cmd=missing_parent,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit=commit,
+        head=head,
+    )
+
+    # Parent resolves, trees differ, but diff-tree returns no paths → fail closed.
+    empty_paths = FakeCommandRunner()
+    empty_paths.queue_result(returncode=0, stdout=f"{commit_tree}\n")
+    empty_paths.queue_result(returncode=0, stdout=f"{head_tree}\n")
+    empty_paths.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
+    empty_paths.queue_result(returncode=0, stdout=f"{'c' * 40}\n")
+    empty_paths.queue_result(returncode=0, stdout="\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=empty_paths,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit=commit,
+        head=head,
+    )
+
+    # diff-tree itself fails → fail closed.
+    diff_tree_fail = FakeCommandRunner()
+    diff_tree_fail.queue_result(returncode=0, stdout=f"{commit_tree}\n")
+    diff_tree_fail.queue_result(returncode=0, stdout=f"{head_tree}\n")
+    diff_tree_fail.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
+    diff_tree_fail.queue_result(returncode=0, stdout=f"{'c' * 40}\n")
+    diff_tree_fail.queue_result(returncode=1, stdout="", stderr="boom")
+    runner = make_runner(
+        factory=factory,
+        cmd=diff_tree_fail,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit=commit,
+        head=head,
+    )
