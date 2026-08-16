@@ -1253,6 +1253,16 @@ class TestExists:
 
 class TestListWorkspaces:
     @pytest.mark.unit
+    async def test_list_by_ids_empty_input_skips_query(self) -> None:
+        session = _RecordingSchedulerSession("postgresql")
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        rows = await repo.list_by_ids([])
+
+        assert rows == []
+        assert session.executed == []
+
+    @pytest.mark.unit
     async def test_combines_status_agent_and_repo_filters(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
         matching = await repo.create(

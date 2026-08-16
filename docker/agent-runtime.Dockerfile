@@ -145,11 +145,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.144.1
-# 2.1.154+ is required for Claude Opus 4.8 (the default model in defaults.py);
-# older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
+ARG CODEX_VERSION=0.147.0
+# 2.1.226+ is required for Claude Opus 5 (the default model in defaults.py);
+# older CLIs reject `--model claude-opus-5`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.206
+ARG CLAUDE_CODE_VERSION=2.1.226
 ARG GEMINI_VERSION=0.50.0
 ARG OPENCODE_VERSION=1.17.18
 ARG GROK_VERSION=0.2.94
@@ -269,7 +269,7 @@ RUN set -eux; \
     done; \
     npm cache clean --force; \
     codex --version; \
-    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
+    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
     gemini --version; \

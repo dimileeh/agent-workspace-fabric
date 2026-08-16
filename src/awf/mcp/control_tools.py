@@ -30,6 +30,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
     AgentRuntime,
+    TaskClass,
 )
 from awf.mcp.server import (
     _idempotency_key_error,
@@ -216,6 +217,18 @@ def register_control_tools(
                 "accepted. Entity keys appear bracketed on AWF monitor commits."
             ),
         ),
+        external_id: str | None = Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create."
+            ),
+        ),
+        task_class: TaskClass | None = Field(
+            default=None,
+            description="Optional task class for scheduling and policy parity.",
+        ),
         reason: str | None = Field(
             default=None,
             max_length=512,
@@ -242,6 +255,8 @@ def register_control_tools(
                     task_title=task_title,
                     task_prompt=task_prompt,
                     task_tag=task_tag,
+                    external_id=external_id,
+                    task_class=task_class,
                     reason=reason,
                 )
             )
