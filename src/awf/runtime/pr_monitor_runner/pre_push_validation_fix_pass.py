@@ -216,12 +216,14 @@ async def _commit_changes_present_in_head(
     Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
     reuse therefore requires either an identical tree at ``head``, or that
     **every** path changed by ``commit`` vs its first parent still carries the
-    salvage commit's blob at ``head`` (not merely a blob that differs from the
-    parent). A third-content overwrite (A→B salvage, later tip to C) must fail
-    closed even though C≠A — otherwise a no-change FIXED retry can reuse stale
-    salvage after B is gone. Partial or full reverts and revert-then-unrelated
-    tips likewise fail closed. Root commits and unresolved objects also fail
-    closed.
+    salvage commit's complete tree entry at ``head`` (mode, type, and object id —
+    not merely a blob OID that differs from the parent). A third-content overwrite
+    (A→B salvage, later tip to C) must fail closed even though C≠A — otherwise a
+    no-change FIXED retry can reuse stale salvage after B is gone. Mode-only
+    salvage (e.g. chmod +x) that a later tip reverts must likewise fail closed,
+    because Git stores mode separately from the object id. Partial or full
+    reverts and revert-then-unrelated tips fail closed. Root commits and
+    unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -232,9 +234,29 @@ async def _commit_changes_present_in_head(
         )
         return result.stdout.strip() if result.ok else ""
 
-    async def _blob_at(ref: str, path: str) -> str:
-        # Missing path → empty token so absence compares equal across refs.
-        return await _rev_parse(f"{ref}:{path}")
+    async def _tree_entry_at(ref: str, path: str) -> str:
+        # Compare mode + type + object id. Missing path → empty token so absence
+        # compares equal across refs. ``ls-tree`` lines are
+        # ``<mode> SP <type> SP <object> TAB <file>``; keep metadata only.
+        result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "ls-tree",
+                "-z",
+                ref,
+                "--",
+                path,
+            ),
+            env=git_env,
+        )
+        entry = result.stdout.strip() if result.ok else ""
+        if not entry:
+            return ""
+        raw = entry.split("\0", 1)[0].strip()
+        if not raw:
+            return ""
+        meta, _sep, _name = raw.partition("\t")
+        return meta
 
     commit_sha = commit.strip()
     head_sha = head.strip()
@@ -278,7 +300,7 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        if await _blob_at(head_sha, path) != await _blob_at(commit_sha, path):
+        if await _tree_entry_at(head_sha, path) != await _tree_entry_at(commit_sha, path):
             return False
     return True
 

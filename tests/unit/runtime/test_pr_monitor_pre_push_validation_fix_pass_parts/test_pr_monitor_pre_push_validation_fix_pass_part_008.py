@@ -695,6 +695,73 @@ async def test_commit_changes_present_in_head_rejects_third_content_overwrite(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_mode_only_revert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Mode/type are part of salvage evidence; blob OID alone must not retain it.
+
+    Salvage only makes a script executable. A later tip reverts that mode while
+    adding an unrelated path: parent/head trees differ (so the full-tree shortcut
+    does not reject) and blob OIDs still match. Complete tree-entry comparison
+    must fail closed (PRRT_kwDOSJAM6s6Zl_za).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    script = repo / "script.sh"
+    script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    _git(repo, "add", "script.sh")
+    _git(repo, "commit", "-qm", "base non-executable")
+    _git(repo, "update-index", "--chmod=+x", "script.sh")
+    _git(repo, "commit", "-qm", "salvage make executable")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "update-index", "--chmod=-x", "script.sh")
+    (repo / "unrelated.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "script.sh", "unrelated.txt")
+    _git(repo, "commit", "-qm", "revert mode and add unrelated")
+    mode_reverted = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: keep executable mode while adding an unrelated path — still present.
+    _git(repo, "checkout", "-q", "-B", "mode-preserved", salvage)
+    (repo / "other.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-qm", "unrelated while mode preserved")
+    mode_preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=mode_preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=mode_reverted,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_fail_closed_on_unresolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
