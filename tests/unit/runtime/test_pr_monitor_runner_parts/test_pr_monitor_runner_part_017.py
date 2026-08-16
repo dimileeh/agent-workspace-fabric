@@ -203,6 +203,18 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
+    def test_private_awf_verdict_placeholder_with_trailing_exit_boilerplate_has_no_reason(
+        self,
+    ) -> None:
+        # Prompt echoes often keep trailing ``and exit."`` after the placeholder.
+        # That must still sanitize away without treating mid-reason ``<summary>``
+        # as a template echo.
+        result = _parse_verdict_result('AWF-VERDICT: NEEDS_HUMAN: <what you need> and exit."')
+
+        assert result.verdict == "needs_human"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_verdict_needs_human_without_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN:")
 
@@ -340,6 +352,24 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason == "fixed_placeholder_echo"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fixed_ellipsis_placeholder_fail_closed(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FIXED: …")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "fixed_placeholder_echo"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_garbled_final_marker_fail_closed_after_earlier_verdict(
+        self,
+    ) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: rationale\nAWF-VERDICT: SHIPPED: done"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
     def test_private_awf_verdict_fixed_reason_keeps_inline_angle_bracket_term(self) -> None:

@@ -207,11 +207,18 @@ _BARE_VERDICT_LINE = re.compile(
     r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
     re.IGNORECASE,
 )
-# Match only when the *entire* reason is a prompt-template echo. An unanchored
-# search falsely strips legitimate mid-reason tags such as ``<summary>``.
+# Match when the reason *starts* with a prompt-template placeholder. An
+# unanchored search falsely strips legitimate mid-reason tags such as
+# ``<summary>``. Allow trailing prompt boilerplate (e.g. `` and exit."``) after
+# a leading placeholder so stored echoes normalize away, without requiring the
+# reason to be exactly one angle-bracket token. Whole-reason ellipsis echoes of
+# the prompt form ``FIXED: …`` are also treated as placeholders.
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
-    r"^\s*<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
-    r"\b[^>\n\r]{0,80}>\s*$",
+    r"^\s*(?:"
+    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
+    r"\b[^>\n\r]{0,80}>"
+    r"|…|\.{3}"
+    r")",
     re.IGNORECASE,
 )
 _VERDICT_REASON_REDACTION_ONLY = re.compile(
@@ -290,17 +297,24 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # Markerless / bare-only output fails closed to needs_human.
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
+    last_awf_mention_recognized = False
+    saw_awf_mention = False
     for line in stdout.splitlines():
         stripped = line.strip()
         for verdict_line in _verdict_line_candidates(stripped):
-            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
-            if awf_match is not None:
-                awf_verdicts.append(
-                    _verdict_result_from_match(
-                        label=awf_match.group("label"),
-                        reason=awf_match.group("reason"),
+            if re.search(r"\bAWF-VERDICT\s*:", verdict_line, re.IGNORECASE):
+                saw_awf_mention = True
+                awf_match = _AWF_VERDICT.fullmatch(verdict_line)
+                last_awf_mention_recognized = awf_match is not None
+                if awf_match is not None:
+                    awf_verdicts.append(
+                        _verdict_result_from_match(
+                            label=awf_match.group("label"),
+                            reason=awf_match.group("reason"),
+                        )
                     )
-                )
+            else:
+                awf_match = None
             bare_match = _BARE_VERDICT_LINE.fullmatch(verdict_line)
             if bare_match is not None:
                 bare_verdicts.append(
@@ -309,6 +323,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                         reason=bare_match.group("reason"),
                     )
                 )
+    # A garbled final ``AWF-VERDICT:`` marker fails closed even when an earlier
+    # recognized verdict exists — the agent's last marker is authoritative.
+    if saw_awf_mention and not last_awf_mention_recognized:
+        return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
     if awf_verdicts:
         latest = awf_verdicts[-1]
         if latest.reason is None:
