@@ -184,6 +184,11 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -276,6 +281,13 @@ async def _run_fix_cycle(
                     publish_dependent_ids.append(t.thread_id)
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
                 elif captured is False:
+                    # The prior ``defer`` reason describes work that was meant
+                    # for a tracking issue, not why this thread now needs human
+                    # attention. Clear it so the notification does not conceal
+                    # the permanent deferred-capture failure.
+                    _sync_needs_human_reason(
+                        state, t.thread_id, VerdictResult(verdict="needs_human")
+                    )
                     _mark_review_thread_addressed(state, t, "needs_human")
                 # captured is None: a transient capture failure already cleared
                 # the verdict so the next poll re-attempts capture — don't
@@ -309,6 +321,11 @@ async def _run_fix_cycle(
                     owned_paths=owned_paths,
                     task_tag=task_tag,
                     operation_start_head=item_operation_start_head,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:

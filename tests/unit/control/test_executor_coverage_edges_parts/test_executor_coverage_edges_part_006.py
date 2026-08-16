@@ -449,6 +449,50 @@ def test_validation_tier_for_workspace_uses_active_validate_operation_payload_ti
 
 
 @pytest.mark.unit
+async def test_baseline_coverage_preflight_forwards_hosted_runner_identity_and_worktree(
+    tmp_path: Path,
+) -> None:
+    """Hosted baseline uses the delegate with PR identity and checkout env base."""
+    baseline = _coverage(tmp_path, percent=88, minimum=99)
+    local_validation = _CoverageValidation(None)
+    hosted_validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(
+        FakeCommandRunner(),
+        tmp_path,
+        validation=local_validation,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "coverage-preflight-worktree",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "pytest --cov=awf",
+                }
+            },
+        }
+    )
+    worktree = tmp_path / "worktree"
+
+    result = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_preflight_worktree",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        worktree_path=worktree,
+        coverage_runner=hosted_validation,
+        coverage_run_kwargs={"pr_identity": {"pr_number": 42}},
+    )
+
+    assert result is baseline
+    assert local_validation.calls == []
+    assert hosted_validation.calls == ["baseline_coverage"]
+    assert hosted_validation.kwargs[0]["worktree_path"] == worktree
+    assert hosted_validation.kwargs[0]["pr_identity"] == {"pr_number": 42}
+
+
+@pytest.mark.unit
 async def test_baseline_coverage_preflight_returns_logged_policy_result(
     tmp_path: Path,
 ) -> None:
@@ -778,6 +822,55 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
         assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_uses_supplied_coverage_runner(
+    tmp_path: Path,
+) -> None:
+    local_validation = _CoverageValidation(_coverage(tmp_path, percent=50))
+    hosted_coverage = _coverage(
+        tmp_path,
+        percent=99.5,
+        reason_code="COVERAGE_OK",
+        status="passed",
+    )
+    hosted_validation = _CoverageValidation(hosted_coverage)
+    executor = _executor_with_runner(
+        FakeCommandRunner(),
+        tmp_path,
+        validation=local_validation,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-hosted-runner",
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+    pr_identity = {"pr_number": 764, "head_ref": "awf/ws-hosted"}
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id="ws_hosted_coverage",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=2,
+        workspace_head_sha="head",
+        coverage_runner=hosted_validation,
+        coverage_run_kwargs={"pr_identity": pr_identity},
+    )
+
+    assert result.coverage is hosted_coverage
+    assert result.evidence_status == "executed"
+    assert local_validation.calls == []
+    assert hosted_validation.calls == ["coverage"]
+    assert hosted_validation.kwargs[0]["pr_identity"] == pr_identity
 
 
 @pytest.mark.unit

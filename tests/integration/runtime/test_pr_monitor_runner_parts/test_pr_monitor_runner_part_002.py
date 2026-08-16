@@ -185,6 +185,7 @@ async def _seed_monitoring_workspace(
     remote_push_branch: str | None = None,
     task_kind: str = "feature_branch_pr",
     task_policy: dict[str, object] | None = None,
+    auto_merge: bool = True,
 ) -> str:
     """Insert a workspace already in ``monitoring_pr`` state.
 
@@ -225,6 +226,7 @@ async def _seed_monitoring_workspace(
         ws.compose_project_name = f"awf_{ws.id}"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
         ws.pr_number = pr_number
+        ws.auto_merge = auto_merge
         # Walk requested → provisioning → ready → running → validating → pushing → monitoring_pr
         for target in (
             WorkspaceStatus.provisioning,
@@ -462,6 +464,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
         cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout=("b" * 40) + "\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout="SYNC-BASE-SHA\n")  # rev-parse origin/<base>
         # Outer iter 2: CLEAN → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>

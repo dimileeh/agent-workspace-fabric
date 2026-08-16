@@ -849,10 +849,16 @@ class TestCreateWorkspaceDiskPressure:
 
 class TestCreateWorkspaceMonitorPolicy:
     @pytest.mark.unit
-    async def test_old_v2_payload_defaults_to_auto_merge_and_profile_grace(
+    async def test_old_v2_payload_defaults_to_manual_merge_and_profile_grace(
         self,
         client: AsyncClient,
     ) -> None:
+        # REGRESSION (breaking change): a defaulted feature_branch_pr create no
+        # longer auto-merges. With auto_merge omitted, the persisted intent stays
+        # unset, so the monitor is manual unless the profile or --auto-merge opts
+        # in. The GET reports the policy as unresolved (null) rather than the
+        # provisional off seed, which the provisioner may still resolve on from
+        # the profile's monitor.auto_merge.
         create = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
         assert create.status_code == 202
 
@@ -861,7 +867,8 @@ class TestCreateWorkspaceMonitorPolicy:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["auto_merge"] is True
+        assert body["task_policy"]["auto_merge_intent"] is None
+        assert body["auto_merge"] is None
         assert body["initial_review_grace_period_seconds"] is None
 
     @pytest.mark.unit

@@ -78,6 +78,7 @@ class _TerminalRuntimeCandidate:
     compose_project_name: str | None
     compose_file_path: str | None
     repo_url: str
+    task_policy: dict[str, Any] | None = None
     # ``event_order`` of the ``terminal_runtime_released`` event the candidate was listed
     # under (the current effective-release cycle's floor). Carried only for deferred
     # overlay-umount candidates so the marker-write guards can verify, under the row lock,

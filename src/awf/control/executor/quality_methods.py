@@ -45,6 +45,9 @@ from awf.control.executor.constants import (
 from awf.control.executor.git_ops import (
     _git_name_lines,
 )
+from awf.control.executor.hosted_validation_sync import (
+    _sync_hosted_validation_fix_head,
+)
 from awf.control.executor.quality_gates import (
     _build_post_agent_precommit_repair_prompt,
     _classify_post_agent_commit_failure,
@@ -74,17 +77,12 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import (
-    ResourceReservationRepository,
     WorkspaceRepository,
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCoverageResult
 from awf.service.provider_recovery import (
     create_provider_recovery_attempt_row,
-)
-from awf.service.supply_chain_policy import (
-    SupplyChainPolicyRefreshResult,
-    SupplyChainPolicyRefreshService,
 )
 
 
@@ -95,6 +93,9 @@ async def _run_baseline_coverage_preflight(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
+    worktree_path: Path | None = None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> ValidationCoverageResult | None:
     from awf.control.executor.quality_gates import _run_baseline_coverage_preflight
 
@@ -104,6 +105,9 @@ async def _run_baseline_coverage_preflight(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
 
 
@@ -116,6 +120,9 @@ async def _measure_and_persist_baseline_coverage(
     profile: WorkspaceProfile,
     reuse: ValidationCoverageResult | None = None,
     skip_measure: bool = False,
+    worktree_path: Path | None = None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> ValidationCoverageResult | None:
     """Measure the pre-agent baseline coverage and persist it for blocked-resume.
 
@@ -123,7 +130,9 @@ async def _measure_and_persist_baseline_coverage(
     mutated the worktree); persisting it lets a later pause into ``blocked`` hand
     the original base back to the resume path. A directive resume passes
     ``skip_measure=True`` to keep the already-reused base (``reuse``) instead of
-    recomputing against the mutated blocked worktree.
+    recomputing against the mutated blocked worktree. Hosted PR adoption supplies
+    its validation delegate and PR identity through the optional coverage runner
+    arguments.
     """
     if skip_measure:
         return reuse
@@ -134,6 +143,9 @@ async def _measure_and_persist_baseline_coverage(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
     await self._persist_block_baseline_coverage(
         workspace_id,
@@ -151,6 +163,8 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    coverage_runner: Any | None = None,
+    coverage_run_kwargs: Mapping[str, Any] | None = None,
 ) -> _CoverageEvidenceResult:
     from awf.control.executor.quality_gates import _run_final_coverage_gate
 
@@ -162,41 +176,9 @@ async def _run_final_coverage_gate(
         profile=profile,
         validation_tier=validation_tier,
         workspace_head_sha=workspace_head_sha,
+        coverage_runner=coverage_runner,
+        coverage_run_kwargs=coverage_run_kwargs,
     )
-
-
-async def _parallel_worker_cpu_limit_for_workspace(
-    self: Any,
-    workspace_id: str,
-    *,
-    profile: WorkspaceProfile,
-) -> int | None:
-    if profile.validation.coverage.parallel_workers is None:
-        return None
-    async with self._session_factory() as session:
-        reservation = await ResourceReservationRepository(session).active_for_workspace(
-            workspace_id
-        )
-    if reservation is None:
-        return None
-    return max(1, int(reservation.steady_cpu))
-
-
-async def _refresh_supply_chain_policy_for_workspace(
-    self: Any,
-    *,
-    workspace_id: str,
-    command_evidence: Sequence[str],
-    changed_paths: Sequence[str],
-) -> SupplyChainPolicyRefreshResult:
-    async with self._session_factory() as session:
-        result = await SupplyChainPolicyRefreshService(session).refresh_workspace(
-            workspace_id,
-            command_evidence=command_evidence,
-            changed_paths=changed_paths,
-        )
-        await session.commit()
-        return result
 
 
 async def _verify_recovered_post_agent_commit(
@@ -525,6 +507,7 @@ async def _run_post_agent_commit_repair(
     ws: Workspace,
     profile: WorkspaceProfile,
     command_evidence: list[str],
+    hosted_pr_identity: dict[str, Any] | None,
     execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
     before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
@@ -577,6 +560,7 @@ async def _run_post_agent_commit_repair(
                 ws=ws,
                 profile=profile,
                 command_evidence=command_evidence,
+                hosted_pr_identity=hosted_pr_identity,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
                 before_agent_retry=before_agent_retry,
@@ -955,6 +939,7 @@ async def _run_post_agent_semantic_precommit_repair(
     ws: Workspace,
     profile: WorkspaceProfile,
     command_evidence: list[str],
+    hosted_pr_identity: dict[str, Any] | None,
     execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
     before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
@@ -978,6 +963,9 @@ async def _run_post_agent_semantic_precommit_repair(
                 model=model,
                 workspace_id=workspace_id,
                 log_source="post_agent_precommit_repair",
+                hosted_pr_identity=hosted_pr_identity,
+                profile=profile,
+                worktree_path=worktree_path,
             )
 
         recovered, repair_result = await _run_agent_callable_with_service_recovery(
@@ -1003,6 +991,47 @@ async def _run_post_agent_semantic_precommit_repair(
             stdout=repair_result.stdout,
             stderr=repair_result.stderr,
         )
+        if getattr(adapter, "is_hosted", False):
+            terminal_head_sha = getattr(repair_result, "terminal_head_sha", None)
+            if not isinstance(terminal_head_sha, str) or not terminal_head_sha.strip():
+                sync_result = CommandResult(
+                    returncode=1,
+                    stdout=repair_result.stdout,
+                    stderr="hosted pre-commit repair completed without terminal_head_sha",
+                    reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                )
+            else:
+                terminal_head_sha = terminal_head_sha.strip()
+                sync_result = await _sync_hosted_validation_fix_head(
+                    self,
+                    worktree_path=worktree_path,
+                    hosted_pr_identity=hosted_pr_identity,
+                    terminal_head_sha=terminal_head_sha,
+                )
+            if not sync_result.ok:
+                reason_code = sync_result.reason_code or "HOSTED_REMOTE_HEAD_SYNC_FAILED"
+                await self._record_post_agent_commit_format_repair(
+                    workspace_id=workspace_id,
+                    repaired_paths=[],
+                    restaged_paths=[],
+                    formatter_paths=classification.format_repair_files,
+                    normalizer_paths=classification.normalizer_repair_files,
+                    failed_hooks=classification.failed_hooks,
+                    repair_strategy="agent",
+                    retry_outcome="error",
+                    reason_code=reason_code,
+                )
+                raise _PostAgentCommitStepError(
+                    stage="hosted terminal head sync",
+                    result=sync_result,
+                    classification=classification,
+                    precommit_repair_attempted=True,
+                    repair_strategy="agent",
+                    reason_code_override=reason_code,
+                )
+            cast(dict[str, Any], hosted_pr_identity)["expected_head_sha"] = (
+                sync_result.stdout.strip()
+            )
     except AgentRunError as exc:
         repair_error = exc
         append_command_evidence(
@@ -1010,6 +1039,26 @@ async def _run_post_agent_semantic_precommit_repair(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    if repair_error is not None and getattr(adapter, "is_hosted", False):
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=[],
+            restaged_paths=[],
+            formatter_paths=classification.format_repair_files,
+            normalizer_paths=classification.normalizer_repair_files,
+            failed_hooks=classification.failed_hooks,
+            repair_strategy="agent",
+            retry_outcome="error",
+            reason_code=classification.reason_code,
+        )
+        raise _PostAgentCommitStepError(
+            stage="post-agent pre-commit repair",
+            result=repair_error.result,
+            classification=classification,
+            precommit_repair_attempted=True,
+            repair_strategy="agent",
+            reason_code_override=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+        ) from repair_error
 
     add_again = await git_in_worktree(["add", "-A"])
     await self._repair_agent_git_ownership(

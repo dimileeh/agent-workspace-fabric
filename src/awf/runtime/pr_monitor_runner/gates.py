@@ -643,6 +643,13 @@ async def _handle_merge_gate_blocker(
                         extra_identity=wait_identity,
                     )
                 return False
+            # ``loop._execute`` skips its general attention clear for NotifyHuman
+            # and Merge. A prior manual-ready HUMAN_WAIT episode (auto_merge=false)
+            # would otherwise survive this status flip and resurface after recovery
+            # returns the workspace to monitoring_pr (PRRT_kwDOSJAM6s6Xd2rU).
+            # Clear in this same transaction so fencing + attention_cleared land
+            # with the RECOVERY_DISPATCH transition.
+            await workspace_repo.clear_workspace_attention(workspace_id)
             await workspace_repo.transition(
                 _ws,
                 to=WorkspaceStatus.ready,

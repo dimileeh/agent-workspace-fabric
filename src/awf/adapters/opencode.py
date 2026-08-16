@@ -48,6 +48,14 @@ OPENCODE_PROVIDER_API_KEY_NAMES = (
 )
 
 
+def opencode_provider_for_model(model: str | None) -> str:
+    """Return the provider family for a selected OpenCode model."""
+    active_model = model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+    if "/" in active_model:
+        return active_model.split("/", 1)[0]
+    return "ollama"
+
+
 @register_adapter
 class OpenCodeAdapter(AgentAdapter):
     """Adapter that runs OpenCode CLI in AWF workspaces."""
@@ -61,10 +69,7 @@ class OpenCodeAdapter(AgentAdapter):
 
     def get_provider(self, model: str | None) -> str:
         """Return the provider family for the selected OpenCode model."""
-        active_model = model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
-        if "/" in active_model:
-            return active_model.split("/", 1)[0]
-        return "ollama"
+        return opencode_provider_for_model(model or self._default_model)
 
     @property
     def hosted_env_passthrough_names(self) -> tuple[str, ...]:

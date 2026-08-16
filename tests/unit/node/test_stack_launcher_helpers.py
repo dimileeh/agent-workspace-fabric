@@ -1,4 +1,4 @@
-"""Unit tests for ``awf.node.stack_launcher`` pure timeout/metadata helpers.
+"""Unit tests for stack-launcher and companion-service pure helpers.
 
 These exercise the pure timeout/metadata helpers without touching Docker, the
 database, the network, or sleeping. The ``Protocol`` ``...`` method bodies are
@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from awf.node import stack_launcher
+from awf.node.companion_services import _hosted_companion_repo_url
 from awf.node.stack_launcher import (
     _companion_compose_up_timeout_seconds,
     _stack_secret_metadata,
@@ -114,6 +115,13 @@ def test_stack_secret_metadata_merges_lease_and_companion() -> None:
         "LEASE_ONLY": 1,
         "COMPANION_ONLY": 2,
     }
+
+
+def test_hosted_companion_repo_url_strips_query_credentials_and_fragment() -> None:
+    """Hosted companion source metadata never carries URL query or fragment secrets."""
+    repo_url = "https://github.com/org/private.git?token=secret#deploy-key"
+
+    assert _hosted_companion_repo_url(repo_url) == "https://github.com/org/private.git"
 
 
 def test_module_exposes_execution_error() -> None:

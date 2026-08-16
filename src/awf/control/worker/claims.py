@@ -19,6 +19,11 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.attention_events import (
+    ATTENTION_CLEARED_EVENT_TYPE,
+    ATTENTION_REQUIRED_EVENT_TYPE,
+    blocked_attention_payload,
+)
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.admission import (
     _acquire_requested_admission_locks,
@@ -840,6 +845,17 @@ async def _claim_paused_for_resume(
         )
         if ws is None:
             return False
+        if reason == "blocked":
+            # Claim clears the protected-gate attention episode; restore will
+            # re-emit attention_required if the resume is abandoned.
+            await repo.add_event(
+                ws,
+                event_type=ATTENTION_CLEARED_EVENT_TYPE,
+                payload=blocked_attention_payload(
+                    block_reason_code=ws.block_reason_code,
+                    block_type=ws.block_type,
+                ),
+            )
         _apply_execution_claim(self, ws, owner_id=self._worker_id)
         await session.commit()
         return True
@@ -885,7 +901,8 @@ async def _restore_paused_resume_claim(
     off for a later safe retry."""
     try:
         async with self._session_factory() as session:
-            ws = await WorkspaceRepository(session).transition_if_current(
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
                 workspace_id,
                 from_status=WorkspaceStatus.running,
                 to=_PAUSED_RESUME_FROM_STATUS[reason],
@@ -893,6 +910,17 @@ async def _restore_paused_resume_claim(
                 extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
             )
             if ws is not None:
+                if reason == "blocked":
+                    # Claim cleared attention; restoring blocked must re-emit so
+                    # subscribers are not left with a false terminal cleared.
+                    await repo.add_event(
+                        ws,
+                        event_type=ATTENTION_REQUIRED_EVENT_TYPE,
+                        payload=blocked_attention_payload(
+                            block_reason_code=ws.block_reason_code,
+                            block_type=ws.block_type,
+                        ),
+                    )
                 if rearm_recovering_cooldown:
                     rearmed = rearm_recovering_cooldown_task_policy(
                         ws.task_policy, now=datetime.now(UTC)

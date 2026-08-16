@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from awf.api import schemas_responses
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorExecutionPolicy,
     WorkspaceCreateRequest,
     WorkspaceTask,
 )
@@ -28,6 +30,14 @@ def _create_request(task_tag: str | None | object = "__unset__") -> WorkspaceCre
         validation={"commands": [], "requested_tier": 1},
         resources={},
     )
+
+
+@pytest.mark.unit
+def test_pr_monitor_request_models_are_owned_by_api_schemas() -> None:
+    assert PullRequestMonitorExecutionPolicy.__module__ == "awf.api.schemas"
+    assert PullRequestMonitorAdoptionRequest.__module__ == "awf.api.schemas"
+    assert not hasattr(schemas_responses, "PullRequestMonitorExecutionPolicy")
+    assert not hasattr(schemas_responses, "PullRequestMonitorAdoptionRequest")
 
 
 @pytest.mark.unit

@@ -344,7 +344,15 @@ export function WorkspaceFilters({
   const statusOptions = Array.from(
     new Set([...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]),
   );
-  const agentOptions = ["codex", "claude_code", "gemini", "opencode"];
+  const agentOptions = [
+    "codex",
+    "claude_code",
+    "cursor",
+    "antigravity",
+    "gemini",
+    "opencode",
+    "grok",
+  ];
   const modelOptions = Array.from(new Set([...modelFilters, ...availableModels])).filter(Boolean);
   const activeFilters = workspaceFilterSummary({
     agentFilters,

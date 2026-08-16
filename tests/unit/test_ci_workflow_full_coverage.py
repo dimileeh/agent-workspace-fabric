@@ -442,7 +442,7 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
     ("action", "ref"),
     [
         ("actions/checkout", "v7"),
-        ("astral-sh/setup-uv", "v8"),
+        ("astral-sh/setup-uv", "v10.0.0"),
         ("actions/upload-artifact", "v7"),
         ("actions/download-artifact", "v8"),
         ("actions/setup-node", "v6"),

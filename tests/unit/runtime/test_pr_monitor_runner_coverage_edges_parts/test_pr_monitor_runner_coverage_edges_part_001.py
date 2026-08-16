@@ -201,6 +201,53 @@ async def test_monitor_run_fails_cleanly_when_sync_workspace_has_no_remote_push_
 
 
 @pytest.mark.unit
+async def test_monitor_run_routes_action_to_current_pr_head_after_branch_rename(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _update_workspace(
+        factory,
+        workspace_id,
+        remote_push_branch="feature/old-name",
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(head_ref="feature/renamed"),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    captured: dict[str, object] = {}
+
+    async def _execute(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(runner, "_execute", _execute)
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    state = captured["state"]
+    assert isinstance(state, MonitorState)
+    assert captured["remote_branch"] == "feature/renamed"
+    assert state.current_pr_head_ref == "feature/renamed"
+    assert state.current_pr_head_ref_checked is True
+
+
+@pytest.mark.unit
 async def test_monitor_run_terminates_on_github_status_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

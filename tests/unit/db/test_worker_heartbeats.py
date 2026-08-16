@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 
 from awf.db.models import WorkerHeartbeat
 from awf.db.repositories.base import _worker_heartbeat_upsert_stmt
@@ -144,6 +145,302 @@ async def test_fallback_record_heartbeat_returns_insert_without_redundant_get(
     assert heartbeat.poll_interval_seconds == 5.0
     assert persisted is not None
     assert persisted.worker_id == worker_id
+
+
+@pytest.mark.unit
+async def test_fallback_record_heartbeat_returns_existing_updated_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    existing = WorkerHeartbeat(
+        worker_id="worker-existing",
+        node_id="node-b",
+        started_at=started_at,
+        last_heartbeat_at=started_at + timedelta(seconds=5),
+        poll_interval_seconds=6.0,
+        created_at=started_at,
+        updated_at=started_at,
+    )
+    update_calls: list[dict[str, object]] = []
+
+    class _Session:
+        def add(self, _row: object) -> None:
+            raise AssertionError("existing heartbeat update should skip insert")
+
+    async def _update_existing(
+        self: WorkerHeartbeatRepository,
+        **kwargs: object,
+    ) -> WorkerHeartbeat:
+        del self
+        update_calls.append(kwargs)
+        return existing
+
+    monkeypatch.setattr(
+        WorkerHeartbeatRepository,
+        "_update_existing_heartbeat",
+        _update_existing,
+    )
+
+    heartbeat = await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+        _Session(),
+        dialect_name="unsupported",
+    ).record_heartbeat(
+        worker_id="worker-existing",
+        node_id="node-b",
+        started_at=started_at,
+        last_heartbeat_at=started_at + timedelta(seconds=5),
+        poll_interval_seconds=6.0,
+    )
+
+    assert heartbeat is existing
+    assert len(update_calls) == 1
+    assert update_calls[0]["worker_id"] == "worker-existing"
+    assert update_calls[0]["node_id"] == "node-b"
+
+
+@pytest.mark.unit
+async def test_fallback_record_heartbeat_returns_update_after_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    existing = WorkerHeartbeat(
+        worker_id="worker-race",
+        node_id="node-b",
+        started_at=started_at,
+        last_heartbeat_at=started_at + timedelta(seconds=2),
+        poll_interval_seconds=7.0,
+        created_at=started_at,
+        updated_at=started_at,
+    )
+    update_results: list[WorkerHeartbeat | None] = [None, existing]
+
+    class _Nested:
+        async def __aenter__(self) -> _Nested:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+    class _Session:
+        def __init__(self) -> None:
+            self.added: list[WorkerHeartbeat] = []
+            self.flush_calls = 0
+
+        def begin_nested(self) -> _Nested:
+            return _Nested()
+
+        def add(self, row: WorkerHeartbeat) -> None:
+            self.added.append(row)
+
+        async def flush(self) -> None:
+            self.flush_calls += 1
+            raise IntegrityError("INSERT worker_heartbeats", {}, RuntimeError("duplicate"))
+
+    async def _update_existing(
+        self: WorkerHeartbeatRepository,
+        **_kwargs: object,
+    ) -> WorkerHeartbeat | None:
+        del self
+        return update_results.pop(0)
+
+    async def _get(
+        self: WorkerHeartbeatRepository,
+        *,
+        worker_id: str,
+    ) -> WorkerHeartbeat | None:
+        del self, worker_id
+        raise AssertionError("successful fallback update should not issue get()")
+
+    monkeypatch.setattr(
+        WorkerHeartbeatRepository,
+        "_update_existing_heartbeat",
+        _update_existing,
+    )
+    monkeypatch.setattr(WorkerHeartbeatRepository, "get", _get)
+    session = _Session()
+
+    heartbeat = await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+        session,
+        dialect_name="unsupported",
+    ).record_heartbeat(
+        worker_id="worker-race",
+        node_id="node-b",
+        started_at=started_at,
+        last_heartbeat_at=started_at + timedelta(seconds=2),
+        poll_interval_seconds=7.0,
+    )
+
+    assert heartbeat is existing
+    assert update_results == []
+    assert [row.worker_id for row in session.added] == ["worker-race"]
+    assert session.flush_calls == 1
+
+
+@pytest.mark.unit
+async def test_fallback_record_heartbeat_raises_when_integrity_fallback_loses_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    get_calls: list[str] = []
+
+    class _Nested:
+        async def __aenter__(self) -> _Nested:
+            return self
+
+        async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+            return False
+
+    class _Session:
+        def begin_nested(self) -> _Nested:
+            return _Nested()
+
+        def add(self, _row: WorkerHeartbeat) -> None:
+            return None
+
+        async def flush(self) -> None:
+            raise IntegrityError("INSERT worker_heartbeats", {}, RuntimeError("duplicate"))
+
+    async def _update_missing(
+        self: WorkerHeartbeatRepository,
+        **_kwargs: object,
+    ) -> None:
+        del self
+
+    async def _get_missing(
+        self: WorkerHeartbeatRepository,
+        *,
+        worker_id: str,
+    ) -> None:
+        del self
+        get_calls.append(worker_id)
+
+    monkeypatch.setattr(
+        WorkerHeartbeatRepository,
+        "_update_existing_heartbeat",
+        _update_missing,
+    )
+    monkeypatch.setattr(WorkerHeartbeatRepository, "get", _get_missing)
+
+    with pytest.raises(
+        RuntimeError, match="Worker heartbeat fallback did not persist a row"
+    ) as exc:
+        await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+            _Session(),
+            dialect_name="unsupported",
+        ).record_heartbeat(
+            worker_id="worker-lost-race",
+            node_id="node-b",
+            started_at=started_at,
+            last_heartbeat_at=started_at + timedelta(seconds=2),
+            poll_interval_seconds=7.0,
+        )
+
+    assert isinstance(exc.value.__cause__, IntegrityError)
+    assert get_calls == ["worker-lost-race"]
+
+
+@pytest.mark.unit
+async def test_update_existing_heartbeat_flushes_before_returning_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updated_at = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    existing = WorkerHeartbeat(
+        worker_id="worker-update",
+        node_id="node-b",
+        started_at=updated_at - timedelta(seconds=10),
+        last_heartbeat_at=updated_at,
+        poll_interval_seconds=4.0,
+        created_at=updated_at,
+        updated_at=updated_at,
+    )
+    events: list[str] = []
+
+    class _Result:
+        rowcount = 1
+
+    class _Session:
+        async def execute(self, _statement: object) -> _Result:
+            events.append("execute")
+            return _Result()
+
+        async def flush(self) -> None:
+            events.append("flush")
+
+    async def _get(
+        self: WorkerHeartbeatRepository,
+        *,
+        worker_id: str,
+    ) -> WorkerHeartbeat:
+        del self
+        events.append("get")
+        assert worker_id == "worker-update"
+        return existing
+
+    monkeypatch.setattr(WorkerHeartbeatRepository, "get", _get)
+
+    heartbeat = await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+        _Session(),
+        dialect_name="unsupported",
+    )._update_existing_heartbeat(
+        worker_id="worker-update",
+        node_id="node-b",
+        last_heartbeat_at=updated_at,
+        poll_interval_seconds=4.0,
+        updated_at=updated_at,
+    )
+
+    assert heartbeat is existing
+    assert events == ["execute", "flush", "get"]
+
+
+@pytest.mark.unit
+async def test_prune_stale_non_positive_limit_skips_delete() -> None:
+    class _Session:
+        async def execute(self, _statement: object) -> object:
+            raise AssertionError("non-positive prune limit should not execute SQL")
+
+        async def flush(self) -> None:
+            raise AssertionError("non-positive prune limit should not flush")
+
+    pruned = await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+        _Session(),
+        dialect_name="unsupported",
+    ).prune_stale(before=datetime(2026, 6, 4, 8, 0, tzinfo=UTC), limit=0)
+
+    assert pruned == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rowcount", [None, -1])
+async def test_prune_stale_unknown_or_negative_rowcount_returns_zero(
+    rowcount: int | None,
+) -> None:
+    class _Result:
+        def __init__(self, rowcount: int | None) -> None:
+            self.rowcount = rowcount
+
+    class _Session:
+        def __init__(self) -> None:
+            self.executed = 0
+            self.flushed = 0
+
+        async def execute(self, _statement: object) -> _Result:
+            self.executed += 1
+            return _Result(rowcount)
+
+        async def flush(self) -> None:
+            self.flushed += 1
+
+    session = _Session()
+
+    pruned = await WorkerHeartbeatRepository(  # type: ignore[arg-type]
+        session,
+        dialect_name="unsupported",
+    ).prune_stale(before=datetime(2026, 6, 4, 8, 0, tzinfo=UTC), limit=5)
+
+    assert pruned == 0
+    assert session.executed == 1
+    assert session.flushed == 1
 
 
 @pytest.mark.unit

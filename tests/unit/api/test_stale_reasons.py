@@ -47,6 +47,7 @@ async def _seed_candidate(
     base_sha: str = "a" * 40,
     updated_at: datetime | None = None,
     successful_validate_tier: int | None = None,
+    auto_merge: bool = False,
 ) -> tuple[str, str, str]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -60,6 +61,7 @@ async def _seed_candidate(
             test_commands=[],
             owned_paths=owned_paths or ["src/awf/api/**"],
             task_class=task_class,
+            auto_merge=auto_merge,
         )
         task = await TaskRepository(session).create_or_get(
             repo_url=workspace.repo_url,
@@ -235,6 +237,10 @@ class TestMergeQueueExposesStaleReasons:
             branch_name="awf/docs-only",
             owned_paths=["docs/USAGE.md"],
             task_class="docs_task",
+            # ``candidate`` clears to ready-or-waiting only when the workspace
+            # opts into auto-merge; this test asserts the non-overlapping docs
+            # change stays mergeable, so seed the opt-in intent.
+            auto_merge=True,
         )
 
         async with factory() as session:

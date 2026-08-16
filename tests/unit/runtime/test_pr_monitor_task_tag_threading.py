@@ -61,8 +61,9 @@ class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
         log_source: str,
         command_evidence: list[str] | None = None,
         operation_start_head: str | None = None,
+        state: object | None = None,
     ) -> AgentRunResult:
-        del operation_start_head
+        del operation_start_head, state
         result = await self._deps.adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -1002,13 +1003,13 @@ async def test_comment_paths_resolve_once_and_thread_to_invoke(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1"),
+            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
             **common_kwargs,
         )
     else:
         await comments._address_review_comment_result(
             runner,
-            comment=SimpleNamespace(comment_id=11),
+            comment=SimpleNamespace(comment_id=11, body="", body_excerpt=""),
             **common_kwargs,
         )
 
@@ -1069,13 +1070,13 @@ async def test_comment_paths_thread_supplied_tag_skips_resolver(
     if entry == "_address_thread":
         await comments._address_thread(
             runner,
-            thread=SimpleNamespace(thread_id="t1"),
+            thread=SimpleNamespace(thread_id="t1", comments=(), author=None, body_excerpt=""),
             **common_kwargs,
         )
     else:
         await comments._address_review_comment_result(
             runner,
-            comment=SimpleNamespace(comment_id=11),
+            comment=SimpleNamespace(comment_id=11, body="", body_excerpt=""),
             **common_kwargs,
         )
 

@@ -25,6 +25,10 @@ from typing import Any
 
 from sqlalchemy.sql.elements import ColumnElement
 
+from awf.common.attention_events import (
+    ATTENTION_REQUIRED_EVENT_TYPE,
+    blocked_attention_payload,
+)
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -146,4 +150,15 @@ async def enter_blocked_for_protected_violation_in_session(
     # instance (grants are epoch-fenced and invalidated by the bumped epoch, but
     # the directive column is not), mirroring the WS-1 executor behavior.
     ws.pending_operator_hint = None
+    # Typed attention event (additive): subscribers see enter-blocked without
+    # polling ``block_*`` / status. ``workspace.state_changed`` from the CAS is
+    # unchanged; this is a same-status informational timeline sibling.
+    await repo.add_event(
+        ws,
+        event_type=ATTENTION_REQUIRED_EVENT_TYPE,
+        payload=blocked_attention_payload(
+            block_reason_code=block_reason_code,
+            block_type=block_type,
+        ),
+    )
     return ws

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import yaml
 from sqlalchemy.engine import make_url
@@ -30,6 +30,9 @@ from awf.service.environment import (
     compose_expand_value,
     env_lookup,
 )
+
+if TYPE_CHECKING:
+    from awf.runtime.hosted_delegation import HostedDelegationConfig
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
@@ -64,6 +67,7 @@ __all__ = [
     "LOCAL_SERVICE_COMPOSE_FILE",
     "LOCAL_SERVICE_INCLUDED_COMPOSE_FILE",
     "ServiceSettings",
+    "hosted_delegation_config_from_service_settings",
     "local_service_environ",
     "local_service_worker_environment",
     "local_service_worker_environment_keys",
@@ -107,6 +111,14 @@ class ServiceSettings:
     workspace_peak_memory_gb: float = 16.0
     agent_wall_timeout_seconds: float = 7200
     agent_idle_timeout_seconds: float = 3600
+    hosted_delegation_base_url: str | None = None
+    hosted_delegation_bearer_token: str | None = None
+    hosted_delegation_bearer_token_env: str | None = None
+    hosted_delegation_poll_interval_seconds: float = 2.0
+    hosted_delegation_operation_timeout_seconds: float = 7200.0
+    hosted_delegation_request_timeout_seconds: float = 30.0
+    hosted_delegation_cancel_timeout_seconds: float = 10.0
+    hosted_delegation_max_output_bytes: int = 1_000_000
     planning_max_iterations_default: int = 3
     host_home: str = "~"
     claude_base_gc_enabled: bool = True
@@ -198,6 +210,9 @@ def resolve_service_settings(
     settings = base or Settings()
     env = os.environ if environ is None else environ
     service_env = local_service_environ(env) if environ is None else env
+    worker_env = local_service_worker_environment(service_env, host_env=env)
+    if worker_env is None:
+        worker_env = dict(service_env)
     database_url = settings.database_url
     project_dotenv_lookup = _ProjectDotenvLookup()
 
@@ -258,6 +273,23 @@ def resolve_service_settings(
         workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
+        hosted_delegation_base_url=settings.hosted_delegation_base_url,
+        hosted_delegation_bearer_token=_resolve_hosted_delegation_bearer_token(
+            settings,
+            worker_env,
+        ),
+        hosted_delegation_bearer_token_env=settings.hosted_delegation_bearer_token_env,
+        hosted_delegation_poll_interval_seconds=(settings.hosted_delegation_poll_interval_seconds),
+        hosted_delegation_operation_timeout_seconds=(
+            settings.hosted_delegation_operation_timeout_seconds
+        ),
+        hosted_delegation_request_timeout_seconds=(
+            settings.hosted_delegation_request_timeout_seconds
+        ),
+        hosted_delegation_cancel_timeout_seconds=(
+            settings.hosted_delegation_cancel_timeout_seconds
+        ),
+        hosted_delegation_max_output_bytes=settings.hosted_delegation_max_output_bytes,
         planning_max_iterations_default=settings.planning_max_iterations_default,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
@@ -304,10 +336,68 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
         payload["network_posture_open_legacy_cutoff"] = (
             settings.network_posture_open_legacy_cutoff.isoformat()
         )
-    for key in ("api_token", "github_token"):
+    for key in ("api_token", "github_token", "hosted_delegation_bearer_token"):
         if payload.get(key):
             payload[key] = "<redacted>"
     return payload
+
+
+def hosted_delegation_config_from_service_settings(
+    settings: ServiceSettings,
+    *,
+    required: bool = False,
+) -> HostedDelegationConfig | None:
+    """Return hosted delegation config using the worker-visible service settings."""
+
+    from awf.runtime.hosted_delegation import (
+        HOSTED_DELEGATION_MISSING_BASE_URL,
+        HOSTED_DELEGATION_MISSING_TOKEN,
+        HostedDelegationConfigError,
+        hosted_delegation_config_from_values,
+    )
+
+    base_url = _empty_to_none(settings.hosted_delegation_base_url)
+    token = _empty_to_none(settings.hosted_delegation_bearer_token)
+    token_env = _empty_to_none(settings.hosted_delegation_bearer_token_env)
+    if base_url is None or (token is None and token_env is None):
+        if not required:
+            return None
+        missing: list[str] = []
+        if base_url is None:
+            missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
+        if token is None and token_env is None:
+            missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
+        raise HostedDelegationConfigError(missing=tuple(missing))
+    try:
+        return hosted_delegation_config_from_values(
+            base_url=settings.hosted_delegation_base_url,
+            bearer_token=settings.hosted_delegation_bearer_token,
+            bearer_token_env=settings.hosted_delegation_bearer_token_env,
+            poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
+            operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
+            request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
+            cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
+            max_output_bytes=settings.hosted_delegation_max_output_bytes,
+        )
+    except HostedDelegationConfigError as exc:
+        if not required and exc.missing == (HOSTED_DELEGATION_MISSING_TOKEN,):
+            return None
+        raise
+
+
+def _resolve_hosted_delegation_bearer_token(
+    settings: Settings,
+    worker_environ: Mapping[str, str],
+) -> str | None:
+    """Resolve hosted delegation token from direct value or worker-visible env name."""
+
+    direct = _empty_to_none(settings.hosted_delegation_bearer_token)
+    if direct is not None:
+        return direct
+    token_env = _empty_to_none(settings.hosted_delegation_bearer_token_env)
+    if token_env is None:
+        return None
+    return _empty_to_none(_env_value(worker_environ, token_env))
 
 
 def local_service_environ(
@@ -315,12 +405,15 @@ def local_service_environ(
     *,
     env_file: Path | None = LOCAL_SERVICE_COMPOSE_ENV_FILE,
 ) -> dict[str, str]:
-    """Return the environment local Compose services actually receive.
+    """Return the merged environment used to render local Compose services.
 
     Docker Compose resolves variables from its env file and then lets the host
     shell override them. The CLI uses this merged view for readiness checks so a
     token present in root ``.env`` is not incorrectly reported as missing just
-    because it is absent from the host shell.
+    because it is absent from the host shell. Bare list-form Compose environment
+    entries still forward values only from the host/container environment; use
+    :func:`local_service_worker_environment` when materialized container values
+    matter.
     """
 
     merged: dict[str, str] = {}
@@ -344,36 +437,50 @@ def local_service_worker_environment_keys(
     The worker's secret-lease resolver only sees variables defined on the
     local-service Compose ``environment:`` block (the worker service inherits the
     shared ``&awf-environment`` anchor via ``<<: *awf-service``), NOT every
-    caller-shell export. Returns those mapping KEYS -- the real worker env
-    allowlist -- parsed from the canonical ``docker/compose/local-service.yml``.
-    ``None`` when the compose asset cannot be located/parsed (caller falls back
-    to the unrestricted merged view, preserving legacy behavior).
+    caller-shell export. Returns the statically declared worker env allowlist
+    parsed from the canonical ``docker/compose/local-service.yml``. Dynamic
+    list-form names require a merged environment and are handled by
+    :func:`local_service_worker_environment`. ``None`` when the compose asset
+    cannot be located/parsed (caller falls back to the unrestricted merged view,
+    preserving legacy behavior).
     """
 
     pairs = _local_service_worker_environment_pairs(compose_file=compose_file)
     if pairs is None:
         return None
-    return frozenset(pairs)
+    static_keys = (
+        key
+        for key, (_value, interpolates_name) in pairs.items()
+        if not interpolates_name or "$" not in key
+    )
+    return frozenset(static_keys)
 
 
 def local_service_worker_environment(
-    merged_env: Mapping[str, str], *, compose_file: Path | None = None
+    merged_env: Mapping[str, str],
+    *,
+    host_env: Mapping[str, str] | None = None,
+    compose_file: Path | None = None,
 ) -> dict[str, str] | None:
     """Return the worker container's MATERIALIZED Compose environment.
 
     Unlike :func:`local_service_worker_environment_keys` (NAMES only), this
-    resolves each declared value on the worker's Compose ``environment:`` block by
-    interpolating it against ``merged_env`` (the merged Compose view: env file
-    overlaid with the caller shell), reproducing the values Docker Compose
-    actually injects into the worker container. This materializes aliased defaults
+    resolves each declared value and list-form name on the worker's Compose
+    ``environment:`` block by interpolating it against ``merged_env`` (the merged
+    Compose view: env file overlaid with the caller shell), reproducing the
+    values Docker Compose actually injects into the worker container. This
+    materializes aliased defaults
     such as ``AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``
     -- a key whose NAME is absent from ``merged_env`` yet which the worker receives
     populated from ``GH_TOKEN`` -- so a ``provider: env`` lease with
     ``ref: AWF_GITHUB_TOKEN`` is evaluated against the value the real worker has,
     rather than being falsely reported as ``SECRET_LEASE_SOURCE_MISSING`` by a
     filter of the pre-interpolation inputs. A bare list-form entry (``- KEY``)
-    forwards the host value unchanged (omitted when the host does not set it,
-    matching Compose). Keys that resolve to an empty string are kept (the worker
+    forwards the host/container value unchanged from ``host_env`` (omitted when
+    that environment does not set it, matching Compose). When ``host_env`` is
+    omitted, the current process environment is used; this matches callers that
+    built ``merged_env`` with :func:`local_service_environ` and no explicit
+    ``environ``. Keys that resolve to an empty string are kept (the worker
     receives them as ``""``); the secret-lease resolver treats an empty value as
     missing, so this does not weaken the signal. ``None`` when the compose asset
     cannot be located/parsed (caller falls back to the unrestricted merged view,
@@ -384,11 +491,15 @@ def local_service_worker_environment(
     if pairs is None:
         return None
     materialized: dict[str, str] = {}
-    for key, raw_value in pairs.items():
+    bare_forward_env = os.environ if host_env is None else host_env
+    for raw_key, (raw_value, interpolates_name) in pairs.items():
+        key = compose_expand_value(raw_key, environ=merged_env) if interpolates_name else raw_key
+        if not key:
+            continue
         if raw_value is None:
             # Bare ``- KEY`` list entry: Compose forwards the host value verbatim,
             # and omits the key when the host does not set it.
-            found, value = env_lookup(merged_env, key)
+            found, value = env_lookup(bare_forward_env, key)
             if found:
                 materialized[key] = value
             continue
@@ -398,7 +509,7 @@ def local_service_worker_environment(
 
 def _local_service_worker_environment_pairs(
     *, compose_file: Path | None = None
-) -> dict[str, str | None] | None:
+) -> dict[str, tuple[str | None, bool]] | None:
     """Parse the worker service's Compose ``environment:`` key->raw-value pairs.
 
     Single source of truth for both the worker env KEY allowlist
@@ -421,7 +532,7 @@ def _local_service_worker_environment_pairs(
     if not isinstance(data, Mapping):
         return None
 
-    pairs: dict[str, str | None] = {}
+    pairs: dict[str, tuple[str | None, bool]] = {}
     services = data.get("services")
     if isinstance(services, Mapping):
         worker = services.get("worker")
@@ -448,18 +559,23 @@ def _local_service_worker_environment_pairs(
     return pairs
 
 
-def _collect_compose_environment_pairs(environment: object, pairs: dict[str, str | None]) -> None:
+def _collect_compose_environment_pairs(
+    environment: object,
+    pairs: dict[str, tuple[str | None, bool]],
+) -> None:
     """Collect Compose ``environment:`` key->raw-value pairs from mapping or list shapes.
 
     Mapping values are kept verbatim (coerced to ``str``; a YAML null stays
     ``None``). A list ``KEY=value`` entry keeps ``value``; a bare ``KEY`` entry
-    maps to ``None`` (Compose forwards the host value unchanged).
+    maps to ``None`` (Compose forwards the host value unchanged). Compose
+    interpolates list-form names but not mapping keys, so list entries are
+    marked for name interpolation during materialization.
     """
 
     if isinstance(environment, Mapping):
         for key, value in environment.items():
             if isinstance(key, str):
-                pairs[key] = None if value is None else str(value)
+                pairs[key] = (None if value is None else str(value), False)
         return
     if isinstance(environment, Sequence) and not isinstance(environment, str | bytes | bytearray):
         for item in environment:
@@ -469,7 +585,7 @@ def _collect_compose_environment_pairs(environment: object, pairs: dict[str, str
             name = name.strip()
             if not name:
                 continue
-            pairs[name] = value if separator else None
+            pairs[name] = (value if separator else None, True)
 
 
 def resolve_local_service_provider_environ(

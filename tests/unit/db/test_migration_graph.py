@@ -37,8 +37,10 @@ _WORKSPACE_TASK_TAG_REVISION = "c3e5f7b9d1a2"
 _SERVICE_GC_REQUESTS_REVISION = "b582d1c4e7a9"
 # Blocked status columns + operator grant audit records.
 _BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
-# Current head: workspace awaiting-human attention flag columns.
+# Workspace awaiting-human attention flag columns.
 _AWAITING_HUMAN_ATTENTION_REVISION = "d7e8f9a0b1c2"
+# Current head: flip workspaces.auto_merge database default to opt-out.
+_AUTO_MERGE_DEFAULT_OPT_OUT_REVISION = "e9f0a1b2c3d4"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -106,7 +108,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_AWAITING_HUMAN_ATTENTION_REVISION]
+    assert script.get_heads() == [_AUTO_MERGE_DEFAULT_OPT_OUT_REVISION]
 
 
 @pytest.mark.unit

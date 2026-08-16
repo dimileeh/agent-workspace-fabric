@@ -34,6 +34,7 @@ class RunnerDelegatesMixin:
     _run_monitor_agent_with_service_recovery = (
         _agent_service_recovery._run_monitor_agent_with_service_recovery
     )
+    _hosted_pr_identity_for_workspace = _agent_service_recovery._hosted_pr_identity_for_workspace
 
     _run_ci_fix = _ci_ops._run_ci_fix
 

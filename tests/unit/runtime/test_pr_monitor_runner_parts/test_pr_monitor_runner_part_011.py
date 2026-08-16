@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
     ReviewComment,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_done_key,
@@ -19,6 +22,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_wait_seconds,
     _initial_review_grace_wall_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
+    _needs_human_reason_state_key,
     _notify_human_reason,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -39,6 +43,23 @@ class TestNotificationAndGraceHelpers:
             author="human",
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
+        reasonless_escalation_state = MonitorState(threads_addressed_ids={"C-human": "needs_human"})
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        outdated_state = MonitorState(
+            threads_addressed_ids={
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
 
         assert "merge-blocking changes-requested review" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
@@ -67,7 +88,208 @@ class TestNotificationAndGraceHelpers:
             )
             == "human review feedback was deferred by the agent and remains unresolved"
         )
+        assert (
+            _notify_human_reason(
+                _status(reviews=(deferred_review,)),
+                reasonless_escalation_state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(deferred_review,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                MonitorState(
+                    threads_addressed_ids={
+                        **reasonless_escalation_state.threads_addressed_ids,
+                        **outdated_state.threads_addressed_ids,
+                    }
+                ),
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
+                replace(_status(), outdated_unresolved_inline_threads=(outdated_thread,)),
+                outdated_state,
+            )
+            == "the outdated thread could not be resolved"
+        )
         assert _notify_human_reason(_status(), MonitorState()) is None
+
+    @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_human_escalation_over_bot_retry(self) -> None:
+        """A human escalation must not be hidden by a bot retry fallback."""
+        human_review = ReviewComment(
+            comment_id="C-human",
+            body_excerpt="a maintainer needs to decide this",
+            author="human",
+        )
+        bot_outdated_thread = ReviewThread(
+            thread_id="T-bot-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="retry resolving this thread",
+            author="cursor[bot]",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                human_review.comment_id: "needs_human",
+                _outdated_resolve_requeued_key(bot_outdated_thread.thread_id): "requeued",
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(human_review,)),
+                    outdated_unresolved_inline_threads=(bot_outdated_thread,),
+                ),
+                state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+
+    @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_escalation_over_human_retry(self) -> None:
+        """A current escalation must not be hidden by an outdated human retry."""
+        human_review = ReviewComment(
+            comment_id="C-human",
+            body_excerpt="a maintainer needs to decide this",
+            author="human",
+        )
+        human_outdated_thread = ReviewThread(
+            thread_id="T-human-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="retry resolving this thread",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                human_review.comment_id: "needs_human",
+                _outdated_resolve_requeued_key(human_outdated_thread.thread_id): "requeued",
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(human_review,)),
+                    outdated_unresolved_inline_threads=(human_outdated_thread,),
+                ),
+                state,
+            )
+            == "human review feedback needs human input and remains unresolved"
+        )
+
+    @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_bot_escalation_over_outdated_reason(
+        self,
+    ) -> None:
+        """A current bot escalation must not be hidden by stale human feedback."""
+        bot_thread = ReviewThread(
+            thread_id="T-bot-current",
+            path="src/current.py",
+            line=1,
+            body_excerpt="a maintainer needs to decide this",
+            author="cursor[bot]",
+        )
+        outdated_thread = ReviewThread(
+            thread_id="T-human-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                bot_thread.thread_id: "needs_human",
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(inline=(bot_thread,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                state,
+            )
+            == "review feedback needs human input and remains unresolved on GitHub"
+        )
+
+    @pytest.mark.unit
+    def test_notify_human_reason_prioritizes_current_review_reason_over_outdated_thread(
+        self,
+    ) -> None:
+        """Current review feedback must outrank an outdated thread diagnosis."""
+        current_review = ReviewComment(
+            comment_id="C-current",
+            body_excerpt="a maintainer must approve this approach",
+            author="dimileeh",
+        )
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                current_review.comment_id: "needs_human",
+                _needs_human_reason_state_key(current_review.comment_id): (
+                    "the current review needs a maintainer decision"
+                ),
+                outdated_thread.thread_id: "needs_human",
+                _needs_human_reason_state_key(outdated_thread.thread_id): (
+                    "the outdated thread could not be resolved"
+                ),
+            }
+        )
+
+        assert (
+            _notify_human_reason(
+                replace(
+                    _status(reviews=(current_review,)),
+                    outdated_unresolved_inline_threads=(outdated_thread,),
+                ),
+                state,
+            )
+            == "the current review needs a maintainer decision"
+        )
+
+    @pytest.mark.unit
+    def test_notify_human_reason_keeps_outdated_thread_diagnosis(self) -> None:
+        """An outdated human escalation retains its actionable AWF diagnosis."""
+        outdated_thread = ReviewThread(
+            thread_id="T-outdated",
+            path="src/outdated.py",
+            line=1,
+            body_excerpt="resolution failed",
+            author="dimileeh",
+            is_outdated=True,
+        )
+        state = MonitorState(threads_addressed_ids={outdated_thread.thread_id: "needs_human"})
+
+        assert (
+            _notify_human_reason(
+                replace(_status(), outdated_unresolved_inline_threads=(outdated_thread,)),
+                state,
+            )
+            == "AWF could not resolve this outdated thread and needs human input"
+        )
 
     @pytest.mark.unit
     def test_initial_review_grace_state_converts_between_wall_and_monotonic_time(self) -> None:

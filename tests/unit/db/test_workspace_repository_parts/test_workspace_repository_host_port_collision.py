@@ -1131,6 +1131,71 @@ class TestCrossNodeAndEdgeCases:
         assert conflicts[0].workspace_id == existing_ws.id
 
     @pytest.mark.asyncio
+    async def test_hosted_pr_adoption_profile_service_port_does_not_conflict(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Hosted PR adoptions do not hold local Docker host ports."""
+        repo = WorkspaceRepository(session)
+        await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.monitoring_pr,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "example/hostport",
+                    "pr_number": 764,
+                    "execution": {"mode": "hosted"},
+                }
+            },
+            resolved_profile={
+                "name": "hosted-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15432]],
+                    }
+                ],
+            },
+        )
+        local_adoption_ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.monitoring_pr,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "example/hostport",
+                    "pr_number": 765,
+                }
+            },
+            resolved_profile={
+                "name": "local-profile",
+                "services": [
+                    {
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "ports": [[5432, 15433]],
+                    }
+                ],
+            },
+        )
+
+        hosted_conflicts = await repo.find_host_port_conflicts(
+            host_ports=[15432],
+            excluding_workspace_id=None,
+        )
+        local_conflicts = await repo.find_host_port_conflicts(
+            host_ports=[15433],
+            excluding_workspace_id=None,
+        )
+
+        assert hosted_conflicts == []
+        assert len(local_conflicts) == 1
+        assert local_conflicts[0].host_port == 15433
+        assert local_conflicts[0].workspace_id == local_adoption_ws.id
+
+    @pytest.mark.asyncio
     async def test_requested_profile_service_port_conflict_before_resolution(
         self,
         session: AsyncSession,

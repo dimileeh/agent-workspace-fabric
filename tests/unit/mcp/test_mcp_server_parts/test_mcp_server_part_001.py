@@ -641,6 +641,53 @@ class TestToolRegistration:
         ]
 
     @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_forwards_external_id_and_task_class(
+        self,
+    ) -> None:
+        class _CaptureService:
+            def __init__(self) -> None:
+                self.request = None
+
+            async def adopt_pull_request_monitor(self, request):  # type: ignore[no-untyped-def]
+                self.request = request
+                return PullRequestMonitorAdoptionResponse(
+                    workspace_id="ws_adopt",
+                    status=WorkspaceStatus.requested,
+                    version=1,
+                    repo_slug="dimileeh/aira-web",
+                    repo_url="git@github.com:dimileeh/aira-web.git",
+                    pr_number=277,
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    head_ref="feature/ready",
+                    base_ref="development",
+                    auto_merge=True,
+                    attached_existing=False,
+                    status_url="/v1/workspaces/ws_adopt",
+                    events_url="/v1/workspaces/ws_adopt/events",
+                    logs_url="/v1/workspaces/ws_adopt/logs",
+                )
+
+        service = _CaptureService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "external_id": "CLOUD-TASK-42",
+                "task_class": "test_task",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert payload["workspace_id"] == "ws_adopt"
+        assert service.request is not None
+        assert service.request.external_id == "CLOUD-TASK-42"
+        assert service.request.task_class.value == "test_task"
+
+    @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_ignores_destroyed_prior_adoption(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -815,20 +862,31 @@ class TestToolRegistration:
         assert repo_url_schema["maxLength"] == 512
         assert repo_url_schema["minLength"] == 1
 
-        adopt_props = tools["awf_adopt_pull_request_monitor"].inputSchema["properties"]
+        adopt_schema = tools["awf_adopt_pull_request_monitor"].inputSchema
+        adopt_props = adopt_schema["properties"]
         model_schema = _optional_string_schema(adopt_props["model"])
         effort_schema = _optional_string_schema(adopt_props["effort"])
         owned_paths_schema = adopt_props["owned_paths"]
+        execution_schema = adopt_props["execution"]
+        execution_def = adopt_schema["$defs"]["PullRequestMonitorExecutionPolicy"]
+        execution_mode_schema = execution_def["properties"]["mode"]
         assert model_schema["maxLength"] == 128
         assert model_schema["minLength"] == 1
         assert effort_schema["maxLength"] == 64
         assert effort_schema["minLength"] == 1
+        assert execution_schema["$ref"] == "#/$defs/PullRequestMonitorExecutionPolicy"
+        assert execution_def["additionalProperties"] is False
+        assert execution_mode_schema["default"] == "local"
+        assert execution_mode_schema["enum"] == ["local", "hosted"]
         assert owned_paths_schema["maxItems"] == 128
         assert owned_paths_schema["items"] == {
             "maxLength": 512,
             "minLength": 1,
             "type": "string",
         }
+        external_id_schema = _optional_string_schema(adopt_props["external_id"])
+        assert external_id_schema["maxLength"] == 128
+        assert "task_class" in adopt_props
 
         create_props = tools["awf_create_workspace"].inputSchema["properties"]
         create_model_schema = _optional_string_schema(create_props["model"])

@@ -22,6 +22,7 @@ from awf.api.schemas import (
     StaleReasonListResponse,
     StaleReasonResponse,
     WorkspaceEventResponse,
+    WorkspaceOverviewBatchResponse,
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
 )
@@ -287,6 +288,27 @@ async def list_workspace_overview_response(
         has_more=has_more,
         limit=limit,
         cursor=cursor,
+    )
+
+
+async def batch_workspace_overview_response(
+    session: AsyncSession,
+    *,
+    workspace_ids: Sequence[str],
+) -> WorkspaceOverviewBatchResponse:
+    """Project overview items for known IDs in request order; list absences separately."""
+    rows = await WorkspaceRepository(session).list_by_ids(workspace_ids)
+    by_id = {ws.id: ws for ws in rows}
+    found_ids = [workspace_id for workspace_id in workspace_ids if workspace_id in by_id]
+    missing_workspace_ids = [
+        workspace_id for workspace_id in workspace_ids if workspace_id not in by_id
+    ]
+    snapshots = await asyncio.to_thread(read_latest_usage_snapshots, found_ids)
+    with prefetched_usage_snapshots(snapshots):
+        items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
+    return WorkspaceOverviewBatchResponse(
+        items=items,
+        missing_workspace_ids=missing_workspace_ids,
     )
 
 
