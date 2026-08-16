@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,25 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
     _git_env_for_merge_safety_object_lookup,
 )
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+# Binding targets that an appended tip can rebind to supersede added salvage.
+_ASSIGN_BINDING_RE = re.compile(
+    r"(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:"
+    r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
+    r"|"
+    r"[ \t]*:="  # `name :=`
+    r")"
+)
+_DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+_CLASS_BINDING_RE = re.compile(r"(?m)^[ \t]*class[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+_FUNCTION_BINDING_RE = re.compile(
+    r"(?m)^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+)
+_LET_CONST_BINDING_RE = re.compile(
+    r"(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+)
+_DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#define[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
@@ -196,6 +216,47 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
 
 
+def _binding_names(text: str) -> set[str]:
+    """Return names bound by assignments / defs / defines in ``text``.
+
+    Used to detect when appended tip content rebinds a name from an added salvage
+    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``), which
+    keeps a line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM).
+    Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
+    count; ``#define`` remains a binding.
+    """
+    names: set[str] = set()
+    for raw_line in text.splitlines():
+        stripped = raw_line.lstrip(" \t")
+        if stripped.startswith("//"):
+            continue
+        if stripped.startswith("#") and not stripped.startswith("#define"):
+            continue
+        for pattern in (
+            _DEFINE_BINDING_RE,
+            _DEF_BINDING_RE,
+            _CLASS_BINDING_RE,
+            _FUNCTION_BINDING_RE,
+            _LET_CONST_BINDING_RE,
+            _ASSIGN_BINDING_RE,
+        ):
+            match = pattern.match(raw_line)
+            if match is not None:
+                names.add(match.group(1))
+                break
+    return names
+
+
+def _suffix_can_supersede_added_salvage(*, salvage: str, suffix: str) -> bool:
+    """Return True when ``suffix`` rebinds a name bound in ``salvage``."""
+    if not suffix:
+        return False
+    salvage_names = _binding_names(salvage)
+    if not salvage_names:
+        return False
+    return bool(salvage_names & _binding_names(suffix))
+
+
 def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     """Return True when an added salvage blob remains applied in ``head_blob``.
 
@@ -211,6 +272,9 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     salvage lacks a trailing newline it must end at EOF or before a newline.
     Suffix retention additionally rejects a prepend that leaves an open block
     comment, triple-quoted string, or ``#if`` region (PRRT_kwDOSJAM6s6ZpaIn).
+    Prefix retention with a non-empty append additionally rejects when the
+    appended suffix rebinds a name bound in the salvage
+    (PRRT_kwDOSJAM6s6Zp8jM).
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
@@ -228,9 +292,16 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
         end = idx + len(commit_blob)
         return commit_blob.endswith("\n") or end == len(head_blob) or head_blob[end] == "\n"
 
-    # Append / exact: salvage remains a line-aligned prefix of the tip.
+    # Append / exact: salvage remains a line-aligned prefix of the tip. Exact
+    # match retains; a longer tip retains only when the appended suffix cannot
+    # supersede (rebind) names from the salvage (PRRT_kwDOSJAM6s6Zp8jM).
     if _line_aligned_at(0):
-        return True
+        if len(head_blob) == len(commit_blob):
+            return True
+        return not _suffix_can_supersede_added_salvage(
+            salvage=commit_blob,
+            suffix=head_blob[len(commit_blob) :],
+        )
     # Prepend: salvage remains a line-aligned suffix (not already covered above),
     # and the prepended prefix must not leave an open disabling context.
     suffix_idx = len(head_blob) - len(commit_blob)
@@ -262,7 +333,8 @@ async def _commit_changes_present_in_head(
     prefix or suffix of the tip blob so append/prepend keep evidence while
     mid-line modifications, mid-file disabling wrappers (``#if 0`` / comments /
     strings), prepended unterminated wrappers that leave salvage as a suffix
-    (PRRT_kwDOSJAM6s6ZpaIn), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
+    (PRRT_kwDOSJAM6s6ZpaIn), appended rebinding of salvage names
+    (PRRT_kwDOSJAM6s6Zp8jM), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
     PRRT_kwDOSJAM6s6Zm6F1, PRRT_kwDOSJAM6s6ZpQKt). ``baseline``
     defaults to the tip's
     first parent; callers that retain a failed-run tip must pass the invocation
@@ -374,9 +446,11 @@ async def _commit_changes_present_in_head(
             # while leaving the added bytes intact (OID changes). Exact OID is
             # sufficient but not required — require line-boundary-aligned
             # prefix or suffix retention of the salvage blob; suffix also
-            # rejects open disabling wrappers
+            # rejects open disabling wrappers, and prefix+append rejects
+            # rebinding of salvage names
             # (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1,
-            # PRRT_kwDOSJAM6s6ZpQKt, PRRT_kwDOSJAM6s6ZpaIn).
+            # PRRT_kwDOSJAM6s6ZpQKt, PRRT_kwDOSJAM6s6ZpaIn,
+            # PRRT_kwDOSJAM6s6Zp8jM).
             head_raw = await _blob_raw(head_oid)
             commit_raw = await _blob_raw(commit_oid)
             if head_raw is None or commit_raw is None:

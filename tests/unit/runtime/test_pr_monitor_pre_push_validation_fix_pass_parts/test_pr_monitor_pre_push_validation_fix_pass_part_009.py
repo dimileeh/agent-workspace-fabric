@@ -80,6 +80,34 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="enable_guard()\n",
         head_blob="prefix\nenable_guard()\n",
     )
+    # Appended rebinding of a salvage assignment must fail closed: the original
+    # addition remains a line-aligned prefix, but the later assignment supersedes
+    # it (PRRT_kwDOSJAM6s6Zp8jM).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = False\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED: bool = False\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="#define FEATURE_ENABLED 1\n",
+        head_blob="#define FEATURE_ENABLED 1\n#define FEATURE_ENABLED 0\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="def guard():\n    return True\n",
+        head_blob="def guard():\n    return True\ndef guard():\n    return False\n",
+    )
+    # Comment-only / unrelated appends cannot supersede the salvage binding.
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n# FEATURE_ENABLED = False\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nother = 1\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob="enable_guard()\n",
         head_blob="# enable_guard()\n",
