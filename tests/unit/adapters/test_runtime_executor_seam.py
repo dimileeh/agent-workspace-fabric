@@ -24,6 +24,7 @@ import asyncio
 import inspect
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import structlog
@@ -1410,20 +1411,32 @@ class TestAgentAdapterBaseDefaults:
         """When task cancellation occurs after execute_task is already done, result is discarded."""
 
         class _FastDoneExecutor:
+            def __init__(self) -> None:
+                self.outer_task: asyncio.Task[Any] | None = None
+
             async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
-                current = asyncio.current_task()
-                if current:
-                    current.cancel()
+                if self.outer_task:
+                    self.outer_task.cancel()
                 return AgentRuntimeExecResult(returncode=0, stdout="done", stderr="")
 
-        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=_FastDoneExecutor())
-        with pytest.raises(asyncio.CancelledError):
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-                workspace_id="ws_done_cancel",
+        executor = _FastDoneExecutor()
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=executor)
+
+        with patch("awf.adapters.base._discard_hosted_execute_task_result") as mock_discard:
+            run_task = asyncio.create_task(
+                adapter.run(
+                    compose_project=_COMPOSE_PROJECT,
+                    compose_file=_COMPOSE_FILE,
+                    prompt=_PROMPT,
+                    workspace_id="ws_done_cancel",
+                )
             )
+            executor.outer_task = run_task
+
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            mock_discard.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.unit
