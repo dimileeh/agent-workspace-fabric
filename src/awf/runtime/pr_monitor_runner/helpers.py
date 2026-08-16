@@ -267,6 +267,14 @@ _MARKDOWN_TASK_LIST_CHECKBOX = re.compile(r"^\[(?: |x|X)\]\s+")
 # Same attempt-only strip as list prefixes — a trailing blockquoted marker must
 # fail closed rather than leave an earlier resolvable verdict selected.
 _MARKDOWN_BLOCKQUOTE_PREFIX = re.compile(r"^(?:>\s*)+")
+# Common LLM "Final answer:" wrappers before a canonical marker. Attempt-only
+# strip — a trailing ``Final answer: AWF-VERDICT: …`` must fail closed rather
+# than leave an earlier resolvable verdict selected when the start-only
+# attempt check would otherwise ignore the mid-segment marker.
+_FINAL_ANSWER_ATTEMPT_PREFIX = re.compile(
+    r"^(?:(?:my|the)\s+)?final\s+answer(?:\s+is)?\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
@@ -843,19 +851,27 @@ def _ascii_apostrophe_is_leading_elision(verdict_line: str, index: int) -> bool:
     return suffix in _ASCII_LEADING_ELISION_SUFFIXES
 
 
+def _strip_final_answer_attempt_prefix(stripped: str) -> str:
+    """Remove a leading ``Final answer:``-style wrapper, if present."""
+    return _FINAL_ANSWER_ATTEMPT_PREFIX.sub("", stripped, count=1)
+
+
 def _strip_markdown_attempt_prefixes(segment: str) -> str:
-    """Strip leading Markdown list/blockquote/task-list markers until none apply.
+    """Strip leading Markdown / final-answer wrappers until none apply.
 
     Agents may nest them in either order (``- > AWF-VERDICT: …``,
-    ``> - > AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``). One-pass
-    blockquote-then-list leaves a residual ``>`` after ``- >``, and plain list
-    strip leaves ``[ ]`` after a GFM task-list item, so the marker no longer
-    looks like a leading attempt.
+    ``> - > AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``,
+    ``Final answer: AWF-VERDICT: …``). One-pass blockquote-then-list leaves a
+    residual ``>`` after ``- >``, plain list strip leaves ``[ ]`` after a GFM
+    task-list item, and a bare start-only check misses ``Final answer:``
+    wrappers — so the marker no longer looks like a leading attempt.
     """
     normalized = segment.lstrip()
     while True:
-        stripped = _strip_markdown_task_list_checkbox(
-            _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+        stripped = _strip_final_answer_attempt_prefix(
+            _strip_markdown_task_list_checkbox(
+                _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+            )
         )
         if stripped == normalized:
             return normalized
@@ -867,9 +883,10 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
 
     Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
     attempts; only segments that begin with the marker count toward the
-    final-marker fail-closed gate. Leading Markdown blockquote, list, and
-    task-list checkbox markers are stripped first so ``> AWF-VERDICT: …`` /
-    ``- AWF-VERDICT: SHIPPED: …`` / ``- [ ] AWF-VERDICT: …`` still count as
+    final-marker fail-closed gate. Leading Markdown blockquote, list,
+    task-list checkbox, and ``Final answer:`` wrappers are stripped first so
+    ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …`` /
+    ``- [ ] AWF-VERDICT: …`` / ``Final answer: AWF-VERDICT: …`` still count as
     garbled finals.
     """
     return _AWF_VERDICT_MARKER.match(_strip_markdown_attempt_prefixes(segment)) is not None
