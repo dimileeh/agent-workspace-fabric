@@ -990,9 +990,9 @@ class TestParseVerdict:
     def test_private_awf_verdict_same_line_leading_defer_then_needs_human(
         self,
     ) -> None:
-        # DEFER is resolvable/non-blocking — same-line absorption is NEEDS_HUMAN
-        # only. A later unquoted NEEDS_HUMAN must win (fail closed), not be
-        # swallowed as DEFER reason prose (#822 PRRT_kwDOSJAM6s6Zl4Ra repair).
+        # DEFER absorbs later nonblocking citations, but a later unquoted
+        # NEEDS_HUMAN must still win (fail closed), not be swallowed as DEFER
+        # reason prose (#822 PRRT_kwDOSJAM6s6Zl4Ra repair).
         result = _parse_verdict_result(
             "AWF-VERDICT: DEFER: maybe use AWF-VERDICT: NEEDS_HUMAN: actually block"
         )
@@ -1001,18 +1001,47 @@ class TestParseVerdict:
         assert result.reason == "actually block"
 
     @pytest.mark.unit
-    def test_private_awf_verdict_same_line_leading_defer_then_false_positive_wins(
+    def test_private_awf_verdict_same_line_unquoted_marker_in_defer_reason_keeps_defer(
         self,
     ) -> None:
-        # Leading DEFER keeps normal later-marker / final-marker handling
-        # (parity with multiline DEFER then FALSE POSITIVE).
+        # Unquoted marker-grammar citations inside a DEFER reason must stay
+        # rationale. Splitting them lets false_positive win and skips the DEFER
+        # tracking artifact (#822 PRRT_kwDOSJAM6s6Zm6F4).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: DEFER: stop emitting AWF-VERDICT: FALSE POSITIVE: for valid findings"
+        )
+
+        assert result.verdict == "defer"
+        assert result.reason == ("stop emitting AWF-VERDICT: FALSE POSITIVE: for valid findings")
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_leading_defer_absorbs_false_positive_citation(
+        self,
+    ) -> None:
+        # Mid-reason FALSE POSITIVE grammar after DEFER is a citation, not a
+        # separate attempt — keep DEFER so tracking-issue creation still runs.
         result = _parse_verdict_result(
             "AWF-VERDICT: DEFER: track whether to emit "
             "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
         )
 
+        assert result.verdict == "defer"
+        assert result.reason == (
+            "track whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_quote_adjacent_trailing_after_defer_still_splits(
+        self,
+    ) -> None:
+        # Unambiguous trailing attempts after a closed quote still split for
+        # DEFER leaders (parity with FIXED absorption gate).
+        result = _parse_verdict_result(
+            'AWF-VERDICT: DEFER: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
+        )
+
         assert result.verdict == "false_positive"
-        assert result.reason == "reviewer is wrong."
+        assert result.reason == "real trailing"
 
     @pytest.mark.unit
     def test_private_awf_verdict_same_line_curly_quoted_marker_keeps_needs_human(
