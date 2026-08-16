@@ -205,6 +205,8 @@ uv run --python 3.12 --extra dev awf workspace adopt-pr \
   --repo owner/repo \
   --pr 123 \
   --auto-merge \
+  --external-id CLOUD-TASK-42 \
+  --task-class test_task \
   --reason "attach AWF to existing PR"
 ```
 
@@ -218,10 +220,15 @@ uv run --python 3.12 --extra dev awf workspace adopt-pr \
 ```
 
 `awf workspace adopt-pr` posts to `POST /v1/workspaces/adopt-pr` and uses
-`AWF_API_TOKEN` or `--api-token` for AWF API auth. GitHub PR metadata and later
+`AWF_API_TOKEN` or `--api-token` for AWF API auth. Optional `--external-id` and
+`--task-class` mirror the REST/MCP adoption identity inputs (omit
+`--external-id` for the generated repo/PR identity). GitHub PR metadata and later
 monitor actions use the service-visible `AWF_GITHUB_TOKEN`, with `GH_TOKEN` and
 `GITHUB_TOKEN` accepted as fallbacks. AWF derives deterministic repo/PR
-idempotency for adoption; do not pass an adoption idempotency key. See
+idempotency for adoption; do not pass an adoption idempotency key. Changing
+`external_id` or `task_class` on a live adoption returns
+`PR_ADOPTION_POLICY_CONFLICT`; an explicit `external_id` owned by another task
+scope returns `TASK_EXTERNAL_ID_CONFLICT`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub readiness, permissions,
 terminal adoption retry behavior, console inspection, REST/MCP examples, and the
 mocked-local docs-tested demo path.

@@ -23,12 +23,14 @@ from awf.db.models import (
     Workspace,
 )
 from awf.db.repositories import (
+    TaskAttemptRepository,
     TaskExternalIdConflictError,
     TaskRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
+from awf.service import pr_monitor_adoption_helpers as adoption_helpers
 from awf.service.pr_monitor_adoption import (
     _LIVE_ADOPTION_STATUSES,
     PRMonitorAdoptionError,
@@ -215,10 +217,6 @@ class TestPullRequestMonitorAdoptionServicePart003:
             repo_slug="dimileeh/aira-web",
             pr_number=277,
         )
-        already_superseded_external_id = adoption_module._superseded_adoption_external_id(
-            external_id=adoption_external_id,
-            workspace_id="prior-generation",
-        )
         task_generation_key = f"{logical_key}:g1"
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(
@@ -233,6 +231,10 @@ class TestPullRequestMonitorAdoptionServicePart003:
             assert result.task_id is not None
             task = await TaskRepository(session).get(result.task_id)
             assert task is not None
+            already_superseded_external_id = adoption_module._superseded_adoption_external_id(
+                external_id=adoption_external_id,
+                workspace_id=workspace.id,
+            )
             workspace.status = WorkspaceStatus.destroyed.value
             workspace.task_external_id = already_superseded_external_id
             task.idempotency_key = task_generation_key
@@ -256,6 +258,412 @@ class TestPullRequestMonitorAdoptionServicePart003:
             assert task is not None
             assert task.idempotency_key == task_generation_key
             assert task.external_id == already_superseded_external_id
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_preserves_shared_source_task_external_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Do not rewrite a joined same-scope task's identity on supersession."""
+        logical_key = _canonical_key()
+        shared_external_id = "CLOUD-SHARED-TASK-42"
+        source_task_key = "source-workspace-idempotency"
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert result.task_id is not None
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+            # Simulate joining an existing same-scope source task that adoption
+            # does not own (different idempotency key, shared external_id).
+            task.idempotency_key = source_task_key
+            task.external_id = shared_external_id
+            workspace.task_external_id = shared_external_id
+            await session.flush()
+
+            await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.task_external_id == (
+                adoption_module._superseded_adoption_external_id(
+                    external_id=shared_external_id,
+                    workspace_id=result.workspace_id,
+                )
+            )
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            assert task.idempotency_key == source_task_key
+            assert task.external_id == shared_external_id
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_preserves_null_key_source_task_after_join(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Null-key source tasks stamped by reuse must not look adoption-owned."""
+        logical_key = _canonical_key()
+        shared_external_id = "CLOUD-NULL-KEY-SOURCE-77"
+        async with factory() as session:
+            source_task = await TaskRepository(session).create_or_get(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                base_branch="development",
+                title="feature: ready",
+                prompt="source workspace work",
+                external_id=shared_external_id,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            source_workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="feature: ready",
+                task_prompt="source workspace work",
+                task_external_id=shared_external_id,
+                agent="codex",
+                test_commands=[],
+            )
+            await TaskAttemptRepository(session).create_for_workspace(
+                task=source_task,
+                workspace=source_workspace,
+            )
+
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            assert result.task_id == source_task.id
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            task = await TaskRepository(session).get(source_task.id)
+            assert task is not None
+            # Reuse stamps the adoption key onto the formerly-null source row.
+            assert task.idempotency_key == logical_key
+            assert task.external_id == shared_external_id
+            workspace.status = WorkspaceStatus.destroyed.value
+            await session.flush()
+
+            await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.task_external_id == (
+                adoption_module._superseded_adoption_external_id(
+                    external_id=shared_external_id,
+                    workspace_id=result.workspace_id,
+                )
+            )
+            task = await TaskRepository(session).get(source_task.id)
+            assert task is not None
+            assert task.idempotency_key == logical_key
+            assert task.external_id == shared_external_id
+
+    @pytest.mark.unit
+    async def test_terminal_readoption_rejoins_null_key_source_task_with_explicit_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Destroyed join of a reuse-stamped null-key source must re-adopt cleanly.
+
+        Supersession preserves the stamped logical key on the shared task. Create
+        must rejoin that task under the same explicit external_id instead of
+        treating the key as a prior adoption-owned generation.
+        """
+        shared_external_id = "CLOUD-NULL-KEY-READOPT-88"
+        async with factory() as session:
+            source_task = await TaskRepository(session).create_or_get(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                base_branch="development",
+                title="feature: ready",
+                prompt="source workspace work",
+                external_id=shared_external_id,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            source_workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="feature: ready",
+                task_prompt="source workspace work",
+                task_external_id=shared_external_id,
+                agent="codex",
+                test_commands=[],
+            )
+            await TaskAttemptRepository(session).create_for_workspace(
+                task=source_task,
+                workspace=source_workspace,
+            )
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            assert first.task_id == source_task.id
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert first_workspace is not None
+            first_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert second.task_id == source_task.id
+        async with factory() as session:
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            shared_task = await TaskRepository(session).get(source_task.id)
+            assert fresh_workspace is not None
+            assert shared_task is not None
+            assert fresh_workspace.task_external_id == shared_external_id
+            assert shared_task.external_id == shared_external_id
+            assert shared_task.idempotency_key == _canonical_key()
+
+    @pytest.mark.unit
+    async def test_terminal_readoption_rejoins_shared_peer_adoption_task_with_explicit_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Peer adoption attempts establish shared ownership like source joins.
+
+        Two same-scope PR adoptions that share an explicit external_id join one
+        task. When the key-owning adoption goes terminal, supersession preserves
+        identity because of the peer attempt; re-adoption must rejoin that task
+        instead of raising TASK_EXTERNAL_ID_CONFLICT.
+        """
+        shared_external_id = "CLOUD-PEER-ADOPTION-99"
+        shared_title = "feature: shared-ownership"
+
+        class _ByNumberFetcher:
+            def __init__(self, by_number: dict[int, PullRequestAdoptionMetadata]) -> None:
+                self.by_number = by_number
+
+            async def __call__(
+                self, *, repo: RepoRef, pr_number: int
+            ) -> PullRequestAdoptionMetadata:
+                del repo
+                return self.by_number[pr_number]
+
+        fetcher = _ByNumberFetcher(
+            {
+                277: _metadata(number=277, title=shared_title, head_ref="feature/a"),
+                278: _metadata(number=278, title=shared_title, head_ref="feature/b"),
+            }
+        )
+
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            peer = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=278,
+                    external_id=shared_external_id,
+                )
+            )
+            assert peer.task_id == first.task_id
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert first_workspace is not None
+            first_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert second.task_id == first.task_id
+        async with factory() as session:
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            shared_task = await TaskRepository(session).get(first.task_id)
+            assert fresh_workspace is not None
+            assert shared_task is not None
+            assert fresh_workspace.task_external_id == shared_external_id
+            assert shared_task.external_id == shared_external_id
+            assert shared_task.idempotency_key == _canonical_key()
+
+    @pytest.mark.unit
+    async def test_terminal_readoption_serializes_with_in_flight_external_id_join(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Peer join holding the task row must block supersession ownership.
+
+        Without FOR UPDATE on reuse + ownership, terminal re-adoption can miss
+        an uncommitted peer attempt, rewrite the shared external ID, and leave
+        the joiner attached to a superseded task identity.
+        """
+        shared_external_id = "CLOUD-JOIN-LOCK-42"
+        shared_title = "feature: join-lock"
+
+        class _ByNumberFetcher:
+            def __init__(self, by_number: dict[int, PullRequestAdoptionMetadata]) -> None:
+                self.by_number = by_number
+
+            async def __call__(
+                self, *, repo: RepoRef, pr_number: int
+            ) -> PullRequestAdoptionMetadata:
+                del repo
+                return self.by_number[pr_number]
+
+        fetcher = _ByNumberFetcher(
+            {
+                277: _metadata(number=277, title=shared_title, head_ref="feature/a"),
+                278: _metadata(number=278, title=shared_title, head_ref="feature/b"),
+            }
+        )
+
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert first_workspace is not None
+            first_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+            owned_task_id = first.task_id
+
+        join_locked = asyncio.Event()
+        release_join = asyncio.Event()
+
+        async def _peer_join_holding_task() -> None:
+            async with factory() as session, session.begin():
+                task = await TaskRepository(session).create_or_get(
+                    repo_url="git@github.com:dimileeh/aira-web.git",
+                    base_branch="development",
+                    title=shared_title,
+                    prompt="peer join before attempt",
+                    external_id=shared_external_id,
+                    idempotency_key="peer-join-key",
+                    task_class=None,
+                    owned_paths=[],
+                )
+                assert task.id == owned_task_id
+                join_locked.set()
+                await release_join.wait()
+                peer_workspace = await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:dimileeh/aira-web.git",
+                    branch_base="development",
+                    task_title=shared_title,
+                    task_prompt="peer join before attempt",
+                    task_external_id=shared_external_id,
+                    agent="codex",
+                    test_commands=[],
+                )
+                await TaskAttemptRepository(session).create_for_workspace(
+                    task=task,
+                    workspace=peer_workspace,
+                )
+
+        async def _terminal_readopt() -> str:
+            await join_locked.wait()
+            async with factory() as session:
+                result = await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=fetcher,
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        external_id=shared_external_id,
+                    )
+                )
+                await session.commit()
+                return result.task_id
+
+        peer_task = asyncio.create_task(_peer_join_holding_task())
+        await join_locked.wait()
+        readopt_task = asyncio.create_task(_terminal_readopt())
+        await asyncio.sleep(0.25)
+        assert not readopt_task.done(), "re-adoption must wait on the in-flight join lock"
+        release_join.set()
+        await peer_task
+        readopt_task_id = await asyncio.wait_for(readopt_task, timeout=10)
+
+        assert readopt_task_id == owned_task_id
+        async with factory() as session:
+            shared_task = await TaskRepository(session).get(owned_task_id)
+            assert shared_task is not None
+            assert shared_task.external_id == shared_external_id
+            assert shared_task.idempotency_key == _canonical_key()
 
     @pytest.mark.unit
     async def test_supersede_previous_adoption_tolerates_missing_task_row(
@@ -331,6 +739,10 @@ class TestPullRequestMonitorAdoptionServicePart003:
                     idempotency_key=logical_key,
                     logical_idempotency_key=logical_key,
                     previous_terminal_adoptions=[],
+                    effective_external_id=adoption_module._adoption_external_id(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                    ),
                 )
 
     @pytest.mark.unit
@@ -429,9 +841,9 @@ class TestPullRequestMonitorAdoptionServicePart003:
             del logical_idempotency_key, task_external_id
             return []
 
-        monkeypatch.setattr(adoption_module, "_task_idempotency_key_family", _reserved_task_keys)
+        monkeypatch.setattr(adoption_helpers, "_task_idempotency_key_family", _reserved_task_keys)
         monkeypatch.setattr(
-            adoption_module,
+            adoption_helpers,
             "_task_external_id_family_idempotency_keys",
             _reserved_external_keys,
         )
