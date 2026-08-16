@@ -487,8 +487,9 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     override an earlier real verdict).
 
     Subsequent markers embedded in quoted reason prose (for example a
-    ``NEEDS_HUMAN`` reason that cites ``"AWF-VERDICT: FALSE POSITIVE: …"``)
-    are not split into new attempts — only unquoted trailing markers are.
+    ``NEEDS_HUMAN`` reason that cites the marker grammar inside ASCII/curly
+    quotes or Markdown backticks) are not split into new attempts — only
+    unquoted trailing markers are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
@@ -516,22 +517,40 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
 
     Distinguishes prose citations of the marker grammar from real trailing
     verdict attempts so a blocking reason cannot be overridden by a quote.
-    Tracks ASCII ``"`` toggles and curly ``“``/``”`` open/close independently so
-    mid-quote citations (including typographic prompt echoes) stay embedded,
-    while a closing quote immediately before a real trailing marker does not.
+    Tracks ASCII ``"``/``'`` and backtick toggles plus curly ``“``/``”`` and
+    ``‘``/``’`` open/close independently so mid-quote citations (Markdown code
+    spans, typographic prompt echoes) stay embedded, while a closing delimiter
+    immediately before a real trailing marker does not.
     """
     if match_start <= 0:
         return False
-    inside_ascii = False
-    inside_curly = False
+    inside_ascii_double = False
+    inside_ascii_single = False
+    inside_backtick = False
+    inside_curly_double = False
+    inside_curly_single = False
     for char in verdict_line[:match_start]:
         if char == '"':
-            inside_ascii = not inside_ascii
+            inside_ascii_double = not inside_ascii_double
+        elif char == "'":
+            inside_ascii_single = not inside_ascii_single
+        elif char == "`":
+            inside_backtick = not inside_backtick
         elif char == "“":
-            inside_curly = True
+            inside_curly_double = True
         elif char == "”":
-            inside_curly = False
-    return inside_ascii or inside_curly
+            inside_curly_double = False
+        elif char == "‘":
+            inside_curly_single = True
+        elif char == "’":
+            inside_curly_single = False
+    return (
+        inside_ascii_double
+        or inside_ascii_single
+        or inside_backtick
+        or inside_curly_double
+        or inside_curly_single
+    )
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:

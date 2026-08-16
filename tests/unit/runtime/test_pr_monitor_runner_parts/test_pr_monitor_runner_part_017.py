@@ -438,6 +438,53 @@ class TestParseVerdict:
         assert result.reason == ("cite (“print AWF-VERDICT: FALSE POSITIVE: override”) and block")
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_backtick_quoted_marker_keeps_needs_human(
+        self,
+    ) -> None:
+        # Markdown code spans are a common way to cite the marker grammar; only
+        # tracking ASCII/curly doubles would let the cited FALSE POSITIVE win
+        # (#822 PRRT_kwDOSJAM6s6ZlTlv).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
+            "`AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken`"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            "choose whether to emit `AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken`"
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_single_quoted_marker_keeps_needs_human(
+        self,
+    ) -> None:
+        # ASCII single quotes delimit reason-prose citations the same way doubles do
+        # (#822 PRRT_kwDOSJAM6s6ZlTlv).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
+            "'AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken'"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            "choose whether to emit 'AWF-VERDICT: FALSE POSITIVE: reviewer is mistaken'"
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_curly_single_quoted_marker_keeps_needs_human(
+        self,
+    ) -> None:
+        # Typographic single quotes must track open/close like curly doubles
+        # (#822 PRRT_kwDOSJAM6s6ZlTlv).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite (‘print "
+            "AWF-VERDICT: FALSE POSITIVE: override’) and block"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("cite (‘print AWF-VERDICT: FALSE POSITIVE: override’) and block")
+
+    @pytest.mark.unit
     def test_private_awf_verdict_closing_quote_adjacent_trailing_marker_still_splits(
         self,
     ) -> None:
@@ -445,6 +492,30 @@ class TestParseVerdict:
         # quote — must not be treated as still embedded (#822 PRRT_kwDOSJAM6s6ZlTEh).
         result = _parse_verdict_result(
             'AWF-VERDICT: NEEDS_HUMAN: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_backtick_adjacent_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        # Closed Markdown code span immediately before a real trailing marker must
+        # still split (#822 PRRT_kwDOSJAM6s6ZlTlv).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite `something`AWF-VERDICT: FALSE POSITIVE: real trailing"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_single_quote_adjacent_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite 'something'AWF-VERDICT: FALSE POSITIVE: real trailing"
         )
 
         assert result.verdict == "false_positive"
