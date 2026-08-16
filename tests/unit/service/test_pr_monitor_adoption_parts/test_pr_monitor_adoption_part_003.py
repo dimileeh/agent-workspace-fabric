@@ -23,6 +23,7 @@ from awf.db.models import (
     Workspace,
 )
 from awf.db.repositories import (
+    TaskAttemptRepository,
     TaskExternalIdConflictError,
     TaskRepository,
     WorkspaceRepository,
@@ -311,6 +312,83 @@ class TestPullRequestMonitorAdoptionServicePart003:
             task = await TaskRepository(session).get(result.task_id)
             assert task is not None
             assert task.idempotency_key == source_task_key
+            assert task.external_id == shared_external_id
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_preserves_null_key_source_task_after_join(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Null-key source tasks stamped by reuse must not look adoption-owned."""
+        logical_key = _canonical_key()
+        shared_external_id = "CLOUD-NULL-KEY-SOURCE-77"
+        async with factory() as session:
+            source_task = await TaskRepository(session).create_or_get(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                base_branch="development",
+                title="feature: ready",
+                prompt="source workspace work",
+                external_id=shared_external_id,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            source_workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="feature: ready",
+                task_prompt="source workspace work",
+                task_external_id=shared_external_id,
+                agent="codex",
+                test_commands=[],
+            )
+            await TaskAttemptRepository(session).create_for_workspace(
+                task=source_task,
+                workspace=source_workspace,
+            )
+
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            assert result.task_id == source_task.id
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            task = await TaskRepository(session).get(source_task.id)
+            assert task is not None
+            # Reuse stamps the adoption key onto the formerly-null source row.
+            assert task.idempotency_key == logical_key
+            assert task.external_id == shared_external_id
+            workspace.status = WorkspaceStatus.destroyed.value
+            await session.flush()
+
+            await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.task_external_id == (
+                adoption_module._superseded_adoption_external_id(
+                    external_id=shared_external_id,
+                    workspace_id=result.workspace_id,
+                )
+            )
+            task = await TaskRepository(session).get(source_task.id)
+            assert task is not None
+            assert task.idempotency_key == logical_key
             assert task.external_id == shared_external_id
 
     @pytest.mark.unit

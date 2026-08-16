@@ -254,10 +254,16 @@ class PullRequestMonitorAdoptionService:
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
         if attempt is not None:
             task = await TaskRepository(self._session).get(attempt.task_id)
-            if task is not None and task.idempotency_key == idempotency_key:
+            if task is not None and await _adoption_owns_task_identity(
+                self._session,
+                task,
+                adoption_idempotency_key=idempotency_key,
+                workspace_id=workspace.id,
+            ):
                 # Only rewrite identity on adoption-owned tasks. A joined
                 # same-scope source task keeps its external_id / key so prior
-                # attempts and future lookups stay intact.
+                # attempts and future lookups stay intact — including when
+                # reuse stamped a null source key with the adoption key.
                 task.idempotency_key = superseded_idempotency_key
                 task.external_id = _release_superseded_adoption_external_id(
                     task.external_id,
@@ -766,6 +772,33 @@ async def _next_adoption_task_idempotency_key(
 async def _task_has_existing_attempt(session: AsyncSession, task_id: str) -> bool:
     stmt = select(TaskAttempt.id).where(TaskAttempt.task_id == task_id).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _adoption_owns_task_identity(
+    session: AsyncSession,
+    task: Task,
+    *,
+    adoption_idempotency_key: str,
+    workspace_id: str,
+) -> bool:
+    """Return whether supersession may rewrite this task's identity slots.
+
+    Key equality alone is insufficient: joining a same-scope source task whose
+    ``idempotency_key`` was null causes ``TaskRepository._reuse_or_conflict`` to
+    stamp the adoption key onto that shared row. Ownership therefore requires
+    both a matching key and no attempt from any other workspace.
+    """
+    if task.idempotency_key != adoption_idempotency_key:
+        return False
+    stmt = (
+        select(TaskAttempt.id)
+        .where(
+            TaskAttempt.task_id == task.id,
+            TaskAttempt.workspace_id != workspace_id,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is None
 
 
 def _is_adoption_generation_suffix(value: str) -> bool:
