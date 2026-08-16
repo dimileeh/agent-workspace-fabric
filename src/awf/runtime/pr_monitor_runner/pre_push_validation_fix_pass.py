@@ -214,11 +214,12 @@ async def _commit_changes_present_in_head(
     """Return True when ``commit``'s first-parent changes still appear in ``head``.
 
     Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
-    reuse therefore requires either an identical tree at ``head``, or at least one
-    path changed by ``commit`` vs its first parent that still differs from the
-    parent blob at ``head``. A full revert (every salvaged path back to the parent
-    state), including revert-then-unrelated-edit tips, fails closed. Root commits
-    and unresolved objects also fail closed.
+    reuse therefore requires either an identical tree at ``head``, or that
+    **every** path changed by ``commit`` vs its first parent still differs from the
+    parent blob at ``head``. A partial or full revert (any salvaged path back to
+    the parent state), including revert-then-unrelated-edit tips, fails closed —
+    one surviving collateral path must not reuse evidence after the fix path is
+    gone. Root commits and unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -275,9 +276,9 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        if await _blob_at(head_sha, path) != await _blob_at(parent, path):
-            return True
-    return False
+        if await _blob_at(head_sha, path) == await _blob_at(parent, path):
+            return False
+    return True
 
 
 async def _reparent_fix_pass_commit(

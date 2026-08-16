@@ -589,6 +589,60 @@ async def test_commit_changes_present_in_head_accepts_preserved_and_rejects_reve
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_partial_multi_path_revert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """One surviving salvage path must not reuse evidence after another is reverted.
+
+    Salvage touched a.txt (the fix) and b.txt; a later tip restores only a.txt to
+    the parent blob while leaving b.txt. Complete-delta presence must fail closed
+    so a no-change retry cannot resolve the original thread on collateral alone.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.txt").write_text("base-a\n", encoding="utf-8")
+    (repo / "b.txt").write_text("base-b\n", encoding="utf-8")
+    _git(repo, "add", "a.txt", "b.txt")
+    _git(repo, "commit", "-qm", "base")
+    (repo / "a.txt").write_text("salvaged-a\n", encoding="utf-8")
+    (repo / "b.txt").write_text("salvaged-b\n", encoding="utf-8")
+    _git(repo, "add", "a.txt", "b.txt")
+    _git(repo, "commit", "-qm", "salvage both paths")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.txt").write_text("base-a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "revert only a.txt")
+    partial = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=partial,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_fail_closed_on_unresolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
