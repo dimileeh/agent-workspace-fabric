@@ -308,8 +308,11 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     def test_private_awf_verdict_ignores_markers_inside_html_code_block(self) -> None:
+        # Complete ``<code>`` is type 7 and cannot interrupt a paragraph — blank
+        # before the opener is required for shielding (PRRT_kwDOSJAM6s6ZqS4U).
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
             "<code>\n"
             "AWF-VERDICT: FALSE POSITIVE: example\n"
             "</code>\n"

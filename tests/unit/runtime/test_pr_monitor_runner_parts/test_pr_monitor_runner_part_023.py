@@ -64,9 +64,11 @@ class TestParseVerdict:
         self,
     ) -> None:
         # Type-7 complete custom tags also continue until a blank line
-        # (PRRT_kwDOSJAM6s6ZnUxZ).
+        # (PRRT_kwDOSJAM6s6ZnUxZ). CommonMark type 7 cannot interrupt a
+        # paragraph, so the opener needs a blank (or document start).
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
             "<custom-example>\n"
             "AWF-VERDICT: FALSE POSITIVE: example\n"
             "</custom-example>\n"
@@ -80,6 +82,49 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "tag",
+        ["<span>", "</span>", "<custom-example>"],
+        ids=["open_span", "close_span", "custom"],
+    )
+    def test_private_awf_verdict_type7_without_blank_does_not_shield_needs_human(
+        self,
+        tag: str,
+    ) -> None:
+        # Type 7 cannot interrupt a paragraph. Shielding ``<span>`` / ``</span>``
+        # / custom tags without a preceding blank suppressed a later explicit
+        # NEEDS_HUMAN and left an earlier FIXED authoritative
+        # (PRRT_kwDOSJAM6s6ZqS4U).
+        stdout = (
+            "AWF-VERDICT: FIXED: evidence-backed fix\n"
+            f"{tag}\n"
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_type7_after_blank_still_shields_through_blank(
+        self,
+    ) -> None:
+        # With a blank before the type-7 opener, blank-terminated shielding
+        # still applies through EOF when no terminating blank follows.
+        stdout = (
+            "AWF-VERDICT: FIXED: evidence-backed fix\n"
+            "\n"
+            "<span>\n"
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "evidence-backed fix"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "closer",
         ["</pre>", "</code>", "</script>", "</style>", "</textarea>"],
         ids=["close_pre", "close_code", "close_script", "close_style", "close_textarea"],
@@ -90,10 +135,12 @@ class TestParseVerdict:
     ) -> None:
         # CommonMark type 7 allows any complete closing tag (including type-1
         # names). Openers stay on the type-1 path; a naked ``</pre>`` /
-        # ``</script>`` must enter blank-terminated type-7 shielding or an
-        # example FALSE POSITIVE overrides NEEDS_HUMAN (PRRT_kwDOSJAM6s6Zn6x4).
+        # ``</script>`` after a blank must enter blank-terminated type-7
+        # shielding or an example FALSE POSITIVE overrides NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6Zn6x4).
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
             f"{closer}\n"
             "AWF-VERDICT: FALSE POSITIVE: example\n"
             "\n"
@@ -123,6 +170,7 @@ class TestParseVerdict:
         # POSITIVE inside the blank-line-terminated block overrides NEEDS_HUMAN.
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
             f"{opener}\n"
             "AWF-VERDICT: FALSE POSITIVE: example\n"
             "</custom-example>\n"
@@ -152,6 +200,7 @@ class TestParseVerdict:
             ),
             (
                 "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "\n"
                 "> - <custom-example>\n"
                 ">   AWF-VERDICT: FALSE POSITIVE: example\n"
                 "\n"
@@ -331,6 +380,7 @@ class TestParseVerdict:
             ),
             (
                 "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+                "\n"
                 "> - <code>\n"
                 ">   AWF-VERDICT: FALSE POSITIVE: example\n"
                 ">   </code>\n"

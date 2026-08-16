@@ -54,6 +54,7 @@ __all__ = (
     "_html_cdata_closes",
     "_html_type6_block_opens",
     "_html_type7_block_opens",
+    "_html_type7_may_start_at",
     "_html_complete_code_opens",
     "_html_complete_code_self_closes",
     "_html_blank_terminated_block_closes",
@@ -591,6 +592,20 @@ def _html_type7_block_opens(line: str) -> bool:
     return _HTML_TYPE7_BLOCK_OPEN.match(_normalize_markdown_fence_line(line)) is not None
 
 
+def _html_type7_may_start_at(lines: Sequence[str], idx: int) -> bool:
+    """Return whether a type-7 HTML block may start at ``lines[idx]``.
+
+    CommonMark type 7 cannot interrupt a paragraph, so the opener must be at
+    document start or immediately preceded by a blank line. Without this gate,
+    ``<span>`` / ``</span>`` / custom tags after a non-blank ``FIXED`` line
+    enter blank-terminated shielding and suppress a later ``NEEDS_HUMAN``
+    (PRRT_kwDOSJAM6s6ZqS4U). Type 6 may still interrupt and is not gated here.
+    """
+    if idx <= 0:
+        return True
+    return _HTML_BLANK_LINE.match(lines[idx - 1]) is not None
+
+
 def _html_complete_code_opens(line: str) -> bool:
     """Return whether ``line`` is a complete standalone ``<code>`` opener.
 
@@ -712,7 +727,9 @@ def _independent_region_mask_for_code_close_lookahead(
                 html_declaration = True
                 html_declaration_blockquote_depth = decl_bq_depth
             continue
-        if _html_type6_block_opens(line) or _html_type7_block_opens(line):
+        type6_opens = _html_type6_block_opens(line)
+        type7_opens = _html_type7_block_opens(line)
+        if type6_opens or (type7_opens and _html_type7_may_start_at(lines, idx)):
             # Do not treat complete ``<code>`` as an independent blank-terminated
             # region — that would mask a real later ``</code>`` and defeat hybrid
             # look-ahead. Self-closing / never-closed complete openers stay free.
@@ -728,6 +745,11 @@ def _independent_region_mask_for_code_close_lookahead(
             if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
                 html_blank_terminated = True
                 html_blank_terminated_blockquote_depth = opened_bq_depth
+            continue
+        if type7_opens:
+            # Type-7 shape that cannot interrupt a paragraph: skip without
+            # masking and without falling through to type-1/example ``code``
+            # openers (complete ``<code>`` would otherwise close-tag shield).
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:
@@ -1045,7 +1067,12 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
         # Self-closing ``<code/>`` and never-closed ``<code>`` stay on pure
         # blank termination (PRRT_kwDOSJAM6s6ZpTPI). Incomplete / same-line
         # ``<code…`` still fall through to the close-tag path below.
-        if _html_type6_block_opens(line) or _html_type7_block_opens(line):
+        # Type 7 cannot interrupt a paragraph: require document start or a
+        # preceding blank before blank-terminated / hybrid shielding
+        # (PRRT_kwDOSJAM6s6ZqS4U). Type 6 may still interrupt.
+        type6_opens = _html_type6_block_opens(line)
+        type7_opens = _html_type7_block_opens(line)
+        if type6_opens or (type7_opens and _html_type7_may_start_at(lines, idx)):
             # Type 6/7 continue until a blank line (same-line wrappers still
             # skip the opener line itself). Track opener blockquote depth so
             # matching ``>`` / ``>   `` content blanks can terminate without
@@ -1075,6 +1102,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):
                 html_blank_terminated = True
                 html_blank_terminated_blockquote_depth = opened_bq_depth
+            continue
+        if type7_opens:
+            # Cannot interrupt a paragraph — skip the tag line without shielding
+            # and without falling through to type-1/example ``code`` openers.
             continue
         opened_html = _html_code_block_open_tag(line)
         if opened_html is not None:

@@ -167,6 +167,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_type7_block_opens as _html_type7_block_opens,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_type7_may_start_at as _html_type7_may_start_at,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _iter_non_fenced_verdict_lines as _iter_non_fenced_verdict_lines,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -242,6 +245,7 @@ __all__ = (
     "_html_cdata_closes",
     "_html_type6_block_opens",
     "_html_type7_block_opens",
+    "_html_type7_may_start_at",
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_iter_non_fenced_verdict_lines",
