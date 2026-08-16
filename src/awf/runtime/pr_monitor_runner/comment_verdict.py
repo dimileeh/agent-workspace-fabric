@@ -335,6 +335,7 @@ async def _invoke_cli_for_verdict_result(
         item_end_head = await rev_parse_end(worktree_path)
 
     descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
     local_ancestry_evaluable = (
         item_start_head is not None
         and item_end_head is not None
@@ -347,20 +348,27 @@ async def _invoke_cli_for_verdict_result(
         assert item_start_head is not None
         assert item_end_head is not None
         assert callable(descends)
-        if item_end_head.lower() != item_start_head.lower():
-            # SHA inequality alone accepts resets/checkouts to older tips.
-            # Require forward-only ancestry when evaluable; dirty evidence must
-            # not override a known non-descendant move.
+        # SHA inequality alone accepts resets/checkouts to older tips.
+        # Require forward-only ancestry when evaluable; dirty evidence must
+        # not override a known non-descendant move. Forward ancestry alone
+        # still accepts empty commits (unchanged tree); require a tree diff.
+        if item_end_head.lower() != item_start_head.lower() and await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=item_end_head,
+        ):
             local_head_advanced = bool(
-                await descends(
+                callable(trees_differ)
+                and await trees_differ(
                     worktree_path=worktree_path,
-                    ancestor=item_start_head,
-                    descendant=item_end_head,
+                    left=item_start_head,
+                    right=item_end_head,
                 )
             )
     # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
     # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
     # FIXED via the flag after local ancestry correctly rejected the same move.
+    # Empty hosted tips need the same tree-diff gate as local advances.
     hosted_head_advanced = False
     if state is not None and state.hosted_terminal_head_advanced:
         synced_head = (state.last_push_sha or "").strip() or None
@@ -370,12 +378,18 @@ async def _invoke_cli_for_verdict_result(
             and synced_head.lower() != item_start_head.lower()
             and callable(descends)
             and worktree_path.exists()
+            and await descends(
+                worktree_path=worktree_path,
+                ancestor=item_start_head,
+                descendant=synced_head,
+            )
         ):
             hosted_head_advanced = bool(
-                await descends(
+                callable(trees_differ)
+                and await trees_differ(
                     worktree_path=worktree_path,
-                    ancestor=item_start_head,
-                    descendant=synced_head,
+                    left=item_start_head,
+                    right=synced_head,
                 )
             )
     # Dirty commit is item-scoped evidence only when local HEAD/ancestry cannot

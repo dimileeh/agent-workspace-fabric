@@ -158,6 +158,38 @@ async def _head_descends_from(
     return bool(result.ok)
 
 
+async def _commit_trees_differ(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+) -> bool:
+    """Return True when ``left`` and ``right`` resolve to different trees.
+
+    Forward ancestry alone accepts empty commits (``git commit --allow-empty``):
+    the tip advances with an unchanged tree. FIXED evidence requires a content
+    change, so compare ``^{tree}`` SHAs. Fail closed when either tree cannot be
+    resolved.
+    """
+    git_env = git_env_without_object_lookup_overrides()
+    left_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "rev-parse", f"{left}^{{tree}}"),
+        env=git_env,
+    )
+    left_tree = left_result.stdout.strip() if left_result.ok else ""
+    if not left_tree:
+        return False
+    right_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "rev-parse", f"{right}^{{tree}}"),
+        env=git_env,
+    )
+    right_tree = right_result.stdout.strip() if right_result.ok else ""
+    if not right_tree:
+        return False
+    return left_tree.lower() != right_tree.lower()
+
+
 async def _reparent_fix_pass_commit(
     self: Any,
     *,

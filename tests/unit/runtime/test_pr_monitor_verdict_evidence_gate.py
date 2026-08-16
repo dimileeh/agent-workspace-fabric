@@ -48,6 +48,7 @@ def _evidence_runner(
     heads: list[str | None] | None = None,
     returncode: int = 0,
     head_descends: bool | None = None,
+    commit_trees_differ: bool | None = None,
 ) -> SimpleNamespace:
     """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
     head_iter = iter(heads or [])
@@ -87,6 +88,18 @@ def _evidence_runner(
             return head_descends
         return ancestor.lower() != descendant.lower()
 
+    async def _commit_trees_differ(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+    ) -> bool:
+        del worktree_path
+        if commit_trees_differ is not None:
+            return commit_trees_differ
+        # Default: distinct SHAs imply a contentful advance for legacy stubs.
+        return left.lower() != right.lower()
+
     async def _handle_provider_agent_run_error(
         _workspace_id: str,
         _exc: object,
@@ -101,6 +114,7 @@ def _evidence_runner(
         _commit_dirty_worktree=_commit_dirty_worktree,
         _rev_parse_head=_rev_parse_head,
         _head_descends_from=_head_descends_from,
+        _commit_trees_differ=_commit_trees_differ,
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -213,6 +227,7 @@ async def test_fixed_claim_with_forward_head_advance_is_fix_committed(
         dirty=False,
         heads=[end],
         head_descends=True,
+        commit_trees_differ=True,
     )
     runner._worktrees_root = tmp_path
 
@@ -228,6 +243,88 @@ async def test_fixed_claim_with_forward_head_advance_is_fix_committed(
 
     assert result.verdict == "fix_committed"
     assert result.reason == "agent committed locally"
+
+
+@pytest.mark.unit
+async def test_fixed_claim_with_empty_forward_commit_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Forward ancestry alone must not accept FIXED when the commit tree is unchanged."""
+    start = "a" * 40
+    empty_descendant = "b" * 40
+    workspace_id = "ws_fixed_empty_forward"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: empty allow-empty commit",
+        dirty=False,
+        heads=[empty_descendant],
+        head_descends=True,
+        commit_trees_differ=False,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_hosted_fixed_with_empty_forward_commit_stays_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted empty-commit tip must not satisfy FIXED via forward ancestry alone."""
+    start = "a" * 40
+    empty_synced = "b" * 40
+    workspace_id = "ws_hosted_empty_forward"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: hosted empty tip",
+        dirty=False,
+        heads=[start],
+        head_descends=True,
+        commit_trees_differ=False,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_with_empty_hosted_advance(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        state_arg.last_push_sha = empty_synced
+        state_arg.hosted_terminal_head_advanced = True
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted empty tip",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_with_empty_hosted_advance
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
 
 
 @pytest.mark.unit

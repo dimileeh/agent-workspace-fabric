@@ -71,6 +71,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
+    _commit_trees_differ,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
     _protected_scope_violations_for_recovered_commit,
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)

@@ -208,3 +208,141 @@ async def test_head_descends_from_rejects_replace_and_default_info_graft_forgery
         ancestor=ancestor,
         descendant=lateral,
     )
+
+
+@pytest.mark.unit
+async def test_commit_trees_differ_compares_resolved_trees(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._commit_trees_differ(
+        runner,
+        worktree_path=worktree,
+        left="1" * 40,
+        right="2" * 40,
+    )
+    assert len(cmd.calls) == 2
+    assert f"{'1' * 40}^{{tree}}" in cmd.calls[0].args
+    assert f"{'2' * 40}^{{tree}}" in cmd.calls[1].args
+
+
+@pytest.mark.unit
+async def test_commit_trees_differ_false_for_identical_or_unresolved_trees(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    same_tree = "c" * 40
+
+    identical = FakeCommandRunner()
+    identical.queue_result(returncode=0, stdout=f"{same_tree}\n")
+    identical.queue_result(returncode=0, stdout=f"{same_tree}\n")
+    identical_runner = make_runner(
+        factory=factory,
+        cmd=identical,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_trees_differ(
+        identical_runner,
+        worktree_path=worktree,
+        left="1" * 40,
+        right="2" * 40,
+    )
+
+    missing_left = FakeCommandRunner()
+    missing_left.queue_result(returncode=128, stdout="", stderr="missing")
+    missing_left_runner = make_runner(
+        factory=factory,
+        cmd=missing_left,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_trees_differ(
+        missing_left_runner,
+        worktree_path=worktree,
+        left="1" * 40,
+        right="2" * 40,
+    )
+
+    missing_right = FakeCommandRunner()
+    missing_right.queue_result(returncode=0, stdout=f"{same_tree}\n")
+    missing_right.queue_result(returncode=128, stdout="", stderr="missing")
+    missing_right_runner = make_runner(
+        factory=factory,
+        cmd=missing_right,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_trees_differ(
+        missing_right_runner,
+        worktree_path=worktree,
+        left="1" * 40,
+        right="2" * 40,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_trees_differ_rejects_real_empty_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Real-repo proof: allow-empty advances HEAD with an unchanged tree."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "commit", "--allow-empty", "-qm", "empty")
+    empty_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "a.txt").write_text("changed\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "content")
+    content_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_trees_differ(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=empty_tip,
+    )
+    assert await pre_push_validation._commit_trees_differ(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=content_tip,
+    )
