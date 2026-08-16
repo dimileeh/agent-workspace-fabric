@@ -583,9 +583,8 @@ def _peel_one_unconditional_verdict_reason_wrapper(cleaned: str) -> str | None:
     if emphasis_match is None:
         return None
     # Underscore strong collides with Python dunders; keep those intact.
-    if (
-        emphasis_match.group("strong_under") is not None
-        and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
+    if emphasis_match.group("strong_under") is not None and _span_is_python_dunder(
+        cleaned, 0, len(cleaned)
     ):
         return None
     # Single emphasis is placeholder-gated; callers handle it separately.
@@ -605,13 +604,39 @@ _VERDICT_REASON_UNCONDITIONAL_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
 _VERDICT_REASON_UNCONDITIONAL_MARKERS: tuple[str, ...] = ("**", "__", "~~")
 
 
+def _span_is_python_dunder(s: str, start: int, end: int) -> bool:
+    """Return whether ``s[start:end]`` is a Python dunder (``__ident__``).
+
+    Matches ``_VERDICT_REASON_PYTHON_DUNDER`` with cursor-local checks so nested
+    ``__`` peels do not allocate slices or ``fullmatch``-rescan the remaining
+    span on every layer (PRRT_kwDOSJAM6s6ZqZoz).
+    """
+    # Minimum ``__a__``; charset is ASCII ``[A-Za-z_][A-Za-z0-9_]*``.
+    if end - start < 5:
+        return False
+    if s[start] != "_" or s[start + 1] != "_" or s[end - 2] != "_" or s[end - 1] != "_":
+        return False
+    i = start + 2
+    stop = end - 2
+    first = s[i]
+    if first != "_" and not ("A" <= first <= "Z" or "a" <= first <= "z"):
+        return False
+    i += 1
+    while i < stop:
+        ch = s[i]
+        if ch != "_" and not ("A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9"):
+            return False
+        i += 1
+    return True
+
+
 def _peel_all_outer_unconditional_verdict_reason_wrappers(cleaned: str) -> str:
     """Peel consecutive outer tick/quote/strong/strike wrappers in linear time.
 
     Same whole-reason semantics as repeated
     ``_peel_one_unconditional_verdict_reason_wrapper`` matches, without per-layer
     full-string ``fullmatch`` rescans that are quadratic on deep nests
-    (PRRT_kwDOSJAM6s6ZqS4V).
+    (PRRT_kwDOSJAM6s6ZqS4V, PRRT_kwDOSJAM6s6ZqZoz).
     """
     s = cleaned
     left = 0
@@ -670,11 +695,28 @@ def _peel_all_outer_unconditional_verdict_reason_wrappers(cleaned: str) -> str:
                 continue
             if s[left : left + mlen] != marker or s[right - mlen : right] != marker:
                 continue
-            if (
-                marker == "__"
-                and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(s[left:right]) is not None
-            ):
-                continue
+            if marker == "__":
+                # One dunder check, then peel consecutive ``__`` layers without
+                # rescanning unless whitespace strip can reveal ``__ident__``.
+                if _span_is_python_dunder(s, left, right):
+                    continue
+                while True:
+                    left += 2
+                    right -= 2
+                    before_left, before_right = left, right
+                    _strip_inner()
+                    if not (
+                        right - left >= 4
+                        and s[left : left + 2] == "__"
+                        and s[right - 2 : right] == "__"
+                    ):
+                        break
+                    if (left != before_left or right != before_right) and _span_is_python_dunder(
+                        s, left, right
+                    ):
+                        break
+                marker_peeled = True
+                break
             left += mlen
             right -= mlen
             _strip_inner()

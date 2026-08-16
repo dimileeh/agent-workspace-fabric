@@ -13,8 +13,10 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _peel_all_outer_html_verdict_reason_wrappers,
     _peel_all_outer_unconditional_verdict_reason_wrappers,
     _peel_one_unconditional_verdict_reason_wrapper,
+    _span_is_python_dunder,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_PYTHON_DUNDER,
     _verdict_reason_inline_link_label,
 )
 
@@ -349,8 +351,10 @@ class TestParseVerdict:
     ) -> None:
         # Per-layer fullmatch peels are quadratic on deep quote/tick/strong/strike
         # nests and can stall the monitor event loop before the 500-char reason
-        # bound (PRRT_kwDOSJAM6s6ZqS4V). Tens of thousands of layers must still
-        # fail closed without approaching the default test timeout.
+        # bound (PRRT_kwDOSJAM6s6ZqS4V). Underscore-strong nests must also avoid
+        # per-layer Python-dunder fullmatch rescans (PRRT_kwDOSJAM6s6ZqZoz).
+        # Tens of thousands of layers must still fail closed without approaching
+        # the default test timeout.
         nested = "<reason>"
         for _ in range(20_000):
             nested = wrap(nested)  # type: ignore[operator]
@@ -372,11 +376,44 @@ class TestParseVerdict:
         assert peel("```") == "`"
         assert peel("“x”") == "x"
         assert peel("‘x’") == "x"
+        # Whitespace between __ layers can reveal a dunder after strip; must not
+        # over-peel once the span becomes __ident__ (PRRT_kwDOSJAM6s6ZqZoz).
+        assert peel("__ __init__ __") == "__init__"
+        assert peel("__ __name__ __") == "__name__"
+        assert peel("__ __<reason>__ __") == "<reason>"
+        assert peel("__123__") == "123"
         # One-layer regex helper stays aligned with a single cursor peel.
         assert _peel_one_unconditional_verdict_reason_wrapper('"<reason>"') == "<reason>"
         assert _peel_one_unconditional_verdict_reason_wrapper("__init__") is None
         assert _peel_one_unconditional_verdict_reason_wrapper("*<reason>*") is None
         assert _aggressively_peel_verdict_reason_wrappers('*"<reason>"*') == "<reason>"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "__init__",
+            "__name__",
+            "__all__",
+            "____init____",
+            "__hello__",
+            "__<reason>__",
+            "____",
+            "__",
+            "__123__",
+            "init",
+            "_init_",
+            "__init_",
+            "_init__",
+            "__init __",
+        ],
+    )
+    def test_private_span_is_python_dunder_matches_regex(self, text: str) -> None:
+        # Cursor-local helper must stay equivalent to the legacy fullmatch
+        # pattern (PRRT_kwDOSJAM6s6ZqZoz).
+        assert _span_is_python_dunder(text, 0, len(text)) is (
+            _VERDICT_REASON_PYTHON_DUNDER.fullmatch(text) is not None
+        )
 
     @pytest.mark.unit
     def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:
