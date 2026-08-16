@@ -896,6 +896,147 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
 
 
 @pytest.mark.unit
+async def test_salvage_retained_when_agent_cancelled_after_self_commit(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid-agent after self-commit must retain salvage before re-raise.
+
+    ``CancelledError`` bypasses ``except Exception`` around the agent invocation.
+    Unlike cancellation after ``_commit_dirty_worktree`` creates a commit, a
+    restart here previously had no persisted salvage keys: the next invocation
+    starts at the advanced HEAD, and a no-change FIXED is rejected as
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZmviO). Catch cancellation
+    around the agent run, retain/persist any HEAD advance, then re-raise.
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_agent_cancel"
+    body_hash = "feedback_body_hash_agent_cancel"
+    workspace_id = "ws_salvage_agent_cancel"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_agent_cancel"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+
+    entered_agent = asyncio.Event()
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _agent_self_commits_then_hangs(**_kwargs: object) -> AgentRunResult:
+        # Agent already advanced HEAD (self-commit); hang until worker cancels.
+        entered_agent.set()
+        await asyncio.Event().wait()
+        return AgentRunResult(returncode=0, stdout="AWF-VERDICT: FIXED: never reached", stderr="")
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_must_not_run(**_kwargs: object) -> bool:
+        raise AssertionError("cancel during agent must not reach dirty-commit sink")
+
+    runner._deps = SimpleNamespace(adapter=SimpleNamespace(run=_agent_self_commits_then_hangs))
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    runner._commit_dirty_worktree = _commit_dirty_must_not_run
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_agent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after agent cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after agent cancel"
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_persist_failed_run_salvage_durably_merges_only_salvage_keys(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

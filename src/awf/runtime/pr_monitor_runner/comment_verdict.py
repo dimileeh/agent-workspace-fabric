@@ -142,14 +142,15 @@ async def _retain_failed_run_salvage_despite_cancellation(
     isolated_worktree_host_path: Path | None,
     result_stdout: str,
 ) -> None:
-    """Capture post-sink HEAD and retain salvage while cancellation is pending.
+    """Capture post-cancel HEAD and retain salvage while cancellation is pending.
 
-    ``asyncio.CancelledError`` bypasses ``except Exception`` around the dirty
-    commit sink. On Python 3.11+, catching cancellation leaves it pending, so a
-    direct post-sink await would re-raise before salvage is recorded. Shield the
-    evaluate+retain+persist work so a later no-change FIXED at the tip does not
-    become ``fixed_without_head_advance`` after a worker reload
-    (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ).
+    ``asyncio.CancelledError`` bypasses ``except Exception`` around the agent
+    invocation and the dirty commit sink. On Python 3.11+, catching cancellation
+    leaves it pending, so a direct post-cancel await would re-raise before
+    salvage is recorded. Shield the evaluate+retain+persist work so a later
+    no-change FIXED at the tip does not become ``fixed_without_head_advance``
+    after a worker reload (PRRT_kwDOSJAM6s6Zmn1b, PRRT_kwDOSJAM6s6ZmsZQ,
+    PRRT_kwDOSJAM6s6ZmviO — agent self-commit then cancel before the sink).
 
     Persist ONLY the item's ``__salvaged_fix_*`` keys (merged onto DB state) —
     never full ``_persist_state``, which would flush mid-burst unconfirmed
@@ -531,6 +532,22 @@ async def _invoke_cli_for_verdict_result(
         )
         if unexpected_sink_error is not None:
             raise unexpected_sink_error from None
+        raise
+    except asyncio.CancelledError:
+        # Agent may have self-committed before cancellation; retain HEAD advance
+        # before re-raising so a worker reload does not strand the thread as
+        # fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmviO).
+        await _retain_failed_run_salvage_despite_cancellation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            item_start_head=item_start_head,
+            state=state,
+            salvage_item_id=salvage_item_id,
+            salvage_body_hash=salvage_body_hash,
+            isolated_worktree_host_path=isolated_worktree_host_path,
+            result_stdout=result_stdout,
+        )
         raise
 
     # Commit dirty changes, then evaluate HEAD / retain salvage even when the
