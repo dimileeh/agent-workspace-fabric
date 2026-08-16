@@ -11,7 +11,6 @@ import pytest
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.runtime.pr_monitor_runner import comment_verdict, comments, comments_checkout
 from awf.runtime.pr_monitor_runner.comments_source_git import (
-    _read_pinned_reask_source_head,
     _reask_source_mirror_command,
     _rev_parse_pinned_reask_source_head,
 )
@@ -627,52 +626,6 @@ async def test_pinned_reask_head_read_returns_none_for_git_failure() -> None:
         )
         is None
     )
-
-
-@pytest.mark.unit
-async def test_current_pinned_reask_head_read_returns_none_for_git_failure() -> None:
-    """A failed current HEAD probe cannot fall back to mutable worktree metadata."""
-
-    class _FailedCurrentHeadRunner:
-        def __init__(self) -> None:
-            self.args: list[str] | None = None
-            self.timeout_seconds: float | None = None
-            self.env: dict[str, str] | None = None
-
-        async def run(
-            self,
-            args: list[str],
-            *,
-            timeout_seconds: float,
-            env: dict[str, str],
-        ) -> CommandResult:
-            self.args = args
-            self.timeout_seconds = timeout_seconds
-            self.env = env
-            return CommandResult(returncode=1, stdout="", stderr="missing source HEAD")
-
-    command_runner = _FailedCurrentHeadRunner()
-    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
-
-    assert (
-        await _read_pinned_reask_source_head(
-            runner,
-            Path("/worktrees/ws_1/.git/worktrees/reask"),
-            timeout_seconds=12.5,
-        )
-        is None
-    )
-    assert command_runner.args == [
-        "git",
-        "--git-dir",
-        "/worktrees/ws_1/.git/worktrees/reask",
-        "rev-parse",
-        "HEAD",
-    ]
-    assert command_runner.timeout_seconds == 12.5
-    assert command_runner.env is not None
-    assert "GIT_DIR" not in command_runner.env
-    assert "GIT_WORK_TREE" not in command_runner.env
 
 
 @pytest.mark.unit
