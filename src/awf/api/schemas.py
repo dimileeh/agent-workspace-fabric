@@ -157,8 +157,28 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
             ),
         ),
     ] = None
-    external_id: Annotated[str | None, Field(default=None, max_length=128)] = None
-    task_class: TaskClass | None = None
+    external_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create. Omit to use the "
+                "generated repo/PR adoption identity. Changing this on a live "
+                "adoption returns PR_ADOPTION_POLICY_CONFLICT; an id owned by "
+                "another task scope returns TASK_EXTERNAL_ID_CONFLICT."
+            ),
+        ),
+    ] = None
+    task_class: TaskClass | None = Field(
+        default=None,
+        description=(
+            "Optional task class for scheduling and policy parity with workspace "
+            "create. Omit to leave unset. Changing this on a live adoption returns "
+            "PR_ADOPTION_POLICY_CONFLICT."
+        ),
+    )
     reason: Annotated[str | None, Field(default=None, max_length=512)] = None
 
     @field_validator("task_tag")
