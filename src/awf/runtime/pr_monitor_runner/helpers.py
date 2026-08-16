@@ -208,18 +208,20 @@ _BARE_VERDICT_LINE = re.compile(
     r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
     re.IGNORECASE,
 )
-# Match when the reason *starts* with a prompt-template placeholder. An
-# unanchored search falsely strips legitimate mid-reason tags such as
-# ``<summary>``. Allow trailing prompt boilerplate (e.g. `` and exit."``) after
-# a leading placeholder so stored echoes normalize away, without requiring the
-# reason to be exactly one angle-bracket token. Whole-reason ellipsis echoes of
-# the prompt form ``FIXED: …`` are also treated as placeholders.
+# Match whole-reason prompt-template placeholders. An unanchored or start-only
+# search falsely strips legitimate mid-reason or leading-content tags such as
+# ``added the <summary> section`` / ``<summary> section rewritten``. Allow only
+# trailing prompt boilerplate (e.g. `` and exit."``) after the placeholder so
+# stored echoes normalize away. Whole-reason ellipsis echoes of the prompt form
+# ``FIXED: …`` are also treated as placeholders — not ``...real content``.
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"^\s*(?:"
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
     r"\b[^>\n\r]{0,80}>"
     r"|…|\.{3}"
-    r")",
+    r")"
+    r"(?:\s+and\s+exit\.?)?"
+    r"[\s\"'”’]*$",
     re.IGNORECASE,
 )
 _VERDICT_REASON_REDACTION_ONLY = re.compile(

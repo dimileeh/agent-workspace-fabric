@@ -414,6 +414,48 @@ class TestParseVerdict:
         assert result.reason == "docs already document the <reason> field"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_fixed_reason_keeps_leading_angle_bracket_term(
+        self,
+    ) -> None:
+        # Start-anchored placeholder detection must not strip reasons that merely
+        # begin with a template-shaped tag and continue with real content
+        # (#822 PRRT_kwDOSJAM6s6ZlK2d).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: <summary> section was rewritten with a null check"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "<summary> section was rewritten with a null check"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_false_positive_reason_keeps_leading_angle_bracket_term(
+        self,
+    ) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: <reason> field already documents this"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "<reason> field already documents this"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "...fixed the null check in helpers",
+            "…because the branch already handles None",
+        ],
+    )
+    def test_private_awf_verdict_fixed_reason_keeps_leading_ellipsis_content(
+        self,
+        reason: str,
+    ) -> None:
+        result = _parse_verdict_result(f"AWF-VERDICT: FIXED: {reason}")
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == reason
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 
