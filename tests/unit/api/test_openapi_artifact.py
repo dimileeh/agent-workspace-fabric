@@ -63,6 +63,7 @@ _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
         ("post", "/v1/workspaces"),
         ("post", "/v1/workspaces/adopt-pr"),
         ("get", "/v1/workspaces/overview"),
+        ("post", "/v1/workspaces/overview/batch"),
         ("delete", "/v1/workspaces/{workspace_id}"),
         ("get", "/v1/workspaces/{workspace_id}"),
         ("get", "/v1/workspaces/{workspace_id}/artifacts"),

@@ -976,14 +976,15 @@ def _matches_pr_adoption_identity(
     repo_slug: str,
     pr_number: int,
 ) -> bool:
-    """Return True if the workspace matches a PR adoption identity."""
-    if workspace.task_kind == task_kind and workspace.task_external_id == task_external_id:
-        return True
+    """Return True if the workspace matches a PR adoption identity.
 
+    Every history candidate must match the persisted repo/PR identity. Matching
+    ``task_kind`` + ``task_external_id`` alone is insufficient: an adoption of
+    PR A can use an explicit external_id equal to the generated adoption id for
+    PR B, and that must not select A when adopting B.
+    """
     adoption = _workspace_pr_adoption_policy(workspace)
     if not adoption:
-        return False
-    if workspace.task_kind != task_kind and workspace.idempotency_key != idempotency_key:
         return False
 
     adoption_repo = adoption.get("repo_slug")
@@ -994,11 +995,16 @@ def _matches_pr_adoption_identity(
         normalized_pr_number = int(adoption_pr_number)
     except (TypeError, ValueError):
         return False
-    return (
+    if not (
         isinstance(adoption_repo, str)
         and adoption_repo.lower() == repo_slug.lower()
         and normalized_pr_number == pr_number
-    )
+    ):
+        return False
+
+    if workspace.task_kind == task_kind and workspace.task_external_id == task_external_id:
+        return True
+    return workspace.task_kind == task_kind or workspace.idempotency_key == idempotency_key
 
 
 def _workspace_pr_adoption_policy(workspace: Workspace) -> Mapping[str, Any]:

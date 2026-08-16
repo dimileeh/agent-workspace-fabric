@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from awf.api.schemas import WorkspaceControlResponse
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -83,23 +84,25 @@ async def _release_runtime_stack(
     behind a stopped-only stack (issue #588 / #583). The git worktree is
     preserved (``remove_worktree=False``) because cancel/stop keep the
     workspace for inspection; an absent or already-down project is a no-op
-    success.
+    success. Hosted PR-adoption workspaces carry rendered compose metadata but
+    no local Compose stack, so they skip Compose teardown.
     """
     cleaner = self._cleaner_factory()
-    return _normalize_cleanup_result(
-        await cleaner.cleanup(
-            workspace_id=workspace.id,
-            repo_url=workspace.repo_url,
-            companion_worktrees=(),
-            compose_project_name=workspace.compose_project_name,
-            compose_file_path=(
-                Path(workspace.compose_file_path) if workspace.compose_file_path else None
-            ),
-            worktree_host_path=None,
-            remove_volumes=True,
-            remove_worktree=False,
-        )
-    )
+    cleanup_kwargs: dict[str, Any] = {
+        "workspace_id": workspace.id,
+        "repo_url": workspace.repo_url,
+        "companion_worktrees": (),
+        "compose_project_name": workspace.compose_project_name,
+        "compose_file_path": (
+            Path(workspace.compose_file_path) if workspace.compose_file_path else None
+        ),
+        "worktree_host_path": None,
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    if pr_adoption_is_hosted(workspace.task_policy):
+        cleanup_kwargs["skip_compose"] = True
+    return _normalize_cleanup_result(await cleaner.cleanup(**cleanup_kwargs))
 
 
 async def _finalize_service_stack_release(

@@ -69,7 +69,7 @@ def test_workspace_task_rejects_deprecated_monitor_release_pr() -> None:
     message = str(exc.value)
     assert "deprecated" in message
     assert "PR adoption" in message
-    assert "auto_merge=false" in message
+    assert "auto_merge defaults to false" in message
 
 
 @pytest.mark.unit
@@ -437,9 +437,26 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "name",
+    [
+        "isolated_reask_0123456789abcdef0123456789abcdef",
+        "isolated_reask_companion",
+    ],
+)
+def test_workspace_companion_rejects_isolated_reask_name_prefix(name: str) -> None:
+    """Temporary isolated re-ask checkout names cannot be live companions."""
+    with pytest.raises(ValidationError, match="isolated re-ask"):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {"name": name, "repo_url": "git@example.com:api.git"}
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("companions", "message"),
     [
         ([{"name": "agent", "repo_url": "git@example.com:api.git"}], "reserved"),
+        ([{"name": "clarification", "repo_url": "git@example.com:api.git"}], "reserved"),
         (
             [
                 {"name": "api", "repo_url": "git@example.com:api.git"},

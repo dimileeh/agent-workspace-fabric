@@ -41,7 +41,8 @@
         +------------------------------------+
         | Coding Agent CLI                   |
         |                                    |
-        | codex / claude / cursor / gemini   |
+        | codex / claude / cursor            |
+        | gemini (deprecated) / antigravity  |
         | opencode / grok                    |
         | edits files                        |
         | commits changes                    |
@@ -145,7 +146,7 @@ instead of relying on an agent-specific interactive plan mode:
 4. Iterate execution while the report says plan gaps remain.
 5. Fail the workspace if the plan is not satisfied within the configured budget.
 
-This works the same way for Codex, Claude Code, Cursor, Gemini, OpenCode, Grok,
+This works the same way for Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode, Grok,
 and future adapters because the control plane invokes normal non-interactive agent
 runs for each phase and stores the plan/report inside the workspace.
 
@@ -331,6 +332,43 @@ When meaningful bot or human feedback appears, AWF:
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
+
+### Auto-merge (opt-in, default off)
+
+`auto_merge` is one uniform, opt-in setting that behaves identically whether a
+workspace is created (`awf workspace create`) or an existing PR is adopted
+(`awf workspace adopt-pr`). It **defaults to `false`** everywhere. The persisted
+`workspace.auto_merge` flag is the single authority for monitor selection:
+
+- `true` → feature monitor: squash-merge once all gates are green.
+- `false` → release/manual monitor: report "ready to merge" via `NotifyHuman`
+  and never merge.
+
+`task_kind` (including `sync_release_pr`) never affects auto-merge — it is a
+separate opt-in flag. The flag is resolved once at provision time from the
+per-task intent and the repo profile, and written to the column the monitor
+reads. Resolution precedence (highest wins):
+
+1. per-task intent — `--auto-merge` / `--no-auto-merge` (omit to leave unset);
+2. `monitor.auto_merge.by_base_branch[<PR base branch>]` (exact match);
+3. `monitor.auto_merge.default` (repo global);
+4. the built-in default (`false`).
+
+Configure it per repo in `workspace.yml`:
+
+```yaml
+monitor:
+  auto_merge:
+    default: false
+    by_base_branch:
+      development: true   # auto-merge PRs targeting development
+      main: false         # keep main a human-gated merge
+```
+
+Omitting the block resolves to `false`. A per-task `--auto-merge` /
+`--no-auto-merge` always overrides the profile config. Existing workspaces
+persisted with `auto_merge=true` before this default flip are grandfathered
+untouched.
 
 ### Initial Review Grace
 
@@ -529,7 +567,7 @@ curl "${AWF_BASE_URL}/release-readiness"
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for
-GitHub, Codex, Claude Code, Cursor, Gemini, OpenCode/Ollama, Grok, and Docker. Each
+GitHub, Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode/Ollama, Grok, and Docker. Each
 provider reports redacted `credential_sources`, `credential_scope`,
 `isolation`, and structured warnings. Missing optional providers and local
 least-privilege downgrades are warnings by default. Pass `--provider <name>` or

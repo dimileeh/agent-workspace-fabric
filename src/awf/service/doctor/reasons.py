@@ -124,6 +124,24 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
     ),
+    "NEEDS_HUMAN_REASON_MISSING": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        "The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.",
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
+    ),
+    "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        (
+            "AWF could not complete the read-only clarification follow-up because the "
+            "hosted executor rejected or failed the isolated run, or the local worktree "
+            "could not be prepared as an isolated checkout."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),
+    ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF could not run release-PR sync because the release-PR sync path "
@@ -771,6 +789,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "",
         "",
     ),
+    "ANTIGRAVITY_AUTH_OK": _ReasonText(
+        "Antigravity auth is usable for agent workspaces.",
+        "No action required.",
+        "",
+        "",
+        "",
+    ),
     "GEMINI_AUTH_OK": _ReasonText(
         "Gemini auth is usable for agent workspaces.",
         "No action required.",
@@ -920,6 +945,79 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
     ),
+    "HOSTED_REMOTE_HEAD_MISSING": _ReasonText(
+        "Hosted PR monitor repair completed without reporting the terminal head commit.",
+        (
+            "Inspect the hosted agent result and monitor log, then remonitor after "
+            "the provider reports `terminal_head_sha`."
+        ),
+        (
+            "The hosted agent returned success but omitted the terminal head SHA "
+            "AWF needs before syncing the local worktree to the PR head."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_missing",
+    ),
+    "HOSTED_REMOTE_HEAD_IDENTITY_MISSING": _ReasonText(
+        (
+            "AWF could not sync a hosted repair because PR head repository or "
+            "branch metadata was missing."
+        ),
+        (
+            "Verify the adopted PR metadata includes the head repository and head "
+            "ref, then re-adopt or remonitor the PR."
+        ),
+        (
+            "Stored PR identity lacked a usable head repository URL or head ref, "
+            "so AWF could not fetch the hosted repair result safely."
+        ),
+        "awf workspace show <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_identity_missing",
+    ),
+    "HOSTED_REMOTE_HEAD_FETCH_FAILED": _ReasonText(
+        "AWF could not fetch the hosted PR head after a hosted repair completed.",
+        (
+            "Inspect the monitor log for git fetch stderr, verify remote access "
+            "and that the PR head branch still exists, then remonitor."
+        ),
+        (
+            "Git fetch of the PR head repository/ref failed due to credentials, "
+            "network availability, a deleted branch, or remote rejection."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_fetch_failed",
+    ),
+    "HOSTED_REMOTE_HEAD_MISMATCH": _ReasonText(
+        (
+            "AWF refused to sync the hosted worktree because fetched PR head did "
+            "not match the reported terminal head."
+        ),
+        (
+            "Verify the hosted provider terminal head and PR head state, then "
+            "remonitor once they agree."
+        ),
+        (
+            "The hosted agent reported one terminal commit, but fetching the PR "
+            "head returned a different SHA, so syncing would risk using stale or "
+            "wrong content."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_mismatch",
+    ),
+    "HOSTED_REMOTE_HEAD_SYNC_FAILED": _ReasonText(
+        ("AWF fetched the hosted terminal head but could not reset the local worktree to it."),
+        (
+            "Inspect the monitor log and worktree git state, repair local "
+            "permissions or recreate the workspace, then remonitor."
+        ),
+        (
+            "The final `git reset --hard` failed after fetching the expected PR "
+            "head, usually due to worktree corruption, permissions, or local git "
+            "state."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_sync_failed",
+    ),
     "CI_TRANSIENT_RERUN_FAILED": _ReasonText(
         (
             "AWF could not request a GitHub rerun for CI failures classified "
@@ -988,6 +1086,27 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Missing Cursor API credentials.",
         "awf service doctor",
         "docs/REASON_CATALOG.md#cursor_auth_missing",
+    ),
+    "ANTIGRAVITY_AUTH_MISSING": _ReasonText(
+        "No Antigravity auth signal was visible.",
+        "Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.",
+        "Missing Antigravity API credentials.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_auth_missing",
+    ),
+    "ANTIGRAVITY_AUTH_REJECTED": _ReasonText(
+        "Antigravity rejected the configured API credentials.",
+        "Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.",
+        "Antigravity API key rejected by the provider.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_auth_rejected",
+    ),
+    "ANTIGRAVITY_QUOTA_EXHAUSTED": _ReasonText(
+        "Antigravity quota or rate limit is exhausted.",
+        "Wait for quota reset or switch providers, then re-check readiness.",
+        "Antigravity provider quota exhausted.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_quota_exhausted",
     ),
     "GEMINI_AUTH_MISSING": _ReasonText(
         "No Gemini auth signal was visible.",

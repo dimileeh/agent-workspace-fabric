@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populates registry
@@ -353,7 +354,7 @@ async def test_rebase_recovery_staleness_clear_failure_is_best_effort(
     ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     async def _raise(**_kwargs: Any) -> None:
-        raise RuntimeError("staleness clear exploded")
+        raise SQLAlchemyError("staleness clear exploded")
 
     monkeypatch.setattr(executor, "_clear_rebase_recovery_staleness", _raise)
 

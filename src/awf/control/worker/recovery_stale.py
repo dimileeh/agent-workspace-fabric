@@ -22,9 +22,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+)
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS,
+    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
@@ -44,6 +51,7 @@ from awf.control.worker.constants import (
 from awf.control.worker.helpers import (
     _candidate_claim_is_stale,
     _execution_claim_is_stale,
+    _extract_pr_number,
     _has_running_agent_runtime,
     _running_monitoring_pr_recovery_finding,
     _runtime_snapshot_payload,
@@ -55,6 +63,7 @@ from awf.control.worker.helpers import (
     _stale_active_execution_failure_message,
     _worker_exception_is_transient_db_connection,
     _workspace_claim_recheck_passes,
+    _workspace_claim_snapshot,
 )
 from awf.control.worker.logging import _log
 from awf.control.worker.scheduling import (
@@ -101,6 +110,12 @@ from awf.service.workspace_runtime_health import (
     WorkspaceRuntimeFinding,
     classify_runtime_snapshot,
     has_open_pr_for_remonitor,
+)
+
+_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE"
+_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE = "HOSTED_PR_ADOPTION_PR_URL_MISSING"
+_HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED_REASON_CODE = (
+    "HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED"
 )
 
 
@@ -307,6 +322,8 @@ async def _recover_stale_active_execution(
             return
     if not await self._stale_active_candidate_is_current(candidate):
         return
+    if await self._recover_hosted_pr_adoption_active_execution(candidate):
+        return
     try:
         snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
     except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -414,6 +431,292 @@ async def _recover_stale_active_execution(
         ):
             await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
         return
+
+
+async def _recover_hosted_pr_adoption_active_execution(
+    self: Any,
+    candidate: _ActiveExecutionCandidate,
+) -> bool:
+    if candidate.status == WorkspaceStatus.provisioning:
+        if not pr_adoption_is_hosted(candidate.task_policy):
+            return False
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return True
+            if not pr_adoption_is_hosted(ws.task_policy):
+                return False
+            attachable_pr = ws.pr_url is not None and (
+                ws.pr_number is not None or _extract_pr_number(ws.pr_url) is not None
+            )
+            setup_completed = attachable_pr and await _has_hosted_monitor_handoff_setup_completed(
+                session,
+                ws,
+            )
+        if not setup_completed:
+            snapshot = RuntimeSnapshot(
+                stack_state="hosted",
+                reason="hosted PR adoption provisioning does not use a local Compose runtime",
+            )
+            if not await self._record_stale_active_execution_detected(candidate, snapshot):
+                await self._fail_stale_active_execution(candidate, snapshot)
+            return True
+
+    if candidate.status == WorkspaceStatus.ready:
+        if not pr_adoption_is_hosted(candidate.task_policy):
+            return False
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return True
+            if not pr_adoption_is_hosted(ws.task_policy):
+                return False
+            if ws.execution_claimed_by is None and ws.execution_claim_expires_at is None:
+                return True
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return True
+            if not ws.pr_url:
+                return True
+
+    if candidate.status not in (
+        *_ACTIVE_EXECUTION_STATUSES,
+        WorkspaceStatus.provisioning,
+        WorkspaceStatus.ready,
+    ):
+        return False
+    if not pr_adoption_is_hosted(candidate.task_policy):
+        return False
+
+    snapshot = RuntimeSnapshot(
+        stack_state="hosted",
+        reason="hosted PR adoption does not use a local Compose runtime",
+    )
+    finding = WorkspaceRuntimeFinding(
+        workspace_id=candidate.workspace_id,
+        workspace_status=candidate.status.value,
+        status="stranded",
+        reason_code="STRANDED_WORKSPACE",
+        decision="remonitor_workspace",
+        message=(
+            "Hosted PR-adoption execution has an already-open pull request and no "
+            "local Compose stack by design; the PR monitor is the recovery point."
+        ),
+        compose_project_name=candidate.compose_project_name,
+    )
+    runtime_payload = _runtime_stranding_event_payload(candidate, snapshot, finding)
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get_for_update(candidate.workspace_id)
+        if ws is None or ws.status != candidate.status.value:
+            return True
+        if not pr_adoption_is_hosted(ws.task_policy):
+            return False
+        if (
+            candidate.status == WorkspaceStatus.ready
+            and ws.execution_claimed_by is None
+            and ws.execution_claim_expires_at is None
+        ):
+            return True
+        claim_cutoff = datetime.now(UTC)
+        if not _execution_claim_is_stale(ws, claim_cutoff):
+            return True
+        if not ws.pr_url:
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_pr_missing",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code=_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE,
+            )
+            await _fail_hosted_pr_adoption_pr_url_missing_after_restart(repo, ws, candidate)
+            await session.commit()
+            return True
+        if ws.pr_number is None:
+            ws.pr_number = _extract_pr_number(ws.pr_url)
+        if ws.pr_number is None:
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_open_pr_unparseable",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                pr_url=ws.pr_url,
+                reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
+            )
+            return False
+        setup_completed = await _has_hosted_monitor_handoff_setup_completed(session, ws)
+        if candidate.status == WorkspaceStatus.ready and not setup_completed:
+            previous_claim = _workspace_claim_snapshot(ws)
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+            await session.commit()
+            _log.warning(
+                "worker.hosted_pr_adoption_ready_stale_claim_cleared",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code=_HOSTED_PR_ADOPTION_READY_STALE_CLAIM_CLEARED_REASON_CODE,
+                previous_claim=previous_claim,
+            )
+            return True
+        if not setup_completed:
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_setup_incomplete",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+            )
+            await _fail_hosted_pr_adoption_setup_incomplete_after_restart(
+                repo,
+                ws,
+                candidate,
+            )
+            await session.commit()
+            return True
+
+        previous_claim = _workspace_claim_snapshot(ws)
+        claims_will_clear = any(
+            value is not None
+            for value in (
+                ws.execution_claimed_by,
+                ws.execution_claim_expires_at,
+                ws.monitor_claimed_by,
+                ws.monitor_claim_expires_at,
+            )
+        )
+        ws.execution_claimed_by = None
+        ws.execution_claim_expires_at = None
+        ws.monitor_claimed_by = None
+        ws.monitor_claim_expires_at = None
+        if claims_will_clear:
+            ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+
+        payload = {
+            **runtime_payload,
+            "source": "hosted_pr_adoption",
+            "previous_claim": previous_claim,
+            "pr_url": ws.pr_url,
+            "pr_number": ws.pr_number,
+        }
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+            payload=payload,
+        )
+        await repo.add_event(
+            ws,
+            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            reason_code=finding.reason_code,
+            payload=runtime_payload,
+        )
+        await repo.add_event(
+            ws,
+            event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+            payload=payload,
+        )
+        await session.commit()
+
+    _log.warning(
+        "worker.hosted_pr_adoption_monitor_attached_after_restart",
+        workspace_id=candidate.workspace_id,
+        status=candidate.status.value,
+        reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    )
+    return True
+
+
+async def _fail_hosted_pr_adoption_setup_incomplete_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+) -> None:
+    message = (
+        "hosted monitor handoff setup did not complete before worker restart; "
+        "hosted PR adoption does not have a local Compose runtime to recover"
+    )
+    await _fail_hosted_pr_adoption_after_restart(
+        repo,
+        ws,
+        candidate,
+        reason_code=_HOSTED_MONITOR_HANDOFF_SETUP_INCOMPLETE_REASON_CODE,
+        message=message,
+    )
+
+
+async def _fail_hosted_pr_adoption_pr_url_missing_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+) -> None:
+    message = (
+        "hosted PR adoption cannot attach a PR monitor after worker restart because "
+        "no pr_url is persisted; hosted PR adoption does not have a local Compose "
+        "runtime to recover"
+    )
+    await _fail_hosted_pr_adoption_after_restart(
+        repo,
+        ws,
+        candidate,
+        reason_code=_HOSTED_PR_ADOPTION_PR_URL_MISSING_REASON_CODE,
+        message=message,
+    )
+
+
+async def _fail_hosted_pr_adoption_after_restart(
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    candidate: _ActiveExecutionCandidate,
+    *,
+    reason_code: str,
+    message: str,
+) -> None:
+    previous_claim = _workspace_claim_snapshot(ws)
+    claim_cutoff = datetime.now(UTC)
+    payload = {
+        "source": "hosted_pr_adoption",
+        "reason_code": reason_code,
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "message": message,
+        "previous_claim": previous_claim,
+        "pr_url": ws.pr_url,
+        "pr_number": ws.pr_number,
+    }
+    transitioned = await repo.transition_if_current(
+        candidate.workspace_id,
+        from_status=candidate.status,
+        to=WorkspaceStatus.failed,
+        reason_code=reason_code,
+        payload=payload,
+        extra_conditions=_claim_recheck_conditions(candidate.status, claim_cutoff),
+    )
+    if transitioned is None:
+        return
+    ws = transitioned
+    ws.execution_claimed_by = None
+    ws.execution_claim_expires_at = None
+    ws.monitor_claimed_by = None
+    ws.monitor_claim_expires_at = None
+    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+    ws.failure_reason = FailureReason.infrastructure_failure.value
+    ws.failure_message = message[:2048]
+
+
+async def _has_hosted_monitor_handoff_setup_completed(
+    session: AsyncSession,
+    ws: Workspace,
+) -> bool:
+    setup_completed_stmt = (
+        select(literal(1))
+        .select_from(WorkspaceEvent)
+        .where(
+            WorkspaceEvent.workspace_id == ws.id,
+            WorkspaceEvent.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+            WorkspaceEvent.reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+        )
+        .limit(1)
+    )
+    return (await session.execute(setup_completed_stmt)).scalar_one_or_none() is not None
 
 
 async def _stale_active_candidate_is_current(
@@ -580,16 +883,19 @@ async def _cleanup_and_fail_stale_active_execution(
         )
         return
 
-    cleanup = await self._runtime_cleaner.cleanup(
-        workspace_id=candidate.workspace_id,
-        repo_url=candidate.repo_url,
-        compose_project_name=candidate.compose_project_name,
-        compose_file_path=(
+    cleanup_kwargs: dict[str, Any] = {
+        "workspace_id": candidate.workspace_id,
+        "repo_url": candidate.repo_url,
+        "compose_project_name": candidate.compose_project_name,
+        "compose_file_path": (
             Path(candidate.compose_file_path) if candidate.compose_file_path else None
         ),
-        remove_volumes=True,
-        remove_worktree=False,
-    )
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    if pr_adoption_is_hosted(candidate.task_policy):
+        cleanup_kwargs["skip_compose"] = True
+    cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
     if not cleanup.ok:
         await self._record_stale_active_execution_cleanup_failed(
             candidate,

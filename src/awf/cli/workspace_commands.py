@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import typer
+from typer.models import OptionInfo
 
 from awf.cli.common import (
     MinRichHelpWidthCommand,
@@ -52,6 +53,13 @@ def _option_value(value: Any) -> str:
     """Return the wire value for Typer enum options and direct string test calls."""
     enum_value = getattr(value, "value", None)
     return str(enum_value if enum_value is not None else value)
+
+
+def _option_default(value: Any) -> Any:
+    """Return Typer option defaults for direct command-helper calls."""
+    if isinstance(value, OptionInfo):
+        return value.default
+    return value
 
 
 def _task_tag_callback(value: str | None) -> str | None:
@@ -134,10 +142,13 @@ def workspace_create(
         "--with-db",
         help="Deprecated v1 shortcut; selects the aira profile when set.",
     ),
-    auto_merge: bool = typer.Option(
-        True,
+    auto_merge: bool | None = typer.Option(
+        None,
         "--auto-merge/--no-auto-merge",
-        help="Allow the monitor to merge when PR gates are green.",
+        help=(
+            "Allow the monitor to merge when PR gates are green. Omit to use the "
+            "repo/profile default (off unless configured in monitor.auto_merge)."
+        ),
     ),
     initial_review_grace_period_seconds: float | None = typer.Option(
         None,
@@ -874,10 +885,19 @@ def workspace_adopt_pr(
         ),
     ),
     profile_ref: str | None = typer.Option("auto", "--profile"),
-    auto_merge: bool = typer.Option(
-        True,
+    auto_merge: bool | None = typer.Option(
+        None,
         "--auto-merge/--no-auto-merge",
-        help="Allow the adopted PR monitor to merge when gates are green.",
+        help=(
+            "Allow the adopted PR monitor to merge when gates are green. Omit to "
+            "use the repo/profile default (off unless configured in "
+            "monitor.auto_merge)."
+        ),
+    ),
+    execution: str = typer.Option(
+        "local",
+        "--execution",
+        help="PR monitor execution placement: local or hosted.",
     ),
     initial_review_grace_period_seconds: float | None = typer.Option(
         None,
@@ -899,6 +919,16 @@ def workspace_adopt_pr(
             "keys are bare."
         ),
     ),
+    external_id: str | None = typer.Option(
+        None,
+        "--external-id",
+        help="Optional external task id persisted on the adopted workspace/task.",
+    ),
+    task_class: TaskClass | None = typer.Option(
+        None,
+        "--task-class",
+        help="Optional task class for scheduling/policy parity with workspace create.",
+    ),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -916,6 +946,12 @@ def workspace_adopt_pr(
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
         )
+    execution = str(_option_default(execution)).strip().lower()
+    if execution not in {"local", "hosted"}:
+        raise typer.BadParameter("--execution must be 'local' or 'hosted'")
+    task_tag = _option_default(task_tag)
+    external_id = _option_default(external_id)
+    task_class = _option_default(task_class)
     _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
         "repo_url": repo if _repo_is_url else None,
@@ -926,6 +962,7 @@ def workspace_adopt_pr(
         "profile_ref": profile_ref,
         "profile": None,
         "auto_merge": auto_merge,
+        "execution": {"mode": execution},
         "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         "task_title": task_title,
         "task_prompt": task_prompt,
@@ -937,6 +974,10 @@ def workspace_adopt_pr(
         body["effort"] = effort
     if task_tag is not None:
         body["task_tag"] = task_tag
+    if external_id is not None:
+        body["external_id"] = external_id
+    if task_class is not None:
+        body["task_class"] = _option_value(task_class)
     if owned_paths is not None:
         body["owned_paths"] = owned_paths
     response = _call(

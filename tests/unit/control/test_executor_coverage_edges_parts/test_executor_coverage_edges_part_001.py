@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -96,12 +97,12 @@ class _PlanningAdapter:
         self.stdout_values = list(stdout_values)
         self.prompts: list[str] = []
 
-    async def run(self, **kwargs: object) -> SimpleNamespace:
+    async def run(self, **kwargs: object) -> AgentRunResult:
         prompt = kwargs.get("prompt")
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
         stdout = self.stdout_values.pop(0) if self.stdout_values else ""
-        return SimpleNamespace(stdout=stdout, stderr="")
+        return AgentRunResult(returncode=0, stdout=stdout, stderr="")
 
 
 class _CoverageValidation:

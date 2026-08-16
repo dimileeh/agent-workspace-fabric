@@ -4,6 +4,7 @@ import { ExternalLink,XCircle } from "lucide-react";
 import { createContext,useContext } from "react";
 
 import { omitUndefined } from "@/lib/api-payload";
+import { awfPath, operatorPath } from "@/lib/console-urls";
 import {
 bytes,
 statusGlyph,
@@ -598,7 +599,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<ApiEnvel
 }
 
 export function operatorActionPath(action: WorkspaceOperatorAction, workspaceId: string): string {
-  return `/api/operator/workspaces/${encodeURIComponent(workspaceId)}/${action}`;
+  return operatorPath(`workspaces/${encodeURIComponent(workspaceId)}/${action}`);
 }
 
 export function operatorActionReason(action: WorkspaceOperatorAction): string {
@@ -675,9 +676,10 @@ export async function readLogTailEntry(
 ): Promise<{ entry: LogEntry; nextOffset: number }> {
   const offset = Math.max(stream.byte_count - 65_536, 0);
   const result = await apiGet<WorkspaceLogRead>(
-    `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(
-      stream.stream_id,
-    )}?offset=${offset}&limit_bytes=65536`,
+    awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
+      offset,
+      limit_bytes: 65536,
+    }),
   );
   if (!result.ok) {
     const now = new Date().toISOString();

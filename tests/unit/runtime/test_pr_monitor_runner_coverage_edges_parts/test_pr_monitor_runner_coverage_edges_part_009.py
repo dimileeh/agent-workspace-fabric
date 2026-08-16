@@ -253,10 +253,12 @@ async def test_execute_sync_base_records_branch_push_audit(
 ) -> None:
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
+    pushed_head = "b" * 40
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout=f"{pushed_head}\n")  # rev-parse HEAD
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -283,6 +285,7 @@ async def test_execute_sync_base_records_branch_push_audit(
 
     assert terminal is False
     assert state.iter_count == 1
+    assert state.last_push_sha == pushed_head
     async with factory() as s:
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
         push_events = await WorkspaceEventRepository(s).list(

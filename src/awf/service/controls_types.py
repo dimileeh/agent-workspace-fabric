@@ -41,4 +41,5 @@ class WorkspaceCleanerProtocol(Protocol):
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
+        skip_compose: bool = False,
     ) -> CleanupResultLike: ...

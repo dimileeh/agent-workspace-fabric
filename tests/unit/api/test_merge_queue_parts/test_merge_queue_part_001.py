@@ -1131,7 +1131,9 @@ class TestMergeQueueListPart001:
         client: AsyncClient,
         engine: AsyncEngine,
     ) -> None:
+        """G2: terminal legacy rows are absent; active legacy rows keep blockers."""
         expected: dict[str, tuple[str, str | None]] = {}
+        absent_ids: set[str] = set()
         for index, (title, status, auto_merge, reason, action) in enumerate(
             [
                 (
@@ -1155,19 +1157,19 @@ class TestMergeQueueListPart001:
                     "waiting_for_monitor",
                     None,
                 ),
-                ("Completed legacy", WorkspaceStatus.completed, True, "completed", None),
+                ("Completed legacy", WorkspaceStatus.completed, True, None, None),
                 (
                     "Failed legacy",
                     WorkspaceStatus.failed,
                     True,
-                    "failed_or_cancelled",
+                    None,
                     None,
                 ),
                 (
                     "Cancelled legacy",
                     WorkspaceStatus.cancelled,
                     True,
-                    "failed_or_cancelled",
+                    None,
                     None,
                 ),
                 (
@@ -1187,7 +1189,10 @@ class TestMergeQueueListPart001:
                 pr_url=f"https://github.com/example/legacy/pull/{90 + index}",
                 updated_at=datetime(2026, 4, 20 + index, 12, 0, tzinfo=UTC),
             )
-            expected[workspace_id] = (reason, action)
+            if reason is None:
+                absent_ids.add(workspace_id)
+            else:
+                expected[workspace_id] = (reason, action)
 
         response = await client.get(
             "/v1/merge-queue",
@@ -1196,7 +1201,8 @@ class TestMergeQueueListPart001:
 
         assert response.status_code == 200
         items = {item["workspace_id"]: item for item in response.json()["items"]}
-        assert set(items) == set(expected)
+        assert absent_ids.isdisjoint(items)
+        assert set(expected) <= set(items)
         for workspace_id, (reason, action) in expected.items():
             item = items[workspace_id]
             assert item["candidate_id"] is None
@@ -1205,10 +1211,7 @@ class TestMergeQueueListPart001:
             assert item["queue_blockers"] == []
             assert item["merge_blocker_reason"] == reason
             assert item["required_next_action"] == action
-            if reason == "completed":
-                assert item["merged_at"] == item["updated_at"]
-            else:
-                assert item["merged_at"] is None
+            assert item["merged_at"] is None
             assert item["last_event"]["event_type"] == "merge_queue.legacy_marker"
 
     @pytest.mark.unit
