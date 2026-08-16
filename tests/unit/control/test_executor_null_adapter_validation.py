@@ -10,6 +10,7 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor.constants import POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
 from awf.db.enums import (
     FailureReason,
     OperationStatus,
@@ -146,11 +147,11 @@ async def test_execution_validation_fails_cleanly_when_adapter_is_none_and_valid
 
 
 @pytest.mark.unit
-async def test_execution_validation_skips_conformance_and_succeeds_when_adapter_is_none_and_validation_passes(
+async def test_execution_validation_fails_when_adapter_is_none_and_conformance_is_required(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When adapter is None and validation passes, post-validation conformance check is skipped."""
+    """When adapter is None and planning_validation_handoff is present, validation fails because conformance cannot be checked."""
     profile = WorkspaceProfile.model_validate(
         {"name": "test-null-adapter-pass", "planning": {"required": True}}
     )
@@ -246,12 +247,19 @@ async def test_execution_validation_skips_conformance_and_succeeds_when_adapter_
         git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
 
-    assert not result.stop
-    assert result.successful_validation_run_id == "vr-null-adapter-2"
+    assert result.stop
+    assert result.successful_validation_run_id is None
 
-    # Operations should be finished as succeeded
+    # Operations should be finished as failed
     executor._finish_pending_validate_operations.assert_awaited_once()
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["validation_run_id"] == "vr-null-adapter-2"
-    assert finish_kwargs["status"] == OperationStatus.succeeded
-    executor._mark_failed.assert_not_called()
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["reason_code"] == POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
+    assert "agent adapter is unavailable" in finish_kwargs["error_message"]
+
+    # Workspace should be marked failed cleanly
+    executor._mark_failed.assert_awaited_once()
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["from_status"] == WorkspaceStatus.validating
+    assert mark_kwargs["failure_reason"] == FailureReason.infrastructure_failure
