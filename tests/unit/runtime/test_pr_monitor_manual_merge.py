@@ -1049,6 +1049,7 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     policy_comment = issue_comment_node(
@@ -1067,7 +1068,7 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
-    adapter.queue(stdout="fixed later comment")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: addressed later human review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
@@ -1084,6 +1085,11 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
         worktrees_root=tmp_path / "worktrees",
         auto_merge=False,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     with structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,
