@@ -562,6 +562,71 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     return _normalized_verdict_reason_is_template_placeholder(cleaned)
 
 
+def _peel_one_unconditional_verdict_reason_wrapper(cleaned: str) -> str | None:
+    """Peel one outer tick/quote/strong/strike wrapper, or return None."""
+    tick_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(cleaned)
+    if tick_match is not None:
+        return tick_match.group("line").strip()
+    quote_match = _VERDICT_REASON_INLINE_QUOTE_WRAPPER.fullmatch(cleaned)
+    if quote_match is not None:
+        return next(g for g in quote_match.groups() if g is not None).strip()
+    emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
+    if emphasis_match is None:
+        return None
+    # Underscore strong collides with Python dunders; keep those intact.
+    if (
+        emphasis_match.group("strong_under") is not None
+        and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
+    ):
+        return None
+    # Single emphasis is placeholder-gated; callers handle it separately.
+    if emphasis_match.group("em_star") is not None or emphasis_match.group("em_under") is not None:
+        return None
+    return next(g for g in emphasis_match.groups() if g is not None).strip()
+
+
+def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
+    """Return the inner text of one outer placeholder-gated wrapper, or None.
+
+    Covers single emphasis, safe inline HTML (em/strong/span), and whole-reason
+    Markdown links/images (inline or reference-style).
+    """
+    emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
+    if emphasis_match is not None and (
+        emphasis_match.group("em_star") is not None or emphasis_match.group("em_under") is not None
+    ):
+        return next(g for g in emphasis_match.groups() if g is not None).strip()
+    html_match = _VERDICT_REASON_INLINE_HTML_WRAPPER.fullmatch(cleaned)
+    if html_match is not None:
+        return html_match.group("inner").strip()
+    link_label = _verdict_reason_inline_link_label(cleaned)
+    if link_label is not None:
+        return link_label.strip()
+    return None
+
+
+def _aggressively_peel_verdict_reason_wrappers(reason: str) -> str:
+    """Iteratively peel every wrapper type without placeholder gating.
+
+    Used only to decide whether a conditional peel would expose a
+    placeholder-shaped value. Bound iterations by input length so deeply
+    nested ``<em>``/``<strong>``/``<span>`` chains cannot recurse
+    (PRRT_kwDOSJAM6s6Zpg0B).
+    """
+    cleaned = reason.strip()
+    for _ in range(max(len(cleaned), 1)):
+        nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
+        if nxt is not None:
+            cleaned = nxt
+            continue
+        inner = _conditional_verdict_reason_wrapper_inner(cleaned)
+        if inner is not None:
+            cleaned = inner
+            continue
+        break
+    return cleaned
+
+
 def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     """Peel balanced outer quote/backtick/strong/strike/link/HTML wrappers from a reason.
 
@@ -577,66 +642,33 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
     PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
     PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL, PRRT_kwDOSJAM6s6ZpdhJ).
+
+    Conditional peels (single emphasis / safe HTML / links) stay
+    placeholder-gated, but the gate uses bounded iterative peeling rather than
+    recursion so ~1k nested wrappers fail closed instead of raising
+    ``RecursionError`` before the 500-character reason bound
+    (PRRT_kwDOSJAM6s6Zpg0B).
     """
     cleaned = reason.strip()
-    while cleaned:
-        tick_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(cleaned)
-        if tick_match is not None:
-            cleaned = tick_match.group("line").strip()
+    # Each successful peel shortens ``cleaned``; ``len(cleaned)`` therefore
+    # bounds nested wrapper depth without a separate magic constant.
+    for _ in range(max(len(cleaned), 1)):
+        nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
+        if nxt is not None:
+            cleaned = nxt
             continue
-        quote_match = _VERDICT_REASON_INLINE_QUOTE_WRAPPER.fullmatch(cleaned)
-        if quote_match is not None:
-            cleaned = next(g for g in quote_match.groups() if g is not None).strip()
-            continue
-        emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
-        if emphasis_match is not None:
-            # Underscore strong collides with Python dunders; keep those intact.
-            if (
-                emphasis_match.group("strong_under") is not None
-                and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
-            ):
-                break
-            inner = next(g for g in emphasis_match.groups() if g is not None).strip()
-            # Single emphasis: peel only when the enclosed value is
-            # placeholder-shaped — whole-reason or absorbed same-line citation
-            # (PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZoGYD).
-            if (
-                emphasis_match.group("em_star") is not None
-                or emphasis_match.group("em_under") is not None
-            ):
-                normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
-                if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
-                    break
-                cleaned = normalized_inner
-                continue
-            cleaned = inner
-            continue
-        html_match = _VERDICT_REASON_INLINE_HTML_WRAPPER.fullmatch(cleaned)
-        if html_match is not None:
-            # Safe inline HTML (em/strong/span): peel only when placeholder-
-            # shaped so rich-text template echoes fail closed while real
-            # HTML-wrapped justifications remain usable (PRRT_kwDOSJAM6s6ZpdhJ).
-            inner = html_match.group("inner").strip()
-            normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
-            if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
-                break
-            cleaned = normalized_inner
-            continue
-        link_label = _verdict_reason_inline_link_label(cleaned)
-        if link_label is not None:
-            # Markdown links / images (inline or reference-style): peel only
-            # when the label is placeholder-shaped so a real linked or imaged
-            # justification remains usable (PRRT_kwDOSJAM6s6Zos6S,
-            # PRRT_kwDOSJAM6s6Zo-5M, PRRT_kwDOSJAM6s6ZpXSL). Inline
-            # destinations may include balanced / escaped parentheses
-            # (PRRT_kwDOSJAM6s6ZpLqR).
-            inner = link_label.strip()
-            normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
-            if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
-                break
-            cleaned = normalized_inner
-            continue
-        break
+        inner = _conditional_verdict_reason_wrapper_inner(cleaned)
+        if inner is None:
+            break
+        # Speculative full peel (iterative) decides whether this gated wrapper
+        # encloses a placeholder-shaped value — whole-reason or absorbed
+        # same-line citation (PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZoGYD,
+        # PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M, PRRT_kwDOSJAM6s6ZpXSL,
+        # PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpdhJ, PRRT_kwDOSJAM6s6Zpg0B).
+        speculative = _aggressively_peel_verdict_reason_wrappers(inner)
+        if not _normalized_verdict_reason_is_template_placeholder(speculative):
+            break
+        cleaned = speculative
     return cleaned
 
 

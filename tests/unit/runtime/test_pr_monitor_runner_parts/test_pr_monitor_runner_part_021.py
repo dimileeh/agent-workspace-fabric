@@ -242,6 +242,31 @@ class TestParseVerdict:
         assert result.reason in {"verdict_placeholder_echo", "fixed_placeholder_echo"}
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            ("<span>", "</span>"),
+            ("<em>", "</em>"),
+            ("<strong>", "</strong>"),
+        ],
+    )
+    def test_private_awf_deeply_nested_html_placeholder_fail_closed(
+        self, wrapper: tuple[str, str]
+    ) -> None:
+        # Recursive normalize of placeholder-gated HTML wrappers hit Python's
+        # recursion limit around ~1k nested <em>/<strong>/<span> layers before
+        # the 500-char reason bound applies, crashing the monitor instead of
+        # fail-closed needs_human (PRRT_kwDOSJAM6s6Zpg0B).
+        open_tag, close_tag = wrapper
+        nested = "<reason>"
+        for _ in range(1000):
+            nested = f"{open_tag}{nested}{close_tag}"
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
+
+    @pytest.mark.unit
     def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:
         # Empty quote wrappers are not usable reasons; after unwrap they behave
         # like a bare empty FALSE POSITIVE (reasonless, still false_positive).
