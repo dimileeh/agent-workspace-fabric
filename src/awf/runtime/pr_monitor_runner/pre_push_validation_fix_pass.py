@@ -48,6 +48,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.path_helpers import _changed_paths_from_name_only_z
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -287,6 +288,7 @@ async def _commit_changes_present_in_head(
             "diff-tree",
             "--no-commit-id",
             "--name-only",
+            "-z",
             "-r",
             parent,
             commit_sha,
@@ -295,12 +297,24 @@ async def _commit_changes_present_in_head(
     )
     if not paths_result.ok:
         return False
-    paths = [line.strip() for line in paths_result.stdout.splitlines() if line.strip()]
+    # ``-z`` preserves pathname bytes (including newlines). Without it, Git
+    # C-quotes such names; ``splitlines()`` then feeds the quoted spelling to
+    # ``ls-tree``, both lookups miss, and empty==empty falsely retains salvage
+    # (PRRT_kwDOSJAM6s6ZmCZz).
+    try:
+        paths = _changed_paths_from_name_only_z(paths_result.stdout or "")
+    except ProtectedScopeDiffError:
+        return False
     if not paths:
         return False
 
     for path in paths:
-        if await _tree_entry_at(head_sha, path) != await _tree_entry_at(commit_sha, path):
+        # Require a concrete salvage tree entry. Two missing entries (e.g. a
+        # C-quoted miss or bogus path) must not compare equal as "present".
+        commit_entry = await _tree_entry_at(commit_sha, path)
+        if not commit_entry:
+            return False
+        if await _tree_entry_at(head_sha, path) != commit_entry:
             return False
     return True
 

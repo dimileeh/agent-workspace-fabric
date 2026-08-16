@@ -695,6 +695,117 @@ async def test_commit_changes_present_in_head_rejects_third_content_overwrite(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_newline_pathname_overwrite(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Newline pathnames must use -z bytes; C-quoted spellings must not retain salvage.
+
+    Without ``diff-tree -z``, Git emits a C-quoted path for names containing a
+    newline. ``splitlines()`` feeds that spelling to ``ls-tree``; both lookups
+    return empty and compare equal, so a later overwrite/revert falsely looks
+    present (PRRT_kwDOSJAM6s6ZmCZz).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-qm", "base")
+
+    weird_name = "weird\nname.txt"
+    (repo / weird_name).write_text("salvaged\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "salvage newline pathname")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: later tip keeps the salvage entry while adding an unrelated path.
+    (repo / "later.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-qm", "unrelated while salvage preserved")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Overwrite/remove the newline pathname so salvage content is gone.
+    _git(repo, "rm", "-f", "--", weird_name)
+    (repo / "other.txt").write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-qm", "remove weird pathname")
+    removed = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=removed,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_both_missing_tree_entries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Two empty ls-tree tokens must not count as retained salvage evidence."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    commit = "1" * 40
+    head = "2" * 40
+    commit_tree = "a" * 40
+    head_tree = "b" * 40
+    parent = "3" * 40
+    parent_tree = "c" * 40
+    # C-quoted-style path that will miss in both trees when looked up as-is.
+    bogus_path = '"weird\\nname.txt"'
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{commit_tree}\n")  # commit^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{head_tree}\n")  # head^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{parent}\n")  # commit^
+    cmd.queue_result(returncode=0, stdout=f"{parent_tree}\n")  # parent^{tree}
+    cmd.queue_result(returncode=0, stdout=f"{bogus_path}\0")  # diff-tree -z
+    cmd.queue_result(returncode=0, stdout="")  # ls-tree commit (missing)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=worktree,
+        commit=commit,
+        head=head,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_mode_only_revert(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
