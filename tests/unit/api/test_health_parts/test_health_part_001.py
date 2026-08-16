@@ -519,6 +519,53 @@ async def test_worker_heartbeat_check_stale_result_includes_age_and_threshold(
 
 
 @pytest.mark.unit
+async def test_worker_heartbeat_check_fresh_result_uses_fixed_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_now = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    session_events: list[str] = []
+    queried_nodes: list[str] = []
+
+    class _Session:
+        async def close(self) -> None:
+            session_events.append("close")
+
+    class _FixedDatetime:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            assert tz is UTC
+            return fixed_now
+
+    class _FreshWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> SimpleNamespace:
+            queried_nodes.append(node_id)
+            return SimpleNamespace(
+                last_heartbeat_at=fixed_now - timedelta(seconds=1),
+                poll_interval_seconds=10.0,
+            )
+
+    monkeypatch.setattr(health_route, "datetime", _FixedDatetime)
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _FreshWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="node-a")
+
+    assert result.ok is True
+    assert result.status == "ok"
+    assert result.reason == "WORKER_HEARTBEAT_FRESH"
+    assert result.resource_count == 1
+    assert result.detail == "Latest worker heartbeat is fresh for node 'node-a'"
+    assert queried_nodes == ["node-a"]
+    assert session_events == ["close"]
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_returns_posture_counts(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,
