@@ -372,6 +372,28 @@ class TestParseVerdict:
         assert result.reason == "garbled_verdict_marker"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_trailing_garbled_marker_fail_closed(
+        self,
+    ) -> None:
+        # Same-line trailing markers must not be absorbed into the first reason
+        # group — the final garbled marker is authoritative and fails closed.
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: rationale AWF-VERDICT: SHIPPED: done"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_second_valid_marker_wins(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: interim note AWF-VERDICT: FALSE POSITIVE: final rationale"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "final rationale"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_reason_keeps_inline_angle_bracket_term(self) -> None:
         # Prompt-template detection must not treat ordinary mid-reason tags such as
         # HTML-ish ``<summary>`` as a whole-reason placeholder echo (#822 Greptile).

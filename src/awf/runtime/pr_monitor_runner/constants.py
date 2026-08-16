@@ -216,6 +216,8 @@ _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_confor
 # / ``DEFER:`` / ``NEEDS_HUMAN:`` lines (no ``AWF-VERDICT:`` prefix) fail closed
 # at parse time; bare blockers are only consulted as fallback when an AWF FIXED
 # line has no usable reason.
+_AWF_VERDICT_MARKER = re.compile(r"\bAWF-VERDICT\s*:", re.IGNORECASE)
+
 _AWF_VERDICT = re.compile(
     r"\bAWF-VERDICT\s*:\s*"
     # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also

@@ -97,6 +97,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
     _AUTHORIZATION_BEARER_RE,
     _AWF_VERDICT,
+    _AWF_VERDICT_MARKER,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
     _BITBUCKET_TRANSIENT_HTTP_STATUSES,
     _FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX,
@@ -302,27 +303,30 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     for line in stdout.splitlines():
         stripped = line.strip()
         for verdict_line in _verdict_line_candidates(stripped):
-            if re.search(r"\bAWF-VERDICT\s*:", verdict_line, re.IGNORECASE):
-                saw_awf_mention = True
-                awf_match = _AWF_VERDICT.fullmatch(verdict_line)
-                last_awf_mention_recognized = awf_match is not None
-                if awf_match is not None:
-                    awf_verdicts.append(
+            # Multiple markers on one line are separate verdict units — do not
+            # let the first reason group absorb a trailing second marker.
+            for segment in _awf_verdict_segments(verdict_line):
+                if _AWF_VERDICT_MARKER.search(segment):
+                    saw_awf_mention = True
+                    awf_match = _AWF_VERDICT.fullmatch(segment)
+                    last_awf_mention_recognized = awf_match is not None
+                    if awf_match is not None:
+                        awf_verdicts.append(
+                            _verdict_result_from_match(
+                                label=awf_match.group("label"),
+                                reason=awf_match.group("reason"),
+                            )
+                        )
+                else:
+                    awf_match = None
+                bare_match = _BARE_VERDICT_LINE.fullmatch(segment)
+                if bare_match is not None:
+                    bare_verdicts.append(
                         _verdict_result_from_match(
-                            label=awf_match.group("label"),
-                            reason=awf_match.group("reason"),
+                            label=bare_match.group("label"),
+                            reason=bare_match.group("reason"),
                         )
                     )
-            else:
-                awf_match = None
-            bare_match = _BARE_VERDICT_LINE.fullmatch(verdict_line)
-            if bare_match is not None:
-                bare_verdicts.append(
-                    _verdict_result_from_match(
-                        label=bare_match.group("label"),
-                        reason=bare_match.group("reason"),
-                    )
-                )
     # A garbled final ``AWF-VERDICT:`` marker fails closed even when an earlier
     # recognized verdict exists — the agent's last marker is authoritative.
     if saw_awf_mention and not last_awf_mention_recognized:
@@ -377,7 +381,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
 
 
 def _stdout_mentions_awf_verdict(stdout: str) -> bool:
-    return bool(re.search(r"\bAWF-VERDICT\s*:", stdout, re.IGNORECASE))
+    return _AWF_VERDICT_MARKER.search(stdout) is not None
 
 
 _RESOLVABLE_PLACEHOLDER_LABELS = {
@@ -396,14 +400,15 @@ def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict)
     found = False
     for line in stdout.splitlines():
         for verdict_line in _verdict_line_candidates(line.strip()):
-            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
-            if awf_match is None:
-                continue
-            normalized_label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
-            if normalized_label != wanted:
-                continue
-            found = True
-            last_reason = awf_match.group("reason")
+            for segment in _awf_verdict_segments(verdict_line):
+                awf_match = _AWF_VERDICT.fullmatch(segment)
+                if awf_match is None:
+                    continue
+                normalized_label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
+                if normalized_label != wanted:
+                    continue
+                found = True
+                last_reason = awf_match.group("reason")
     if not found:
         return False
     cleaned = (last_reason or "").strip()
@@ -461,6 +466,25 @@ def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     inner = code_match.group("line").strip()
     if inner:
         yield inner
+
+
+def _awf_verdict_segments(verdict_line: str) -> list[str]:
+    """Split a candidate so each ``AWF-VERDICT:`` occurrence is its own unit.
+
+    Same-line trailing markers must not be absorbed into an earlier reason
+    group; each marker is authoritative in order (final marker wins / fails
+    closed), matching multiline parsing.
+    """
+    matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
+    if len(matches) <= 1:
+        return [verdict_line]
+    segments: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(verdict_line)
+        segment = verdict_line[match.start() : end].strip()
+        if segment:
+            segments.append(segment)
+    return segments or [verdict_line]
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
