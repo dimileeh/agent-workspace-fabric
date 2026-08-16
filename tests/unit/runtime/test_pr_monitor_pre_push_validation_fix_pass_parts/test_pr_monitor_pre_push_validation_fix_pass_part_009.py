@@ -1376,7 +1376,7 @@ async def test_commit_changes_present_in_head_fail_closed_on_salvage_merge_tmpdi
     FIXED evidence checking (PRRT_kwDOSJAM6s6ZoX2i).
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
-    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence as fix_pass_presence
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1409,7 +1409,12 @@ async def test_commit_changes_present_in_head_fail_closed_on_salvage_merge_tmpdi
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             raise OSError("temporary directory unavailable")
 
-    monkeypatch.setattr(fix_pass.tempfile, "TemporaryDirectory", _TemporaryDirectoryFailure)
+    # tempfile lives on the presence helper module after the line-limit split.
+    monkeypatch.setattr(
+        fix_pass_presence.tempfile,
+        "TemporaryDirectory",
+        _TemporaryDirectoryFailure,
+    )
 
     runner = make_runner(
         factory=factory,
