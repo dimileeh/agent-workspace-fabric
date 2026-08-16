@@ -469,6 +469,90 @@ class TestPullRequestMonitorAdoptionServicePart003:
             assert shared_task.idempotency_key == _canonical_key()
 
     @pytest.mark.unit
+    async def test_terminal_readoption_rejoins_shared_peer_adoption_task_with_explicit_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Peer adoption attempts establish shared ownership like source joins.
+
+        Two same-scope PR adoptions that share an explicit external_id join one
+        task. When the key-owning adoption goes terminal, supersession preserves
+        identity because of the peer attempt; re-adoption must rejoin that task
+        instead of raising TASK_EXTERNAL_ID_CONFLICT.
+        """
+        shared_external_id = "CLOUD-PEER-ADOPTION-99"
+        shared_title = "feature: shared-ownership"
+
+        class _ByNumberFetcher:
+            def __init__(self, by_number: dict[int, PullRequestAdoptionMetadata]) -> None:
+                self.by_number = by_number
+
+            async def __call__(
+                self, *, repo: RepoRef, pr_number: int
+            ) -> PullRequestAdoptionMetadata:
+                del repo
+                return self.by_number[pr_number]
+
+        fetcher = _ByNumberFetcher(
+            {
+                277: _metadata(number=277, title=shared_title, head_ref="feature/a"),
+                278: _metadata(number=278, title=shared_title, head_ref="feature/b"),
+            }
+        )
+
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            peer = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=278,
+                    external_id=shared_external_id,
+                )
+            )
+            assert peer.task_id == first.task_id
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert first_workspace is not None
+            first_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=shared_external_id,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert second.task_id == first.task_id
+        async with factory() as session:
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            shared_task = await TaskRepository(session).get(first.task_id)
+            assert fresh_workspace is not None
+            assert shared_task is not None
+            assert fresh_workspace.task_external_id == shared_external_id
+            assert shared_task.external_id == shared_external_id
+            assert shared_task.idempotency_key == _canonical_key()
+
+    @pytest.mark.unit
     async def test_supersede_previous_adoption_tolerates_missing_task_row(
         self,
         factory: async_sessionmaker[AsyncSession],
