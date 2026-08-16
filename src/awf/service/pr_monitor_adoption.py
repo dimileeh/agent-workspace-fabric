@@ -246,7 +246,10 @@ class PullRequestMonitorAdoptionService:
         # Release whatever active identity the terminal generation still holds.
         # Matching only the *new* effective ID strands a prior explicit ID when
         # re-adoption omits or changes identity, blocking later re-use of that ID.
-        workspace.task_external_id = _release_superseded_adoption_external_id(
+        # Probe the task namespace so an occupied preferred superseded slot does
+        # not raise IntegrityError on flush and wedge later re-adoptions.
+        workspace.task_external_id = await _release_superseded_adoption_external_id(
+            self._session,
             workspace.task_external_id,
             workspace_id=workspace.id,
         )
@@ -265,7 +268,8 @@ class PullRequestMonitorAdoptionService:
                 # attempts and future lookups stay intact — including when
                 # reuse stamped a null source key with the adoption key.
                 task.idempotency_key = superseded_idempotency_key
-                task.external_id = _release_superseded_adoption_external_id(
+                task.external_id = await _release_superseded_adoption_external_id(
+                    self._session,
                     task.external_id,
                     workspace_id=workspace.id,
                 )
@@ -1203,9 +1207,16 @@ def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: 
 # Matches Workspace.task_external_id / Task.external_id String(128) columns.
 _ADOPTION_EXTERNAL_ID_MAX_LENGTH = 128
 _SUPERSEDED_EXTERNAL_ID_MARKER = ":superseded:"
+# Prefer nonce 0, then salt until an unoccupied uq_tasks_external_id slot is found.
+_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS = 32
 
 
-def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> str:
+def _superseded_adoption_external_id(
+    *,
+    external_id: str,
+    workspace_id: str,
+    collision_nonce: int = 0,
+) -> str:
     """Return a unique superseded slot that always fits the external_id column.
 
     The naive ``{id}:superseded:{workspace_id}`` form is preferred for short IDs.
@@ -1213,11 +1224,20 @@ def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> 
     id then overflows ``String(128)``, so long IDs use a digest prefix that still
     ends with ``:superseded:{workspace_id}`` (or a digest of it) for detection
     and remains unique per pair.
+
+    ``collision_nonce`` > 0 salts the preferred/digest forms so allocation can
+    dodge an already-occupied ``uq_tasks_external_id`` candidate.
     """
-    candidate = f"{external_id}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if collision_nonce == 0:
+        prefix = external_id
+        digest_material = f"{external_id}\0{workspace_id}"
+    else:
+        prefix = f"{external_id}:c{collision_nonce}"
+        digest_material = f"{external_id}\0{workspace_id}\0{collision_nonce}"
+    candidate = f"{prefix}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
     if len(candidate) <= _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
         return candidate
-    digest = hashlib.sha256(f"{external_id}\0{workspace_id}".encode()).hexdigest()
+    digest = hashlib.sha256(digest_material.encode()).hexdigest()
     suffix = f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
     if len(suffix) < _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
         budget = _ADOPTION_EXTERNAL_ID_MAX_LENGTH - len(suffix)
@@ -1241,12 +1261,49 @@ def _is_superseded_adoption_external_id(external_id: str, *, workspace_id: str) 
     return external_id.endswith(f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}")
 
 
-def _release_superseded_adoption_external_id(
+async def _task_external_id_occupied(session: AsyncSession, external_id: str) -> bool:
+    stmt = select(Task.id).where(Task.external_id == external_id).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _allocate_superseded_adoption_external_id(
+    session: AsyncSession,
+    *,
+    external_id: str,
+    workspace_id: str,
+) -> str:
+    """Return an unoccupied superseded external_id for *workspace_id*.
+
+    Prefers the deterministic nonce-0 encoding; if another task already owns that
+    value, try salted candidates rather than flushing into ``uq_tasks_external_id``.
+    """
+    for collision_nonce in range(_SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS):
+        candidate = _superseded_adoption_external_id(
+            external_id=external_id,
+            workspace_id=workspace_id,
+            collision_nonce=collision_nonce,
+        )
+        if not await _task_external_id_occupied(session, candidate):
+            return candidate
+    # Practically unreachable with salted digests; surface as a domain conflict
+    # instead of an untranslated IntegrityError on flush.
+    raise PRMonitorAdoptionError(
+        error_code="TASK_EXTERNAL_ID_CONFLICT",
+        message=(
+            "Unable to allocate a free superseded external task ID slot; "
+            "retry after clearing colliding external task IDs."
+        ),
+        detail={"workspace_id": workspace_id},
+    )
+
+
+async def _release_superseded_adoption_external_id(
+    session: AsyncSession,
     external_id: str | None,
     *,
     workspace_id: str,
 ) -> str | None:
-    """Rewrite an active adoption external ID into a superseded slot.
+    """Rewrite an active adoption external ID into a free superseded slot.
 
     Values already encoded for *workspace_id* (and ``None``) are left unchanged
     so a second supersession pass does not nest ``:superseded:`` markers.
@@ -1256,7 +1313,8 @@ def _release_superseded_adoption_external_id(
         workspace_id=workspace_id,
     ):
         return external_id
-    return _superseded_adoption_external_id(
+    return await _allocate_superseded_adoption_external_id(
+        session,
         external_id=external_id,
         workspace_id=workspace_id,
     )

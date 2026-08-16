@@ -511,6 +511,91 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert await _count(session, Task) == 2
 
     @pytest.mark.unit
+    async def test_terminal_readoption_dodges_occupied_superseded_external_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Preferred superseded slot may already be owned; allocate a free alternate.
+
+        A caller can create an external ID equal to ``{old}:superseded:{workspace_id}``
+        after observing a terminal adoption. Rewriting into that occupied slot must
+        not raise IntegrityError and wedge every later re-adoption.
+        """
+        explicit_id = "CLOUD-TASK-42"
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            preferred_superseded = adoption_module._superseded_adoption_external_id(
+                external_id=explicit_id,
+                workspace_id=first.workspace_id,
+            )
+            await TaskRepository(session).create_or_get(
+                repo_url="https://github.com/other/repo.git",
+                base_branch="main",
+                title="occupies preferred superseded slot",
+                prompt="unrelated prompt",
+                external_id=preferred_superseded,
+                idempotency_key="unrelated-superseded-slot",
+                task_class="docs_task",
+                owned_paths=[],
+            )
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        alternate = adoption_module._superseded_adoption_external_id(
+            external_id=explicit_id,
+            workspace_id=first.workspace_id,
+            collision_nonce=1,
+        )
+        async with factory() as session:
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            fresh_task = await session.get(Task, second.task_id)
+            occupant = await TaskRepository(session).get_by_ref(preferred_superseded)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert fresh_workspace is not None
+            assert fresh_task is not None
+            assert occupant is not None
+            assert occupant.external_id == preferred_superseded
+            assert old_workspace.task_external_id == alternate
+            assert old_task.external_id == alternate
+            assert alternate != preferred_superseded
+            assert adoption_module._is_superseded_adoption_external_id(
+                alternate,
+                workspace_id=first.workspace_id,
+            )
+            assert fresh_workspace.task_external_id == explicit_id
+            assert fresh_task.external_id == explicit_id
+            assert await _count(session, Task) == 3
+
+    @pytest.mark.unit
     def test_superseded_external_id_stays_within_column_bounds(self) -> None:
         workspace_id = "ws_" + ("a" * 24)
         short_id = "CLOUD-TASK-42"
@@ -520,6 +605,17 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
                 workspace_id=workspace_id,
             )
             == f"{short_id}:superseded:{workspace_id}"
+        )
+        salted = adoption_module._superseded_adoption_external_id(
+            external_id=short_id,
+            workspace_id=workspace_id,
+            collision_nonce=1,
+        )
+        assert salted != f"{short_id}:superseded:{workspace_id}"
+        assert len(salted) <= 128
+        assert adoption_module._is_superseded_adoption_external_id(
+            salted,
+            workspace_id=workspace_id,
         )
 
         # Accepted explicit IDs may be 128 chars; naive append exceeds String(128).
