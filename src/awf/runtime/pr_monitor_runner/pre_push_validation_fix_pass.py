@@ -343,6 +343,9 @@ async def _commit_changes_present_in_head(
             return False
         # CommandResult decodes as UTF-8 with replace; binary/NUL blobs cannot be
         # round-tripped safely through merge-file — require exact OID equality.
+        # Valid UTF-8 (including non-ASCII source) round-trips through
+        # decode(replace) → encode("utf-8"); only invalid byte sequences that
+        # introduced U+FFFD diverge, and those are treated as non-text above.
         if "\0" in parent_blob or "\0" in head_blob or "\0" in commit_blob:
             return commit_oid == head_oid
 

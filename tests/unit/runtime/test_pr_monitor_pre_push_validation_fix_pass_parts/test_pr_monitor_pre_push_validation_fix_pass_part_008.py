@@ -491,6 +491,19 @@ async def test_commit_trees_differ_rejects_empty_commit_with_replace_forgery(
 
 
 @pytest.mark.unit
+def test_parse_ls_tree_meta_accepts_valid_and_rejects_malformed() -> None:
+    """``_parse_ls_tree_meta`` must cover valid meta and defensive None edges."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _parse_ls_tree_meta,
+    )
+
+    assert _parse_ls_tree_meta("100644 blob abc") == ("100644", "blob", "abc")
+    assert _parse_ls_tree_meta("100644") is None  # missing type/oid spaces
+    assert _parse_ls_tree_meta("100644 blob ") is None  # empty oid
+    assert _parse_ls_tree_meta("100644 blob abc def") is None  # oid containing a space
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_accepts_preserved_and_rejects_revert(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
