@@ -767,11 +767,19 @@ async def _invoke_cli_for_verdict_result(
                         right=synced_head,
                     )
                 )
-        # Dirty commit is item-scoped evidence only when local HEAD/ancestry cannot
-        # be evaluated (stub runners / missing worktree / missing heads). When both
-        # heads are known, ancestry (or equal SHAs) is authoritative — never accept
-        # FIXED via dirty after a known non-descendant move.
-        dirty_fix_evidence = bool(committed_dirty_changes) and not local_ancestry_evaluable
+        # Dirty commit is item-scoped evidence only for stub / missing-worktree
+        # environments where ancestry cannot be evaluated. A present worktree
+        # whose post-commit HEAD probe fails must fail closed — accepting
+        # committed_dirty_changes as FIXED after a burst reset to the remote tip
+        # can push a replacement commit while silently dropping an earlier item's
+        # fix (PRRT_kwDOSJAM6s6ZpUC7). When both heads are known, ancestry (or
+        # equal SHAs) is authoritative — never accept FIXED via dirty after a
+        # known non-descendant move.
+        dirty_fix_evidence = (
+            bool(committed_dirty_changes)
+            and not local_ancestry_evaluable
+            and not worktree_path.exists()
+        )
         item_fix_evidence = local_head_advanced or hosted_head_advanced or dirty_fix_evidence
 
         # Failed runs may still leave a contentful salvage commit. Retain that SHA

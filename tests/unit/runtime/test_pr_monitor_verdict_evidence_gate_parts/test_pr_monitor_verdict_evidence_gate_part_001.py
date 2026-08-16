@@ -397,6 +397,41 @@ async def test_fixed_claim_backward_head_with_dirty_commit_stays_unresolved(
 
 
 @pytest.mark.unit
+async def test_fixed_claim_dirty_commit_with_unverified_head_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Present worktree + failed post-commit HEAD probe must fail closed.
+
+    After a multi-item burst reset to the remote tip, a dirty sink commit can
+    still succeed while a transient ``_rev_parse_head`` failure leaves ancestry
+    unevaluable. Accepting ``committed_dirty_changes`` as FIXED in that case
+    would let a replacement tip push while dropping an earlier item's fix.
+    """
+    start = "b" * 40
+    workspace_id = "ws_fixed_dirty_head_probe_fail"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reset tip then committed dirty edits",
+        dirty=True,
+        heads=[None],
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_markerless_output_never_upgraded_by_dirty_commit() -> None:
     runner = _evidence_runner(
         stdout="Committed a fix without a marker",
