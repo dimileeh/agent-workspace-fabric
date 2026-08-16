@@ -111,6 +111,39 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="def guard():\n    return True\n",
         head_blob="def guard():\n    return True\ndef guard():\n    return False\n",
     )
+    # ``export class`` / ``export default function`` must count as bindings the
+    # same way bare ``class`` / ``export function`` do; otherwise an appended
+    # rebind keeps a line-aligned prefix and reuses stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zp_sx). Avoid ``name =`` bodies so retention is gated on
+    # the declaration binding, not an incidental field assignment.
+    assert not _added_salvage_blob_retained(
+        commit_blob="export class Guard {\n  ok() { return true; }\n}\n",
+        head_blob=(
+            "export class Guard {\n  ok() { return true; }\n}\n"
+            "export class Guard {\n  ok() { return false; }\n}\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="export default class Guard {\n  ok() { return true; }\n}\n",
+        head_blob=(
+            "export default class Guard {\n  ok() { return true; }\n}\n"
+            "export default class Guard {\n  ok() { return false; }\n}\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="export default function guard() {\n  return true;\n}\n",
+        head_blob=(
+            "export default function guard() {\n  return true;\n}\n"
+            "export default function guard() {\n  return false;\n}\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="export default async function guard() {\n  return true;\n}\n",
+        head_blob=(
+            "export default async function guard() {\n  return true;\n}\n"
+            "export default async function guard() {\n  return false;\n}\n"
+        ),
+    )
     # Comment-only / unrelated appends cannot supersede the salvage binding.
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",

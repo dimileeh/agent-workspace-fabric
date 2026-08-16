@@ -24,9 +24,11 @@ _ASSIGN_BINDING_RE = re.compile(
     r")"
 )
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
-_CLASS_BINDING_RE = re.compile(r"(?m)^[ \t]*class[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+_CLASS_BINDING_RE = re.compile(
+    r"(?m)^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?class[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+)
 _FUNCTION_BINDING_RE = re.compile(
-    r"(?m)^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _LET_CONST_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
