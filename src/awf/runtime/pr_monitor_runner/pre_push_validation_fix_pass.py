@@ -341,12 +341,13 @@ async def _commit_changes_present_in_head(
         commit_blob = await _blob_text(commit_oid)
         if parent_blob is None or head_blob is None or commit_blob is None:
             return False
-        # CommandResult decodes as UTF-8 with replace; binary/NUL blobs cannot be
-        # round-tripped safely through merge-file — require exact OID equality.
-        # Valid UTF-8 (including non-ASCII source) round-trips through
-        # decode(replace) → encode("utf-8"); only invalid byte sequences that
-        # introduced U+FFFD diverge, and those are treated as non-text above.
-        if "\0" in parent_blob or "\0" in head_blob or "\0" in commit_blob:
+        # CommandResult decodes as UTF-8 with replace; NUL and replacement
+        # characters cannot be round-tripped safely through merge-file —
+        # require exact OID equality. Distinct invalid-byte blobs all collapse
+        # to the same U+FFFD text, so merge-file would falsely prove retention
+        # if we only gated on NUL. Valid UTF-8 (including non-ASCII) round-trips
+        # through decode(replace) → encode("utf-8") without introducing U+FFFD.
+        if any("\0" in blob or "\ufffd" in blob for blob in (parent_blob, head_blob, commit_blob)):
             return commit_oid == head_oid
 
         with tempfile.TemporaryDirectory(prefix="awf-salvage-merge-", dir="/tmp") as tmp:
