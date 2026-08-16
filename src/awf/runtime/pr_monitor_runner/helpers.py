@@ -545,10 +545,10 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     immediately before a real trailing marker does not.
 
     ASCII ``'`` is only a quote delimiter when it is not a word-internal
-    apostrophe (``don't``, ``user's``); ASCII ``"`` is only a delimiter at
-    plausible quote boundaries (not inch/unit marks like ``5"``). Naive toggle
-    would absorb a later unquoted same-line marker into an earlier resolvable
-    verdict.
+    apostrophe (``don't``, ``user's``) or a leading elision (``'em``, ``'til``,
+    ``'cause``); ASCII ``"`` is only a delimiter at plausible quote boundaries
+    (not inch/unit marks like ``5"``). Naive toggle would absorb a later
+    unquoted same-line marker into an earlier resolvable verdict.
     """
     if match_start <= 0:
         return False
@@ -606,10 +606,13 @@ def _ascii_single_quote_is_delimiter(
     """Return whether ``verdict_line[index]`` is an ASCII single-quote delimiter.
 
     Word-internal apostrophes before a lowercase continuation (``don't``,
-    ``user's``, ``it's``) never toggle quote state. Outside a quote, only open
-    when the previous character is not alphanumeric so plural possessives like
-    ``users'`` do not start a span. Inside a quote, a closer jammed against a
-    following lowercase token (``'strict'by``) still closes unless the letters
+    ``user's``, ``it's``) never toggle quote state. Leading elisions after a
+    non-alphanumeric boundary (``'em``, ``'til``, ``'cause``) also never toggle
+    — otherwise an open span never closes and a later unquoted same-line marker
+    is absorbed, or an already-open citation closes early. Outside a quote, only
+    open when the previous character is not alphanumeric so plural possessives
+    like ``users'`` do not start a span. Inside a quote, a closer jammed against
+    a following lowercase token (``'strict'by``) still closes unless the letters
     after the apostrophe are a short English contraction suffix (``n't``,
     ``'s``, ``'re``, …), so trailing unquoted markers are not absorbed.
     """
@@ -619,6 +622,8 @@ def _ascii_single_quote_is_delimiter(
         return inside_ascii_single and not _ascii_apostrophe_is_contraction_suffix(
             verdict_line, index
         )
+    if _ascii_apostrophe_is_leading_elision(verdict_line, index):
+        return False
     return inside_ascii_single or not prev.isalnum()
 
 
@@ -626,6 +631,33 @@ def _ascii_single_quote_is_delimiter(
 # / clitics (n't, 's, 're, 've, 'll, 'd, 'm). Longer jammed tokens ('strict'by)
 # are closers, not apostrophes.
 _ASCII_APOSTROPHE_CONTRACTION_SUFFIXES = frozenset({"t", "s", "re", "ve", "ll", "d", "m"})
+
+# Colloquial leading elisions after a word boundary ('em, 'til, 'cause). These
+# must not open or close ASCII single-quote spans in verdict reason prose.
+_ASCII_LEADING_ELISION_SUFFIXES = frozenset(
+    {
+        "em",
+        "tis",
+        "twas",
+        "twere",
+        "twill",
+        "twould",
+        "twixt",
+        "til",
+        "till",
+        "cause",
+        "bout",
+        "round",
+        "nother",
+        "cept",
+        "gainst",
+        "fore",
+        "stead",
+        "cross",
+        "neath",
+        "ere",
+    }
+)
 
 
 def _ascii_apostrophe_is_contraction_suffix(verdict_line: str, index: int) -> bool:
@@ -635,6 +667,23 @@ def _ascii_apostrophe_is_contraction_suffix(verdict_line: str, index: int) -> bo
         end += 1
     suffix = verdict_line[index + 1 : end].lower()
     return suffix in _ASCII_APOSTROPHE_CONTRACTION_SUFFIXES
+
+
+def _ascii_apostrophe_is_leading_elision(verdict_line: str, index: int) -> bool:
+    """Return whether ``verdict_line[index]`` starts a leading elision (``'em``).
+
+    Requires a non-alphanumeric previous character and an alphabetic run that
+    matches a known elision suffix. Longer tokens like ``'emergency`` are not
+    elisions and may still open a real quote span.
+    """
+    prev = verdict_line[index - 1] if index > 0 else ""
+    if prev.isalnum():
+        return False
+    end = index + 1
+    while end < len(verdict_line) and verdict_line[end].isalpha():
+        end += 1
+    suffix = verdict_line[index + 1 : end].lower()
+    return suffix in _ASCII_LEADING_ELISION_SUFFIXES
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:

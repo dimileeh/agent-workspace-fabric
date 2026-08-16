@@ -616,6 +616,58 @@ class TestParseVerdict:
         assert result.reason == "maintainer must decide"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reason_with_elision",
+        [
+            "drop 'em safely",
+            "wait 'til merge",
+            "'cause the guard holds",
+        ],
+    )
+    def test_private_awf_verdict_leading_elision_does_not_absorb_trailing_marker(
+        self,
+        reason_with_elision: str,
+    ) -> None:
+        # Whitespace-prefixed elisions ('em, 'til, 'cause) must not open an
+        # unclosed ASCII single-quote span, or a later unquoted same-line
+        # blocker is absorbed into an earlier resolvable verdict
+        # (#822 PRRT_kwDOSJAM6s6ZlgbO).
+        result = _parse_verdict_result(
+            f"AWF-VERDICT: FIXED: {reason_with_elision} "
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must decide"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must decide"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_leading_elision_trailing_garbled_still_fail_closed(
+        self,
+    ) -> None:
+        # Same elision trap must not absorb a trailing garbled marker into an
+        # earlier resolvable verdict (#822 PRRT_kwDOSJAM6s6ZlgbO).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: drop 'em already AWF-VERDICT: SHIPPED: done"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_elision_inside_single_quotes_keeps_embedded_marker(
+        self,
+    ) -> None:
+        # Leading elisions inside a real ASCII single-quoted span must not close
+        # the quote early, or a mid-prose marker citation would incorrectly split
+        # (#822 PRRT_kwDOSJAM6s6ZlgbO).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: docs say 'drop 'em AWF-VERDICT: FIXED: done' as an example"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("docs say 'drop 'em AWF-VERDICT: FIXED: done' as an example")
+
+    @pytest.mark.unit
     def test_private_awf_verdict_apostrophe_in_reason_trailing_garbled_still_fail_closed(
         self,
     ) -> None:
