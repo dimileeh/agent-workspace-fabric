@@ -59,6 +59,10 @@ class RetiredAgentAdapter(AgentAdapter):
                 self._runtime = str(runtime)
 
     @property
+    def is_retired(self) -> bool:
+        return True
+
+    @property
     def name(self) -> AgentRuntime | str:
         return self._runtime
 

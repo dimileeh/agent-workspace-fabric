@@ -1008,6 +1008,7 @@ class TestRegistry:
         assert codex.name == AgentRuntime.codex
         assert claude.name == AgentRuntime.claude_code
         assert cursor.name == AgentRuntime.cursor
+        assert cursor.is_retired is False
         assert antigravity.name == AgentRuntime.antigravity
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok
@@ -1016,6 +1017,7 @@ class TestRegistry:
 
         gemini = get_adapter(AgentRuntime.gemini, runner=runner)
         assert isinstance(gemini, RetiredAgentAdapter)
+        assert gemini.is_retired is True
         assert gemini.name == AgentRuntime.gemini
         assert gemini.name_str == "gemini"
 

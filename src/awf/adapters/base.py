@@ -186,6 +186,11 @@ class AgentAdapter(ABC):
         return name.value if isinstance(name, AgentRuntime) else str(name)
 
     @property
+    def is_retired(self) -> bool:
+        """Return True if this adapter represents a retired or unsupported agent runtime."""
+        return False
+
+    @property
     def default_model(self) -> str | None:
         """Return the default model for this adapter."""
         return self._default_model
