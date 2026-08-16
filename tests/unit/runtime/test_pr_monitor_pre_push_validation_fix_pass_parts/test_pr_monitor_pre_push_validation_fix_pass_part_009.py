@@ -130,10 +130,36 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="check();\n",
         head_blob="#ifndef FEATURE\ncheck();\n",
     )
+    # Hash-line bodies must still scan for trailing ``/*``; otherwise
+    # ``#endif /*`` / ``#define X /*`` leave block-comment state closed and a
+    # later no-change FIXED reuses disabled suffix evidence
+    # (PRRT_kwDOSJAM6s6ZpdMC).
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="#endif /*\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="#define X /*\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="#if 0\n#endif /*\ncheck();\n",
+    )
+    # Closing ``*/`` must not clear line-start across a same-line ``#if`` after
+    # a multi-line comment ends (PRRT_kwDOSJAM6s6ZpdMC).
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="/*\n*/ #if 0\ncheck();\n",
+    )
     # Closed wrappers before the salvage suffix are fine (benign prepend region).
     assert _added_salvage_blob_retained(
         commit_blob="check();\n",
         head_blob="/* note */\ncheck();\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="#endif /* note */\ncheck();\n",
     )
     assert _added_salvage_blob_retained(
         commit_blob="check();\n",

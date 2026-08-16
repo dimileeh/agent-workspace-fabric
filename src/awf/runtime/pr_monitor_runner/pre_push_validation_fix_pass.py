@@ -207,7 +207,10 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     Suffix (prepend) salvage retention must reject tips that place the salvage
     under an unterminated ``/*``, triple-quoted string, or ``#if`` / ``#ifdef`` /
     ``#ifndef`` — those keep a line-aligned suffix while disabling the fix
-    (PRRT_kwDOSJAM6s6ZpaIn). Closed wrappers and plain header lines return False.
+    (PRRT_kwDOSJAM6s6ZpaIn). Hash-line bodies are still scanned for trailing
+    ``/*`` / triple-quotes (``#endif /*``, ``#define X /*``), and closing a
+    multi-line ``*/`` keeps line-start so a same-line ``#if`` is not missed
+    (PRRT_kwDOSJAM6s6ZpdMC). Closed wrappers and plain header lines return False.
     """
     in_block_comment = False
     in_triple_double = False
@@ -222,7 +225,9 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             if ch == "*" and i + 1 < n and prefix[i + 1] == "/":
                 in_block_comment = False
                 i += 2
-                at_line_start = False
+                # Keep ``at_line_start`` from a prior newline inside the comment
+                # so a same-line ``#if`` after ``*/`` is still seen
+                # (PRRT_kwDOSJAM6s6ZpdMC).
                 continue
             if ch == "\n":
                 at_line_start = True
@@ -232,7 +237,6 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             if prefix.startswith('"""', i):
                 in_triple_double = False
                 i += 3
-                at_line_start = False
                 continue
             if ch == "\n":
                 at_line_start = True
@@ -242,7 +246,6 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             if prefix.startswith("'''", i):
                 in_triple_single = False
                 i += 3
-                at_line_start = False
                 continue
             if ch == "\n":
                 at_line_start = True
@@ -269,6 +272,7 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             while j < n and prefix[j] in " \t":
                 j += 1
             rest = prefix[j:]
+            matched_directive = False
             # Check longer ``ifdef`` / ``ifndef`` / ``endif`` before bare ``if``.
             for keyword, depth_delta in (
                 ("ifdef", 1),
@@ -285,10 +289,17 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
                     if_depth = max(0, if_depth + depth_delta)
                 else:
                     if_depth += depth_delta
+                # Advance past the keyword; scan the rest of the line normally
+                # so trailing ``/*`` / triple-quotes still open disabling context
+                # (PRRT_kwDOSJAM6s6ZpdMC).
+                i = after
+                matched_directive = True
                 break
-            # Consume through end of line (directive body ignored).
-            while i < n and prefix[i] != "\n":
+            if not matched_directive:
+                # Non-directive hash line (e.g. ``#define X /*``): skip ``#``
+                # and keep scanning the body for openers.
                 i += 1
+            at_line_start = False
             continue
         if ch == "\n":
             at_line_start = True
