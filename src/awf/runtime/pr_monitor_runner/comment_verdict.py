@@ -209,6 +209,41 @@ async def _retain_failed_run_salvage_despite_cancellation(
         raise cancellation
 
 
+async def _await_failed_run_salvage_persist_shielded(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+    state: MonitorState,
+    *,
+    salvage_item_id: str,
+) -> None:
+    """Durable-write salvage keys even if ``CancelledError`` arrives mid-await.
+
+    Bare ``await persist(...)`` lets cancel escape from exception handlers after
+    in-memory retain, so a worker reload drops item-bound evidence while HEAD
+    still carries the fix — a later no-change FIXED becomes
+    ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZovMQ). Same shield +
+    save/re-raise contract as successful-tip and salvage-clear paths.
+    """
+    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+    if not callable(persist):
+        return
+    persist_task = asyncio.create_task(
+        persist(workspace_id, state, salvage_item_id=salvage_item_id)
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(persist_task)
+            break
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            if persist_task.done():
+                persist_task.result()
+                break
+    if cancellation is not None:
+        raise cancellation
+
+
 def _retain_or_clear_failed_run_salvage(
     *,
     state: MonitorState | None,
@@ -584,9 +619,12 @@ async def _invoke_cli_for_verdict_result(
             retain_for_failed_run=True,
         )
         if state is not None and salvage_item_id is not None:
-            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-            if callable(persist):
-                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
+            await _await_failed_run_salvage_persist_shielded(
+                runner,
+                workspace_id,
+                state,
+                salvage_item_id=salvage_item_id,
+            )
         if unexpected_sink_error is not None:
             raise unexpected_sink_error from None
         raise
@@ -764,11 +802,15 @@ async def _invoke_cli_for_verdict_result(
         # ``_MonitorAgentServiceRecoverySupersededError`` and returns without
         # ``_persist_state`` (runner.py). Persist only ``__salvaged_fix_*``
         # keys before re-raising — same selective merge as CancelledError /
-        # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt).
+        # unexpected Exception (PRRT_kwDOSJAM6s6Zm-Yt). Shield the write so
+        # cancel mid-await cannot drop salvage evidence (PRRT_kwDOSJAM6s6ZovMQ).
         if state is not None and salvage_item_id is not None:
-            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
-            if callable(persist):
-                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
+            await _await_failed_run_salvage_persist_shielded(
+                runner,
+                workspace_id,
+                state,
+                salvage_item_id=salvage_item_id,
+            )
         raise commit_sink_error from None
 
     if agent_run_err is not None:

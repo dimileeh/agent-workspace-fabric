@@ -815,6 +815,271 @@ async def test_salvage_persisted_when_agent_raises_unexpected_after_self_commit(
 
 
 @pytest.mark.unit
+async def test_unexpected_exception_salvage_persist_shielded_from_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid-persist on unexpected Exception must still durable-write salvage.
+
+    Successful-tip and salvage-clear paths shield ``_persist_failed_run_salvage_durably``.
+    The unexpected agent Exception path retained keys then used a bare await; cancel
+    during that write drops item-bound salvage while HEAD already advanced, so a
+    later no-change FIXED becomes ``fixed_without_head_advance``
+    (PRRT_kwDOSJAM6s6ZovMQ).
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6ZovMQ_unexpected"
+    body_hash = "feedback_body_hash_unexpected_persist_shield"
+    workspace_id = "ws_unexpected_persist_shield"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_unexpected_persist_shield"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    entered_persist = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _agent_self_commits_then_crashes(**_kwargs: object) -> AgentRunResult:
+        raise RuntimeError("adapter crashed after self-commit")
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        entered_persist.set()
+        await release_persist.wait()
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_clean(**_kwargs: object) -> bool:
+        return False
+
+    runner._deps = SimpleNamespace(adapter=SimpleNamespace(run=_agent_self_commits_then_crashes))
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    runner._commit_dirty_worktree = _commit_dirty_clean
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_persist.wait()
+    task.cancel()
+    release_persist.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots, "unexpected-Exception salvage persist must complete under cancel"
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed tip after unexpected mid-persist cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed tip after unexpected mid-persist cancel"
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
+async def test_commit_sink_error_salvage_persist_shielded_from_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Cancel mid-persist on commit-sink error must still durable-write salvage.
+
+    The commit-sink Exception path (service-recovery failed/superseded, ownership
+    repair, etc.) selectively persists ``__salvaged_fix_*`` then re-raises. A bare
+    await lets cancel drop that write while HEAD already advanced, so a later
+    no-change FIXED becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6ZovMQ).
+    """
+    import asyncio
+
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6ZovMQ_sink"
+    body_hash = "feedback_body_hash_sink_persist_shield"
+    workspace_id = "ws_sink_persist_shield"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_sink_persist_shield"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+    entered_persist = asyncio.Event()
+    release_persist = asyncio.Event()
+
+    sink_exc = _MonitorAgentServiceRecoveryFailedError(
+        "service recovery failed after sink HEAD advance"
+    )
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed before sink raised",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+        commit_dirty_raises=sink_exc,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        entered_persist.set()
+        await release_persist.wait()
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    failed_runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    failed_runner._persist_state = _persist_state
+
+    task = asyncio.create_task(
+        comments._invoke_cli_for_verdict_result(
+            failed_runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    )
+    await entered_persist.wait()
+    task.cancel()
+    release_persist.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots, "commit-sink salvage persist must complete under cancel"
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed tip after sink mid-persist cancel",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed tip after sink mid-persist cancel"
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
 async def test_salvage_persisted_when_post_exception_mirror_repair_fails_after_self_commit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
