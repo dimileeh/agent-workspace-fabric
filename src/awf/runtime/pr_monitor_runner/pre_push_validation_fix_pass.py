@@ -208,26 +208,35 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     use contiguous retention instead. Raw ``commit_blob in head_blob`` is too weak:
     commenting out an added call (``enable_guard()`` → ``# enable_guard()``) still
     contains the salvage bytes as a mid-line substring and would reuse stale
-    evidence (PRRT_kwDOSJAM6s6Zm6F1). Require a line-boundary-aligned occurrence:
-    the match must start at file start or after a newline, and if the salvage
-    lacks a trailing newline it must end at EOF or before a newline — so the
-    added patch remains a whole-line block, not a modified occurrence.
+    evidence (PRRT_kwDOSJAM6s6Zm6F1). A mid-file whole-line occurrence is also too
+    weak: nesting the salvage under ``#if 0`` / a multiline comment / string keeps
+    line-boundary alignment while disabling the fix (PRRT_kwDOSJAM6s6ZpQKt).
+    Retain only a line-boundary-aligned **prefix** (append / exact) or **suffix**
+    (prepend): the match must start at file start or after a newline, and if the
+    salvage lacks a trailing newline it must end at EOF or before a newline.
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
     """
     if not commit_blob:
         return not head_blob
-    start = 0
-    while True:
-        idx = head_blob.find(commit_blob, start)
-        if idx < 0:
+
+    def _line_aligned_at(idx: int) -> bool:
+        if idx < 0 or idx + len(commit_blob) > len(head_blob):
             return False
-        if idx == 0 or head_blob[idx - 1] == "\n":
-            end = idx + len(commit_blob)
-            if commit_blob.endswith("\n") or end == len(head_blob) or head_blob[end] == "\n":
-                return True
-        start = idx + 1
+        if head_blob[idx : idx + len(commit_blob)] != commit_blob:
+            return False
+        if not (idx == 0 or head_blob[idx - 1] == "\n"):
+            return False
+        end = idx + len(commit_blob)
+        return commit_blob.endswith("\n") or end == len(head_blob) or head_blob[end] == "\n"
+
+    # Append / exact: salvage remains a line-aligned prefix of the tip.
+    if _line_aligned_at(0):
+        return True
+    # Prepend: salvage remains a line-aligned suffix (not already covered above).
+    suffix_idx = len(head_blob) - len(commit_blob)
+    return suffix_idx > 0 and _line_aligned_at(suffix_idx)
 
 
 async def _commit_changes_present_in_head(
@@ -250,9 +259,10 @@ async def _commit_changes_present_in_head(
     checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
     result equals head. A no-baseline addition (new path) cannot use that
     3-way model; retain when the salvage blob remains a line-boundary-aligned
-    contiguous block in the tip blob so append/prepend keep evidence while
-    mid-line modifications (e.g. commenting out an added call) and overwrites
-    fail closed (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1). ``baseline``
+    prefix or suffix of the tip blob so append/prepend keep evidence while
+    mid-line modifications, mid-file disabling wrappers (``#if 0`` / comments /
+    strings), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
+    PRRT_kwDOSJAM6s6Zm6F1, PRRT_kwDOSJAM6s6ZpQKt). ``baseline``
     defaults to the tip's
     first parent; callers that retain a failed-run tip must pass the invocation
     start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is checked as
@@ -362,8 +372,9 @@ async def _commit_changes_present_in_head(
             # Addition without a baseline blob: later tips may append/prepend
             # while leaving the added bytes intact (OID changes). Exact OID is
             # sufficient but not required — require line-boundary-aligned
-            # contiguous retention of the salvage blob (PRRT_kwDOSJAM6s6Zm0PC,
-            # PRRT_kwDOSJAM6s6Zm6F1).
+            # prefix or suffix retention of the salvage blob
+            # (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1,
+            # PRRT_kwDOSJAM6s6ZpQKt).
             head_raw = await _blob_raw(head_oid)
             commit_raw = await _blob_raw(commit_oid)
             if head_raw is None or commit_raw is None:

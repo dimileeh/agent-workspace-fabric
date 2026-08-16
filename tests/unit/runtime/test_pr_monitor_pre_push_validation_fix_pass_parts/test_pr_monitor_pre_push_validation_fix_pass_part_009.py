@@ -88,6 +88,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="enable_guard()",
         head_blob="x_enable_guard()",
     )
+    # Mid-file whole-line occurrence inside disabling wrappers must fail closed
+    # even though the salvage bytes remain line-boundary-aligned
+    # (PRRT_kwDOSJAM6s6ZpQKt).
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="#if 0\ncheck();\n#endif\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="/*\ncheck();\n*/\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob='"""\ncheck();\n"""\n',
+    )
     # Empty-file addition salvage: only an exact empty tip blob retains it.
     # Vacuous ``"" in head`` / early-True would accept an overwrite and let a
     # later no-change FIXED retry reuse stale evidence (PRRT_kwDOSJAM6s6ZpEZh).
@@ -193,6 +208,73 @@ async def test_commit_changes_present_in_head_rejects_commented_out_addition(
         worktree_path=repo,
         commit=salvage,
         head=commented,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_disabled_wrapper_addition(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Later tip that wraps an added salvage call in ``#if 0`` must fail closed.
+
+    Salvage adds ``check();``. A descendant that keeps the whole line but nests
+    it under ``#if 0`` / ``#endif`` still satisfies line-boundary substring
+    retention; that must not reuse stale evidence on a no-change FIXED retry
+    (PRRT_kwDOSJAM6s6ZpQKt).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.py").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.py")
+    _git(repo, "commit", "-qm", "base without new file")
+
+    (repo / "guard.py").write_text("check();\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "salvage adds check")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "guard.py").write_text("#if 0\ncheck();\n#endif\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "later tip disables addition under if 0")
+    disabled = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: append after the added call keeps a prefix-aligned salvage block.
+    _git(repo, "checkout", "-q", "-B", "append-tip", salvage)
+    (repo / "guard.py").write_text("check();\nextra();\n", encoding="utf-8")
+    _git(repo, "add", "guard.py")
+    _git(repo, "commit", "-qm", "later tip appends after addition")
+    appended = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=appended,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=disabled,
     )
 
 
