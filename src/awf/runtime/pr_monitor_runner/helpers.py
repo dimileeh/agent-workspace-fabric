@@ -596,15 +596,22 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     markers look like leading attempts (mid-prose option lists must not
     override an earlier real verdict).
 
-    Subsequent markers embedded in quoted reason prose (for example a
-    ``NEEDS_HUMAN`` reason that cites the marker grammar inside ASCII/curly
-    quotes or Markdown backticks) are not split into new attempts — only
-    unquoted trailing markers are.
+    When the leading marker is already a hard block (``NEEDS_HUMAN`` /
+    ``DEFER``), keep the whole line as one unit as well. Later markers — quoted
+    or unquoted — are treated as reason prose citations so they cannot resolve
+    a thread the agent explicitly blocked (PRRT_kwDOSJAM6s6Zl4Ra).
+
+    Subsequent markers embedded in quoted reason prose after a resolvable
+    leading verdict (for example a ``FIXED`` reason that cites the marker
+    grammar inside ASCII/curly quotes or Markdown backticks) are not split into
+    new attempts — only unquoted trailing markers are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
         return [verdict_line]
     if verdict_line[: matches[0].start()].strip():
+        return [verdict_line]
+    if _awf_verdict_leading_hard_block(verdict_line, matches[0].start()):
         return [verdict_line]
     split_starts = [matches[0].start()]
     for match in matches[1:]:
@@ -620,6 +627,19 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
         if segment:
             segments.append(segment)
     return segments or [verdict_line]
+
+
+def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool:
+    """Return whether the leading same-line marker is ``NEEDS_HUMAN`` or ``DEFER``.
+
+    Hard-block leaders absorb later same-line markers into the reason so unquoted
+    prose citations cannot override the block.
+    """
+    leading = _AWF_VERDICT.match(verdict_line, match_start)
+    if leading is None:
+        return False
+    normalized_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
+    return normalized_label in {"needs human", "defer"}
 
 
 def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:

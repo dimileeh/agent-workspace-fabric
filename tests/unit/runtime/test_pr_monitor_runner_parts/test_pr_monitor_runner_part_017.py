@@ -721,6 +721,38 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_unquoted_marker_in_blocking_reason_keeps_needs_human(
+        self,
+    ) -> None:
+        # Unquoted prose citations of the marker grammar inside a hard-block reason
+        # must not split into a later authoritative verdict (#822 PRRT_kwDOSJAM6s6Zl4Ra).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
+            "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            "choose whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_unquoted_marker_in_defer_reason_keeps_defer(
+        self,
+    ) -> None:
+        # Same hard-block preservation for DEFER reasons that cite another marker
+        # without quotes (#822 PRRT_kwDOSJAM6s6Zl4Ra).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: DEFER: track whether to emit "
+            "AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
+        )
+
+        assert result.verdict == "defer"
+        assert result.reason == (
+            "track whether to emit AWF-VERDICT: FALSE POSITIVE: reviewer is wrong."
+        )
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_curly_quoted_marker_keeps_needs_human(
         self,
     ) -> None:
@@ -788,9 +820,11 @@ class TestParseVerdict:
         self,
     ) -> None:
         # Matching double-backtick close must leave the parser outside so a real
-        # trailing marker still wins (#822 PRRT_kwDOSJAM6s6Zlnbx).
+        # trailing marker still wins after a resolvable leading verdict
+        # (#822 PRRT_kwDOSJAM6s6Zlnbx). Hard-block leaders keep the whole line
+        # (PRRT_kwDOSJAM6s6Zl4Ra); use FIXED here to isolate quote-exit splitting.
         result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: cite ``something``AWF-VERDICT: FALSE POSITIVE: real trailing"
+            "AWF-VERDICT: FIXED: cite ``something``AWF-VERDICT: FALSE POSITIVE: real trailing"
         )
 
         assert result.verdict == "false_positive"
@@ -832,8 +866,10 @@ class TestParseVerdict:
     ) -> None:
         # A closing quote immediately before a real trailing marker is outside the
         # quote — must not be treated as still embedded (#822 PRRT_kwDOSJAM6s6ZlTEh).
+        # Leading resolvable verdict isolates quote-exit splitting from hard-block
+        # same-line absorption (PRRT_kwDOSJAM6s6Zl4Ra).
         result = _parse_verdict_result(
-            'AWF-VERDICT: NEEDS_HUMAN: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
+            'AWF-VERDICT: FIXED: cite "something"AWF-VERDICT: FALSE POSITIVE: real trailing'
         )
 
         assert result.verdict == "false_positive"
@@ -846,7 +882,7 @@ class TestParseVerdict:
         # Closed Markdown code span immediately before a real trailing marker must
         # still split (#822 PRRT_kwDOSJAM6s6ZlTlv).
         result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: cite `something`AWF-VERDICT: FALSE POSITIVE: real trailing"
+            "AWF-VERDICT: FIXED: cite `something`AWF-VERDICT: FALSE POSITIVE: real trailing"
         )
 
         assert result.verdict == "false_positive"
@@ -857,7 +893,7 @@ class TestParseVerdict:
         self,
     ) -> None:
         result = _parse_verdict_result(
-            "AWF-VERDICT: NEEDS_HUMAN: cite 'something'AWF-VERDICT: FALSE POSITIVE: real trailing"
+            "AWF-VERDICT: FIXED: cite 'something'AWF-VERDICT: FALSE POSITIVE: real trailing"
         )
 
         assert result.verdict == "false_positive"
