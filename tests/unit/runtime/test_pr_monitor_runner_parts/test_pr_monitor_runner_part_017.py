@@ -1996,6 +1996,48 @@ class TestParseVerdict:
         assert result.reason == "real trailing"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_explicit_correction_splits_later_attempt(
+        self,
+    ) -> None:
+        # Explicit self-correction separators (e.g. ``; correction:``) mark a
+        # later same-line marker as a new attempt even without a closed quote.
+        # Absorbing FIXED into the FALSE POSITIVE reason would resolve without
+        # the HEAD-advance gate (#822 PRRT_kwDOSJAM6s6Znm-N).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: initially misread; correction: "
+            "AWF-VERDICT: FIXED: changed the implementation"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "changed the implementation"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_same_line_corrected_to_separator_splits_later_attempt(
+        self,
+    ) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: first pass wrong; corrected to: "
+            "AWF-VERDICT: FIXED: applied the real fix"
+        )
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "applied the real fix"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_quoted_correction_separator_stays_absorbed(
+        self,
+    ) -> None:
+        # A cited correction phrase inside quotes is still reason prose, not a
+        # separate attempt — only unquoted correction separators split.
+        result = _parse_verdict_result(
+            'AWF-VERDICT: FALSE POSITIVE: docs say "correction: '
+            'AWF-VERDICT: FIXED: example" already'
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == ('docs say "correction: AWF-VERDICT: FIXED: example" already')
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_curly_quoted_marker_keeps_needs_human(
         self,
     ) -> None:

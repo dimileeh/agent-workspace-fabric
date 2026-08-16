@@ -1137,18 +1137,19 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
     When the leading marker is ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``,
     later resolvable markers cited in the reason (quoted or unquoted) stay
     rationale unless they are an unambiguously separate trailing attempt after
-    a closed quote/code span — otherwise a later citation would win and either
-    bypass the HEAD-advance evidence gate (``FIXED`` citation after
-    ``FALSE POSITIVE``, PRRT_kwDOSJAM6s6ZngUH; ``FALSE POSITIVE`` citation after
-    ``FIXED``, PRRT_kwDOSJAM6s6Zmggp) or skip DEFER tracking-artifact creation
-    (``DEFER``, PRRT_kwDOSJAM6s6Zm6F4). Later ``NEEDS_HUMAN`` / unrecognized
-    labels still split (fail closed).
+    a closed quote/code span or an explicit correction/separator
+    (``correction:`` / ``corrected to:``, PRRT_kwDOSJAM6s6Znm-N) — otherwise a
+    later citation would win and either bypass the HEAD-advance evidence gate
+    (``FIXED`` citation after ``FALSE POSITIVE``, PRRT_kwDOSJAM6s6ZngUH;
+    ``FALSE POSITIVE`` citation after ``FIXED``, PRRT_kwDOSJAM6s6Zmggp) or skip
+    DEFER tracking-artifact creation (``DEFER``, PRRT_kwDOSJAM6s6Zm6F4). Later
+    ``NEEDS_HUMAN`` / unrecognized labels still split (fail closed).
 
     Subsequent markers embedded in quoted reason prose after a resolvable
     leading verdict (for example a ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``
     reason that cites the marker grammar inside ASCII/curly quotes or Markdown
     backticks) are not split into new attempts — only unquoted trailing
-    markers are.
+    markers and explicit self-corrections are.
     """
     matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
     if len(matches) <= 1:
@@ -1184,8 +1185,8 @@ def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool
     reason so unquoted prose citations cannot override the block. ``FIXED`` /
     ``DEFER`` / ``FALSE POSITIVE`` use
     :func:`_awf_verdict_leading_fixed_absorbs_later_marker` instead so
-    unambiguous trailing attempts after a closed quote still split and later
-    blockers still fail closed.
+    unambiguous trailing attempts after a closed quote or explicit correction
+    still split and later blockers still fail closed.
     """
     leading = _AWF_VERDICT.match(verdict_line, match_start)
     if leading is None:
@@ -1209,10 +1210,10 @@ def _awf_verdict_leading_fixed_absorbs_later_marker(
     (PRRT_kwDOSJAM6s6ZngUH); a later ``false_positive`` after ``FIXED`` would
     bypass the HEAD-advance evidence gate (PRRT_kwDOSJAM6s6Zmggp); a later
     ``false_positive`` after ``DEFER`` would skip tracking-artifact creation
-    (PRRT_kwDOSJAM6s6Zm6F4). Later ``NEEDS_HUMAN`` and unrecognized labels
+    (PRRT_kwDOSJAM6s6Zm6F4).     Later ``NEEDS_HUMAN`` and unrecognized labels
     still split (fail closed). Markers that follow a closed quote/code span
-    with only optional whitespace are unambiguously separate trailing attempts
-    and still split.
+    with only optional whitespace, or an explicit correction/separator, are
+    unambiguously separate trailing attempts and still split.
     """
     leading = _AWF_VERDICT.match(verdict_line, leading_start)
     if leading is None:
@@ -1229,11 +1230,20 @@ def _awf_verdict_leading_fixed_absorbs_later_marker(
     return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
 
 
+# Explicit self-correction before a later same-line marker
+# (``…; correction: AWF-VERDICT: …`` / ``…; corrected to: AWF-VERDICT: …``).
+_EXPLICIT_VERDICT_CORRECTION_SEPARATOR = re.compile(
+    r"(?is)(?:^|[\s;,.:—–-])(?:correction|corrected(?:\s+to)?)\s*:\s*\Z"
+)
+
+
 def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_start: int) -> bool:
-    """Return whether ``match_start`` follows a closed quote with only whitespace.
+    """Return whether ``match_start`` is an unambiguous separate trailing attempt.
 
     Distinguishes a real trailing verdict jammed against a finished citation
-    span (``cite "x"AWF-VERDICT: …``) from mid-reason marker-grammar prose.
+    span (``cite "x"AWF-VERDICT: …``) or introduced by an explicit
+    correction/separator (``…; correction: AWF-VERDICT: …``) from mid-reason
+    marker-grammar prose.
     """
     if match_start <= 0:
         return False
@@ -1284,17 +1294,24 @@ def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_
             if inside_curly_single:
                 last_close_end = index + 1
             inside_curly_single = False
-    if last_close_end < 0:
-        return False
-    if (
+    inside_quote_or_code = (
         inside_ascii_double
         or inside_ascii_single
         or inside_backtick
         or inside_curly_double
         or inside_curly_single
+    )
+    if (
+        last_close_end >= 0
+        and not inside_quote_or_code
+        and not verdict_line[last_close_end:match_start].strip()
     ):
-        return False
-    return not verdict_line[last_close_end:match_start].strip()
+        return True
+    # Explicit self-corrections split even without a closed quote span
+    # (PRRT_kwDOSJAM6s6Znm-N). Stay absorbed when still inside an open span.
+    return (not inside_quote_or_code) and bool(
+        _EXPLICIT_VERDICT_CORRECTION_SEPARATOR.search(prefix)
+    )
 
 
 def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:
