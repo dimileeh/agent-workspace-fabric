@@ -1194,6 +1194,34 @@ class TestPullRequestMonitorAdoptionServicePart002:
                     idempotency_key=None,
                     task_policy={},
                 ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id="pr-adopt-external",
+                    idempotency_key=None,
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": 100,
+                        }
+                    },
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id="pr-adopt-external",
+                    idempotency_key=None,
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": 277,
+                        }
+                    },
+                ),
                 True,
             ),
             (

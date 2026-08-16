@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Task, Workspace
 from awf.db.repositories import TaskRepository, WorkspaceRepository
@@ -25,7 +26,65 @@ from tests.unit.service.test_pr_monitor_adoption_parts.test_pr_monitor_adoption_
 _IMPORTED_FIXTURES = (factory,)
 
 
+class _ByNumberMetadataFetcher:
+    """Return metadata keyed by requested PR number (for cross-PR scenarios)."""
+
+    def __init__(self, by_number: dict[int, PullRequestAdoptionMetadata]) -> None:
+        self._by_number = by_number
+        self.calls: list[tuple[str, int]] = []
+
+    async def __call__(self, *, repo: RepoRef, pr_number: int) -> PullRequestAdoptionMetadata:
+        self.calls.append((repo.slug(), pr_number))
+        return self._by_number[pr_number]
+
+
 class TestPullRequestMonitorAdoptionExternalIdTaskClass:
+    @pytest.mark.unit
+    async def test_history_does_not_attach_when_explicit_id_collides_with_other_pr_generated_id(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Explicit id equal to another PR's generated adoption id must not attach."""
+        repo_slug = "dimileeh/aira-web"
+        pr_a = 100
+        pr_b = 200
+        b_generated = adoption_module._adoption_external_id(
+            repo_slug=repo_slug,
+            pr_number=pr_b,
+        )
+        fetcher = _ByNumberMetadataFetcher(
+            {
+                pr_a: _metadata(number=pr_a, title="feature: shared-title"),
+                pr_b: _metadata(number=pr_b, title="feature: shared-title"),
+            }
+        )
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug=repo_slug,
+                    pr_number=pr_a,
+                    external_id=b_generated,
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug=repo_slug,
+                    pr_number=pr_b,
+                )
+            )
+            await session.commit()
+
+        assert first.pr_number == pr_a
+        assert first.attached_existing is False
+        assert second.pr_number == pr_b
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert fetcher.calls == [(repo_slug, pr_a), (repo_slug, pr_b)]
+
     @pytest.mark.unit
     async def test_persists_explicit_external_id_and_task_class(
         self,
