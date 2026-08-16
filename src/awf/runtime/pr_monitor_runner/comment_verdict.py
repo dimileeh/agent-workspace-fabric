@@ -380,10 +380,12 @@ async def _invoke_cli_for_verdict_result(
             return VerdictResult(verdict="agent_failed")
         return parsed
     if parsed.verdict == "fix_committed":
-        if item_fix_evidence:
-            return parsed
+        # Hosted recovery may sync a terminal SHA and set advance evidence before
+        # re-raising AgentRunError; never resolve FIXED from a failed invocation.
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
+        if item_fix_evidence:
+            return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt
             # documents FIXED without a code change for that path.

@@ -404,6 +404,64 @@ async def test_hosted_fixed_requires_terminal_head_advance(
 
 
 @pytest.mark.unit
+async def test_hosted_fixed_ignored_on_cli_failure_even_with_head_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failed hosted run must not resolve FIXED even after terminal SHA sync."""
+    from awf.adapters.base import AgentRunError
+    from awf.db.enums import AgentRuntime
+
+    start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_cli_fail_advance"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: printed before hosted failure",
+        dirty=False,
+        heads=[synced],
+        head_descends=True,
+        returncode=1,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_fail_after_hosted_sync(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        # Mirrors _run_monitor_agent_with_service_recovery: sync terminal SHA /
+        # set advance evidence, then re-raise AgentRunError.
+        state_arg.last_push_sha = synced
+        state_arg.hosted_terminal_head_advanced = True
+        raise AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="AWF-VERDICT: FIXED: printed before hosted failure",
+                stderr="hosted adapter failed",
+            ),
+            reason_code="AGENT_CLI_FAILED",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_fail_after_hosted_sync
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "agent_failed"
+
+
+@pytest.mark.unit
 async def test_hosted_fixed_without_head_advance_stays_unresolved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
