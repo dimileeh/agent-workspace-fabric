@@ -577,6 +577,33 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         "final_line",
         [
+            "- [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "- [x] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "- [X] AWF-VERDICT: SHIPPED: done",
+            "* [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "1. [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "> - [ ] AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+            "- [ ] > AWF-VERDICT: NEEDS_HUMAN: actually unsure",
+        ],
+    )
+    def test_private_awf_verdict_task_list_prefixed_final_fail_closed(
+        self,
+        final_line: str,
+    ) -> None:
+        # GFM task-list checkboxes remain after plain list-marker strip
+        # (``- `` → ``[ ] AWF-…``). Without stripping ``[ ]``/``[x]``/``[X]``
+        # for attempt classification, a trailing task-list marker is ignored
+        # and an earlier resolvable verdict stays selected
+        # (#822 PRRT_kwDOSJAM6s6ZlxPo).
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_line",
+        [
             "> AWF-VERDICT: NEEDS_HUMAN: actually unsure",
             ">AWF-VERDICT: NEEDS_HUMAN: actually unsure",
             ">> AWF-VERDICT: NEEDS_HUMAN: actually unsure",

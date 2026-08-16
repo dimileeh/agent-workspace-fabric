@@ -256,6 +256,10 @@ _MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
 # never yield list-stripped forms as successful fullmatch candidates (that
 # would make multiline option lists authoritative over an earlier hard block).
 _MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+# GFM task-list checkboxes (``- [ ] AWF-VERDICT: …``, ``- [x] …``). Plain list
+# strip leaves ``[ ]`` before the marker, so the final line is not classified
+# as an attempt and an earlier resolvable verdict can win incorrectly.
+_MARKDOWN_TASK_LIST_CHECKBOX = re.compile(r"^\[(?: |x|X)\]\s+")
 # Leading Markdown blockquote markers (``> AWF-VERDICT: …``, nested ``>>``).
 # Same attempt-only strip as list prefixes — a trailing blockquoted marker must
 # fail closed rather than leave an earlier resolvable verdict selected.
@@ -542,6 +546,11 @@ def _strip_markdown_list_prefix(stripped: str) -> str:
     return _MARKDOWN_LIST_PREFIX.sub("", stripped, count=1)
 
 
+def _strip_markdown_task_list_checkbox(stripped: str) -> str:
+    """Remove a leading GFM task-list checkbox (``[ ]`` / ``[x]`` / ``[X]``)."""
+    return _MARKDOWN_TASK_LIST_CHECKBOX.sub("", stripped, count=1)
+
+
 def _strip_markdown_blockquote_prefix(stripped: str) -> str:
     """Remove leading Markdown blockquote markers (``>``, ``>>``), if present."""
     return _MARKDOWN_BLOCKQUOTE_PREFIX.sub("", stripped, count=1)
@@ -550,11 +559,11 @@ def _strip_markdown_blockquote_prefix(stripped: str) -> str:
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
 
-    Do not yield Markdown-list- or blockquote-stripped variants here. Those
-    prefixes are stripped only in ``_awf_verdict_segment_is_attempt`` so garbled
-    finals fail closed; treating ``- AWF-VERDICT: …`` or ``> AWF-VERDICT: …`` as
-    a successful match would let quoted/option-list lines override an earlier
-    hard block.
+    Do not yield Markdown-list-, task-list-, or blockquote-stripped variants
+    here. Those prefixes are stripped only in ``_awf_verdict_segment_is_attempt``
+    so garbled finals fail closed; treating ``- AWF-VERDICT: …``,
+    ``- [ ] AWF-VERDICT: …``, or ``> AWF-VERDICT: …`` as a successful match would
+    let quoted/option-list lines override an earlier hard block.
     """
     yield stripped
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
@@ -776,15 +785,19 @@ def _ascii_apostrophe_is_leading_elision(verdict_line: str, index: int) -> bool:
 
 
 def _strip_markdown_attempt_prefixes(segment: str) -> str:
-    """Strip leading Markdown list/blockquote markers until neither applies.
+    """Strip leading Markdown list/blockquote/task-list markers until none apply.
 
     Agents may nest them in either order (``- > AWF-VERDICT: …``,
-    ``> - > AWF-VERDICT: …``). One-pass blockquote-then-list leaves a residual
-    ``>`` after ``- >``, so the marker no longer looks like a leading attempt.
+    ``> - > AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``). One-pass
+    blockquote-then-list leaves a residual ``>`` after ``- >``, and plain list
+    strip leaves ``[ ]`` after a GFM task-list item, so the marker no longer
+    looks like a leading attempt.
     """
     normalized = segment.lstrip()
     while True:
-        stripped = _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+        stripped = _strip_markdown_task_list_checkbox(
+            _strip_markdown_list_prefix(_strip_markdown_blockquote_prefix(normalized))
+        )
         if stripped == normalized:
             return normalized
         normalized = stripped
@@ -795,9 +808,10 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
 
     Mid-prose quotes of the marker grammar (prompt echoes in chat) are not
     attempts; only segments that begin with the marker count toward the
-    final-marker fail-closed gate. Leading Markdown blockquote and list markers
-    are stripped first so ``> AWF-VERDICT: …`` / ``- AWF-VERDICT: SHIPPED: …``
-    still count as garbled finals.
+    final-marker fail-closed gate. Leading Markdown blockquote, list, and
+    task-list checkbox markers are stripped first so ``> AWF-VERDICT: …`` /
+    ``- AWF-VERDICT: SHIPPED: …`` / ``- [ ] AWF-VERDICT: …`` still count as
+    garbled finals.
     """
     return _AWF_VERDICT_MARKER.match(_strip_markdown_attempt_prefixes(segment)) is not None
 
