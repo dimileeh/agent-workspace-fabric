@@ -616,7 +616,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         preflight = body["detail"]["provider_readiness_preflight"]
         assert preflight["provider"] == "codex"
-        assert preflight["model"] == "gpt-5.5"
+        assert preflight["model"] == "gpt-5.6-sol"
         assert preflight["auth_status"] == "fail"
         assert preflight["auth_source"] == "not_observed"
         assert preflight["probe_status"] == "skipped"
@@ -862,7 +862,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         for item in (detail.json(), listed.json()[0], overview.json()["items"][0]):
             preflight = item["provider_readiness_preflight"]
             assert preflight["provider"] == "codex"
-            assert preflight["model"] == "gpt-5.5"
+            assert preflight["model"] == "gpt-5.6-sol"
             assert preflight["override_used"] is True
 
     @pytest.mark.unit
