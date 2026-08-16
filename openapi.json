@@ -13783,6 +13783,9 @@
                   "$ref": "#/components/schemas/AgentRuntime"
                 },
                 {
+                  "type": "string"
+                },
+                {
                   "type": "null"
                 }
               ],
@@ -14145,6 +14148,9 @@
               "anyOf": [
                 {
                   "$ref": "#/components/schemas/AgentRuntime"
+                },
+                {
+                  "type": "string"
                 },
                 {
                   "type": "null"
