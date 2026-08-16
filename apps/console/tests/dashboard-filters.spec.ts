@@ -105,6 +105,36 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   await expect(page.getByText("status completed, running", { exact: false })).toBeVisible();
 });
 
+test("default agent filters omit gemini on fresh installation without gemini workspaces", async ({ page }) => {
+  await page.route("**/api/awf/workspaces/overview*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        listEnvelope([
+          workspaceOverview("ws_2", "OpenCode workspace", "opencode", "ollama/glm-5.1:cloud", "running"),
+          workspaceOverview("ws_3", "Completed workspace", "codex", "gpt-5.5", "completed"),
+        ])
+      ),
+    });
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const expandButton = page.getByRole("button", { name: "Filters" });
+  await expect(expandButton).toBeVisible();
+  if (await expandButton.getAttribute("aria-expanded") === "false") {
+    await expandButton.click();
+  }
+
+  const agentGroup = page.getByRole("group", { name: "Agent" });
+  await agentGroup.getByRole("button", { name: /Agent all/ }).click();
+  await expect(agentGroup.getByLabel("codex")).toBeVisible();
+  await expect(agentGroup.getByLabel("opencode")).toBeVisible();
+  await expect(agentGroup.getByLabel("gemini")).not.toBeVisible();
+});
+
 test("workspace list keeps long titles clear of status badges", async ({ page }) => {
   await page.goto("/");
   await waitForConsoleReady(page);
