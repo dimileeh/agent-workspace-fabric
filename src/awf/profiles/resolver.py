@@ -10,6 +10,10 @@ from pydantic import ValidationError
 
 from awf.common.forge import detect_forge_from_url
 from awf.common.profile_paths import PROFILE_MARKER_PATHS
+from awf.common.profiles import (
+    format_safe_validation_location,
+    format_safe_validation_message,
+)
 from awf.db.enums import ForgeKind
 from awf.profiles.lint import lint_workspace_profile
 from awf.profiles.models import (
@@ -213,8 +217,8 @@ def _validation_error_message(exc: ValidationError) -> str:
         return "schema validation failed"
     first = errors[0]
     loc = first.get("loc", ())
-    path = ".".join(str(part) for part in loc) if isinstance(loc, tuple) else str(loc)
-    message = first.get("msg", "schema validation failed")
+    path = format_safe_validation_location(loc)
+    message = format_safe_validation_message(first)
     return f"{path or '<profile>'}: {message}"
 
 

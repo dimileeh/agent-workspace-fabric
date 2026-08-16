@@ -144,7 +144,6 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "claude_code",
         "cursor",
         "antigravity",
-        "gemini",
         "opencode",
         "grok",
         "docker",
@@ -282,6 +281,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         # non-reachable.
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1",
         "CURSOR_API_KEY": "cursor_secret",
+        "GEMINI_API_KEY": "antigravity_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
     probe_calls: list[list[str]] = []
@@ -294,7 +294,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-5", "ok"),
         ("cursor", "cursor", "sonnet-4-thinking", "ok"),
-        ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
+        ("antigravity", "antigravity", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
         ("grok", "grok", "grok-build", "ok"),
     ]
@@ -353,7 +353,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         "sh",
         "awf-agent-runtime:latest",
         "-lc",
-        "command -v gemini",
+        "command -v agy",
     ] in probe_calls
     assert [
         "docker",
@@ -413,7 +413,7 @@ def test_selected_antigravity_preflight_requires_env_key_and_runtime_cli(
         _settings(tmp_path),
         agent="antigravity",
         task_policy={},
-        environ={"ANTIGRAVITY_API_KEY": "antigravity_secret"},
+        environ={"GEMINI_API_KEY": "antigravity_secret"},
         run_subprocess=_runtime_cli_ok("agy"),
     )
 
@@ -422,7 +422,7 @@ def test_selected_antigravity_preflight_requires_env_key_and_runtime_cli(
     assert result["model"] == "gemini-3.1-pro-preview"
     assert result["readiness_status"] == "ready"
     assert result["auth_status"] == "ok"
-    assert result["auth_source"] == "ANTIGRAVITY_API_KEY"
+    assert result["auth_source"] == "GEMINI_API_KEY"
     assert result["probe_status"] == "ok"
     assert result["reason_code"] == "PROVIDER_READY"
     assert result["blocks_launch"] is False
@@ -462,14 +462,14 @@ def test_selected_antigravity_preflight_blocks_missing_runtime_cli(
     def _run(args: list[str], **kwargs: object) -> Any:
         """Simulate a missing agy executable."""
         assert args[-1] == "command -v agy"
-        assert kwargs["env"]["ANTIGRAVITY_API_KEY"] == secret
+        assert kwargs["env"]["GEMINI_API_KEY"] == secret
         return _completed(returncode=1, stderr=f"agy missing with {secret}")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="antigravity",
         task_policy={},
-        environ={"ANTIGRAVITY_API_KEY": secret},
+        environ={"GEMINI_API_KEY": secret},
         run_subprocess=_run,
     )
 
@@ -495,12 +495,12 @@ def test_provider_readiness_antigravity_env_auth_requires_runtime_cli(
         """Record the Antigravity runtime probe and return a missing CLI result."""
         calls.append(args)
         assert args[-1] == "command -v agy"
-        assert kwargs["env"]["ANTIGRAVITY_API_KEY"] == secret
+        assert kwargs["env"]["GEMINI_API_KEY"] == secret
         return _completed(returncode=1, stderr=f"missing agy for {secret}")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
-        environ={"ANTIGRAVITY_API_KEY": secret},
+        environ={"GEMINI_API_KEY": secret},
         strict_providers=["antigravity"],
         run_subprocess=_run,
     )
@@ -514,7 +514,7 @@ def test_provider_readiness_antigravity_env_auth_requires_runtime_cli(
     assert antigravity["credential_sources"] == [
         {
             "type": "env",
-            "signal": "ANTIGRAVITY_API_KEY",
+            "signal": "GEMINI_API_KEY",
             "credential_scope": "static_env_token",
             "isolation": "service_env",
         }
@@ -544,7 +544,7 @@ def test_launch_provider_by_agent_covers_every_agent_runtime() -> None:
     from awf.db.enums import AgentRuntime
     from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
 
-    assert set(_LAUNCH_PROVIDER_BY_AGENT) == set(AgentRuntime)
+    assert set(_LAUNCH_PROVIDER_BY_AGENT) == set(AgentRuntime) - {AgentRuntime.gemini}
 
 
 @pytest.mark.unit

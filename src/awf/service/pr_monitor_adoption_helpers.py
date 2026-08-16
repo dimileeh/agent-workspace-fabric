@@ -29,7 +29,7 @@ from awf.common.github_client import (
 )
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_execution_policy
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     TaskExternalIdConflictError,
@@ -585,11 +585,31 @@ def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[
     if request.effort is not None:
         policy["agent_effort"] = request.effort
     elif request.model is not None:
-        defaults = defaults_with_model_overrides({request.agent: request.model})
-        agent_defaults = defaults.get(request.agent)
+        agent_runtime = AgentRuntime(request.agent.value)
+        defaults = defaults_with_model_overrides({agent_runtime: request.model})
+        agent_defaults = defaults.get(agent_runtime)
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
     return policy
+
+
+def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
+    from awf.service.provider_readiness import (
+        is_launchable_agent,
+        supported_launchable_agents,
+    )
+
+    if not is_launchable_agent(request.agent.value):
+        supported_agents = supported_launchable_agents()
+        supported = ", ".join(sorted(supported_agents))
+        raise PRMonitorAdoptionError(
+            error_code="UNSUPPORTED_AGENT_RUNTIME",
+            message=f"Agent runtime {request.agent.value!r} is not supported for PR monitor adoption; supported runtimes: {supported}.",
+            detail={
+                "agent": request.agent.value,
+                "supported_agents": list(supported_agents),
+            },
+        )
 
 
 def _requested_execution_policy(request: PullRequestMonitorAdoptionRequest) -> dict[str, str]:
@@ -1437,4 +1457,5 @@ __all__ = (
     "_optional_int",
     "_redacted_optional_text",
     "_metadata_error_status_code",
+    "_raise_if_unsupported_agent",
 )

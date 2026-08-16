@@ -62,7 +62,7 @@ and future lease-based secret brokers over ad hoc host-home access. Local Core
 does not guarantee that a tool running inside a workspace cannot misuse a
 secret that was intentionally mounted into that workspace.
 
-Provider credentials such as Codex, Claude Code, Cursor, Gemini,
+Provider credentials such as Codex, Claude Code, Cursor, Antigravity,
 OpenCode/Ollama, and GitHub tokens are operational credentials. They should be
 scoped, revocable, and kept out of logs. AWF’s diagnostics and status surfaces
 should redact known secret values, but operators should still avoid placing

@@ -533,3 +533,49 @@ async def test_rollback_persisted_model_network_treats_absent_network_as_complet
 
     assert result.ok
     assert result.stdout == "network was already removed"
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_inspect_marker_raises_exception() -> None:
+    """Exception during network marker inspection is returned as failure."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+
+    class _InspectRaisingRunner:
+        async def run(self, args: list[str], **_kwargs: object) -> CommandResult:
+            if "inspect" in args:
+                raise RuntimeError("inspect network marker failed")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    result = await _rollback_persisted_clarification_model_network(
+        _InspectRaisingRunner(),  # type: ignore[arg-type]
+        attachment=PersistedClarificationModelNetworkAttachment(
+            network_name=network_name,
+            pending_network_creation_marker="pending-marker",
+        ),
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == "RuntimeError: inspect network marker failed"
+
+
+@pytest.mark.unit
+async def test_rollback_persisted_model_network_inspect_marker_absent_network() -> None:
+    """Absent network during marker inspection is treated as successful rollback."""
+    network_name = "awf-ws_legacy-clarification-model-net"
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1,
+        stdout="network missing",
+        stderr=f"Error response from daemon: network {network_name} not found",
+    )
+
+    result = await _rollback_persisted_clarification_model_network(
+        runner,
+        attachment=PersistedClarificationModelNetworkAttachment(
+            network_name=network_name,
+            pending_network_creation_marker="pending-marker",
+        ),
+    )
+
+    assert result.ok
+    assert result.stdout == "network missing"

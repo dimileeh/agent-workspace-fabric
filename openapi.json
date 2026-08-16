@@ -3958,6 +3958,17 @@
               }
             ]
           },
+          "launched_fallback_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launched Fallback Attempts"
+          },
           "next_eligible_at": {
             "anyOf": [
               {
@@ -5831,7 +5842,15 @@
       "TaskAttemptResponse": {
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "attempt_id": {
             "title": "Attempt Id",
@@ -6043,7 +6062,15 @@
         "description": "Workspace-backed task row for operator consoles.",
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "agent_effort": {
             "anyOf": [
@@ -8937,7 +8964,15 @@
       "WorkspaceLockResponse": {
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "branch_base": {
             "title": "Branch Base",
@@ -9556,7 +9591,15 @@
             "title": "Active Operation"
           },
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "agent_effort": {
             "anyOf": [
@@ -10120,7 +10163,15 @@
         "additionalProperties": false,
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "model": {
             "maxLength": 128,
@@ -10708,7 +10759,15 @@
             ]
           },
           "agent": {
-            "$ref": "#/components/schemas/AgentRuntime"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentRuntime"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Agent"
           },
           "agent_effort": {
             "anyOf": [
@@ -13724,6 +13783,9 @@
                   "$ref": "#/components/schemas/AgentRuntime"
                 },
                 {
+                  "type": "string"
+                },
+                {
                   "type": "null"
                 }
               ],
@@ -14086,6 +14148,9 @@
               "anyOf": [
                 {
                   "$ref": "#/components/schemas/AgentRuntime"
+                },
+                {
+                  "type": "string"
                 },
                 {
                   "type": "null"

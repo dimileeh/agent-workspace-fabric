@@ -71,6 +71,7 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _raise_if_existing_workspace_is_not_requested_adoption,
     _raise_if_hosted_delegation_unconfigured,
     _raise_if_policy_conflicts,
+    _raise_if_unsupported_agent,
     _redacted_optional_text,
     _release_superseded_adoption_external_id,
     _requested_execution_policy,
@@ -147,6 +148,8 @@ class PullRequestMonitorAdoptionService:
             if _adoption_workspace_is_resumable(existing):
                 _raise_if_policy_conflicts(existing, request, repo=repo, pr_number=pr_number)
                 return await self._response(existing, attached_existing=True)
+
+        _raise_if_unsupported_agent(request)
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
@@ -569,14 +572,6 @@ class PullRequestMonitorAdoptionService:
             event_type=PR_ADOPTION_REQUESTED_EVENT_TYPE,
             reason_code=PR_ADOPTION_REQUESTED_REASON,
             payload=event_payload,
-        )
-        from awf.service.agent_deprecation import emit_agent_deprecated_event  # noqa: E402
-
-        await emit_agent_deprecated_event(
-            workspace_repo,
-            workspace,
-            agent=request.agent,
-            selection_path="adopt_pr",
         )
         if superseded_workspace is not None and superseded_payload is not None:
             await workspace_repo.add_event(

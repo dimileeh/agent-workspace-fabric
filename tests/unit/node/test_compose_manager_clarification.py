@@ -702,3 +702,73 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_model_servic
         )
         is None
     )
+
+
+def test_upgrade_persisted_clarification_service_handles_unrecognized_runtime_string(
+    tmp_path: Path,
+) -> None:
+    """Unrecognized agent runtime strings fallback to AgentRuntime.antigravity without error."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_unrecognized",
+                    "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+                },
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["awf_net"],
+            },
+        },
+        "networks": {"awf_net": {"name": "awf-ws_unrecognized-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_unrecognized",
+            agent_runtime="unrecognized_custom_runtime",
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    assert clarification["environment"]["GEMINI_API_KEY"] == "${GEMINI_API_KEY}"
+
+
+def test_upgrade_persisted_clarification_service_handles_retired_gemini_runtime(
+    tmp_path: Path,
+) -> None:
+    """Retired AgentRuntime.gemini does not raise KeyError during clarification map lookups."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_gemini",
+                },
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["awf_net"],
+            },
+        },
+        "networks": {"awf_net": {"name": "awf-ws_gemini-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_gemini",
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert "clarification" in upgraded["services"]

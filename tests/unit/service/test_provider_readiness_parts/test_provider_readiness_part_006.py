@@ -205,7 +205,6 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
         "claude_code",
         "cursor",
         "antigravity",
-        "gemini",
         "opencode",
         "grok",
         "docker",

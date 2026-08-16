@@ -79,7 +79,7 @@ read-only credential paths:
   reads the forwarder directly.
 - The read-only host-home credential mounts (`~/.gitconfig`, `~/.ssh`,
   `~/.config/gh`, `~/.config/gcloud`, `~/.codex`, `~/.claude`,
-  `~/.claude.json`, `~/.gemini`, `~/.config/opencode`, `~/.ollama`) are
+  `~/.claude.json`, `~/.config/opencode`, `~/.ollama`) are
   granted only to the API and worker services. They work for both root and
   non-root because read-only access only needs file mode bits to allow
   other-readable.

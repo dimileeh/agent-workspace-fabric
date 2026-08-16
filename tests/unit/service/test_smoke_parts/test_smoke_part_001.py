@@ -357,6 +357,8 @@ class TestCollectSmokeReportLiveMode:
         auth_phase = next(p for p in report["phases"] if p["name"] == "auth_readiness")
         assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
         assert "Grok" in auth_phase["action"]
+        assert "Antigravity" in auth_phase["action"]
+        assert "Gemini" not in auth_phase["action"]
 
     async def test_profile_phase_detects_template(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").write_text('{"dependencies": {"next": "^14"}}')

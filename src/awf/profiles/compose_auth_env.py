@@ -27,18 +27,9 @@ AGENT_AUTH_ENV_VARS = (
     "CLAUDE_CODE_USE_VERTEX",
     # Cursor CLI headless auth.
     "CURSOR_API_KEY",
-    # Google Antigravity CLI headless auth (primary + Gemini AI Studio fallback).
-    "ANTIGRAVITY_API_KEY",
-    # Gemini CLI headless auth.
+    # Google Antigravity CLI / OpenCode headless auth (Gemini AI Studio / Google AI Studio key).
     "GEMINI_API_KEY",
-    "GEMINI_API_KEY_AUTH_MECHANISM",
     "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GOOGLE_GENAI_USE_GCA",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
     # OpenCode via Ollama/Ollama Cloud.
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
@@ -70,7 +61,6 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CURSOR_API_KEY",
-        "ANTIGRAVITY_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "GOOGLE_APPLICATION_CREDENTIALS",
@@ -121,12 +111,8 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
     }
 )
 
-_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
+_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES: frozenset[str] = frozenset(
     {
-        # ADC is a filesystem path whose local Compose contract includes an auth
-        # bind mount. Hosted requests currently carry env values only, so
-        # profile passthrough names and aliases must not re-add it after
-        # adapters omit it.
         "GOOGLE_APPLICATION_CREDENTIALS",
     }
 )
