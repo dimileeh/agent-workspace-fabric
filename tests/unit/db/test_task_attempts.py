@@ -223,6 +223,62 @@ class TestTaskAttemptRepository:
         assert "already belongs to a different task scope" in str(excinfo.value)
 
     @pytest.mark.unit
+    async def test_create_or_get_rejects_external_id_mismatch_via_idempotency_fallback(
+        self, session: AsyncSession
+    ) -> None:
+        """Stamped-key lookup must not reuse a task that already has another ID.
+
+        After a null-key join stamps an idempotency key onto a shared task, a
+        later create_or_get with a different explicit external_id misses by ID
+        but hits by key. Reusing that row would leave the caller with a new
+        workspace ID wired to a task that still holds the old external_id.
+        """
+        from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
+
+        repo = TaskRepository(session)
+
+        first = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="Source prompt",
+            external_id="TICKET-OLD",
+            idempotency_key=None,
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+        stamped = await repo.create_or_get(
+            repo_url="git@github.com:example/app.git",
+            base_branch="development",
+            title="Shared title",
+            prompt="Adoption join",
+            external_id="TICKET-OLD",
+            idempotency_key="adopt:example/app#1",
+            task_class="refactor_task",
+            owned_paths=["src/awf/**"],
+        )
+        assert stamped.id == first.id
+        assert stamped.idempotency_key == "adopt:example/app#1"
+
+        with pytest.raises(TaskExternalIdConflictError) as excinfo:
+            await repo.create_or_get(
+                repo_url="git@github.com:example/app.git",
+                base_branch="development",
+                title="Shared title",
+                prompt="Re-adopt with new ID",
+                external_id="TICKET-NEW",
+                idempotency_key="adopt:example/app#1",
+                task_class="refactor_task",
+                owned_paths=["src/awf/**"],
+            )
+
+        assert excinfo.value.external_id == "TICKET-NEW"
+        reloaded = await repo.get(first.id)
+        assert reloaded is not None
+        assert reloaded.external_id == "TICKET-OLD"
+        assert reloaded.idempotency_key == "adopt:example/app#1"
+
+    @pytest.mark.unit
     async def test_create_or_get_recovers_external_id_uniqueness_race_same_scope(
         self,
         session: AsyncSession,

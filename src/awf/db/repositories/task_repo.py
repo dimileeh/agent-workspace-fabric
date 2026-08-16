@@ -116,19 +116,22 @@ class TaskRepository:
         task_class: str | None,
         owned_paths: list[str],
     ) -> Task:
-        if (
-            external_id is not None
-            and existing.external_id == external_id
-            and not _task_scope_matches(
+        if external_id is not None and existing.external_id is not None:
+            if existing.external_id != external_id:
+                # Idempotency fallback can hit a row stamped by a prior join
+                # while the caller supplies a different explicit external_id.
+                # Reusing would leave workspace.task_external_id diverged from
+                # task.external_id; refuse rather than corrupt identity.
+                raise TaskExternalIdConflictError(external_id)
+            if not _task_scope_matches(
                 existing,
                 repo_url=repo_url,
                 base_branch=base_branch,
                 task_class=task_class,
                 owned_paths=owned_paths,
                 title=title,
-            )
-        ):
-            raise TaskExternalIdConflictError(external_id)
+            ):
+                raise TaskExternalIdConflictError(external_id)
         if existing.external_id is None and external_id is not None:
             existing.external_id = external_id
         if existing.idempotency_key is None and idempotency_key is not None:
