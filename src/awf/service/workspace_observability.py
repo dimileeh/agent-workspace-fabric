@@ -263,7 +263,7 @@ async def list_workspace_overview_response(
     session: AsyncSession,
     *,
     workspace_status: WorkspaceStatus | None = None,
-    agent: AgentRuntime | None = None,
+    agent: AgentRuntime | str | None = None,
     repo_url: str | None = None,
     limit: int = 50,
     cursor: str | None = None,

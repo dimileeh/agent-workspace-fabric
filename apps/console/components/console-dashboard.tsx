@@ -169,11 +169,11 @@ const searchParams = useSearchParams();
     }
   }, [selectedId]);
 
-  const [retainedAgents, setRetainedAgents] = useState<AgentRuntime[]>([]);
+  const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
 
   useEffect(() => {
-    const agents = overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a));
+    const agents = overview.map((w) => w.agent).filter((a): a is string => Boolean(a));
     if (agents.length > 0) {
       setRetainedAgents((prev) => Array.from(new Set([...prev, ...agents])).sort());
     }
@@ -189,7 +189,7 @@ const searchParams = useSearchParams();
   }, [overview, retainedModels]);
 
   const availableAgents = useMemo(() => {
-    const currentAgents = overview.map((w) => w.agent).filter((a): a is AgentRuntime => Boolean(a));
+    const currentAgents = overview.map((w) => w.agent).filter((a): a is string => Boolean(a));
     return Array.from(new Set([...retainedAgents, ...currentAgents])).sort();
   }, [overview, retainedAgents]);
 

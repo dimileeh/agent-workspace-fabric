@@ -678,6 +678,24 @@ class TestWorkspaceDirectRoutes:
         }
 
     @pytest.mark.unit
+    async def test_overview_and_workspace_list_accept_unknown_agent_filter(
+        self, client: AsyncClient
+    ) -> None:
+        overview_resp = await client.get(
+            "/v1/workspaces/overview",
+            params={"agent": "future_cli"},
+        )
+        assert overview_resp.status_code == 200
+        assert overview_resp.json()["items"] == []
+
+        list_resp = await client.get(
+            "/v1/workspaces",
+            params={"agent": "future_cli"},
+        )
+        assert list_resp.status_code == 200
+        assert list_resp.json() == []
+
+    @pytest.mark.unit
     async def test_overview_route_maps_workspace_without_events_or_operations(
         self,
         client: AsyncClient,
