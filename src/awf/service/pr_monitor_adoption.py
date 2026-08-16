@@ -1122,12 +1122,34 @@ def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: 
     return f"{idempotency_key}:superseded:{workspace_id}"
 
 
+# Matches Workspace.task_external_id / Task.external_id String(128) columns.
+_ADOPTION_EXTERNAL_ID_MAX_LENGTH = 128
+_SUPERSEDED_EXTERNAL_ID_MARKER = ":superseded:"
+
+
 def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> str:
-    return f"{external_id}:superseded:{workspace_id}"
+    """Return a unique superseded slot that always fits the external_id column.
+
+    The naive ``{id}:superseded:{workspace_id}`` form is preferred for short IDs.
+    Explicit IDs may be up to 128 characters; appending the marker and workspace
+    id then overflows ``String(128)``, so long IDs use a digest prefix that still
+    contains ``:superseded:`` for detection and remains unique per pair.
+    """
+    candidate = f"{external_id}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if len(candidate) <= _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
+        return candidate
+    digest = hashlib.sha256(f"{external_id}\0{workspace_id}".encode()).hexdigest()
+    suffix = f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if len(suffix) < _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
+        budget = _ADOPTION_EXTERNAL_ID_MAX_LENGTH - len(suffix)
+        return f"{digest[:budget]}{suffix}"
+    # Pathological workspace_id: fold both sides into a fixed-width encoding.
+    workspace_digest = hashlib.sha256(workspace_id.encode()).hexdigest()
+    return f"{digest[:40]}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}"
 
 
 def _is_superseded_adoption_external_id(external_id: str) -> bool:
-    return ":superseded:" in external_id
+    return _SUPERSEDED_EXTERNAL_ID_MARKER in external_id
 
 
 def _release_superseded_adoption_external_id(
