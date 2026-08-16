@@ -31,7 +31,11 @@ _FUNCTION_BINDING_RE = re.compile(
 _LET_CONST_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
 )
-_DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#define[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+_DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+# ``#`` lines that are not ``#define`` / ``# define`` are comments / other
+# directives; spaced form must match the same whitespace rule as open-``#if``
+# scanning (PRRT_kwDOSJAM6s6Zp_sv).
+_DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
 
 
 def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
@@ -223,14 +227,16 @@ def _binding_names(text: str) -> set[str]:
     blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``), which
     keeps a line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM).
     Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
-    count; ``#define`` remains a binding.
+    count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
+    and ``define`` is allowed, matching open-``#if`` scanning;
+    PRRT_kwDOSJAM6s6Zp_sv).
     """
     names: set[str] = set()
     for raw_line in text.splitlines():
         stripped = raw_line.lstrip(" \t")
         if stripped.startswith("//"):
             continue
-        if stripped.startswith("#") and not stripped.startswith("#define"):
+        if stripped.startswith("#") and _DEFINE_DIRECTIVE_LINE_RE.match(stripped) is None:
             continue
         for pattern in (
             _DEFINE_BINDING_RE,

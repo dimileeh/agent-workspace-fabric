@@ -95,6 +95,18 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="#define FEATURE_ENABLED 1\n",
         head_blob="#define FEATURE_ENABLED 1\n#define FEATURE_ENABLED 0\n",
     )
+    # Spaced ``# define`` is a real preprocessor binding (whitespace between ``#``
+    # and the keyword is allowed, same as open-``#if`` scanning). Skipping it as
+    # a comment would keep a line-aligned prefix and reuse stale salvage evidence
+    # (PRRT_kwDOSJAM6s6Zp_sv).
+    assert not _added_salvage_blob_retained(
+        commit_blob="# define FEATURE_ENABLED 1\n",
+        head_blob="# define FEATURE_ENABLED 1\n# define FEATURE_ENABLED 0\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="#define FEATURE_ENABLED 1\n",
+        head_blob="#define FEATURE_ENABLED 1\n# define FEATURE_ENABLED 0\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob="def guard():\n    return True\n",
         head_blob="def guard():\n    return True\ndef guard():\n    return False\n",
