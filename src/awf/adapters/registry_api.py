@@ -46,6 +46,9 @@ def get_adapter(
 
         with contextlib.suppress(ValueError):
             runtime = AgentRuntime(runtime)
+    if defaults is not None:
+        default_model = defaults.model
+        default_effort = defaults.effort
     cls: Any = _REGISTRY.get(runtime)  # type: ignore[arg-type]
     if cls is None:
         from awf.adapters.base import RetiredAgentAdapter
@@ -61,9 +64,6 @@ def get_adapter(
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
         )
-    if defaults is not None:
-        default_model = defaults.model
-        default_effort = defaults.effort
     return cast(
         "AgentAdapter",
         cls(

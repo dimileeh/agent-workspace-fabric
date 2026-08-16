@@ -1019,6 +1019,14 @@ class TestRegistry:
         assert gemini.name == AgentRuntime.gemini
         assert gemini.name_str == "gemini"
 
+        from awf.adapters.base import AgentDefaults
+
+        defaults = AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh")
+        gemini_bound = get_adapter(AgentRuntime.gemini, runner=runner, defaults=defaults)
+        assert isinstance(gemini_bound, RetiredAgentAdapter)
+        assert gemini_bound.default_model == "gemini-3.1-pro-preview"
+        assert gemini_bound._default_effort == "xhigh"
+
         assert gemini.get_provider("model") == "unsupported"
         assert gemini._cli_args(model="model") == []
 

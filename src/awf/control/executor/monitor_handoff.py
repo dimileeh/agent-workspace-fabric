@@ -345,9 +345,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             except ValueError:
                 agent = ws.agent
             defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
-            adapter_defaults = (
-                _agent_defaults_for_workspace(ws, defaults) if defaults is not None else None
-            )
+            adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
             adapter = get_adapter(
                 agent,
                 runner=self._runner,
@@ -1258,9 +1256,7 @@ async def _build_handoff_pr_monitor(
             except ValueError:
                 agent = workspace.agent
             defaults = self._defaults_for(agent) if isinstance(agent, AgentRuntime) else None
-            adapter_defaults = (
-                _agent_defaults_for_workspace(workspace, defaults) if defaults is not None else None
-            )
+            adapter_defaults = _agent_defaults_for_workspace(workspace, defaults)
             adapter = get_adapter(
                 agent,
                 runner=self._runner,
