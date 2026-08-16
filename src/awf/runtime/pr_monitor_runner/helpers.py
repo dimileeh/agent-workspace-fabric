@@ -245,9 +245,11 @@ _MARKDOWN_FENCE_OPEN = re.compile(
     r"(?P<fence_tilde>~{3,})[^~\n]*"
     r")[ \t]*$"
 )
-# CommonMark indented code (four spaces or a tab). Unconditional ``str.strip``
-# would promote example markers inside these regions to authoritative finals.
-_MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
+# CommonMark indented code: four spaces of indent, treating tabs as stops of
+# four columns — so a leading tab or 1–3 spaces plus a tab also qualifies.
+# Unconditional ``str.strip`` would promote example markers inside these
+# regions to authoritative finals.
+_MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -278,10 +280,11 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     """Yield stripped stdout lines outside Markdown code regions.
 
     Skips multiline fenced blocks and CommonMark indented-code lines (four
-    spaces or a tab) so quoted example markers cannot override an authoritative
-    unfenced verdict. Same-line wrapped fences (`` ```verdict``` ``) are still
-    yielded so ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences
-    shield every subsequent line.
+    spaces of indent, including a leading tab or 1–3 spaces plus a tab) so
+    quoted example markers cannot override an authoritative unfenced verdict.
+    Same-line wrapped fences (`` ```verdict``` ``) are still yielded so
+    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences shield
+    every subsequent line.
     """
     fence: str | None = None
     for line in stdout.splitlines():

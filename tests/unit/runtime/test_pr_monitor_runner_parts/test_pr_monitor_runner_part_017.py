@@ -315,6 +315,22 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("indent", [" \t", "  \t", "   \t"])
+    def test_private_awf_verdict_ignores_spaces_plus_tab_indented_code(self, indent: str) -> None:
+        # CommonMark expands 1–3 spaces + tab to a four-column indent, so those
+        # lines are indented code — not prose that strip() may promote
+        # (PRRT_kwDOSJAM6s6ZluBy).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            f"{indent}AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_indented_only_quote_is_markerless(self) -> None:
         stdout = "    AWF-VERDICT: FALSE POSITIVE: example\n"
 
