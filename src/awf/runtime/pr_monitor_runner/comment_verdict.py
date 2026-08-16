@@ -443,6 +443,19 @@ async def _invoke_cli_for_verdict_result(
         state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
         state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
 
+    if cli_failed:
+        # Provider recovery may raise retry/fallback/auth and skip later parse
+        # cleanup. Reject explicit non-FIXED salvage here so a later no-change
+        # FIXED cannot reuse a commit from an invocation that made no FIXED claim.
+        # Fail-closed synthetic NEEDS_HUMAN reasons are not agent claims — keep
+        # salvage for those crashes (mirrors the post-parse needs_human path).
+        early_parsed = _parse_verdict_result(result_stdout)
+        if early_parsed.verdict in {"false_positive", "defer"} or (
+            early_parsed.verdict == "needs_human"
+            and early_parsed.reason not in _FAIL_CLOSED_VERDICT_REASONS
+        ):
+            _clear_retained_salvage()
+
     if agent_run_err is not None:
         # Persist (including salvage keys above) then maybe raise retry/fallback.
         await runner._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)

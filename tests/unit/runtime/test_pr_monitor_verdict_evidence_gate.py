@@ -689,6 +689,91 @@ async def test_non_fixed_crash_clears_dirty_salvage_before_retry(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "AWF-VERDICT: FALSE POSITIVE: printed before provider recovery raise",
+        "AWF-VERDICT: DEFER: printed before provider recovery raise",
+        "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose before recovery raise",
+    ],
+)
+async def test_non_fixed_salvage_cleared_before_provider_recovery_raise(
+    tmp_path: Path,
+    stdout: str,
+) -> None:
+    """Explicit non-FIXED salvage must clear even when recovery raises.
+
+    Salvage is recorded before ``_handle_provider_agent_run_error``. When that
+    call raises retry/fallback, later parse cleanup never runs — so reject
+    explicit non-FIXED salvage before the raising recovery handler.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_non_fixed_recovery_raise"
+    body_hash = "feedback_body_hash_non_fixed_recovery"
+    workspace_id = "ws_salvage_non_fixed_recovery_raise"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout=stdout,
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+        provider_recovery_raise=ProviderRecoveryRetryError(),
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await comments._invoke_cli_for_verdict_result(
+            failed_runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: should not reuse non-fixed salvage after recovery",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_salvaged_fix_evidence_rejects_feedback_body_change(
     tmp_path: Path,
 ) -> None:
