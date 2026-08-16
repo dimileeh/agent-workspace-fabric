@@ -132,11 +132,17 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>](https://example.com)",
             "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`](https://example.com)",
             "AWF-VERDICT: FALSE POSITIVE: [~~<reason>~~](https://example.com)",
+            # Markdown image labels (leading ``!``) must peel like links when
+            # placeholder-shaped (PRRT_kwDOSJAM6s6Zo-5M).
+            "AWF-VERDICT: FALSE POSITIVE: ![<one-sentence justification>](https://example.com)",
+            "AWF-VERDICT: FALSE POSITIVE: ![`<one-sentence justification>`](https://example.com)",
+            "AWF-VERDICT: FALSE POSITIVE: ![~~<reason>~~](https://example.com)",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
             "AWF-VERDICT: FIXED: **<one-sentence summary>**",
             "AWF-VERDICT: FIXED: *<one-sentence summary>*",
             "AWF-VERDICT: FIXED: ~~<one-sentence summary>~~",
             "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com)",
+            "AWF-VERDICT: FIXED: ![<one-sentence summary>](https://example.com)",
             # HTML entity-escaped whole-reason placeholders (PRRT_kwDOSJAM6s6Zoyj2).
             "AWF-VERDICT: FALSE POSITIVE: &lt;reason&gt;",
             "AWF-VERDICT: FALSE POSITIVE: &lt;one-sentence justification&gt;",
@@ -160,7 +166,8 @@ class TestParseVerdict:
         # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG).
         # Single emphasis is peeled only when the enclosed value is
         # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are
-        # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S).
+        # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S),
+        # including image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M).
         # HTML entity-escaped whole-reason echoes must also fail closed
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
         result = _parse_verdict_result(stdout)
@@ -241,6 +248,11 @@ class TestParseVerdict:
             (
                 "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate](https://example.com)",
                 "[stale review boilerplate](https://example.com)",
+            ),
+            # Real image alts likewise stay intact (PRRT_kwDOSJAM6s6Zo-5M).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate](https://example.com)",
+                "![stale review boilerplate](https://example.com)",
             ),
         ],
     )
@@ -330,6 +342,17 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: cite](https://example.com)",
                 "fixed_placeholder_echo",
             ),
+            # Image wrappers with a leading ``!`` likewise (PRRT_kwDOSJAM6s6Zo-5M).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: ![<one-sentence justification> "
+                "AWF-VERDICT: FIXED: cited](https://example.com)",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FIXED: ![<one-sentence summary> "
+                "AWF-VERDICT: FALSE POSITIVE: cite](https://example.com)",
+                "fixed_placeholder_echo",
+            ),
         ],
     )
     def test_private_awf_placeholder_with_absorbed_same_line_citation_fail_closed(
@@ -341,8 +364,8 @@ class TestParseVerdict:
         # the whole-reason placeholder check by folding later FIXED/DEFER/
         # FALSE POSITIVE citations into the reason (#822 PRRT_kwDOSJAM6s6Znin1).
         # Emphasis wrappers around the absorbed form must still peel and fail
-        # closed (PRRT_kwDOSJAM6s6ZoGYD). Markdown link labels likewise
-        # (PRRT_kwDOSJAM6s6Zos6S).
+        # closed (PRRT_kwDOSJAM6s6ZoGYD). Markdown link / image labels likewise
+        # (PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"

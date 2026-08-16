@@ -489,13 +489,14 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     """Peel balanced outer quote/backtick/strong/strike/link wrappers from a reason.
 
     Agents often echo prompt placeholders inside inline code, quotes,
-    Markdown strong/emphasis/strikethrough markers, or Markdown links
+    Markdown strong/emphasis/strikethrough markers, Markdown links, or
+    Markdown images
     (`` `<one-sentence justification>` `` / ``"<…>"`` / ``**<…>**`` /
     ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_`` /
-    ``[<…>](https://example.com)``). Those wrappers must not defeat
-    whole-reason placeholder detection (PRRT_kwDOSJAM6s6Zn-VK,
-    PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZopxG,
-    PRRT_kwDOSJAM6s6Zos6S).
+    ``[<…>](https://example.com)`` / ``![<…>](https://example.com)``). Those
+    wrappers must not defeat whole-reason placeholder detection
+    (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
+    PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -532,8 +533,9 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
             continue
         link_match = _VERDICT_REASON_INLINE_LINK_WRAPPER.fullmatch(cleaned)
         if link_match is not None:
-            # Markdown links: peel only when the label is placeholder-shaped so
-            # a real linked justification remains usable (PRRT_kwDOSJAM6s6Zos6S).
+            # Markdown links / images: peel only when the label is
+            # placeholder-shaped so a real linked or imaged justification
+            # remains usable (PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
             inner = link_match.group("label").strip()
             normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
             if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
