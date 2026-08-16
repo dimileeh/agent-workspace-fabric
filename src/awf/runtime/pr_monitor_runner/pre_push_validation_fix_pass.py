@@ -131,7 +131,16 @@ async def _head_descends_from(
     ancestor of the second and non-zero otherwise. Callers only invoke this with
     distinct SHAs, so a 0 exit means the fix-pass agent advanced HEAD on top of
     the pre-fix commit rather than moving it sideways or backward.
+
+    Replace refs (``refs/replace/*``), ``GIT_REPLACE_REF_BASE``, and
+    ``GIT_GRAFT_FILE`` can rewrite apparent parentage, so a lateral or older tip
+    could otherwise satisfy FIXED / fix-pass ancestry. Disable replacements and
+    strip those mutable ancestry overrides for this merge-safety check.
     """
+    git_env = git_env_without_object_lookup_overrides()
+    git_env.pop("GIT_GRAFT_FILE", None)
+    git_env.pop("GIT_REPLACE_REF_BASE", None)
+    git_env["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,
@@ -139,7 +148,8 @@ async def _head_descends_from(
             "--is-ancestor",
             ancestor,
             descendant,
-        )
+        ),
+        env=git_env,
     )
     return bool(result.ok)
 

@@ -75,3 +75,58 @@ async def test_reparent_fix_pass_commit_strips_git_object_lookup_env(
         assert call.env is not None
         assert "GIT_OBJECT_DIRECTORY" not in call.env
         assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+
+@pytest.mark.unit
+async def test_head_descends_from_disables_replace_and_graft_overrides(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ancestry proof must ignore refs/replace and other mutable parent overrides.
+
+    Regression for PRRT_kwDOSJAM6s6ZlE3n: ``git merge-base --is-ancestor`` honors
+    replace refs and graft/replace-base env, so a lateral/older tip can be made to
+    look like a forward descendant and satisfy FIXED evidence. Disable replacements
+    and strip those overrides for the check.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    monkeypatch.setenv("GIT_GRAFT_FILE", "/tmp/agent-grafts")
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/replace")
+    # A poisoned host env must not leave replace objects enabled.
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    ancestor = "1" * 40
+    descendant = "2" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await pre_push_validation._head_descends_from(
+        runner,
+        worktree_path=worktree,
+        ancestor=ancestor,
+        descendant=descendant,
+    )
+
+    assert len(cmd.calls) == 1
+    call = cmd.calls[0]
+    assert "merge-base" in call.args
+    assert "--is-ancestor" in call.args
+    assert call.env is not None
+    assert call.env.get("GIT_NO_REPLACE_OBJECTS") == "1"
+    assert "GIT_GRAFT_FILE" not in call.env
+    assert "GIT_REPLACE_REF_BASE" not in call.env
+    assert "GIT_OBJECT_DIRECTORY" not in call.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
