@@ -551,10 +551,15 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
 
     Distinguishes prose citations of the marker grammar from real trailing
     verdict attempts so a blocking reason cannot be overridden by a quote.
-    Tracks ASCII ``"``/``'`` and backtick toggles plus curly ``“``/``”`` and
-    ``‘``/``’`` open/close independently so mid-quote citations (Markdown code
-    spans, typographic prompt echoes) stay embedded, while a closing delimiter
+    Tracks ASCII ``"``/``'`` and Markdown backtick *runs* plus curly ``“``/``”``
+    and ``‘``/``’`` open/close independently so mid-quote citations (code spans,
+    typographic prompt echoes) stay embedded, while a closing delimiter
     immediately before a real trailing marker does not.
+
+    Backtick runs follow CommonMark code-span rules: a consecutive run of N
+    backticks opens a span, and only a later run of the same length closes it.
+    Toggling once per backtick character would close a double-backtick span at
+    the opener and treat an embedded marker as a real trailing verdict.
 
     ASCII ``'`` is only a quote delimiter when it is not a word-internal
     apostrophe (``don't``, ``user's``) or a leading elision (``'em``, ``'til``,
@@ -567,9 +572,14 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     inside_ascii_double = False
     inside_ascii_single = False
     inside_backtick = False
+    backtick_open_len = 0
     inside_curly_double = False
     inside_curly_single = False
-    for index, char in enumerate(verdict_line[:match_start]):
+    skip_until = 0
+    prefix = verdict_line[:match_start]
+    for index, char in enumerate(prefix):
+        if index < skip_until:
+            continue
         if char == '"':
             if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
                 inside_ascii_double = not inside_ascii_double
@@ -577,7 +587,17 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
             if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
                 inside_ascii_single = not inside_ascii_single
         elif char == "`":
-            inside_backtick = not inside_backtick
+            run_len = 1
+            while index + run_len < match_start and prefix[index + run_len] == "`":
+                run_len += 1
+            if inside_backtick:
+                if run_len == backtick_open_len:
+                    inside_backtick = False
+                    backtick_open_len = 0
+            else:
+                inside_backtick = True
+                backtick_open_len = run_len
+            skip_until = index + run_len
         elif char == "“":
             inside_curly_double = True
         elif char == "”":

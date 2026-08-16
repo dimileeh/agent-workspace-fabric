@@ -530,6 +530,50 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_private_awf_verdict_same_line_double_backtick_span_keeps_needs_human(
+        self,
+    ) -> None:
+        # CommonMark code spans use a run of N backticks as one delimiter; toggling
+        # once per character closes a ``…`` span at the opener and lets an
+        # embedded FALSE POSITIVE resolve a blocked thread (#822 PRRT_kwDOSJAM6s6Zlnbx).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: choose whether to emit "
+            "``AWF-VERDICT: FALSE POSITIVE: reviewer is wrong``"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == (
+            "choose whether to emit ``AWF-VERDICT: FALSE POSITIVE: reviewer is wrong``"
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_double_backtick_span_with_inner_single_keeps_needs_human(
+        self,
+    ) -> None:
+        # Inner single-backtick runs are content inside a double-backtick span and
+        # must not close it early (#822 PRRT_kwDOSJAM6s6Zlnbx).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite ``print "
+            "`AWF-VERDICT: FALSE POSITIVE: override` and block``"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == ("cite ``print `AWF-VERDICT: FALSE POSITIVE: override` and block``")
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_double_backtick_adjacent_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        # Matching double-backtick close must leave the parser outside so a real
+        # trailing marker still wins (#822 PRRT_kwDOSJAM6s6Zlnbx).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite ``something``AWF-VERDICT: FALSE POSITIVE: real trailing"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_same_line_single_quoted_marker_keeps_needs_human(
         self,
     ) -> None:
