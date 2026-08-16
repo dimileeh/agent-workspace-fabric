@@ -68,12 +68,18 @@ def _advance_string_or_block_comment_state(
 
     Binding scanners use this so Google-style docstring prose
     (``timeout: Seconds…``) is not treated as a YAML-style rebind
-    (PRRT_kwDOSJAM6s6ZqPO9). Matches the opener/closer vocabulary that
-    ``_prefix_leaves_open_disabling_context`` already tracks for prepend checks;
-    ``#if`` depth is intentionally omitted here (dead-code rebinds stay fail-closed).
+    (PRRT_kwDOSJAM6s6ZqPO9). Ordinary ``"..."`` / ``'...'`` strings (with ``\\``
+    escapes) and ``#`` / ``//`` line comments are opaque so a URL/glob or
+    comment containing ``/*`` / nested quotes cannot open state and hide a
+    later real rebind (PRRT_kwDOSJAM6s6ZqSbO). Matches the opener/closer
+    vocabulary that ``_prefix_leaves_open_disabling_context`` already tracks
+    for prepend checks; ``#if`` depth is intentionally omitted here (dead-code
+    rebinds stay fail-closed).
     """
     i = 0
     n = len(chunk)
+    in_double_string = False
+    in_single_string = False
     while i < n:
         if in_block_comment:
             if chunk.startswith("*/", i):
@@ -96,6 +102,34 @@ def _advance_string_or_block_comment_state(
                 continue
             i += 1
             continue
+        if in_double_string:
+            ch = chunk[i]
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                in_double_string = False
+            i += 1
+            continue
+        if in_single_string:
+            ch = chunk[i]
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == "'":
+                in_single_string = False
+            i += 1
+            continue
+        # Line comments are opaque: do not treat ``/*`` / quotes inside them as
+        # openers (PRRT_kwDOSJAM6s6ZqSbO).
+        if chunk.startswith("//", i):
+            while i < n and chunk[i] != "\n":
+                i += 1
+            continue
+        if chunk[i] == "#":
+            while i < n and chunk[i] != "\n":
+                i += 1
+            continue
         if chunk.startswith("/*", i):
             in_block_comment = True
             i += 2
@@ -107,6 +141,14 @@ def _advance_string_or_block_comment_state(
         if chunk.startswith("'''", i):
             in_triple_single = True
             i += 3
+            continue
+        if chunk[i] == '"':
+            in_double_string = True
+            i += 1
+            continue
+        if chunk[i] == "'":
+            in_single_string = True
+            i += 1
             continue
         i += 1
     return in_block_comment, in_triple_double, in_triple_single

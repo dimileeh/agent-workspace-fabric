@@ -169,6 +169,36 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
             "'''\n"
         ),
     )
+    # ``/*`` / nested quotes inside ordinary strings or ``#`` / ``//`` line
+    # comments must not open block/triple state; otherwise a later real rebind
+    # after a URL/glob/comment line is skipped and FIXED evidence is reused
+    # (PRRT_kwDOSJAM6s6ZqSbO).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=(
+            'FEATURE_ENABLED = True\nurl = "https://example.com/*/path"\nFEATURE_ENABLED = False\n'
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\npattern = 'foo/*bar'\nFEATURE_ENABLED = False\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=(
+            "FEATURE_ENABLED = True\nhint = \"use ''' for docs\"\nFEATURE_ENABLED = False\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=(
+            "FEATURE_ENABLED = True\n# see https://example.com/*/docs\nFEATURE_ENABLED = False\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\n// pattern: foo/*bar\nFEATURE_ENABLED = False\n"),
+    )
     # Spaced ``# define`` is a real preprocessor binding (whitespace between ``#``
     # and the keyword is allowed, same as open-``#if`` scanning). Skipping it as
     # a comment would keep a line-aligned prefix and reuse stale salvage evidence
@@ -439,6 +469,26 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             "Args:\n"
             "    timeout: Seconds until the request fails.\n"
             '"""\n'
+        ),
+    )
+    # Tip-extra rebind after a URL/glob/`#`/`//` line that embeds ``/*`` must
+    # still supersede; false openers used to skip the rebind (PRRT_kwDOSJAM6s6ZqSbO).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            'url = "https://example.com/*/path"\n'
+            "FEATURE_ENABLED = False\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            "# see https://example.com/*/docs\n"
+            "FEATURE_ENABLED = False\n"
         ),
     )
     # Unrelated append / later hunk must not look like supersession.
