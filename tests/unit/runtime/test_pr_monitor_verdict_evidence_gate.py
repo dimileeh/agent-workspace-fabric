@@ -1037,6 +1037,137 @@ async def test_salvage_retained_when_agent_cancelled_after_self_commit(
 
 
 @pytest.mark.unit
+async def test_salvage_persisted_when_agent_raises_unexpected_after_self_commit(
+    tmp_path: Path,
+) -> None:
+    """Unexpected agent Exception after self-commit must durable-persist salvage.
+
+    The unexpected ``except Exception`` path retains ``__salvaged_fix_*`` keys in
+    memory then re-raises. Unlike ``CancelledError``, it previously skipped
+    ``_persist_failed_run_salvage_durably``. A monitor-cycle end or worker reload
+    drops those keys while the salvage commit remains, so a later no-change FIXED
+    becomes ``fixed_without_head_advance`` (PRRT_kwDOSJAM6s6Zmzxr). Persist only
+    salvage keys — never full ``_persist_state`` — before re-raising.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    item_id = "PRRT_salvage_agent_unexpected"
+    body_hash = "feedback_body_hash_agent_unexpected"
+    workspace_id = "ws_salvage_agent_unexpected"
+    earlier_unconfirmed = "PRRT_earlier_unconfirmed_agent_unexpected"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    persisted_snapshots: list[dict[str, str]] = []
+    persist_state_calls = 0
+
+    runner = _evidence_runner(
+        stdout="",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    async def _agent_self_commits_then_crashes(**_kwargs: object) -> AgentRunResult:
+        raise RuntimeError("adapter crashed after self-commit")
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            value = persisted.threads_addressed_ids.get(key)
+            if value is not None:
+                snap[key] = value
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    async def _commit_dirty_clean(**_kwargs: object) -> bool:
+        return False
+
+    runner._deps = SimpleNamespace(adapter=SimpleNamespace(run=_agent_self_commits_then_crashes))
+    runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    runner._persist_state = _persist_state
+    # Agent already advanced HEAD; worktree is clean — dirty sink is a no-op.
+    runner._commit_dirty_worktree = _commit_dirty_clean
+
+    with pytest.raises(RuntimeError, match="adapter crashed after self-commit"):
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=start,
+            evidence_item_id=item_id,
+            evidence_body_hash=body_hash,
+        )
+
+    assert persist_state_calls == 0
+    assert persisted_snapshots
+    assert earlier_unconfirmed not in persisted_snapshots[-1]
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) == start
+    assert state.threads_addressed_ids.get(earlier_unconfirmed) == "fix_committed"
+
+    reloaded = MonitorState()
+    reloaded.threads_addressed_ids.update(persisted_snapshots[-1])
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert (
+        reloaded.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    )
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after unexpected crash",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after unexpected crash"
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_persist_failed_run_salvage_durably_merges_only_salvage_keys(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

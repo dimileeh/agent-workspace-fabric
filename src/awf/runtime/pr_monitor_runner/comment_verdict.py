@@ -486,6 +486,10 @@ async def _invoke_cli_for_verdict_result(
         # FIXED at the tip becomes fixed_without_head_advance (same gap as the
         # main sink path; PRRT_kwDOSJAM6s6ZmirT). Cancellation after the sink
         # commit must retain salvage the same way (PRRT_kwDOSJAM6s6Zmn1b).
+        # In-memory keys alone are lost when the exception ends the monitor cycle
+        # or triggers a worker reload — persist only ``__salvaged_fix_*`` keys
+        # before re-raising (same selective merge as CancelledError;
+        # PRRT_kwDOSJAM6s6Zmzxr).
         unexpected_sink_error: BaseException | None = None
         if commit_dirty_changes:
             try:
@@ -530,6 +534,10 @@ async def _invoke_cli_for_verdict_result(
             result_stdout=result_stdout,
             retain_for_failed_run=True,
         )
+        if state is not None and salvage_item_id is not None:
+            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+            if callable(persist):
+                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
         if unexpected_sink_error is not None:
             raise unexpected_sink_error from None
         raise
