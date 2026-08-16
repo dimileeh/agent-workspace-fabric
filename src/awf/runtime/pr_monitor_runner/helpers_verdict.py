@@ -1,0 +1,1118 @@
+"""PR-monitor verdict parsing helpers."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Sequence
+
+from awf.common.redaction import redact_secrets
+from awf.runtime.pr_monitor_runner.comments import (
+    Verdict,
+    VerdictResult,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _AWF_VERDICT,
+    _AWF_VERDICT_MARKER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (  # noqa: F401
+    _BARE_VERDICT_LINE as _BARE_VERDICT_LINE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _CODE_FORMATTED_VERDICT_LINE as _CODE_FORMATTED_VERDICT_LINE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _FINAL_ANSWER_ATTEMPT_PREFIX as _FINAL_ANSWER_ATTEMPT_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_BLANK_LINE as _HTML_BLANK_LINE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_CDATA_CLOSE as _HTML_CDATA_CLOSE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_CDATA_OPEN as _HTML_CDATA_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_CODE_BLOCK_OPEN as _HTML_CODE_BLOCK_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_COMMENT_CLOSE as _HTML_COMMENT_CLOSE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_COMMENT_OPEN as _HTML_COMMENT_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_DECLARATION_CLOSE as _HTML_DECLARATION_CLOSE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_DECLARATION_OPEN as _HTML_DECLARATION_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_PROCESSING_INSTRUCTION_CLOSE as _HTML_PROCESSING_INSTRUCTION_CLOSE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_PROCESSING_INSTRUCTION_OPEN as _HTML_PROCESSING_INSTRUCTION_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_TYPE6_BLOCK_OPEN as _HTML_TYPE6_BLOCK_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_TYPE6_BLOCK_TAGS as _HTML_TYPE6_BLOCK_TAGS,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_TYPE7_ATTR as _HTML_TYPE7_ATTR,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_TYPE7_BLOCK_OPEN as _HTML_TYPE7_BLOCK_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_BLOCKQUOTE_PREFIX as _MARKDOWN_BLOCKQUOTE_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_EMPHASIS_PREFIX as _MARKDOWN_EMPHASIS_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_FENCE_OPEN as _MARKDOWN_FENCE_OPEN,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_HEADING_PREFIX as _MARKDOWN_HEADING_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_INDENTED_CODE_LINE as _MARKDOWN_INDENTED_CODE_LINE,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_LIST_PREFIX as _MARKDOWN_LIST_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MARKDOWN_TASK_LIST_CHECKBOX as _MARKDOWN_TASK_LIST_CHECKBOX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _MAX_VERDICT_REASON_LENGTH as _MAX_VERDICT_REASON_LENGTH,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER as _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_INLINE_QUOTE_WRAPPER as _VERDICT_REASON_INLINE_QUOTE_WRAPPER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_PYTHON_DUNDER as _VERDICT_REASON_PYTHON_DUNDER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_REDACTION_ONLY as _VERDICT_REASON_REDACTION_ONLY,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_REASON_TEMPLATE_PLACEHOLDER as _VERDICT_REASON_TEMPLATE_PLACEHOLDER,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _VERDICT_RESULT_LABEL_ATTEMPT_PREFIX as _VERDICT_RESULT_LABEL_ATTEMPT_PREFIX,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_blank_terminated_block_closes as _html_blank_terminated_block_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_cdata_closes as _html_cdata_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_cdata_opens as _html_cdata_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_code_block_closes as _html_code_block_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_code_block_open_tag as _html_code_block_open_tag,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_comment_closes as _html_comment_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_comment_opens as _html_comment_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_declaration_closes as _html_declaration_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_declaration_opens as _html_declaration_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_processing_instruction_closes as _html_processing_instruction_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_processing_instruction_opens as _html_processing_instruction_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_type6_block_opens as _html_type6_block_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_type7_block_opens as _html_type7_block_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _iter_non_fenced_verdict_lines as _iter_non_fenced_verdict_lines,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _markdown_blockquote_container_depth as _markdown_blockquote_container_depth,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _markdown_fence_closes as _markdown_fence_closes,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _markdown_fence_list_container_indent as _markdown_fence_list_container_indent,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _markdown_fence_open_marker as _markdown_fence_open_marker,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _normalize_markdown_fence_line as _normalize_markdown_fence_line,
+)
+
+__all__ = (
+    "_BARE_VERDICT_LINE",
+    "_VERDICT_REASON_TEMPLATE_PLACEHOLDER",
+    "_VERDICT_REASON_REDACTION_ONLY",
+    "_CODE_FORMATTED_VERDICT_LINE",
+    "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
+    "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
+    "_VERDICT_REASON_PYTHON_DUNDER",
+    "_MARKDOWN_FENCE_OPEN",
+    "_MARKDOWN_INDENTED_CODE_LINE",
+    "_HTML_CODE_BLOCK_OPEN",
+    "_HTML_COMMENT_OPEN",
+    "_HTML_COMMENT_CLOSE",
+    "_HTML_PROCESSING_INSTRUCTION_OPEN",
+    "_HTML_PROCESSING_INSTRUCTION_CLOSE",
+    "_HTML_DECLARATION_OPEN",
+    "_HTML_DECLARATION_CLOSE",
+    "_HTML_CDATA_OPEN",
+    "_HTML_CDATA_CLOSE",
+    "_HTML_TYPE6_BLOCK_TAGS",
+    "_HTML_TYPE6_BLOCK_OPEN",
+    "_HTML_TYPE7_ATTR",
+    "_HTML_TYPE7_BLOCK_OPEN",
+    "_HTML_BLANK_LINE",
+    "_MARKDOWN_LIST_PREFIX",
+    "_MARKDOWN_TASK_LIST_CHECKBOX",
+    "_MARKDOWN_BLOCKQUOTE_PREFIX",
+    "_FINAL_ANSWER_ATTEMPT_PREFIX",
+    "_VERDICT_RESULT_LABEL_ATTEMPT_PREFIX",
+    "_MARKDOWN_EMPHASIS_PREFIX",
+    "_MARKDOWN_HEADING_PREFIX",
+    "_MAX_VERDICT_REASON_LENGTH",
+    "_normalize_markdown_fence_line",
+    "_markdown_fence_list_container_indent",
+    "_markdown_fence_open_marker",
+    "_html_code_block_open_tag",
+    "_html_code_block_closes",
+    "_html_comment_opens",
+    "_html_comment_closes",
+    "_html_processing_instruction_opens",
+    "_html_processing_instruction_closes",
+    "_html_declaration_opens",
+    "_markdown_blockquote_container_depth",
+    "_html_declaration_closes",
+    "_html_cdata_opens",
+    "_html_cdata_closes",
+    "_html_type6_block_opens",
+    "_html_type7_block_opens",
+    "_html_blank_terminated_block_closes",
+    "_markdown_fence_closes",
+    "_iter_non_fenced_verdict_lines",
+    "_parse_verdict",
+    "_parse_verdict_result",
+    "_stdout_mentions_awf_verdict",
+    "_RESOLVABLE_PLACEHOLDER_LABELS",
+    "_normalized_verdict_reason_is_template_placeholder",
+    "_verdict_reason_is_template_placeholder",
+    "_normalize_verdict_reason_inline_formatting",
+    "_last_awf_resolvable_reason_is_placeholder",
+    "_fail_closed_resolvable_placeholder_if_needed",
+    "_select_bare_verdict",
+    "_strip_markdown_list_prefix",
+    "_strip_markdown_task_list_checkbox",
+    "_strip_markdown_blockquote_prefix",
+    "_strip_markdown_emphasis_prefix",
+    "_strip_markdown_heading_prefix",
+    "_verdict_line_candidates",
+    "_awf_verdict_segments",
+    "_awf_verdict_leading_hard_block",
+    "_awf_verdict_leading_hard_block_absorbs_later_marker",
+    "_FIXED_REASON_ABSORBABLE_LABELS",
+    "_awf_verdict_leading_fixed_absorbs_later_marker",
+    "_EXPLICIT_VERDICT_CORRECTION_SEPARATOR",
+    "_awf_verdict_marker_unambiguously_separate_attempt",
+    "_awf_verdict_marker_embedded_in_reason_prose",
+    "_ascii_quote_is_backslash_escaped",
+    "_ascii_double_quote_is_delimiter",
+    "_ascii_single_quote_is_delimiter",
+    "_ASCII_APOSTROPHE_CONTRACTION_SUFFIXES",
+    "_ASCII_LEADING_ELISION_SUFFIXES",
+    "_ascii_apostrophe_is_contraction_suffix",
+    "_ascii_apostrophe_is_leading_elision",
+    "_strip_final_answer_attempt_prefix",
+    "_strip_verdict_result_label_attempt_prefix",
+    "_strip_markdown_attempt_prefixes",
+    "_awf_verdict_segment_is_attempt",
+    "_verdict_result_from_match",
+    "_sanitize_verdict_reason",
+    "_needs_human_reason_missing",
+)
+
+
+def _parse_verdict(stdout: str) -> Verdict:
+    """Map the CLI's final message to a structured verdict.
+
+    The prompt templates instruct the CLI to report a structured stdout
+    ``AWF-VERDICT:`` line. Markerless, bare-marker, empty, garbled, and FIXED
+    placeholder-echo output fail closed to ``needs_human`` — never guess
+    ``fix_committed``.
+    """
+    return _parse_verdict_result(stdout).verdict
+
+
+def _parse_verdict_result(stdout: str) -> VerdictResult:
+    if not stdout.strip():
+        # Empty or whitespace-only agent output is a failure to produce, not a
+        # considered deferral. Treat it as needs_human so it blocks the merge
+        # instead of
+        # triggering the follow-up defer capture (comment + filed issue +
+        # resolve) on a thread the agent never actually addressed (#305).
+        return VerdictResult(verdict="needs_human", reason="empty_verdict_output")
+    # AWF-prefixed verdicts are canonical. Bare FALSE POSITIVE / DEFER /
+    # NEEDS_HUMAN lines are collected only as hard-block fallbacks when an AWF
+    # FIXED line has no usable reason — never as a standalone selected verdict.
+    # When multiple AWF verdicts are present, the final AWF line wins. If that
+    # line omits a reason (and is not a template placeholder), preserve an
+    # earlier reason for the same verdict. A final resolvable placeholder echo
+    # must not reuse an earlier same-label reason — that would still resolve or
+    # defer contrary to fail-closed grammar.
+    # Sanitized non-blocking placeholders (for example
+    # ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back only to an
+    # earlier reasoned hard block (needs_human/defer) or a bare blocking
+    # fallback so a prompt echo cannot clear a hard block; the same hard-block
+    # fallback applies to FALSE POSITIVE / DEFER placeholders so escalation text
+    # is preserved. A genuine no-reason final verdict is otherwise the agent's
+    # last word and must not be trumped by an earlier non-blocking verdict
+    # (e.g. false_positive).
+    # Blocking final verdicts remain authoritative even with no usable reason.
+    # Standalone resolvable placeholder echoes fail closed (never resolve).
+    # Markerless / bare-only output fails closed to needs_human.
+    awf_verdicts: list[VerdictResult] = []
+    bare_verdicts: list[VerdictResult] = []
+    last_awf_mention_recognized = False
+    saw_awf_mention = False
+    # Skip fenced, indented, raw HTML type-1/example code, HTML comment, and
+    # CommonMark type-3–5 (PI / declaration / CDATA) regions so quoted example
+    # verdicts cannot override an authoritative unfenced marker
+    # (PRRT_kwDOSJAM6s6ZlqAE / PRRT_kwDOSJAM6s6ZlsjH / PRRT_kwDOSJAM6s6ZnEAt /
+    # PRRT_kwDOSJAM6s6ZnN2F / PRRT_kwDOSJAM6s6ZnQhP / PRRT_kwDOSJAM6s6ZnSrG).
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
+        for verdict_line in _verdict_line_candidates(stripped):
+            # Multiple markers on one line are separate verdict units — do not
+            # let the first reason group absorb a trailing second marker.
+            for segment in _awf_verdict_segments(verdict_line):
+                # Underscore emphasis (``_AWF-VERDICT: …``) glues to the marker
+                # so ``\b`` search misses it; still treat stripped leading
+                # attempts as mentions so they fail closed.
+                is_attempt = _awf_verdict_segment_is_attempt(segment)
+                if _AWF_VERDICT_MARKER.search(segment) or is_attempt:
+                    saw_awf_mention = True
+                    awf_match = _AWF_VERDICT.fullmatch(segment)
+                    if awf_match is not None:
+                        last_awf_mention_recognized = True
+                        awf_verdicts.append(
+                            _verdict_result_from_match(
+                                label=awf_match.group("label"),
+                                reason=awf_match.group("reason"),
+                            )
+                        )
+                    elif is_attempt:
+                        # Leading / split-marker attempts that fail fullmatch are
+                        # authoritative garbled finals. Mid-prose quotes of the
+                        # marker grammar must not clear a prior recognized verdict.
+                        last_awf_mention_recognized = False
+                bare_match = _BARE_VERDICT_LINE.fullmatch(segment)
+                if bare_match is not None:
+                    bare_verdicts.append(
+                        _verdict_result_from_match(
+                            label=bare_match.group("label"),
+                            reason=bare_match.group("reason"),
+                        )
+                    )
+    # A garbled final leading ``AWF-VERDICT:`` attempt fails closed even when an
+    # earlier recognized verdict exists — the agent's last marker attempt is
+    # authoritative. Embedded prose quotes of the marker do not count.
+    if saw_awf_mention and not last_awf_mention_recognized:
+        return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
+    if awf_verdicts:
+        latest = awf_verdicts[-1]
+        if latest.reason is None:
+            latest_verdict = latest.verdict
+            # Check the final raw reason before same-label reuse: a template
+            # placeholder must not inherit an earlier reasoned same-label verdict
+            # (that would still resolve/defer, contrary to fail-closed grammar).
+            final_is_resolvable_placeholder = (
+                latest_verdict in _RESOLVABLE_PLACEHOLDER_LABELS
+                and _last_awf_resolvable_reason_is_placeholder(stdout, verdict=latest_verdict)
+            )
+            if not final_is_resolvable_placeholder:
+                for parsed in reversed(awf_verdicts[:-1]):
+                    if parsed.verdict == latest_verdict and parsed.reason is not None:
+                        return parsed
+            # Template-placeholder echoes (reason sanitized to None) fail closed for
+            # every resolvable verdict. Any resolvable placeholder may still fall back
+            # to an earlier reasoned hard block (#676 / #822 PRRT_kwDOSJAM6s6ZlxgI),
+            # but never to the same label as the placeholder (that would still
+            # resolve/defer). FALSE POSITIVE / DEFER placeholders never resolve alone.
+            if final_is_resolvable_placeholder:
+                for parsed in reversed(awf_verdicts[:-1]):
+                    if (
+                        parsed.verdict in {"needs_human", "defer"}
+                        and parsed.verdict != latest_verdict
+                        and parsed.reason is not None
+                    ):
+                        return parsed
+                bare_blocking = _select_bare_verdict(
+                    bare_verdicts,
+                    # Exclude same-label DEFER so a DEFER placeholder cannot
+                    # reuse an earlier reasoned DEFER (fail-closed same-label).
+                    priorities=(
+                        ("needs_human",) if latest_verdict == "defer" else ("needs_human", "defer")
+                    ),
+                )
+                if bare_blocking is not None:
+                    return bare_blocking
+                return _fail_closed_resolvable_placeholder_if_needed(stdout, latest)
+            if latest_verdict in {"defer", "needs_human"}:
+                return latest
+            for parsed in reversed(awf_verdicts[:-1]):
+                if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
+                    return parsed
+            bare_blocking = _select_bare_verdict(
+                bare_verdicts,
+                priorities=("needs_human", "defer"),
+            )
+            if bare_blocking is not None:
+                return bare_blocking
+            return latest
+        return latest
+    if _stdout_mentions_awf_verdict(stdout):
+        return VerdictResult(verdict="needs_human", reason="garbled_verdict_marker")
+    return VerdictResult(verdict="needs_human", reason="unrecognized_or_markerless_verdict")
+
+
+def _stdout_mentions_awf_verdict(stdout: str) -> bool:
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
+        if _AWF_VERDICT_MARKER.search(stripped):
+            return True
+    return False
+
+
+_RESOLVABLE_PLACEHOLDER_LABELS = {
+    "fix_committed": "fixed",
+    "false_positive": "false positive",
+    "defer": "defer",
+}
+
+
+def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
+    """Return whether an already-normalized reason is a template-placeholder echo.
+
+    Whole-reason matches cover the common case. Same-line absorption can also
+    fold later ``AWF-VERDICT`` citations into a leading placeholder prefix; that
+    must still count as placeholder-shaped even though the absorbed markers
+    prevent a whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-
+    shaped tags that continue with real prose (no absorbed marker) stay usable.
+
+    Callers must pass text that has already been through
+    ``_normalize_verdict_reason_inline_formatting`` (or an equivalent peel) so
+    the single-emphasis peel gate can reuse this without re-entering normalize
+    (PRRT_kwDOSJAM6s6ZoGYD).
+    """
+    if not cleaned:
+        return False
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+        return True
+    marker = _AWF_VERDICT_MARKER.search(cleaned)
+    if marker is None or marker.start() == 0:
+        return False
+    prefix = _normalize_verdict_reason_inline_formatting(cleaned[: marker.start()])
+    return bool(prefix) and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(prefix) is not None
+
+
+def _verdict_reason_is_template_placeholder(reason: str) -> bool:
+    """Return whether ``reason`` is a prompt-template placeholder echo."""
+    cleaned = _normalize_verdict_reason_inline_formatting(reason.strip())
+    return _normalized_verdict_reason_is_template_placeholder(cleaned)
+
+
+def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
+    """Peel balanced outer quote/backtick/strong wrappers from a verdict reason.
+
+    Agents often echo prompt placeholders inside inline code, quotes, or
+    Markdown strong/emphasis markers (`` `<one-sentence justification>` `` /
+    ``"<…>"`` / ``**<…>**`` / ``__<…>__`` / ``*<…>*`` / ``_<…>_``). Those
+    wrappers must not defeat whole-reason placeholder detection
+    (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU).
+    """
+    cleaned = reason.strip()
+    while cleaned:
+        tick_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(cleaned)
+        if tick_match is not None:
+            cleaned = tick_match.group("line").strip()
+            continue
+        quote_match = _VERDICT_REASON_INLINE_QUOTE_WRAPPER.fullmatch(cleaned)
+        if quote_match is not None:
+            cleaned = next(g for g in quote_match.groups() if g is not None).strip()
+            continue
+        emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
+        if emphasis_match is not None:
+            # Underscore strong collides with Python dunders; keep those intact.
+            if (
+                emphasis_match.group("strong_under") is not None
+                and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(cleaned) is not None
+            ):
+                break
+            inner = next(g for g in emphasis_match.groups() if g is not None).strip()
+            # Single emphasis: peel only when the enclosed value is
+            # placeholder-shaped — whole-reason or absorbed same-line citation
+            # (PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZoGYD).
+            if (
+                emphasis_match.group("em_star") is not None
+                or emphasis_match.group("em_under") is not None
+            ):
+                normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
+                if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
+                    break
+                cleaned = normalized_inner
+                continue
+            cleaned = inner
+            continue
+        break
+    return cleaned
+
+
+def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict) -> bool:
+    """Return whether the final AWF line for ``verdict`` is a template-placeholder echo."""
+    wanted = _RESOLVABLE_PLACEHOLDER_LABELS.get(verdict)
+    if wanted is None:
+        return False
+    last_reason: str | None = None
+    found = False
+    for stripped in _iter_non_fenced_verdict_lines(stdout):
+        for verdict_line in _verdict_line_candidates(stripped):
+            for segment in _awf_verdict_segments(verdict_line):
+                awf_match = _AWF_VERDICT.fullmatch(segment)
+                if awf_match is None:
+                    continue
+                normalized_label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
+                if normalized_label != wanted:
+                    continue
+                found = True
+                last_reason = awf_match.group("reason")
+    if not found:
+        return False
+    cleaned = (last_reason or "").strip()
+    if not cleaned:
+        return False
+    return _verdict_reason_is_template_placeholder(cleaned)
+
+
+def _fail_closed_resolvable_placeholder_if_needed(
+    stdout: str,
+    result: VerdictResult,
+) -> VerdictResult:
+    """Convert a standalone resolvable placeholder echo into fail-closed needs_human.
+
+    Prompt-template echoes such as ``AWF-VERDICT: FALSE POSITIVE: <one-sentence
+    justification>`` sanitize to a reasonless resolvable verdict; those must not
+    clear review items. Explicit reasonless non-placeholder verdicts still pass.
+    """
+    if result.verdict not in _RESOLVABLE_PLACEHOLDER_LABELS or result.reason is not None:
+        return result
+    if not _last_awf_resolvable_reason_is_placeholder(stdout, verdict=result.verdict):
+        return result
+    reason = (
+        "fixed_placeholder_echo"
+        if result.verdict == "fix_committed"
+        else "verdict_placeholder_echo"
+    )
+    return VerdictResult(verdict="needs_human", reason=reason)
+
+
+def _select_bare_verdict(
+    verdicts: Sequence[VerdictResult],
+    *,
+    priorities: Sequence[Verdict],
+) -> VerdictResult | None:
+    for verdict in priorities:
+        selected: VerdictResult | None = None
+        for parsed in reversed(verdicts):
+            if parsed.verdict != verdict:
+                continue
+            if parsed.reason is not None:
+                return parsed
+            if selected is None:
+                selected = parsed
+        if selected is not None:
+            return selected
+    return None
+
+
+def _strip_markdown_list_prefix(stripped: str) -> str:
+    """Remove a single leading Markdown list marker, if present."""
+    return _MARKDOWN_LIST_PREFIX.sub("", stripped, count=1)
+
+
+def _strip_markdown_task_list_checkbox(stripped: str) -> str:
+    """Remove a leading GFM task-list checkbox (``[ ]`` / ``[x]`` / ``[X]``)."""
+    return _MARKDOWN_TASK_LIST_CHECKBOX.sub("", stripped, count=1)
+
+
+def _strip_markdown_blockquote_prefix(stripped: str) -> str:
+    """Remove leading Markdown blockquote markers (``>``, ``>>``), if present."""
+    return _MARKDOWN_BLOCKQUOTE_PREFIX.sub("", stripped, count=1)
+
+
+def _strip_markdown_emphasis_prefix(stripped: str) -> str:
+    """Remove a leading Markdown emphasis / strong run (``*`` / ``_``), if present."""
+    return _MARKDOWN_EMPHASIS_PREFIX.sub("", stripped, count=1)
+
+
+def _strip_markdown_heading_prefix(stripped: str) -> str:
+    """Remove a leading ATX Markdown heading marker (``#``–``######``), if present."""
+    return _MARKDOWN_HEADING_PREFIX.sub("", stripped, count=1)
+
+
+def _verdict_line_candidates(stripped: str) -> Iterable[str]:
+    """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
+
+    Do not yield Markdown-list-, task-list-, blockquote-, emphasis-, or
+    heading-stripped variants here. Those prefixes are stripped only in
+    ``_awf_verdict_segment_is_attempt`` so garbled finals fail closed; treating
+    ``- AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``, ``> AWF-VERDICT: …``,
+    ``**AWF-VERDICT: …**``, or ``### AWF-VERDICT: …`` as a successful match
+    would let quoted/option-list lines override an earlier hard block.
+    """
+    yield stripped
+    code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
+    if code_match is None:
+        return
+    inner = code_match.group("line").strip()
+    if inner:
+        yield inner
+
+
+def _awf_verdict_segments(verdict_line: str) -> list[str]:
+    """Split a candidate so each ``AWF-VERDICT:`` occurrence is its own unit.
+
+    Same-line trailing markers must not be absorbed into an earlier reason
+    group; each marker is authoritative in order (final marker wins / fails
+    closed), matching multiline parsing.
+
+    When the first marker is preceded by non-whitespace prose, keep the whole
+    line as one unit. Splitting would drop that prose and make later quoted
+    markers look like leading attempts (mid-prose option lists must not
+    override an earlier real verdict).
+
+    When the leading marker is already a hard block (``NEEDS_HUMAN``), later
+    markers — quoted or unquoted mid-reason citations — stay reason prose so
+    they cannot resolve a thread the agent explicitly blocked
+    (PRRT_kwDOSJAM6s6Zl4Ra). Explicit self-corrections and unambiguous trailing
+    attempts after a closed quote/code span still split
+    (``correction:`` / ``corrected to:``, PRRT_kwDOSJAM6s6ZnrAH).
+
+    When the leading marker is ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``,
+    later resolvable markers cited in the reason (quoted or unquoted) stay
+    rationale unless they are an unambiguously separate trailing attempt after
+    a closed quote/code span or an explicit correction/separator
+    (``correction:`` / ``corrected to:``, PRRT_kwDOSJAM6s6Znm-N) — otherwise a
+    later citation would win and either bypass the HEAD-advance evidence gate
+    (``FIXED`` citation after ``FALSE POSITIVE``, PRRT_kwDOSJAM6s6ZngUH;
+    ``FALSE POSITIVE`` citation after ``FIXED``, PRRT_kwDOSJAM6s6Zmggp) or skip
+    DEFER tracking-artifact creation (``DEFER``, PRRT_kwDOSJAM6s6Zm6F4). Later
+    ``NEEDS_HUMAN`` / unrecognized labels still split (fail closed).
+
+    Subsequent markers embedded in quoted reason prose after a resolvable
+    leading verdict (for example a ``FIXED``, ``DEFER``, or ``FALSE POSITIVE``
+    reason that cites the marker grammar inside ASCII/curly quotes or Markdown
+    backticks) are not split into new attempts — only unquoted trailing
+    markers and explicit self-corrections are.
+    """
+    matches = list(_AWF_VERDICT_MARKER.finditer(verdict_line))
+    if len(matches) <= 1:
+        return [verdict_line]
+    if verdict_line[: matches[0].start()].strip():
+        return [verdict_line]
+    split_starts = [matches[0].start()]
+    for match in matches[1:]:
+        if _awf_verdict_marker_embedded_in_reason_prose(verdict_line, match.start()):
+            continue
+        if _awf_verdict_leading_hard_block_absorbs_later_marker(
+            verdict_line, matches[0].start(), match.start()
+        ):
+            continue
+        if _awf_verdict_leading_fixed_absorbs_later_marker(
+            verdict_line, matches[0].start(), match.start()
+        ):
+            continue
+        split_starts.append(match.start())
+    if len(split_starts) == 1:
+        return [verdict_line]
+    segments: list[str] = []
+    for index, start in enumerate(split_starts):
+        end = split_starts[index + 1] if index + 1 < len(split_starts) else len(verdict_line)
+        segment = verdict_line[start:end].strip()
+        if segment:
+            segments.append(segment)
+    return segments or [verdict_line]
+
+
+def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool:
+    """Return whether the leading same-line marker is ``NEEDS_HUMAN``."""
+    leading = _AWF_VERDICT.match(verdict_line, match_start)
+    if leading is None:
+        return False
+    normalized_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
+    return normalized_label == "needs human"
+
+
+def _awf_verdict_leading_hard_block_absorbs_later_marker(
+    verdict_line: str, leading_start: int, later_start: int
+) -> bool:
+    """Return whether a ``NEEDS_HUMAN`` leader keeps a later same-line marker as rationale.
+
+    Mid-reason citations (quoted or unquoted) stay absorbed so they cannot
+    resolve a blocked thread (PRRT_kwDOSJAM6s6Zl4Ra). Markers that follow a
+    closed quote/code span with only optional whitespace, or an explicit
+    correction/separator, are unambiguous trailing attempts and still split
+    (PRRT_kwDOSJAM6s6ZnrAH).
+    """
+    if not _awf_verdict_leading_hard_block(verdict_line, leading_start):
+        return False
+    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
+
+
+_FIXED_REASON_ABSORBABLE_LABELS = frozenset({"fixed", "false positive", "defer"})
+
+
+def _awf_verdict_leading_fixed_absorbs_later_marker(
+    verdict_line: str, leading_start: int, later_start: int
+) -> bool:
+    """Return whether a nonblocking leader keeps a later same-line marker as rationale.
+
+    Unquoted (or mid-prose) resolvable marker citations inside a ``FIXED``,
+    ``DEFER``, or ``FALSE POSITIVE`` reason must not become the selected
+    verdict — a later ``FIXED`` after ``FALSE POSITIVE`` becomes
+    ``fixed_without_head_advance`` with no HEAD advance
+    (PRRT_kwDOSJAM6s6ZngUH); a later ``false_positive`` after ``FIXED`` would
+    bypass the HEAD-advance evidence gate (PRRT_kwDOSJAM6s6Zmggp); a later
+    ``false_positive`` after ``DEFER`` would skip tracking-artifact creation
+    (PRRT_kwDOSJAM6s6Zm6F4).     Later ``NEEDS_HUMAN`` and unrecognized labels
+    still split (fail closed). Markers that follow a closed quote/code span
+    with only optional whitespace, or an explicit correction/separator, are
+    unambiguously separate trailing attempts and still split.
+    """
+    leading = _AWF_VERDICT.match(verdict_line, leading_start)
+    if leading is None:
+        return False
+    leading_label = re.sub(r"[\s_]+", " ", leading.group("label").strip().lower())
+    if leading_label not in _FIXED_REASON_ABSORBABLE_LABELS:
+        return False
+    later = _AWF_VERDICT.match(verdict_line, later_start)
+    if later is None:
+        return False
+    later_label = re.sub(r"[\s_]+", " ", later.group("label").strip().lower())
+    if later_label not in _FIXED_REASON_ABSORBABLE_LABELS:
+        return False
+    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
+
+
+# Explicit self-correction before a later same-line marker
+# (``…; correction: AWF-VERDICT: …`` / ``…; corrected to: AWF-VERDICT: …``).
+# Bare past-participle ``corrected:`` is ordinary reason prose and must not
+# split (PRRT_kwDOSJAM6s6Znq6K). Compound hyphenations like ``self-correction:``
+# must not count either — the boundary hyphen would otherwise clear a
+# NEEDS_HUMAN hard block (PRRT_kwDOSJAM6s6ZnuQ0).
+_EXPLICIT_VERDICT_CORRECTION_SEPARATOR = re.compile(
+    r"(?is)(?:^|[\s;,.:—–]|(?<![A-Za-z0-9])-)(?:correction|corrected\s+to)\s*:\s*\Z"
+)
+
+
+def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_start: int) -> bool:
+    """Return whether ``match_start`` is an unambiguous separate trailing attempt.
+
+    Distinguishes a real trailing verdict jammed against a finished citation
+    span (``cite "x"AWF-VERDICT: …``) or introduced by an explicit
+    correction/separator (``…; correction: AWF-VERDICT: …``) from mid-reason
+    marker-grammar prose.
+    """
+    if match_start <= 0:
+        return False
+    last_close_end = -1
+    inside_ascii_double = False
+    inside_ascii_single = False
+    inside_backtick = False
+    backtick_open_len = 0
+    inside_curly_double = False
+    inside_curly_single = False
+    skip_until = 0
+    prefix = verdict_line[:match_start]
+    for index, char in enumerate(prefix):
+        if index < skip_until:
+            continue
+        if char == '"':
+            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
+                if inside_ascii_double:
+                    last_close_end = index + 1
+                inside_ascii_double = not inside_ascii_double
+        elif char == "'":
+            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
+                if inside_ascii_single:
+                    last_close_end = index + 1
+                inside_ascii_single = not inside_ascii_single
+        elif char == "`":
+            run_len = 1
+            while index + run_len < match_start and prefix[index + run_len] == "`":
+                run_len += 1
+            if inside_backtick:
+                if run_len == backtick_open_len:
+                    inside_backtick = False
+                    backtick_open_len = 0
+                    last_close_end = index + run_len
+            else:
+                inside_backtick = True
+                backtick_open_len = run_len
+            skip_until = index + run_len
+        elif char == "“":
+            inside_curly_double = True
+        elif char == "”":
+            if inside_curly_double:
+                last_close_end = index + 1
+            inside_curly_double = False
+        elif char == "‘":
+            inside_curly_single = True
+        elif char == "’":
+            if inside_curly_single:
+                last_close_end = index + 1
+            inside_curly_single = False
+    inside_quote_or_code = (
+        inside_ascii_double
+        or inside_ascii_single
+        or inside_backtick
+        or inside_curly_double
+        or inside_curly_single
+    )
+    if (
+        last_close_end >= 0
+        and not inside_quote_or_code
+        and not verdict_line[last_close_end:match_start].strip()
+    ):
+        return True
+    # Explicit self-corrections split even without a closed quote span
+    # (PRRT_kwDOSJAM6s6Znm-N). Stay absorbed when still inside an open span.
+    return (not inside_quote_or_code) and bool(
+        _EXPLICIT_VERDICT_CORRECTION_SEPARATOR.search(prefix)
+    )
+
+
+def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:
+    """Return whether a same-line marker is quoted inside earlier reason text.
+
+    Distinguishes prose citations of the marker grammar from real trailing
+    verdict attempts so a blocking reason cannot be overridden by a quote.
+    Tracks ASCII ``"``/``'`` and Markdown backtick *runs* plus curly ``“``/``”``
+    and ``‘``/``’`` open/close independently so mid-quote citations (code spans,
+    typographic prompt echoes) stay embedded, while a closing delimiter
+    immediately before a real trailing marker does not.
+
+    Backtick runs follow CommonMark code-span rules: a consecutive run of N
+    backticks opens a span, and only a later run of the same length closes it.
+    Toggling once per backtick character would close a double-backtick span at
+    the opener and treat an embedded marker as a real trailing verdict.
+
+    ASCII ``'`` is only a quote delimiter when it is not a word-internal
+    apostrophe (``don't``, ``user's``) or a leading elision (``'em``, ``'til``,
+    ``'cause``); ASCII ``"`` is only a delimiter at plausible quote boundaries
+    (not inch/unit marks like ``5"``). Backslash-escaped ASCII quotes
+    (``\"``, ``\'``; odd preceding ``\\`` run) are literal reason text and
+    never toggle. Naive toggle would absorb a later unquoted same-line marker
+    into an earlier resolvable verdict.
+    """
+    if match_start <= 0:
+        return False
+    inside_ascii_double = False
+    inside_ascii_single = False
+    inside_backtick = False
+    backtick_open_len = 0
+    inside_curly_double = False
+    inside_curly_single = False
+    skip_until = 0
+    prefix = verdict_line[:match_start]
+    for index, char in enumerate(prefix):
+        if index < skip_until:
+            continue
+        if char == '"':
+            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
+                inside_ascii_double = not inside_ascii_double
+        elif char == "'":
+            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
+                inside_ascii_single = not inside_ascii_single
+        elif char == "`":
+            run_len = 1
+            while index + run_len < match_start and prefix[index + run_len] == "`":
+                run_len += 1
+            if inside_backtick:
+                if run_len == backtick_open_len:
+                    inside_backtick = False
+                    backtick_open_len = 0
+            else:
+                inside_backtick = True
+                backtick_open_len = run_len
+            skip_until = index + run_len
+        elif char == "“":
+            inside_curly_double = True
+        elif char == "”":
+            inside_curly_double = False
+        elif char == "‘":
+            inside_curly_single = True
+        elif char == "’":
+            inside_curly_single = False
+    return (
+        inside_ascii_double
+        or inside_ascii_single
+        or inside_backtick
+        or inside_curly_double
+        or inside_curly_single
+    )
+
+
+def _ascii_quote_is_backslash_escaped(verdict_line: str, index: int) -> bool:
+    """Return whether ``verdict_line[index]`` is escaped by an odd ``\\`` run.
+
+    Agents often cite expected literal quotes as ``\\"foo`` in a reason; those
+    must not open ASCII quote state or a later unquoted same-line blocker is
+    absorbed. An even run (``\\\\"``) leaves a real delimiter.
+    """
+    count = 0
+    cursor = index - 1
+    while cursor >= 0 and verdict_line[cursor] == "\\":
+        count += 1
+        cursor -= 1
+    return count % 2 == 1
+
+
+def _ascii_double_quote_is_delimiter(
+    verdict_line: str, index: int, inside_ascii_double: bool
+) -> bool:
+    """Return whether ``verdict_line[index]`` is an ASCII double-quote delimiter.
+
+    Inch/unit marks after an alphanumeric (``5"``, ``12"x``) must not open a
+    quote span; naive toggle would absorb a later unquoted same-line marker.
+    Backslash-escaped quotes (``\\"``) are never delimiters. Outside a quote,
+    only open when the previous character is not alphanumeric so delimiters sit
+    at plausible quote boundaries. Inside a quote, every unescaped ``"`` closes
+    (including when jammed against a following token).
+    """
+    if _ascii_quote_is_backslash_escaped(verdict_line, index):
+        return False
+    if inside_ascii_double:
+        return True
+    prev = verdict_line[index - 1] if index > 0 else ""
+    return not prev.isalnum()
+
+
+def _ascii_single_quote_is_delimiter(
+    verdict_line: str, index: int, inside_ascii_single: bool
+) -> bool:
+    """Return whether ``verdict_line[index]`` is an ASCII single-quote delimiter.
+
+    Word-internal apostrophes before a lowercase continuation (``don't``,
+    ``user's``, ``it's``) never toggle quote state. Leading elisions after a
+    non-alphanumeric boundary (``'em``, ``'til``, ``'cause``) also never toggle
+    — otherwise an open span never closes and a later unquoted same-line marker
+    is absorbed, or an already-open citation closes early. Backslash-escaped
+    quotes (``\\'``) are never delimiters. Outside a quote, only open when the
+    previous character is not alphanumeric so plural possessives like ``users'``
+    do not start a span. Inside a quote, a closer jammed against a following
+    lowercase token (``'strict'by``) still closes unless the letters after the
+    apostrophe are a short English contraction suffix (``n't``, ``'s``,
+    ``'re``, …), so trailing unquoted markers are not absorbed.
+    """
+    if _ascii_quote_is_backslash_escaped(verdict_line, index):
+        return False
+    prev = verdict_line[index - 1] if index > 0 else ""
+    nxt = verdict_line[index + 1] if index + 1 < len(verdict_line) else ""
+    if prev.isalnum() and nxt.islower():
+        return inside_ascii_single and not _ascii_apostrophe_is_contraction_suffix(
+            verdict_line, index
+        )
+    if _ascii_apostrophe_is_leading_elision(verdict_line, index):
+        return False
+    return inside_ascii_single or not prev.isalnum()
+
+
+# Short alphabetic tails after an ASCII apostrophe that mark English contractions
+# / clitics (n't, 's, 're, 've, 'll, 'd, 'm). Longer jammed tokens ('strict'by)
+# are closers, not apostrophes.
+_ASCII_APOSTROPHE_CONTRACTION_SUFFIXES = frozenset({"t", "s", "re", "ve", "ll", "d", "m"})
+
+# Colloquial leading elisions after a word boundary ('em, 'til, 'cause). These
+# must not open or close ASCII single-quote spans in verdict reason prose.
+_ASCII_LEADING_ELISION_SUFFIXES = frozenset(
+    {
+        "em",
+        "tis",
+        "twas",
+        "twere",
+        "twill",
+        "twould",
+        "twixt",
+        "til",
+        "till",
+        "cause",
+        "bout",
+        "round",
+        "nother",
+        "cept",
+        "gainst",
+        "fore",
+        "stead",
+        "cross",
+        "neath",
+        "ere",
+    }
+)
+
+
+def _ascii_apostrophe_is_contraction_suffix(verdict_line: str, index: int) -> bool:
+    """Return whether letters after ``verdict_line[index]`` look like a contraction."""
+    end = index + 1
+    while end < len(verdict_line) and verdict_line[end].isalpha():
+        end += 1
+    suffix = verdict_line[index + 1 : end].lower()
+    return suffix in _ASCII_APOSTROPHE_CONTRACTION_SUFFIXES
+
+
+def _ascii_apostrophe_is_leading_elision(verdict_line: str, index: int) -> bool:
+    """Return whether ``verdict_line[index]`` starts a leading elision (``'em``).
+
+    Requires a non-alphanumeric previous character and an alphabetic run that
+    matches a known elision suffix. Longer tokens like ``'emergency`` are not
+    elisions and may still open a real quote span.
+    """
+    prev = verdict_line[index - 1] if index > 0 else ""
+    if prev.isalnum():
+        return False
+    end = index + 1
+    while end < len(verdict_line) and verdict_line[end].isalpha():
+        end += 1
+    suffix = verdict_line[index + 1 : end].lower()
+    return suffix in _ASCII_LEADING_ELISION_SUFFIXES
+
+
+def _strip_final_answer_attempt_prefix(stripped: str) -> str:
+    """Remove a leading ``Final answer:``-style wrapper, if present."""
+    return _FINAL_ANSWER_ATTEMPT_PREFIX.sub("", stripped, count=1)
+
+
+def _strip_verdict_result_label_attempt_prefix(stripped: str) -> str:
+    """Remove a leading ``Verdict:`` / ``Result:`` label, if present."""
+    return _VERDICT_RESULT_LABEL_ATTEMPT_PREFIX.sub("", stripped, count=1)
+
+
+def _strip_markdown_attempt_prefixes(segment: str) -> str:
+    """Strip leading Markdown / prose-label wrappers until none apply.
+
+    Agents may nest them in either order (``- > AWF-VERDICT: …``,
+    ``> - > AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``,
+    ``Final answer: AWF-VERDICT: …``, ``Verdict: AWF-VERDICT: …``,
+    ``Result: AWF-VERDICT: …``, ``**AWF-VERDICT: …**``,
+    ``### AWF-VERDICT: …``). One-pass blockquote-then-list leaves a residual
+    ``>`` after ``- >``, plain list strip leaves ``[ ]`` after a GFM task-list
+    item, and a bare start-only check misses ``Final answer:`` /
+    ``Verdict:`` / ``Result:`` / emphasis / heading wrappers — so the marker
+    no longer looks like a leading attempt.
+    """
+    normalized = segment.lstrip()
+    while True:
+        stripped = _strip_markdown_heading_prefix(
+            _strip_markdown_emphasis_prefix(
+                _strip_verdict_result_label_attempt_prefix(
+                    _strip_final_answer_attempt_prefix(
+                        _strip_markdown_task_list_checkbox(
+                            _strip_markdown_list_prefix(
+                                _strip_markdown_blockquote_prefix(normalized)
+                            )
+                        )
+                    )
+                )
+            )
+        )
+        if stripped == normalized:
+            return normalized
+        normalized = stripped
+
+
+def _awf_verdict_segment_is_attempt(segment: str) -> bool:
+    """Return whether ``segment`` is a leading/split ``AWF-VERDICT:`` attempt.
+
+    Mid-prose *quoted* citations of the marker grammar (prompt echoes in chat)
+    are not attempts. Any other marker occurrence — including decorative emoji
+    prefixes (``✅ AWF-VERDICT: …``) and unknown wrappers (``Status: …``) —
+    counts toward the final-marker fail-closed gate so a closed prefix
+    allowlist cannot leave an earlier resolvable verdict selected
+    (PRRT_kwDOSJAM6s6ZmTD6). Leading Markdown blockquote, list, task-list
+    checkbox, emphasis, ATX heading, ``Final answer:``, and ``Verdict:`` /
+    ``Result:`` wrappers are stripped first so those forms still match at the
+    start when present.
+
+    Every marker on the segment is inspected: a quoted citation first must not
+    hide a later unquoted marker on a mid-prose line kept whole because the
+    first match had leading text (PRRT_kwDOSJAM6s6ZmWN6).
+    """
+    stripped = _strip_markdown_attempt_prefixes(segment)
+    for match in _AWF_VERDICT_MARKER.finditer(stripped):
+        if match.start() == 0:
+            return True
+        # Unquoted later markers fail closed; only confident quote/backtick
+        # embeddings are treated as prose citations of the grammar.
+        if not _awf_verdict_marker_embedded_in_reason_prose(stripped, match.start()):
+            return True
+    return False
+
+
+def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
+    # Canonicalize any run of whitespace/underscores to a single space, so
+    # every separator variant the label regex accepts (NEEDS_HUMAN,
+    # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
+    # normalization must stay equally permissive, or a matched NEEDS_HUMAN
+    # could silently fall through to fix_committed — the unsafe direction (#305).
+    normalized_label = re.sub(r"[\s_]+", " ", label.strip().lower())
+    cleaned_reason = _sanitize_verdict_reason(reason)
+    if normalized_label == "false positive":
+        return VerdictResult(verdict="false_positive", reason=cleaned_reason)
+    if normalized_label == "needs human":
+        return VerdictResult(verdict="needs_human", reason=cleaned_reason)
+    if normalized_label == "defer":
+        return VerdictResult(verdict="defer", reason=cleaned_reason)
+    return VerdictResult(verdict="fix_committed", reason=cleaned_reason)
+
+
+def _sanitize_verdict_reason(reason: str | None) -> str | None:
+    """Redact, bound, and normalize a verdict reason, dropping unusable content."""
+    if reason is None:
+        return None
+    cleaned = _normalize_verdict_reason_inline_formatting(redact_secrets(reason).strip())
+    if not cleaned:
+        return None
+    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
+        return None
+    if _verdict_reason_is_template_placeholder(cleaned):
+        return None
+    if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
+        return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
+    return cleaned
+
+
+def _needs_human_reason_missing(result: VerdictResult) -> bool:
+    """Return whether a blocking needs-human result lacks a usable reason."""
+    return result.verdict == "needs_human" and _sanitize_verdict_reason(result.reason) is None
