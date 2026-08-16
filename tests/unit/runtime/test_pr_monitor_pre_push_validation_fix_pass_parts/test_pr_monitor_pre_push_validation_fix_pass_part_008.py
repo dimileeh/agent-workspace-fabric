@@ -695,6 +695,98 @@ async def test_commit_changes_present_in_head_rejects_third_content_overwrite(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_same_file_later_hunk(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Same-file non-overlapping later hunk must retain salvage evidence.
+
+    Salvage edits one middle line; a later tip edits a different line so the
+    blob OID differs while the salvaged line remains. Overwriting or reverting
+    that salvaged line must still fail closed (PRRT_kwDOSJAM6s6ZmWRh).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-middle\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "base multi-line")
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-salvaged\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "salvage middle hunk")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-salvaged\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "later tip different hunk")
+    later_hunk = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Overwrite the salvaged middle line with third content (keep later hunk).
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-third\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "overwrite salvaged hunk")
+    third_content = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Revert only the salvaged middle line back to the parent spelling.
+    _git(repo, "checkout", "-q", "-B", "revert-salvage-hunk", later_hunk)
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-middle\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "revert salvaged hunk")
+    reverted_hunk = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=later_hunk,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=third_content,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=reverted_hunk,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_newline_pathname_overwrite(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

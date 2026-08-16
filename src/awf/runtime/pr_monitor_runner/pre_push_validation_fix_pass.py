@@ -8,6 +8,7 @@ parent module re-exports these symbols to preserve its existing public surface.
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -205,6 +206,17 @@ async def _commit_trees_differ(
     return left_tree.lower() != right_tree.lower()
 
 
+def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
+    """Parse ``mode type oid`` from an ``ls-tree`` metadata token."""
+    mode, sep, rest = entry.partition(" ")
+    if not sep:
+        return None
+    obj_type, sep, oid = rest.partition(" ")
+    if not sep or not mode or not obj_type or not oid or " " in oid:
+        return None
+    return mode, obj_type, oid
+
+
 async def _commit_changes_present_in_head(
     self: Any,
     *,
@@ -217,21 +229,25 @@ async def _commit_changes_present_in_head(
 
     Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
     reuse therefore requires either an identical tree at ``head``, or that
-    **every** path changed by ``commit`` vs ``baseline`` still carries the
-    salvage commit's complete tree entry at ``head`` (mode, type, and object id —
-    not merely a blob OID that differs from the baseline). ``baseline`` defaults
-    to the tip's first parent; callers that retain a failed-run tip must pass the
-    invocation start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is
-    checked as the full ``start..tip`` delta — otherwise a later tip that reverts
-    H1 while preserving H2 falsely retains evidence (PRRT_kwDOSJAM6s6ZmG-B). A
-    deleted path is an empty entry: it counts as present only when the baseline
-    still had the path and ``head`` remains absent (both-missing bogus lookups
-    fail closed). A third-content overwrite (A→B salvage, later tip to C) must
-    fail closed even though C≠A — otherwise a no-change FIXED retry can reuse
-    stale salvage after B is gone. Mode-only salvage (e.g. chmod +x) that a later
-    tip reverts must likewise fail closed, because Git stores mode separately
-    from the object id. Partial or full reverts and revert-then-unrelated tips
-    fail closed. Root commits and unresolved objects also fail closed.
+    **every** path changed by ``commit`` vs ``baseline`` still retains the
+    salvaged patch at ``head`` — not necessarily a byte-identical tree entry
+    (mode+type+OID). A later tip may edit a different hunk of the same file
+    (OID differs) while the salvage hunk remains applied; that must still count
+    as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs is checked via a
+    clean 3-way ``git merge-file`` of parent/head/commit whose result equals
+    head. ``baseline`` defaults to the tip's first parent; callers that retain a
+    failed-run tip must pass the invocation start SHA so a multi-commit salvage
+    (H1 fix + H2 unrelated) is checked as the full ``start..tip`` delta —
+    otherwise a later tip that reverts H1 while preserving H2 falsely retains
+    evidence (PRRT_kwDOSJAM6s6ZmG-B). A deleted path is an empty entry: it counts
+    as present only when the baseline still had the path and ``head`` remains
+    absent (both-missing bogus lookups fail closed). A third-content overwrite
+    (A→B salvage, later tip to C) must fail closed even though C≠A — otherwise a
+    no-change FIXED retry can reuse stale salvage after B is gone. Mode-only
+    salvage (e.g. chmod +x) that a later tip reverts must likewise fail closed,
+    because Git stores mode separately from the object id. Partial or full
+    reverts and revert-then-unrelated tips fail closed. Root commits and
+    unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -265,6 +281,95 @@ async def _commit_changes_present_in_head(
             return ""
         meta, _sep, _name = raw.partition("\t")
         return meta
+
+    async def _blob_text(oid: str) -> str | None:
+        result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "cat-file", "blob", oid),
+            env=git_env,
+        )
+        if not result.ok:
+            return None
+        text: str = result.stdout
+        return text
+
+    async def _salvage_entry_retained(
+        *,
+        parent_entry: str,
+        commit_entry: str,
+        head_entry: str,
+    ) -> bool:
+        # Fast path: identical tree entry (mode+type+OID) is definitely retained.
+        if head_entry == commit_entry:
+            return True
+        if not head_entry:
+            return False
+        commit_meta = _parse_ls_tree_meta(commit_entry)
+        head_meta = _parse_ls_tree_meta(head_entry)
+        if commit_meta is None or head_meta is None:
+            return False
+        commit_mode, commit_type, commit_oid = commit_meta
+        head_mode, head_type, head_oid = head_meta
+        if commit_type != head_type:
+            return False
+        # Non-blob types have no merge-file patch model; require exact equality.
+        if commit_type != "blob":
+            return False
+
+        parent_meta = _parse_ls_tree_meta(parent_entry) if parent_entry else None
+        # Mode retention: when salvage changed mode (or added the path), HEAD must
+        # still carry the salvage mode. Content-only salvage may tolerate later
+        # mode-neutral edits on other hunks without forcing mode equality.
+        if (parent_meta is None or parent_meta[0] != commit_mode) and head_mode != commit_mode:
+            return False
+
+        # Addition without a baseline blob: require exact content OID after mode.
+        if parent_meta is None:
+            return commit_oid == head_oid
+
+        _, parent_type, parent_oid = parent_meta
+        # Mode-only salvage (same blob as baseline): content is retained once mode
+        # checks passed.
+        if commit_oid == parent_oid:
+            return True
+        if commit_oid == head_oid:
+            return True
+        if parent_type != "blob":
+            return False
+
+        parent_blob = await _blob_text(parent_oid)
+        head_blob = await _blob_text(head_oid)
+        commit_blob = await _blob_text(commit_oid)
+        if parent_blob is None or head_blob is None or commit_blob is None:
+            return False
+        # CommandResult decodes as UTF-8 with replace; binary/NUL blobs cannot be
+        # round-tripped safely through merge-file — require exact OID equality.
+        if "\0" in parent_blob or "\0" in head_blob or "\0" in commit_blob:
+            return commit_oid == head_oid
+
+        with tempfile.TemporaryDirectory(prefix="awf-salvage-merge-", dir="/tmp") as tmp:
+            tmp_dir = Path(tmp)
+            base_path = tmp_dir / "base"
+            ours_path = tmp_dir / "ours"
+            theirs_path = tmp_dir / "theirs"
+            base_path.write_bytes(parent_blob.encode("utf-8"))
+            ours_path.write_bytes(head_blob.encode("utf-8"))
+            theirs_path.write_bytes(commit_blob.encode("utf-8"))
+            merge_result = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "merge-file",
+                    "-p",
+                    str(ours_path),
+                    str(base_path),
+                    str(theirs_path),
+                ),
+                env=git_env,
+            )
+            # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
+            if not merge_result.ok:
+                return False
+            merged: str = merge_result.stdout
+            return merged == head_blob
 
     commit_sha = commit.strip()
     head_sha = head.strip()
@@ -335,7 +440,11 @@ async def _commit_changes_present_in_head(
             if not parent_entry or head_entry:
                 return False
             continue
-        if head_entry != commit_entry:
+        if not await _salvage_entry_retained(
+            parent_entry=parent_entry,
+            commit_entry=commit_entry,
+            head_entry=head_entry,
+        ):
             return False
     return True
 
