@@ -16,6 +16,7 @@ from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
@@ -187,6 +188,12 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
         """Normalize and validate an optional task tag; ``None`` when absent."""
         return validate_task_tag(value)
 
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
+
 
 class MergeCandidateReadinessResponse(BaseModel):
     ready: bool
@@ -308,6 +315,12 @@ class WorkspaceTask(BaseModel):
         everywhere.
         """
         return validate_task_tag(value)
+
+    @field_validator("external_id")
+    @classmethod
+    def _validate_external_id(cls, value: str | None) -> str | None:
+        """Reject ASCII controls so malformed ids fail as 422, not at DB flush."""
+        return validate_external_id(value)
 
     @field_validator("kind")
     @classmethod

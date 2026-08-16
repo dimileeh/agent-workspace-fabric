@@ -900,6 +900,28 @@ async def test_adopt_pr_rejects_overlength_external_id_and_unsupported_task_clas
 
 
 @pytest.mark.unit
+async def test_adopt_pr_rejects_nul_in_external_id(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    """Control chars in external_id must 422 at the boundary, not fail at flush."""
+    client, _fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "external_id": "CLOUD\u0000TASK",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "control characters" in response.text
+
+
+@pytest.mark.unit
 async def test_adopt_pr_colliding_explicit_external_id_leaves_db_unchanged(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
     engine: AsyncEngine,
