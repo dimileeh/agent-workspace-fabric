@@ -934,6 +934,41 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
 
 
 @pytest.mark.unit
+def test_bytes_unsafe_for_text_merge_distinguishes_intentional_fffd() -> None:
+    """Strict UTF-8 / NUL gate must allow intentional U+FFFD, reject invalid bytes."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _bytes_unsafe_for_text_merge,
+        _merge_file_result_matches_head,
+        _raw_blob_from_cat_file_result,
+    )
+
+    intentional = "keep\ufffdsafe\n".encode("utf-8")
+    assert not _bytes_unsafe_for_text_merge(intentional)
+    assert not _bytes_unsafe_for_text_merge(b"plain ascii\n")
+    assert _bytes_unsafe_for_text_merge(b"has\0nul\n")
+    assert _bytes_unsafe_for_text_merge(b"bad-\xff\n")
+
+    assert _raw_blob_from_cat_file_result(ok=False, stdout="", stdout_bytes=None) is None
+    assert (
+        _raw_blob_from_cat_file_result(ok=True, stdout="ignored", stdout_bytes=intentional)
+        == intentional
+    )
+    assert (
+        _raw_blob_from_cat_file_result(ok=True, stdout="plain\n", stdout_bytes=None) == b"plain\n"
+    )
+    assert _raw_blob_from_cat_file_result(ok=True, stdout="has\ufffd", stdout_bytes=None) is None
+    assert _raw_blob_from_cat_file_result(ok=True, stdout="has\0", stdout_bytes=None) is None
+
+    assert _merge_file_result_matches_head(
+        head_raw=intentional, stdout="ignored", stdout_bytes=intentional
+    )
+    assert _merge_file_result_matches_head(head_raw=b"plain\n", stdout="plain\n", stdout_bytes=None)
+    assert not _merge_file_result_matches_head(
+        head_raw=b"plain\n", stdout="other\n", stdout_bytes=None
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_commented_out_addition(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1000,6 +1035,83 @@ async def test_commit_changes_present_in_head_rejects_commented_out_addition(
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_accepts_intentional_fffd_later_hunk(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Intentional U+FFFD in valid UTF-8 must not block same-file later-hunk retention.
+
+    Gating on the decoded replacement character rejects legitimate ``\\ufffd``
+    source bytes as if they were ``decode(errors="replace")`` artifacts, so a
+    later tip that edits another hunk while keeping the salvage fix falsely
+    fails closed (PRRT_kwDOSJAM6s6ZnK_D).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    fffd = "\ufffd"
+    (repo / "a.py").write_text(
+        f"line1{fffd}keep\nline2\nline3-middle\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "base with intentional replacement char")
+    (repo / "a.py").write_text(
+        f"line1{fffd}keep\nline2\nline3-salvaged\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "salvage middle hunk")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.py").write_text(
+        f"line1{fffd}keep\nline2\nline3-salvaged\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "later tip different hunk")
+    later_hunk = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.py").write_text(
+        f"line1{fffd}keep\nline2\nline3-third\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "overwrite salvaged hunk")
+    third_content = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=later_hunk,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=third_content,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_invalid_utf8_replace_collapse(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1009,7 +1121,7 @@ async def test_commit_changes_present_in_head_rejects_invalid_utf8_replace_colla
     ``AsyncCommandRunner`` decodes cat-file with ``errors="replace"``. Parent,
     salvage, overwrite, and revert blobs that differ only in invalid bytes all
     become the same replacement-character text, so merge-file would falsely prove
-    retention unless U+FFFD is treated as non-text (exact OID only).
+    retention unless invalid UTF-8 raw bytes fail closed (exact OID only).
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
 

@@ -217,6 +217,50 @@ def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
     return mode, obj_type, oid
 
 
+def _bytes_unsafe_for_text_merge(raw: bytes) -> bool:
+    """Return True when merge-file / string containment cannot be trusted.
+
+    NUL breaks merge-file. Invalid UTF-8 collapses under ``decode(replace)`` to
+    U+FFFD, so distinct invalid blobs can falsely look retained. Intentional
+    U+FFFD in valid UTF-8 is fine — detect lossy decode via strict UTF-8 on
+    raw bytes, not via the decoded character (PRRT_kwDOSJAM6s6ZnK_D).
+    """
+    if b"\0" in raw:
+        return True
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _raw_blob_from_cat_file_result(
+    *, ok: bool, stdout: str, stdout_bytes: bytes | None
+) -> bytes | None:
+    """Resolve cat-file blob bytes, preferring raw capture over decoded stdout.
+
+    Without ``stdout_bytes``, intentional U+FFFD cannot be distinguished from
+    ``decode(replace)`` artifacts — fail closed (``None``) when the decoded
+    text contains NUL or U+FFFD.
+    """
+    if not ok:
+        return None
+    if stdout_bytes is not None:
+        return stdout_bytes
+    if "\0" in stdout or "\ufffd" in stdout:
+        return None
+    return stdout.encode("utf-8")
+
+
+def _merge_file_result_matches_head(
+    *, head_raw: bytes, stdout: str, stdout_bytes: bytes | None
+) -> bool:
+    """Return True when merge-file stdout equals the HEAD blob bytes."""
+    if stdout_bytes is not None:
+        return stdout_bytes == head_raw
+    return stdout == head_raw.decode("utf-8")
+
+
 def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     """Return True when an added salvage blob remains applied in ``head_blob``.
 
@@ -318,15 +362,16 @@ async def _commit_changes_present_in_head(
         meta, _sep, _name = raw.partition("\t")
         return meta
 
-    async def _blob_text(oid: str) -> str | None:
+    async def _blob_raw(oid: str) -> bytes | None:
         result = await self._deps.runner.run(
             git_worktree_command(worktree_path, "cat-file", "blob", oid),
             env=git_env,
         )
-        if not result.ok:
-            return None
-        text: str = result.stdout
-        return text
+        return _raw_blob_from_cat_file_result(
+            ok=result.ok,
+            stdout=result.stdout,
+            stdout_bytes=result.stdout_bytes,
+        )
 
     async def _salvage_entry_retained(
         *,
@@ -367,16 +412,19 @@ async def _commit_changes_present_in_head(
             # sufficient but not required — require line-boundary-aligned
             # contiguous retention of the salvage blob (PRRT_kwDOSJAM6s6Zm0PC,
             # PRRT_kwDOSJAM6s6Zm6F1).
-            head_blob = await _blob_text(head_oid)
-            commit_blob = await _blob_text(commit_oid)
-            if head_blob is None or commit_blob is None:
+            head_raw = await _blob_raw(head_oid)
+            commit_raw = await _blob_raw(commit_oid)
+            if head_raw is None or commit_raw is None:
                 return False
             # Same unsafe-text gate as the baseline path: containment is not
             # trustworthy once decode(replace) may have collapsed distinct
             # invalid bytes (exact OID already failed above).
-            if any("\0" in blob or "\ufffd" in blob for blob in (head_blob, commit_blob)):
+            if _bytes_unsafe_for_text_merge(head_raw) or _bytes_unsafe_for_text_merge(commit_raw):
                 return False
-            return _added_salvage_blob_retained(commit_blob=commit_blob, head_blob=head_blob)
+            return _added_salvage_blob_retained(
+                commit_blob=commit_raw.decode("utf-8"),
+                head_blob=head_raw.decode("utf-8"),
+            )
 
         _, parent_type, parent_oid = parent_meta
         # Mode-only salvage (same blob as baseline): content is retained once mode
@@ -386,18 +434,18 @@ async def _commit_changes_present_in_head(
         if parent_type != "blob":
             return False
 
-        parent_blob = await _blob_text(parent_oid)
-        head_blob = await _blob_text(head_oid)
-        commit_blob = await _blob_text(commit_oid)
-        if parent_blob is None or head_blob is None or commit_blob is None:
+        parent_raw = await _blob_raw(parent_oid)
+        head_raw = await _blob_raw(head_oid)
+        commit_raw = await _blob_raw(commit_oid)
+        if parent_raw is None or head_raw is None or commit_raw is None:
             return False
-        # CommandResult decodes as UTF-8 with replace; NUL and replacement
-        # characters cannot be round-tripped safely through merge-file —
-        # require exact OID equality. Distinct invalid-byte blobs all collapse
-        # to the same U+FFFD text, so merge-file would falsely prove retention
-        # if we only gated on NUL. Valid UTF-8 (including non-ASCII) round-trips
-        # through decode(replace) → encode("utf-8") without introducing U+FFFD.
-        if any("\0" in blob or "\ufffd" in blob for blob in (parent_blob, head_blob, commit_blob)):
+        # CommandResult decodes as UTF-8 with replace. NUL and *invalid* UTF-8
+        # cannot be round-tripped safely through merge-file — require exact OID
+        # equality. Distinct invalid-byte blobs all collapse to the same U+FFFD
+        # text, so merge-file would falsely prove retention. Intentional U+FFFD
+        # in valid UTF-8 is retained; detect lossy decode via strict UTF-8 on
+        # raw bytes (PRRT_kwDOSJAM6s6ZnK_D).
+        if any(_bytes_unsafe_for_text_merge(raw) for raw in (parent_raw, head_raw, commit_raw)):
             return False
 
         with tempfile.TemporaryDirectory(prefix="awf-salvage-merge-", dir="/tmp") as tmp:
@@ -405,9 +453,9 @@ async def _commit_changes_present_in_head(
             base_path = tmp_dir / "base"
             ours_path = tmp_dir / "ours"
             theirs_path = tmp_dir / "theirs"
-            base_path.write_bytes(parent_blob.encode("utf-8"))
-            ours_path.write_bytes(head_blob.encode("utf-8"))
-            theirs_path.write_bytes(commit_blob.encode("utf-8"))
+            base_path.write_bytes(parent_raw)
+            ours_path.write_bytes(head_raw)
+            theirs_path.write_bytes(commit_raw)
             merge_result = await self._deps.runner.run(
                 git_worktree_command(
                     worktree_path,
@@ -422,8 +470,11 @@ async def _commit_changes_present_in_head(
             # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
             if not merge_result.ok:
                 return False
-            merged: str = merge_result.stdout
-            return merged == head_blob
+            return _merge_file_result_matches_head(
+                head_raw=head_raw,
+                stdout=merge_result.stdout,
+                stdout_bytes=merge_result.stdout_bytes,
+            )
 
     commit_sha = commit.strip()
     head_sha = head.strip()
