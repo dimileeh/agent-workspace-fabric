@@ -288,6 +288,7 @@ async def test_sync_base_uses_validated_push(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # merge --no-edit origin/development
+    cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -352,6 +353,7 @@ async def test_sync_base_clean_merge_tags_commit_for_task_tagged_workspace(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # merge --no-edit origin/development -m <tagged>
+    cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -408,6 +410,7 @@ async def test_sync_base_clean_merge_untagged_when_no_task_tag(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # merge --no-edit origin/development
+    cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
     runner = make_runner(
         factory=factory,
         cmd=cmd,

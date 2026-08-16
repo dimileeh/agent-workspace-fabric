@@ -131,10 +131,44 @@ class TestCreate:
         assert ws.status == WorkspaceStatus.requested.value
         assert ws.version == 1
         assert ws.id.startswith("ws_")
-        assert ws.auto_merge is True
+        assert ws.auto_merge is False
         assert ws.initial_review_grace_period_seconds is None
         assert ws.task_class is None
         assert ws.owned_paths == []
+
+    @pytest.mark.unit
+    async def test_construction_omitting_auto_merge_defaults_to_opt_out(
+        self, session: AsyncSession
+    ) -> None:
+        # An ORM construction that omits ``auto_merge`` must fall to the uniform
+        # opt-in default (``False``), not the historical ``True``. A newly
+        # auto-merging row here also lacks ``auto_merge_intent``, so the
+        # provisioner would grandfather that ``True`` permanently.
+        now = datetime(2026, 7, 29, tzinfo=UTC)
+        workspace = Workspace(
+            id="ws_no_auto_merge",
+            status=WorkspaceStatus.requested.value,
+            repo_url="git@example.com:repo.git",
+            branch_base="development",
+            task_title="no auto_merge",
+            task_prompt="do work",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            owned_paths=[],
+            task_policy={},
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(workspace)
+        await session.flush()
+
+        value = (
+            await session.execute(
+                text("SELECT auto_merge FROM workspaces WHERE id = 'ws_no_auto_merge'")
+            )
+        ).scalar_one()
+        assert value is False
+        assert workspace.auto_merge is False
 
     @pytest.mark.unit
     async def test_create_persists_policy_metadata(self, session: AsyncSession) -> None:
@@ -1218,6 +1252,16 @@ class TestExists:
 
 
 class TestListWorkspaces:
+    @pytest.mark.unit
+    async def test_list_by_ids_empty_input_skips_query(self) -> None:
+        session = _RecordingSchedulerSession("postgresql")
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        rows = await repo.list_by_ids([])
+
+        assert rows == []
+        assert session.executed == []
+
     @pytest.mark.unit
     async def test_combines_status_agent_and_repo_filters(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)

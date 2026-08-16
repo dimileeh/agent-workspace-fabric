@@ -737,6 +737,7 @@ class TestExecutorCoverageEdgesPart002:
                     repo_slug="x/y",
                     pr_number=42,
                     agent="claude_code",
+                    auto_merge=True,
                     reason=f"operator retry with GH_TOKEN={secret}",
                 )
             )

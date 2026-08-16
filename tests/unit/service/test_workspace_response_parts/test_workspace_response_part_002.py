@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.common.auto_merge import AUTO_MERGE_INTENT_POLICY_KEY
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.service.validation_observability import (
@@ -677,3 +678,73 @@ def test_workspace_response_skips_malformed_block_violation_mapping() -> None:
     assert len(response.block_state.violations) == 1
     assert response.block_state.violations[0].path == "Makefile"
     assert response.block_state.violations[0].line == 7
+
+
+def _auto_merge_workspace_fixture(
+    *,
+    status: str,
+    task_policy: dict[str, object],
+    auto_merge: bool,
+) -> SimpleNamespace:
+    workspace = _workspace_response_fixture(
+        workspace_id="ws-auto-merge",
+        status=status,
+        events=[],
+    )
+    workspace.task_policy = task_policy
+    workspace.auto_merge = auto_merge
+    return workspace
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "status",
+    [WorkspaceStatus.requested.value, WorkspaceStatus.provisioning.value],
+)
+def test_workspace_response_reports_unresolved_auto_merge_as_null(status: str) -> None:
+    # An unset intent seeds the column with the conservative default before the
+    # profile exists; GET/list must not advertise that seed as a manual gate when
+    # ``monitor.auto_merge`` may still resolve it on at provisioning.
+    workspace = _auto_merge_workspace_fixture(
+        status=status,
+        task_policy={AUTO_MERGE_INTENT_POLICY_KEY: None},
+        auto_merge=False,
+    )
+
+    assert workspace_response(workspace).auto_merge is None  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_workspace_response_reports_resolved_auto_merge_after_provisioning() -> None:
+    workspace = _auto_merge_workspace_fixture(
+        status=WorkspaceStatus.monitoring_pr.value,
+        task_policy={AUTO_MERGE_INTENT_POLICY_KEY: None},
+        auto_merge=True,
+    )
+
+    assert workspace_response(workspace).auto_merge is True  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("intent", [True, False])
+def test_workspace_response_reports_explicit_intent_before_provisioning(intent: bool) -> None:
+    workspace = _auto_merge_workspace_fixture(
+        status=WorkspaceStatus.requested.value,
+        task_policy={AUTO_MERGE_INTENT_POLICY_KEY: intent},
+        auto_merge=intent,
+    )
+
+    assert workspace_response(workspace).auto_merge is intent  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_workspace_response_reports_grandfathered_legacy_auto_merge() -> None:
+    # A legacy row carries no intent key; the provisioner preserves its column, so
+    # reporting it as unresolved would hide a policy that will auto-merge.
+    workspace = _auto_merge_workspace_fixture(
+        status=WorkspaceStatus.requested.value,
+        task_policy={},
+        auto_merge=True,
+    )
+
+    assert workspace_response(workspace).auto_merge is True  # type: ignore[arg-type]

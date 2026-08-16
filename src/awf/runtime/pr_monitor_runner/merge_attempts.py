@@ -191,6 +191,11 @@ async def _attempt_merge_method(
             repo=repo,
             pr_number=pr_number,
             method=merge_method,
+            # ``sync_release_pr`` auto-merges run the feature monitor but their
+            # head is the long-lived release source branch (development), which
+            # must survive the merge; the worker sets this False for that case
+            # (PRRT_kwDOSJAM6s6U3YAS). Feature branches keep the delete default.
+            delete_branch=self._config.delete_source_branch_on_merge,
         )
     except GitHubClientError as exc:
         rejected_method = _merge_method_rejection_method(exc)

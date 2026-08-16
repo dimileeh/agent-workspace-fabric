@@ -72,6 +72,7 @@ WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH = (
     ("POST", "/v1/workspaces"),
     ("GET", "/v1/workspaces"),
     ("GET", "/v1/workspaces/overview"),
+    ("POST", "/v1/workspaces/overview/batch"),
     ("GET", "/v1/workspaces/{workspace_id}"),
     ("GET", "/v1/workspaces/{workspace_id}/events"),
     ("GET", "/v1/workspaces/{workspace_id}/runtime"),

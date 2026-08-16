@@ -26,7 +26,7 @@ jobs:
       manifest_generated: ${{ steps.build.outputs.manifest_generated }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-tags: true
           # This is the most release-sensitive checkout in the repo (it builds
@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
           version: "0.5.31"
           github-token: ""
@@ -140,7 +140,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Match the build job and ci.yml: do not persist GITHUB_TOKEN in
           # .git/config for the artifact-verification smoke checkout.
@@ -159,7 +159,7 @@ jobs:
           path: artifacts/release
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
           version: "0.5.31"
           github-token: ""
@@ -228,6 +228,6 @@ jobs:
           path: dist
 
       - name: Publish via PyPI Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
         with:
           repository-url: ${{ inputs.publish_target == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

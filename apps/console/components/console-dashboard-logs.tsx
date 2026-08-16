@@ -19,6 +19,7 @@ useState
 } from "react";
 
 import { formatAgentLabel } from "@/lib/agent-format";
+import { awfPath } from "@/lib/console-urls";
 import {
 bytes,
 pickWorkspaceLogStreams,
@@ -383,7 +384,7 @@ export function WorkspaceLogColumn({
 
   const loadStreams = useCallback(async () => {
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
-      `/api/awf/workspaces/${workspace.workspace_id}/logs`,
+      awfPath(`workspaces/${workspace.workspace_id}/logs`),
     );
     if (!result.ok) {
       setError(result.message);
@@ -428,7 +429,10 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     setStreamState("connecting");
     const source = new EventSource(
-      `/api/awf/workspaces/${workspace.workspace_id}/stream?channels=events,agent,validation,services&tail_bytes=65536`,
+      awfPath(`workspaces/${workspace.workspace_id}/stream`, {
+        channels: "events,agent,validation,services",
+        tail_bytes: 65536,
+      }),
     );
     let closedByServer = false;
     let terminalError = false;

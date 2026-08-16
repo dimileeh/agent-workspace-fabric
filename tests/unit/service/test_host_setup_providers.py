@@ -203,6 +203,7 @@ def test_registry_env_ref_vars_mirror_readiness() -> None:
         "codex": readiness._CODEX_ENV_KEYS,
         "claude_code": readiness._CLAUDE_ENV_KEYS,
         "cursor": readiness._CURSOR_ENV_KEYS,
+        "antigravity": readiness._ANTIGRAVITY_ENV_KEYS,
         "gemini": readiness._GEMINI_ENV_KEYS,
         "opencode": readiness._OPENCODE_ENV_KEYS,
         "grok": readiness._XAI_ENV_KEYS,

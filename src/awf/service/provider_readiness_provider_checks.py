@@ -475,6 +475,118 @@ def _check_cursor_readiness(
     return result
 
 
+def _check_antigravity(
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Check whether Antigravity API-key auth is visible to the service."""
+    # Readiness accepts GEMINI_API_KEY as well (agy 1.1.x AI Studio path), but
+    # setup ``env_ref_vars`` stays primary-key-only like Cursor.
+    signal = _first_present_env(environ, (*_ANTIGRAVITY_ENV_KEYS, "GEMINI_API_KEY"))
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="ANTIGRAVITY_ENV_AUTH_PRESENT",
+            message="Antigravity auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Antigravity auth is supplied by static service environment variable {signal}.",
+                )
+            ],
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="ANTIGRAVITY_AUTH_MISSING",
+        message=(
+            "No Antigravity auth signal was visible. Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY."
+        ),
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
+    )
+
+
+def _check_antigravity_readiness(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Combine Antigravity env auth with the runtime CLI availability probe."""
+    antigravity_result = _check_antigravity(environ=environ, strict=strict, secrets=secrets)
+    if antigravity_result.get("ok") is not True:
+        return antigravity_result
+
+    probe = _probe_agent_runtime_cli(
+        settings,
+        executable="agy",
+        provider="antigravity",
+        environ=environ,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    runtime_cli_probe = _runtime_cli_probe_payload(probe)
+    if probe.get("status") == "ok":
+        antigravity_result["runtime_cli_probe"] = runtime_cli_probe
+        return antigravity_result
+
+    reason = str(probe.get("reason_code") or "ANTIGRAVITY_RUNTIME_CLI_NOT_FOUND")
+    message = str(probe.get("message") or "Antigravity auth was found but agy is unavailable.")
+    result = _provider_result(
+        ok=False,
+        strict=strict,
+        reason=reason,
+        message=message,
+        detail=str(probe.get("detail") or "") or None,
+        signals=[
+            *[
+                signal
+                for signal in antigravity_result.get("signals", [])
+                if isinstance(signal, str)
+            ],
+            "agy",
+        ],
+        secrets=secrets,
+        credential_sources=_credential_sources(antigravity_result),
+        credential_scope=str(antigravity_result.get("credential_scope") or "static_env_token"),
+        isolation=str(antigravity_result.get("isolation") or "service_env"),
+        warnings=[
+            *[
+                warning
+                for warning in antigravity_result.get("warnings", [])
+                if isinstance(warning, Mapping)
+            ],
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity="error" if strict else "warning",
+            ),
+        ],
+    )
+    result["runtime_cli_probe"] = runtime_cli_probe
+    return result
+
+
 def _check_gemini(
     *,
     environ: Mapping[str, str],
@@ -578,6 +690,7 @@ def _check_gemini(
 # in, and these helpers reference them only at call time, so the late binding is
 # safe.
 from awf.service.provider_readiness import (  # noqa: E402
+    _ANTIGRAVITY_ENV_KEYS,
     _CLAUDE_ENV_KEYS,
     _CODEX_ENV_KEYS,
     _CURSOR_ENV_KEYS,

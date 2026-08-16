@@ -24,6 +24,8 @@ import pytest
 import awf.control.executor.planning_artifacts as planning_artifacts
 from awf.control.executor.planning_artifacts import (
     _deposit_planning_artifacts_best_effort,
+    _enter_blocked_preserving_validation_planning_artifacts,
+    _mark_failed_preserving_validation_planning_artifacts,
     handle_agent_planning_result,
 )
 
@@ -63,6 +65,84 @@ async def test_planning_failure_deposits_before_mark_failed(
     # Deposit must precede the terminal-status update so artifact availability
     # is ordered ahead of the console's ``updated_at`` polling signal.
     assert calls == ["deposit", "mark_failed"]
+
+
+@pytest.mark.unit
+async def test_validation_mark_failed_helper_deposits_before_mark_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    profile = SimpleNamespace()
+    worktree_path = Path("/tmp/worktree")
+
+    def _record_deposit(self: object, **kwargs: object) -> None:
+        assert kwargs["profile"] is profile
+        assert kwargs["workspace_id"] == "ws-1"
+        assert kwargs["worktree_path"] == worktree_path
+        calls.append("deposit")
+
+    monkeypatch.setattr(
+        planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _record_deposit,
+    )
+
+    async def _record_mark_failed(**kwargs: object) -> None:
+        assert kwargs["workspace_id"] == "ws-1"
+        calls.append("mark_failed")
+
+    self = SimpleNamespace(_mark_failed=AsyncMock(side_effect=_record_mark_failed))
+
+    await _mark_failed_preserving_validation_planning_artifacts(
+        self,
+        artifact_profile=profile,
+        artifact_workspace_id="ws-1",
+        artifact_worktree_path=worktree_path,
+        workspace_id="ws-1",
+        message="validation failed",
+    )
+
+    assert calls == ["deposit", "mark_failed"]
+
+
+@pytest.mark.unit
+async def test_validation_block_helper_deposits_before_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    profile = SimpleNamespace()
+    worktree_path = Path("/tmp/worktree")
+
+    def _record_deposit(self: object, **kwargs: object) -> None:
+        assert kwargs["profile"] is profile
+        assert kwargs["workspace_id"] == "ws-1"
+        assert kwargs["worktree_path"] == worktree_path
+        calls.append("deposit")
+
+    monkeypatch.setattr(
+        planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _record_deposit,
+    )
+
+    async def _record_block(**kwargs: object) -> None:
+        assert kwargs["workspace_id"] == "ws-1"
+        calls.append("block")
+
+    self = SimpleNamespace(
+        enter_blocked_for_protected_violation=AsyncMock(side_effect=_record_block)
+    )
+
+    await _enter_blocked_preserving_validation_planning_artifacts(
+        self,
+        artifact_profile=profile,
+        artifact_workspace_id="ws-1",
+        artifact_worktree_path=worktree_path,
+        workspace_id="ws-1",
+        reason_code="PROTECTED_QUALITY_GATE_CHANGED",
+    )
+
+    assert calls == ["deposit", "block"]
 
 
 def _profile_with_planning(*, plan_path: str, conformance_report_path: str) -> SimpleNamespace:

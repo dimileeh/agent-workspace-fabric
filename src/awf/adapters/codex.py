@@ -62,11 +62,22 @@ class CodexAdapter(AgentAdapter):
         return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CODEX_OPENAI_ENV_NAMES)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+        """Build executable arguments for a Codex CLI invocation."""
+        args = [
+            "codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
         selected_model = model or self._default_model
         if selected_model:
             args += ["--model", selected_model]
         if self._default_effort:
             args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
         args.append("-")
+        return args
+
+    def _isolated_cli_args(self, *, model: str | None) -> list[str]:
+        """Bypass Codex's repository guard only for disposable re-ask checkouts."""
+        args = self._cli_args(model=model)
+        args.insert(-1, "--skip-git-repo-check")
         return args

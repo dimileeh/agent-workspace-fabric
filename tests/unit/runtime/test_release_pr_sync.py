@@ -15,12 +15,14 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
+    RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE,
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
     ReleasePrSyncResult,
     count_commits_ahead,
     find_or_create_release_pr,
     prepare_release_pr_sync,
+    reconcile_release_pr_body,
     release_pr_body,
     release_pr_title,
 )
@@ -199,9 +201,12 @@ class TestFindOrCreateReleasePr:
     async def test_reuses_existing_open_pr_without_create(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout="old policy body\n")  # gh pr view (body)
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
 
+        generated = release_pr_body(source_branch="development", target_branch="main")
         metadata, created = await find_or_create_release_pr(
             runner=fake,
             gh=gh,
@@ -209,16 +214,87 @@ class TestFindOrCreateReleasePr:
             source_branch="development",
             target_branch="main",
             title="t",
-            body="b",
+            body=generated,
         )
 
         assert created is False
         assert metadata.number == 99
-        # Only list + view ran; no `gh pr create`.
+        # list → view (current body) → edit (reconcile policy) → view (adoption); no create.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
             ["gh", "pr", "view"],
+            ["gh", "pr", "edit"],
+            ["gh", "pr", "view"],
         ]
+        edit_args = fake.calls[2].args
+        reconciled = edit_args[edit_args.index("--body") + 1]
+        # The human-authored line survives; AWF's managed policy section is appended.
+        assert "old policy body" in reconciled
+        assert "human-gated" in reconciled
+        assert edit_args[3] == "99"
+
+    @pytest.mark.unit
+    async def test_reuse_preserves_human_body_and_replaces_managed_section(self) -> None:
+        # A manually authored release PR carrying human release notes must keep that
+        # content; only AWF's marker-delimited policy block is rewritten in place.
+        fake = FakeCommandRunner()
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        human_body = f"## Release notes\n\n- shipped X\n- fixed Y\n\n{stale}"
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout=human_body + "\n")  # gh pr view (body)
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
+        gh = GitHubClient(fake)
+
+        # Now the workspace resolves auto_merge=True, so the managed section flips.
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+        await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body=generated,
+        )
+
+        edit_args = fake.calls[2].args
+        reconciled = edit_args[edit_args.index("--body") + 1]
+        assert "## Release notes" in reconciled
+        assert "- shipped X" in reconciled
+        assert "auto-merge enabled" in reconciled  # policy flipped in place
+        assert "human-gated" not in reconciled  # stale policy gone
+        assert reconciled.count("AWF:release-merge-policy:start") == 1  # no duplication
+
+    @pytest.mark.unit
+    async def test_reuse_skips_edit_when_body_already_matches(self) -> None:
+        # An idempotent re-sync where the reused PR already carries the exact
+        # reconciled body must issue no ``gh pr edit`` write.
+        fake = FakeCommandRunner()
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=99))  # gh pr list
+        fake.queue_result(returncode=0, stdout=generated + "\n")  # gh pr view (body)
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
+        gh = GitHubClient(fake)
+
+        await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body=generated,
+        )
+
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+            ["gh", "pr", "view"],
+        ]
+        assert all(c.args[:3] != ["gh", "pr", "edit"] for c in fake.calls)
 
     @pytest.mark.unit
     async def test_creates_pr_when_none_exists(self) -> None:
@@ -362,6 +438,8 @@ class TestFindOrCreateReleasePr:
             returncode=0,
             stdout=_fork_and_same_repo_pr_list_payload(fork_number=555, same_repo_number=99),
         )  # gh pr list
+        fake.queue_result(returncode=0, stdout="stale body\n")  # gh pr view (current body)
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
         gh = GitHubClient(fake)
 
@@ -372,18 +450,22 @@ class TestFindOrCreateReleasePr:
             source_branch="development",
             target_branch="main",
             title="t",
-            body="b",
+            body=release_pr_body(source_branch="development", target_branch="main"),
         )
 
         assert created is False
         assert metadata.number == 99
-        # Only list + view of the same-repo PR ran; the fork PR is never viewed
-        # and no `gh pr create` is issued.
+        # list → view (current body) → edit (reconcile) → view (adoption) of the
+        # same-repo PR; the fork PR is never edited and no `gh pr create` is issued.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
             ["gh", "pr", "view"],
+            ["gh", "pr", "edit"],
+            ["gh", "pr", "view"],
         ]
         assert fake.calls[1].args[:4] == ["gh", "pr", "view", "99"]
+        assert fake.calls[2].args[:4] == ["gh", "pr", "edit", "99"]
+        assert fake.calls[3].args[:4] == ["gh", "pr", "view", "99"]
 
     @pytest.mark.unit
     async def test_created_url_for_other_repo_raises(self) -> None:
@@ -812,6 +894,8 @@ class TestPrepareReleasePrSync:
         fake.queue_result(returncode=0)  # fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=88))  # gh pr list
+        fake.queue_result(returncode=0, stdout="stale body\n")  # gh pr view (current body)
+        fake.queue_result(returncode=0, stdout="")  # gh pr edit (reconcile body)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=88))  # view
         gh = GitHubClient(fake)
 
@@ -822,14 +906,16 @@ class TestPrepareReleasePrSync:
             cwd="/work",
             source_branch="development",
             target_branch="main",
-            title="t",
-            body="b",
+            title=release_pr_title(source_branch="development", target_branch="main"),
+            body=release_pr_body(source_branch="development", target_branch="main"),
         )
 
         assert isinstance(outcome, ReleasePrSyncResult)
         assert outcome.created is False
         assert outcome.metadata.number == 88
         assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
+        # The reused PR's stale policy body was reconciled before adoption.
+        assert any(c.args[:3] == ["gh", "pr", "edit"] for c in fake.calls)
 
 
 class TestReleasePrText:
@@ -840,3 +926,434 @@ class TestReleasePrText:
         assert "development" in title and "main" in title
         assert "development" in body and "main" in body
         assert "auto-merge disabled" in body
+        assert "human-gated" in body
+
+    @pytest.mark.unit
+    def test_body_reflects_enabled_auto_merge(self) -> None:
+        # A resolved auto_merge=True release-sync workspace runs the feature
+        # monitor and may squash-merge, so the body must not claim the target
+        # stays human-gated with auto-merge disabled.
+        body = release_pr_body(source_branch="development", target_branch="main", auto_merge=True)
+        assert "development" in body and "main" in body
+        assert "auto-merge disabled" not in body
+        assert "human-gated" not in body
+        assert "auto-merge enabled" in body
+
+    @pytest.mark.unit
+    def test_body_wraps_policy_in_managed_markers(self) -> None:
+        body = release_pr_body(source_branch="development", target_branch="main")
+        assert "AWF:release-merge-policy:start" in body
+        assert "AWF:release-merge-policy:end" in body
+
+
+class TestReconcileReleasePrBody:
+    @pytest.mark.unit
+    def test_replaces_managed_section_in_place_preserving_human_content(self) -> None:
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\nhand-written context\n\n{stale}\n\ntrailing human text"
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "hand-written context" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_appends_managed_section_when_absent(self) -> None:
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        existing = "## Human release PR\n\n- item one"
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert reconciled.startswith("## Human release PR")
+        assert "- item one" in reconciled
+        assert "AWF:release-merge-policy:start" in reconciled
+        assert "human-gated" in reconciled
+
+    @pytest.mark.unit
+    def test_replaces_legacy_unmarked_policy_paragraph(self) -> None:
+        # A release PR opened before the managed markers existed carries the old
+        # unfenced "human-gated" paragraph. Reconciling to auto-merge must strip the
+        # stale paragraph instead of appending the enabled section beside it, or the
+        # PR would claim both manual and automatic merge.
+        legacy_body = (
+            "Automated AWF release PR syncing `development` into `main`.\n\n"
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=legacy_body, generated_body=generated)
+
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled  # stale legacy paragraph gone
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_preserving_surrounding_human_content(self) -> None:
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"# Notes\n\nhand-written context\n\n{legacy_paragraph}\n\ntrailing text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "hand-written context" in reconciled
+        assert "trailing text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
+    def test_preserves_legacy_paragraph_quoted_inside_human_content(self) -> None:
+        # A human release note may *quote* the legacy paragraph — blockquoted, or
+        # embedded mid-line with commentary around it. Neither is an AWF-authored
+        # standalone paragraph, so legacy cleanup must leave both intact instead of
+        # silently deleting human-authored text during reconciliation.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        quoted = f"> {legacy_paragraph}"
+        embedded = f"The old body said: {legacy_paragraph} That claim is now stale."
+        existing = f"# Notes\n\n{quoted}\n\n{embedded}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert quoted in reconciled
+        assert embedded in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert reconciled.count("AWF:release-merge-policy:start") == 1
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_only_when_it_owns_its_line(self) -> None:
+        # An indented/list-item legacy paragraph belongs to human markdown structure
+        # (removing it would leave a dangling bullet), while the same text on its own
+        # line is AWF's own stale output and must go.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
+        existing = f"- {legacy_paragraph}\n\n{legacy_paragraph}"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert f"- {legacy_paragraph}" in reconciled
+        # Only the bulleted copy survives; the standalone stale paragraph is gone.
+        assert reconciled.count(legacy_paragraph) == 1
+
+    @pytest.mark.unit
+    def test_preserves_legacy_paragraph_inside_fenced_code_block(self) -> None:
+        # A human release note may quote the old body verbatim in a fenced code
+        # block, where the paragraph sits at column zero on its own line. That is
+        # human-authored content, not AWF's stale output, so it must survive while a
+        # standalone copy outside the fence is still stripped.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        fenced = f"```text\n{legacy_paragraph}\n```"
+        existing = f"# Notes\n\nThe previous body read:\n\n{fenced}\n\n{legacy_paragraph}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        # Only the quoted copy survives; the standalone stale paragraph is gone.
+        assert reconciled.count(legacy_paragraph) == 1
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_preserves_legacy_paragraph_inside_html_comment(self) -> None:
+        # Text a human parked inside an HTML comment is invisible in the rendered
+        # description but is still their content; container-unaware cleanup would
+        # gut the comment.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind with auto-merge enabled: "
+            "AWF's monitor squash-merges into the release target once checks are "
+            "green and review comments are addressed."
+        )
+        commented = f"<!--\n{legacy_paragraph}\n-->"
+        existing = f"# Notes\n\n{commented}\n\nhand-written context"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert commented in reconciled
+        assert "hand-written context" in reconciled
+        assert "human-gated" in reconciled
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_after_a_closed_fence(self) -> None:
+        # Container tracking must reopen stripping once the fence closes, otherwise a
+        # code block early in the body would shield every later stale paragraph.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"~~~\nsome sample\n~~~\n\n{legacy_paragraph}\n\ntrailing text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "some sample" in reconciled
+        assert "trailing text" in reconciled
+        assert legacy_paragraph not in reconciled
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_ignores_marker_pair_quoted_inside_fenced_code_block(self) -> None:
+        # A human may paste a whole managed block into a fenced example. Those
+        # markers are illustrative text, not AWF's live section: rewriting between
+        # them would gut the human's code block *and* leave the real description
+        # without any policy statement. Treat the body as marker-free and append.
+        quoted_block = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=False
+        )
+        fenced = f"```markdown\n{quoted_block}\n```"
+        existing = f"# Notes\n\nAWF renders this block:\n\n{fenced}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_splices_live_block_and_leaves_fenced_marker_example_alone(self) -> None:
+        # A fenced example beside the live block must not read as a duplicate block
+        # (which would fail closed and wedge every later sync); only the top-level
+        # block is reconciled.
+        fenced = (
+            "```markdown\n"
+            "<!-- AWF:release-merge-policy:start -->\n"
+            "sample policy text\n"
+            "<!-- AWF:release-merge-policy:end -->\n"
+            "```"
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{fenced}\n\n{stale}\n\ntrailing human text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert fenced in reconciled
+        assert "sample policy text" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
+    def test_ignores_marker_pair_quoted_in_a_blockquote(self) -> None:
+        # A human may quote a managed block in a blockquote ("AWF appends this:").
+        # Those markers do not own their lines, so they are illustrative text rather
+        # than the live section: splicing between them would replace the quoted
+        # human content and leave the description without a real managed block.
+        quoted = (
+            "> <!-- AWF:release-merge-policy:start -->\n"
+            "> sample policy text\n"
+            "> <!-- AWF:release-merge-policy:end -->"
+        )
+        existing = f"# Notes\n\nAWF appends this:\n\n{quoted}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert quoted in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+        assert "auto-merge enabled" in reconciled
+
+    @pytest.mark.unit
+    def test_splices_live_block_and_leaves_indented_marker_example_alone(self) -> None:
+        # A marker parked inside a list item beside the live block must not read as a
+        # duplicate block (which would fail closed and wedge every later sync).
+        listed = "- example: <!-- AWF:release-merge-policy:start -->"
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{listed}\n\n{stale}\n\ntrailing human text"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert listed in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
+    def test_ignores_markers_inside_multiline_html_comment(self) -> None:
+        # Markers parked in a human's multi-line HTML comment are invisible in the
+        # rendered description and must not be mistaken for the live section.
+        commented = "<!--\ndraft: <!-- AWF:release-merge-policy:start -->\n-->"
+        existing = f"# Notes\n\n{commented}\n\nhand-written context"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert commented in reconciled
+        assert "hand-written context" in reconciled
+        assert reconciled.rstrip().endswith("<!-- AWF:release-merge-policy:end -->")
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+
+    @pytest.mark.unit
+    def test_splices_live_block_in_a_crlf_body(self) -> None:
+        # GitHub returns a description saved through its web UI with CRLF endings, so
+        # a reused PR body can reach reconciliation with a trailing \r on every line.
+        # Marker and fence matching must look past it; otherwise the live block goes
+        # unseen and reconciliation appends a second one, leaving the PR advertising
+        # both merge policies at once.
+        fenced = (
+            "```markdown\n"
+            "<!-- AWF:release-merge-policy:start -->\n"
+            "sample policy text\n"
+            "<!-- AWF:release-merge-policy:end -->\n"
+            "```"
+        )
+        stale = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"# Notes\n\n{fenced}\n\n{stale}\n\ntrailing human text".replace("\n", "\r\n")
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "sample policy text" in reconciled
+        assert "trailing human text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+        # Only the live block was replaced; the fenced example is still the second one.
+        assert reconciled.count("AWF:release-merge-policy:start") == 2
+
+    @pytest.mark.unit
+    def test_strips_legacy_paragraph_from_a_crlf_body(self) -> None:
+        # Same CRLF hazard on the pre-marker path: a stale paragraph carrying a
+        # trailing \r must still be recognised as AWF's own output and stripped.
+        legacy_paragraph = (
+            "Opened by the `sync_release_pr` task kind and monitored with "
+            "release/manual behavior (auto-merge disabled). Merging into the "
+            "release target stays human-gated."
+        )
+        existing = f"# Notes\n\n{legacy_paragraph}\n\ntrailing text".replace("\n", "\r\n")
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        reconciled = reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert "# Notes" in reconciled
+        assert "trailing text" in reconciled
+        assert "auto-merge enabled" in reconciled
+        assert "human-gated" not in reconciled
+
+    @pytest.mark.unit
+    def test_empty_existing_body_yields_only_managed_section(self) -> None:
+        generated = release_pr_body(source_branch="development", target_branch="main")
+        section = reconcile_release_pr_body(existing_body="   \n", generated_body=generated)
+        # An empty human body reduces to just the managed section (no intro grafted on).
+        assert section.startswith("<!-- AWF:release-merge-policy:start")
+        assert "human-gated" in section
+
+    @pytest.mark.unit
+    def test_generated_body_without_markers_falls_back(self) -> None:
+        # Defensive: a generated body missing the managed markers can't be spliced,
+        # so the whole generated body is returned rather than dropping the policy.
+        reconciled = reconcile_release_pr_body(
+            existing_body="human content", generated_body="no markers here"
+        )
+        assert reconciled == "no markers here"
+
+    @pytest.mark.unit
+    def test_orphan_start_marker_before_valid_block_fails_closed(self) -> None:
+        # An orphan start marker sits before a later valid block. Pairing the first
+        # start with the first end would splice across — and delete — the human text
+        # in between. Fail closed instead so nothing human-authored is destroyed.
+        start = "<!-- AWF:release-merge-policy:start -->"
+        valid_block = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=False
+        )
+        existing = f"{start}\n\nhand-written release notes\n\n{valid_block}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+        # The caller keeps ``existing_body`` untouched — the human notes survive.
+        assert "hand-written release notes" in existing
+
+    @pytest.mark.unit
+    def test_duplicate_managed_blocks_fail_closed(self) -> None:
+        block = release_pr_body(source_branch="development", target_branch="main", auto_merge=False)
+        existing = f"{block}\n\nhand-written context\n\n{block}"
+        generated = release_pr_body(
+            source_branch="development", target_branch="main", auto_merge=True
+        )
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+        assert excinfo.value.detail == {"start_marker_count": 2, "end_marker_count": 2}
+
+    @pytest.mark.unit
+    def test_reversed_markers_fail_closed(self) -> None:
+        # An end marker preceding a start marker cannot bound a section; reconciling
+        # it in place would produce garbage, so refuse rather than guess.
+        start = "<!-- AWF:release-merge-policy:start -->"
+        end = "<!-- AWF:release-merge-policy:end -->"
+        existing = f"{end}\n\nhuman text\n\n{start}"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
+
+    @pytest.mark.unit
+    def test_orphan_end_marker_only_fails_closed(self) -> None:
+        end = "<!-- AWF:release-merge-policy:end -->"
+        existing = f"human notes\n\n{end}\n\nmore notes"
+        generated = release_pr_body(source_branch="development", target_branch="main")
+
+        with pytest.raises(ReleasePrSyncError) as excinfo:
+            reconcile_release_pr_body(existing_body=existing, generated_body=generated)
+
+        assert excinfo.value.reason_code == RELEASE_SYNC_POLICY_MARKERS_MALFORMED_REASON_CODE
