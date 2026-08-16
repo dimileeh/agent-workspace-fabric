@@ -11,6 +11,8 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _aggressively_peel_verdict_reason_wrappers,
     _html_wrapper_close_suffix_start,
     _peel_all_outer_html_verdict_reason_wrappers,
+    _peel_all_outer_unconditional_verdict_reason_wrappers,
+    _peel_one_unconditional_verdict_reason_wrapper,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _verdict_reason_inline_link_label,
@@ -328,6 +330,53 @@ class TestParseVerdict:
         assert _aggressively_peel_verdict_reason_wrappers("[<reason>](https://example.com)") == (
             "<reason>"
         )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda inner: f'"{inner}"',
+            lambda inner: f"'{inner}'",
+            lambda inner: f"`{inner}`",
+            lambda inner: f"**{inner}**",
+            lambda inner: f"__{inner}__",
+            lambda inner: f"~~{inner}~~",
+        ],
+        ids=["dq", "sq", "tick", "strong_star", "strong_under", "strike"],
+    )
+    def test_private_awf_very_deep_unconditional_placeholder_peel_stays_linear(
+        self, wrap: object
+    ) -> None:
+        # Per-layer fullmatch peels are quadratic on deep quote/tick/strong/strike
+        # nests and can stall the monitor event loop before the 500-char reason
+        # bound (PRRT_kwDOSJAM6s6ZqS4V). Tens of thousands of layers must still
+        # fail closed without approaching the default test timeout.
+        nested = "<reason>"
+        for _ in range(20_000):
+            nested = wrap(nested)  # type: ignore[operator]
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
+
+    @pytest.mark.unit
+    def test_private_linear_unconditional_wrapper_peel_edges(self) -> None:
+        # Direct contract for the O(n) unconditional peel (PRRT_kwDOSJAM6s6ZqS4V).
+        peel = _peel_all_outer_unconditional_verdict_reason_wrappers
+        assert peel('  "**x**"  ') == "x"
+        assert peel("`` `x` ``") == "x"
+        assert peel("~~**x**~~") == "x"
+        assert peel("__init__") == "__init__"
+        assert peel("plain") == "plain"
+        assert peel('""') == ""
+        assert peel("```") == "`"
+        assert peel("“x”") == "x"
+        assert peel("‘x’") == "x"
+        # One-layer regex helper stays aligned with a single cursor peel.
+        assert _peel_one_unconditional_verdict_reason_wrapper('"<reason>"') == "<reason>"
+        assert _peel_one_unconditional_verdict_reason_wrapper("__init__") is None
+        assert _peel_one_unconditional_verdict_reason_wrapper("*<reason>*") is None
+        assert _aggressively_peel_verdict_reason_wrappers('*"<reason>"*') == "<reason>"
 
     @pytest.mark.unit
     def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:

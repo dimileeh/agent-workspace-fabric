@@ -567,7 +567,12 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
 
 
 def _peel_one_unconditional_verdict_reason_wrapper(cleaned: str) -> str | None:
-    """Peel one outer tick/quote/strong/strike wrapper, or return None."""
+    """Peel one outer tick/quote/strong/strike wrapper, or return None.
+
+    Prefer ``_peel_all_outer_unconditional_verdict_reason_wrappers`` for nested
+    peels — repeated calls here are quadratic on deep nests
+    (PRRT_kwDOSJAM6s6ZqS4V).
+    """
     tick_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(cleaned)
     if tick_match is not None:
         return tick_match.group("line").strip()
@@ -587,6 +592,98 @@ def _peel_one_unconditional_verdict_reason_wrapper(cleaned: str) -> str | None:
     if emphasis_match.group("em_star") is not None or emphasis_match.group("em_under") is not None:
         return None
     return next(g for g in emphasis_match.groups() if g is not None).strip()
+
+
+# Paired quote delimiters for whole-reason unconditional peels (ASCII + curly).
+_VERDICT_REASON_UNCONDITIONAL_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
+    ('"', '"'),
+    ("'", "'"),
+    ("\u201c", "\u201d"),
+    ("\u2018", "\u2019"),
+)
+# Strong / GFM strikethrough markers peeled without placeholder gating.
+_VERDICT_REASON_UNCONDITIONAL_MARKERS: tuple[str, ...] = ("**", "__", "~~")
+
+
+def _peel_all_outer_unconditional_verdict_reason_wrappers(cleaned: str) -> str:
+    """Peel consecutive outer tick/quote/strong/strike wrappers in linear time.
+
+    Same whole-reason semantics as repeated
+    ``_peel_one_unconditional_verdict_reason_wrapper`` matches, without per-layer
+    full-string ``fullmatch`` rescans that are quadratic on deep nests
+    (PRRT_kwDOSJAM6s6ZqS4V).
+    """
+    s = cleaned
+    left = 0
+    right = len(s)
+    while left < right and s[left].isspace():
+        left += 1
+    while right > left and s[right - 1].isspace():
+        right -= 1
+
+    def _strip_inner() -> None:
+        nonlocal left, right
+        while left < right and s[left].isspace():
+            left += 1
+        while right > left and s[right - 1].isspace():
+            right -= 1
+
+    while left < right:
+        lead = 0
+        while left + lead < right and s[left + lead] == "`":
+            lead += 1
+        if lead > 0:
+            trail = 0
+            while right - trail > left and s[right - 1 - trail] == "`":
+                trail += 1
+            n = min(lead, trail)
+            span = right - left
+            while n >= 1 and 2 * n > span:
+                n -= 1
+            if n >= 1:
+                left += n
+                right -= n
+                _strip_inner()
+                continue
+
+        quote_peeled = False
+        for open_q, close_q in _VERDICT_REASON_UNCONDITIONAL_QUOTE_PAIRS:
+            open_len = len(open_q)
+            close_len = len(close_q)
+            if (
+                right - left >= open_len + close_len
+                and s[left : left + open_len] == open_q
+                and s[right - close_len : right] == close_q
+            ):
+                left += open_len
+                right -= close_len
+                _strip_inner()
+                quote_peeled = True
+                break
+        if quote_peeled:
+            continue
+
+        marker_peeled = False
+        for marker in _VERDICT_REASON_UNCONDITIONAL_MARKERS:
+            mlen = len(marker)
+            if right - left < 2 * mlen:
+                continue
+            if s[left : left + mlen] != marker or s[right - mlen : right] != marker:
+                continue
+            if (
+                marker == "__"
+                and _VERDICT_REASON_PYTHON_DUNDER.fullmatch(s[left:right]) is not None
+            ):
+                continue
+            left += mlen
+            right -= mlen
+            _strip_inner()
+            marker_peeled = True
+            break
+        if not marker_peeled:
+            break
+
+    return s[left:right].strip()
 
 
 def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
@@ -679,21 +776,21 @@ def _aggressively_peel_verdict_reason_wrappers(reason: str) -> str:
     nested ``<em>``/``<strong>``/``<span>`` chains cannot recurse
     (PRRT_kwDOSJAM6s6Zpg0B). HTML wrapper chains are stripped first in a
     linear pass so speculative peels stay O(n) rather than quadratic
-    (PRRT_kwDOSJAM6s6Zpjww).
+    (PRRT_kwDOSJAM6s6Zpjww). Unconditional tick/quote/strong/strike chains
+    use the same linear cursor peel (PRRT_kwDOSJAM6s6ZqS4V).
     """
-    cleaned = _peel_all_outer_html_verdict_reason_wrappers(reason.strip())
+    cleaned = _peel_all_outer_unconditional_verdict_reason_wrappers(
+        _peel_all_outer_html_verdict_reason_wrappers(reason.strip())
+    )
     for _ in range(max(len(cleaned), 1)):
-        nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
-        if nxt is not None:
-            cleaned = nxt
-            continue
         inner = _conditional_verdict_reason_wrapper_inner(cleaned)
-        if inner is not None:
-            # Mixed wrappers may reintroduce HTML (e.g. ``**<em>…</em>**``);
-            # re-run the linear HTML peel instead of one-layer regex steps.
-            cleaned = _peel_all_outer_html_verdict_reason_wrappers(inner)
-            continue
-        break
+        if inner is None:
+            break
+        # Mixed wrappers may reintroduce HTML / unconditional layers
+        # (e.g. ``**<em>…</em>**`` / ``*"…"*``); re-run linear peels.
+        cleaned = _peel_all_outer_unconditional_verdict_reason_wrappers(
+            _peel_all_outer_html_verdict_reason_wrappers(inner)
+        )
     return cleaned
 
 
@@ -720,16 +817,14 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     ``RecursionError`` before the 500-character reason bound
     (PRRT_kwDOSJAM6s6Zpg0B). Nested HTML chains are speculative-peeled in a
     linear pass so deep ``<em>``/``<strong>``/``<span>`` nests cannot burn
-    quadratic regex time before that bound (PRRT_kwDOSJAM6s6Zpjww).
+    quadratic regex time before that bound (PRRT_kwDOSJAM6s6Zpjww). Nested
+    tick/quote/strong/strike chains use the same linear peel
+    (PRRT_kwDOSJAM6s6ZqS4V).
     """
-    cleaned = reason.strip()
-    # Each successful peel shortens ``cleaned``; ``len(cleaned)`` therefore
+    cleaned = _peel_all_outer_unconditional_verdict_reason_wrappers(reason.strip())
+    # Each successful gated peel shortens ``cleaned``; ``len(cleaned)`` therefore
     # bounds nested wrapper depth without a separate magic constant.
     for _ in range(max(len(cleaned), 1)):
-        nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
-        if nxt is not None:
-            cleaned = nxt
-            continue
         # Speculative HTML peel is linear and placeholder-gated — do it before
         # a one-layer ``fullmatch`` on an attacker-inflated nest.
         html_core = _peel_all_outer_html_verdict_reason_wrappers(cleaned)
