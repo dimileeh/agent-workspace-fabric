@@ -119,7 +119,6 @@ _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.claude.json",
     "/home/agent/.codex",
     "/home/agent/.config/gh",
-    "/home/agent/.config/gcloud",
     "/home/agent/.config/opencode",
     "/home/agent/.gitconfig",
     "/home/agent/.grok",
