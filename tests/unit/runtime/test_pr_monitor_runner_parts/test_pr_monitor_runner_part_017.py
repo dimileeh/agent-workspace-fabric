@@ -627,6 +627,26 @@ class TestParseVerdict:
         assert result.reason == "closed ordered-list fence"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ordered_list_blockquote_fence_indented_closer(
+        self,
+    ) -> None:
+        # ``10. > ```text`` records list container_indent 4 and blockquote mode.
+        # Continuation closers are shaped ``    > ``` ``; a prefix matcher that
+        # only allows 0–3 spaces before ``>`` never peels, so the fence stays
+        # open and a later top-level FIXED remains hidden (PRRT_kwDOSJAM6s6ZnHH2).
+        stdout = (
+            "10. > ```text\n"
+            "    > AWF-VERDICT: FALSE POSITIVE: example\n"
+            "    > ```\n"
+            "AWF-VERDICT: FIXED: closed ordered-list blockquote fence\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "closed ordered-list blockquote fence"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_list_prefix_inside_fence_does_not_close(self) -> None:
         # Closer matching must not peel list markers: ``- ``` `` inside a
         # top-level fence is content, not a closer. Treating it as one ends the

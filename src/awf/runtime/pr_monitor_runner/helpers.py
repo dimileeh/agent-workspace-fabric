@@ -308,11 +308,10 @@ _MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
-# CommonMark blockquote line prefix: optional 0–3 spaces, then one or more
-# ``>`` markers (optional space after each). Used when closing a fence that
-# opened inside a blockquote so ``> ``` `` matches without peeling ``>`` inside
-# top-level fences (PRRT_kwDOSJAM6s6ZnAyG).
-_MARKDOWN_BLOCKQUOTE_FENCE_LINE_PREFIX = re.compile(r"^ {0,3}(?:>[ \t]?)+")
+# CommonMark blockquote fence closers allow ``0 .. container_indent+3`` spaces
+# before ``>`` (see ``_markdown_fence_closes``): absolute `` {0,3}`` misses
+# list+blockquote continuations such as ``    > ``` `` under ``10. > ```text``
+# (PRRT_kwDOSJAM6s6ZnHH2), while still matching plain ``> ``` `` (PRRT_kwDOSJAM6s6ZnAyG).
 
 
 def _normalize_markdown_fence_line(line: str) -> str:
@@ -424,9 +423,12 @@ def _markdown_fence_closes(
     (container_indent 0) that looks like a fence must stay inside the open
     region. Blockquote-opened fences strip a matching ``>`` container before
     the indent check; top-level fences must not peel ``>`` (PRRT_kwDOSJAM6s6ZnAyG).
-    After that strip, allow indent ``0 .. container_indent+3`` so a normal
-    ``> ``` `` closer still matches list+blockquote openers whose list width
-    was recorded as ``container_indent`` (PRRT_kwDOSJAM6s6ZnDm7).
+    Before that strip, allow ``0 .. container_indent+3`` spaces ahead of ``>``
+    so ordered-list+blockquote continuations (``    > ``` `` under
+    ``10. > ```text``) match (PRRT_kwDOSJAM6s6ZnHH2). After that strip, allow
+    indent ``0 .. container_indent+3`` so a normal ``> ``` `` closer still
+    matches list+blockquote openers whose list width was recorded as
+    ``container_indent`` (PRRT_kwDOSJAM6s6ZnDm7).
     """
     # List-nested closers (``    ``` `` under ``10. ```text``) need the
     # container indent; absolute 0–3 alone never closes them
@@ -434,7 +436,9 @@ def _markdown_fence_closes(
     # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
     candidate = line
     if blockquote_container:
-        bq = _MARKDOWN_BLOCKQUOTE_FENCE_LINE_PREFIX.match(line)
+        # Absolute `` {0,3}`` before ``>`` misses list-continuation closers
+        # such as ``    > ``` `` when ``container_indent`` is 4.
+        bq = re.match(rf"^ {{{0},{container_indent + 3}}}(?:>[ \t]?)+", line)
         if bq is None:
             return False
         candidate = line[bq.end() :]
