@@ -873,6 +873,21 @@ async def _invoke_cli_for_verdict_result(
                 state.mark_addressed(
                     _salvaged_fix_start_state_key(salvage_item_id), item_start_head
                 )
+            # Tip keys above (or retained from an earlier failed/successful run)
+            # must survive settle-sleep cancel / worker reload before
+            # ``_persist_state`` runs at the end of ``_execute``. Persist only
+            # ``__salvaged_fix_*`` keys — same selective merge as failed/
+            # cancelled paths — so a no-change FIXED retry still has evidence
+            # (PRRT_kwDOSJAM6s6Znz-0). Skip when no head key is present (e.g.
+            # isolated clarification tips that must not bind salvage).
+            if (
+                state is not None
+                and salvage_item_id is not None
+                and state.threads_addressed_ids.get(_salvaged_fix_head_state_key(salvage_item_id))
+            ):
+                persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+                if callable(persist):
+                    await persist(workspace_id, state, salvage_item_id=salvage_item_id)
             return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt
