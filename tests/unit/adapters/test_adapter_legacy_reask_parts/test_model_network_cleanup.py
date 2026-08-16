@@ -533,8 +533,25 @@ async def test_isolated_reask_cancellation_when_git_metadata_task_already_done(
     """When git_metadata_task is already done during cancellation, its result is discarded."""
     compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
 
+    discarded_tasks: list[asyncio.Task[Any]] = []
+    original_discard = adapter_base._discard_isolated_reask_git_metadata_task_result
+
+    def _record_discard(task: asyncio.Task[Any]) -> None:
+        discarded_tasks.append(task)
+        original_discard(task)
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_discard_isolated_reask_git_metadata_task_result",
+        _record_discard,
+    )
+
+    git_metadata_called = False
+
     def _fast_done_git_metadata(*args: Any, **kwargs: Any) -> Any:
-        return ({}, ())
+        nonlocal git_metadata_called
+        git_metadata_called = True
+        return (None, ())
 
     monkeypatch.setattr(
         adapter_base,
@@ -542,19 +559,27 @@ async def test_isolated_reask_cancellation_when_git_metadata_task_already_done(
         _fast_done_git_metadata,
     )
 
-    async def _cancel_attachment(*args: Any, **kwargs: Any) -> Any:
-        raise asyncio.CancelledError()
+    async def _cancelled_shield(arg: Any) -> Any:
+        res = await arg
+        if git_metadata_called:
+            raise asyncio.CancelledError()
+        return res
+
+    monkeypatch.setattr(adapter_base.asyncio, "shield", _cancelled_shield)
+
+    async def _ok_attachment(*args: Any, **kwargs: Any) -> tuple[Any, CommandResult]:
+        return kwargs["attachment"], CommandResult(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
         adapter_base,
         "_attach_persisted_clarification_model_network",
-        _cancel_attachment,
+        _ok_attachment,
     )
 
     adapter = OpenCodeAdapter(runner=FakeCommandRunner())
-    runner = adapter._runner
-    runner.queue_result()
-    runner.queue_result(stdout="stateful-container")
+
+    reask_path = tmp_path / "reask"
+    reask_path.mkdir()
 
     with pytest.raises(asyncio.CancelledError):
         await adapter.run(
@@ -563,5 +588,10 @@ async def test_isolated_reask_cancellation_when_git_metadata_task_already_done(
             prompt=_PROMPT,
             model="ollama/kimi-k2.6:cloud",
             workspace_id="ws_legacy",
-            isolated_worktree_host_path=tmp_path / "reask",
+            isolated_worktree_host_path=reask_path,
+            isolated_worktree_ref="a" * 40,
+            isolated_worktree_source_mirror=tmp_path / "source-mirror",
         )
+
+    assert len(discarded_tasks) == 1
+    assert discarded_tasks[0].done()
