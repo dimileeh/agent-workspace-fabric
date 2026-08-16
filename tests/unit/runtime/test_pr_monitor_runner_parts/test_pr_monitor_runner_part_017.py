@@ -391,6 +391,26 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_list_prefix_inside_fence_does_not_close(self) -> None:
+        # Closer matching must not peel list markers: ``- ``` `` inside a
+        # top-level fence is content, not a closer. Treating it as one ends the
+        # shield early and lets a later example override NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZmnUU).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "```\n"
+            "example closer:\n"
+            "- ```\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_tilde_fenced_example(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"

@@ -298,12 +298,13 @@ _MAX_VERDICT_REASON_LENGTH = 500
 
 
 def _normalize_markdown_fence_line(line: str) -> str:
-    """Strip container indent and one list marker for fence open/close matching.
+    """Strip container indent and one list marker for fence *open* matching.
 
     List-nested openers such as ``- ```text`` are not top-level fence lines, and
     continuation content is often only two-space indented (so it misses the
     indented-code check). Normalize before matching so those regions stay
-    shielded from verdict selection.
+    shielded from verdict selection. Closers must not use this helper — peeling
+    a list marker would treat ``- ``` `` inside a top-level fence as a closer.
     """
     return _MARKDOWN_LIST_PREFIX.sub("", line.lstrip(" \t"), count=1)
 
@@ -317,12 +318,18 @@ def _markdown_fence_open_marker(line: str) -> str | None:
 
 
 def _markdown_fence_closes(line: str, *, fence: str) -> bool:
-    """Return whether ``line`` closes a code fence opened with ``fence``."""
-    normalized = _normalize_markdown_fence_line(line)
+    """Return whether ``line`` closes a code fence opened with ``fence``.
+
+    Strip container indent only. Do not peel list markers: a line like
+    ``- ``` `` inside an open fence is fence content, not a closer.
+    """
+    # List-continuation closers (``  ``` ``) and CommonMark's optional 0–3
+    # space indent both reduce to a bare fence after lstrip.
+    stripped = line.lstrip(" \t")
     return (
         re.match(
-            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
-            normalized,
+            rf"^{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
+            stripped,
         )
         is not None
     )
