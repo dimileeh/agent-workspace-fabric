@@ -720,11 +720,30 @@ async def _invoke_cli_for_verdict_result(
         # In-memory pops alone are lost when settle-sleep cancel reloads DB state
         # before full ``_persist_state``. Persist selective deletions the same
         # way adds already do (PRRT_kwDOSJAM6s6Zn212).
+        # Shield the write itself: cancel mid-await otherwise leaves DB
+        # ``__salvaged_fix_*`` keys intact after in-memory pops, so a later
+        # no-change FIXED can reuse evidence the explicit non-fix verdict
+        # invalidated (PRRT_kwDOSJAM6s6ZohUm) — same contract as successful
+        # tip persist (PRRT_kwDOSJAM6s6ZoXc9).
         _clear_retained_salvage()
         if state is not None and salvage_item_id is not None:
             persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
             if callable(persist):
-                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
+                persist_task = asyncio.create_task(
+                    persist(workspace_id, state, salvage_item_id=salvage_item_id)
+                )
+                cancellation: asyncio.CancelledError | None = None
+                while True:
+                    try:
+                        await asyncio.shield(persist_task)
+                        break
+                    except asyncio.CancelledError as exc:
+                        cancellation = exc
+                        if persist_task.done():
+                            persist_task.result()
+                            break
+                if cancellation is not None:
+                    raise cancellation
 
     retain_for_failed_run = cli_failed or commit_sink_error is not None
     _retain_or_clear_failed_run_salvage(
