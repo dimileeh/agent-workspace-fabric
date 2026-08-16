@@ -666,6 +666,7 @@ def _prune_and_migrate_retired_agent(
 
     if not is_primary_launchable:
         from awf.service.provider_recovery import (
+            PROVIDER_RECOVERY_STATE_KEY,
             _select_fallback_target_with_index,
             parse_provider_recovery_policy,
             parse_provider_recovery_state,
@@ -678,6 +679,13 @@ def _prune_and_migrate_retired_agent(
             promoted_index = target_index
             target_agent = fallback_target.agent
             policy["agent_model"] = fallback_target.model
+
+            raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
+            state_dict = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+            state_dict["fallback_attempt_number"] = target_index + 1
+            state_dict["launched_fallback_attempts"] = rec_state.launched_fallback_attempts + 1
+            state_dict["retry_attempt_number"] = 0
+            policy[PROVIDER_RECOVERY_STATE_KEY] = state_dict
 
     pruned: list[Any] = []
     for idx, item in enumerate(raw_fallbacks):

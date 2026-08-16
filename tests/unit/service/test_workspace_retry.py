@@ -712,6 +712,9 @@ def test_prune_and_migrate_retired_agent_promotes_fallback() -> None:
         None,
         {"agent": "opencode", "model": "opencode-1"},
     ]
+    assert pruned["provider_recovery_state"]["fallback_attempt_number"] == 2
+    assert pruned["provider_recovery_state"]["launched_fallback_attempts"] == 1
+    assert pruned["provider_recovery_state"]["retry_attempt_number"] == 0
 
 
 def test_prune_and_migrate_retired_agent_respects_consumed_fallback_attempt_number() -> None:
@@ -734,6 +737,9 @@ def test_prune_and_migrate_retired_agent_respects_consumed_fallback_attempt_numb
         {"agent": "codex", "model": "gpt-5.5"},
         None,
     ]
+    assert pruned["provider_recovery_state"]["fallback_attempt_number"] == 2
+    assert pruned["provider_recovery_state"]["launched_fallback_attempts"] == 2
+    assert pruned["provider_recovery_state"]["retry_attempt_number"] == 0
 
 
 def test_prune_and_migrate_retired_agent_respects_max_fallback_attempts_exhaustion() -> None:
@@ -757,3 +763,36 @@ def test_prune_and_migrate_retired_agent_respects_max_fallback_attempts_exhausti
         {"agent": "codex", "model": "gpt-5.5"},
         {"agent": "claude_code", "model": "claude-3-7-sonnet"},
     ]
+
+
+def test_prune_and_migrate_retired_agent_advances_recovery_cursor_and_launched_count() -> None:
+    policy = {
+        "provider_recovery": {
+            "max_fallback_attempts": 1,
+            "fallbacks": [
+                {"agent": "codex", "model": "gpt-5.5"},
+                {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 0,
+            "launched_fallback_attempts": 0,
+        },
+    }
+    pruned, target_agent = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    assert target_agent == "codex"
+    assert pruned["agent_model"] == "gpt-5.5"
+    assert pruned["provider_recovery_state"]["fallback_attempt_number"] == 1
+    assert pruned["provider_recovery_state"]["launched_fallback_attempts"] == 1
+    assert pruned["provider_recovery_state"]["retry_attempt_number"] == 0
+
+    from awf.service.provider_recovery import (
+        _select_fallback_target_with_index,
+        parse_provider_recovery_policy,
+        parse_provider_recovery_state,
+    )
+
+    rec_policy = parse_provider_recovery_policy(pruned)
+    rec_state = parse_provider_recovery_state(pruned)
+    fb_target, fb_idx = _select_fallback_target_with_index(rec_policy, rec_state)
+    assert fb_target is None
