@@ -8,6 +8,11 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _parse_verdict,
     _parse_verdict_result,
 )
+from awf.runtime.pr_monitor_runner.helpers_verdict import (
+    _aggressively_peel_verdict_reason_wrappers,
+    _html_wrapper_close_suffix_start,
+    _peel_all_outer_html_verdict_reason_wrappers,
+)
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _verdict_reason_inline_link_label,
 )
@@ -265,6 +270,56 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason == "verdict_placeholder_echo"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            ("<span>", "</span>"),
+            ("<em>", "</em>"),
+            ("<strong>", "</strong>"),
+        ],
+    )
+    def test_private_awf_very_deep_html_placeholder_peel_stays_linear(
+        self, wrapper: tuple[str, str]
+    ) -> None:
+        # Per-layer fullmatch peels are quadratic on deep em/strong/span nests
+        # and can stall the monitor event loop before the 500-char reason bound
+        # (PRRT_kwDOSJAM6s6Zpjww). Tens of thousands of layers must still
+        # fail closed without approaching the default test timeout.
+        open_tag, close_tag = wrapper
+        nested = "<reason>"
+        for _ in range(20_000):
+            nested = f"{open_tag}{nested}{close_tag}"
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
+
+    @pytest.mark.unit
+    def test_private_linear_html_wrapper_peel_edges(self) -> None:
+        # Direct contract for the O(n) HTML peel used by speculative normalize
+        # (PRRT_kwDOSJAM6s6Zpjww): strip outer nests, refuse mismatched closes,
+        # and ignore leading/trailing whitespace without a fullmatch rescan.
+        assert _peel_all_outer_html_verdict_reason_wrappers("  <em><span>x</span></em>  ") == "x"
+        assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</strong>") == "<em>x</strong>"
+        assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</em >") == "x"
+        assert _peel_all_outer_html_verdict_reason_wrappers("plain") == "plain"
+        assert _html_wrapper_close_suffix_start("nope", 0, 4, "em") is None
+        assert _html_wrapper_close_suffix_start("<em>", 0, 0, "em") is None
+        assert _html_wrapper_close_suffix_start("x</em>", 0, 6, "strong") is None
+        assert _html_wrapper_close_suffix_start("x<em>", 0, 5, "em") is None
+        assert _html_wrapper_close_suffix_start("x/em>", 0, 5, "em") is None
+        # Optional spaces before ``>`` / before the close tag still count.
+        assert _html_wrapper_close_suffix_start("x</em >", 0, 7, "em") == 1
+        assert _html_wrapper_close_suffix_start("x  </em>", 0, 8, "em") == 1
+        # Aggressive peel still walks mixed non-HTML + HTML layers after the
+        # linear HTML prefix strip (PRRT_kwDOSJAM6s6Zpjww).
+        assert _aggressively_peel_verdict_reason_wrappers("**<em><reason></em>**") == "<reason>"
+        assert _aggressively_peel_verdict_reason_wrappers("*<reason>*") == "<reason>"
+        assert _aggressively_peel_verdict_reason_wrappers("[<reason>](https://example.com)") == (
+            "<reason>"
+        )
 
     @pytest.mark.unit
     def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:

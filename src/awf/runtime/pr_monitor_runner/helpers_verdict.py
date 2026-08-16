@@ -605,15 +605,79 @@ def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
     return None
 
 
+# Open tag at a cursor for safe whole-reason HTML wrappers. Attributes allowed;
+# trailing whitespace after ``>`` is consumed so layered peels stay tight.
+_VERDICT_REASON_HTML_WRAPPER_OPEN_AT = re.compile(
+    r"<(em|strong|span)(?:\s[^>]*)?\s*>\s*",
+    re.IGNORECASE,
+)
+
+
+def _html_wrapper_close_suffix_start(s: str, start: int, end: int, tag: str) -> int | None:
+    """Return index where ``\\s*</tag\\s*>`` begins in ``s[start:end]``, or None.
+
+    Suffix matching is O(tag length) so deep nested peels stay linear
+    (PRRT_kwDOSJAM6s6Zpjww).
+    """
+    if end <= start or s[end - 1] != ">":
+        return None
+    i = end - 1
+    while i > start and s[i - 1].isspace():
+        i -= 1
+    tag_len = len(tag)
+    if i - tag_len < start or s[i - tag_len : i].lower() != tag.lower():
+        return None
+    i -= tag_len
+    if i <= start or s[i - 1] != "/":
+        return None
+    i -= 1
+    if i <= start or s[i - 1] != "<":
+        return None
+    i -= 1
+    while i > start and s[i - 1].isspace():
+        i -= 1
+    return i
+
+
+def _peel_all_outer_html_verdict_reason_wrappers(cleaned: str) -> str:
+    """Peel consecutive outer ``em``/``strong``/``span`` wrappers in linear time.
+
+    Same whole-reason semantics as repeated ``_VERDICT_REASON_INLINE_HTML_WRAPPER``
+    matches, without per-layer full-string ``fullmatch`` rescans that are
+    quadratic on deep nests (PRRT_kwDOSJAM6s6Zpjww).
+    """
+    s = cleaned
+    left = 0
+    right = len(s)
+    while left < right and s[left].isspace():
+        left += 1
+    while right > left and s[right - 1].isspace():
+        right -= 1
+    while left < right:
+        open_m = _VERDICT_REASON_HTML_WRAPPER_OPEN_AT.match(s, left, right)
+        if open_m is None:
+            break
+        close_start = _html_wrapper_close_suffix_start(s, open_m.end(), right, open_m.group(1))
+        if close_start is None:
+            break
+        if close_start < open_m.end():  # pragma: no cover - overlap is defensive
+            break
+        left = open_m.end()
+        right = close_start
+    return s[left:right].strip()
+
+
 def _aggressively_peel_verdict_reason_wrappers(reason: str) -> str:
     """Iteratively peel every wrapper type without placeholder gating.
 
     Used only to decide whether a conditional peel would expose a
     placeholder-shaped value. Bound iterations by input length so deeply
     nested ``<em>``/``<strong>``/``<span>`` chains cannot recurse
-    (PRRT_kwDOSJAM6s6Zpg0B).
+    (PRRT_kwDOSJAM6s6Zpg0B). HTML wrapper chains are stripped first in a
+    linear pass so speculative peels stay O(n) rather than quadratic
+    (PRRT_kwDOSJAM6s6Zpjww).
     """
-    cleaned = reason.strip()
+    cleaned = _peel_all_outer_html_verdict_reason_wrappers(reason.strip())
     for _ in range(max(len(cleaned), 1)):
         nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
         if nxt is not None:
@@ -621,7 +685,9 @@ def _aggressively_peel_verdict_reason_wrappers(reason: str) -> str:
             continue
         inner = _conditional_verdict_reason_wrapper_inner(cleaned)
         if inner is not None:
-            cleaned = inner
+            # Mixed wrappers may reintroduce HTML (e.g. ``**<em>…</em>**``);
+            # re-run the linear HTML peel instead of one-layer regex steps.
+            cleaned = _peel_all_outer_html_verdict_reason_wrappers(inner)
             continue
         break
     return cleaned
@@ -647,7 +713,9 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     placeholder-gated, but the gate uses bounded iterative peeling rather than
     recursion so ~1k nested wrappers fail closed instead of raising
     ``RecursionError`` before the 500-character reason bound
-    (PRRT_kwDOSJAM6s6Zpg0B).
+    (PRRT_kwDOSJAM6s6Zpg0B). Nested HTML chains are speculative-peeled in a
+    linear pass so deep ``<em>``/``<strong>``/``<span>`` nests cannot burn
+    quadratic regex time before that bound (PRRT_kwDOSJAM6s6Zpjww).
     """
     cleaned = reason.strip()
     # Each successful peel shortens ``cleaned``; ``len(cleaned)`` therefore
@@ -656,6 +724,15 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
         nxt = _peel_one_unconditional_verdict_reason_wrapper(cleaned)
         if nxt is not None:
             cleaned = nxt
+            continue
+        # Speculative HTML peel is linear and placeholder-gated — do it before
+        # a one-layer ``fullmatch`` on an attacker-inflated nest.
+        html_core = _peel_all_outer_html_verdict_reason_wrappers(cleaned)
+        if html_core != cleaned:
+            speculative = _aggressively_peel_verdict_reason_wrappers(html_core)
+            if not _normalized_verdict_reason_is_template_placeholder(speculative):
+                break
+            cleaned = speculative
             continue
         inner = _conditional_verdict_reason_wrapper_inner(cleaned)
         if inner is None:
