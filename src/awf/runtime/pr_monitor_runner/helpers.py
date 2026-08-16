@@ -234,6 +234,13 @@ _VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
     r'^(?:"\s*(?P<dq>.*?)\s*"|\'\s*(?P<sq>.*?)\s*\'|'
     r"“\s*(?P<cdq>.*?)\s*”|‘\s*(?P<csq>.*?)\s*’)$"
 )
+# Balanced Markdown strong wrappers around a reason (``**<…>**``, ``__<…>__``).
+# Same peel loop as ticks/quotes so template-placeholder echoes still fail
+# closed (PRRT_kwDOSJAM6s6ZoAz9). Single ``*`` / ``_`` emphasis is intentionally
+# not peeled — it collides with snake_case / underscored identifiers.
+_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
+    r"^(?:\*\*\s*(?P<strong_star>.*?)\s*\*\*|__\s*(?P<strong_under>.*?)\s*__)$"
+)
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
 # contain backticks (so same-line wraps like `` ```verdict``` `` are not
 # openers). Tilde info strings may include ``~`` (e.g. ``~~~ lang~option``).
@@ -1023,11 +1030,12 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
 
 
 def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
-    """Peel balanced outer quote/backtick wrappers from a verdict reason.
+    """Peel balanced outer quote/backtick/strong wrappers from a verdict reason.
 
-    Agents often echo prompt placeholders inside inline code or quotes
-    (`` `<one-sentence justification>` `` / ``"<…>"``). Those wrappers must not
-    defeat whole-reason placeholder detection (PRRT_kwDOSJAM6s6Zn-VK).
+    Agents often echo prompt placeholders inside inline code, quotes, or
+    Markdown strong markers (`` `<one-sentence justification>` `` / ``"<…>"`` /
+    ``**<…>**`` / ``__<…>__``). Those wrappers must not defeat whole-reason
+    placeholder detection (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -1038,6 +1046,10 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
         quote_match = _VERDICT_REASON_INLINE_QUOTE_WRAPPER.fullmatch(cleaned)
         if quote_match is not None:
             cleaned = next(g for g in quote_match.groups() if g is not None).strip()
+            continue
+        emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
+        if emphasis_match is not None:
+            cleaned = next(g for g in emphasis_match.groups() if g is not None).strip()
             continue
         break
     return cleaned

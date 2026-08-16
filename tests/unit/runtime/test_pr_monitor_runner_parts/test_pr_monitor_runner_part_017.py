@@ -1521,12 +1521,17 @@ class TestParseVerdict:
             'AWF-VERDICT: FALSE POSITIVE: "<one-sentence justification>"',
             "AWF-VERDICT: FALSE POSITIVE: '<one-sentence justification>'",
             'AWF-VERDICT: FALSE POSITIVE: "`<one-sentence justification>`"',
+            "AWF-VERDICT: FALSE POSITIVE: **<one-sentence justification>**",
+            "AWF-VERDICT: FALSE POSITIVE: __<one-sentence justification>__",
+            "AWF-VERDICT: FALSE POSITIVE: **`<one-sentence justification>`**",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
+            "AWF-VERDICT: FIXED: **<one-sentence summary>**",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
-        # Balanced quote/backtick wrappers around a template placeholder must not
-        # leave the echo as a usable reason (PRRT_kwDOSJAM6s6Zn-VK).
+        # Balanced quote/backtick/Markdown-strong wrappers around a template
+        # placeholder must not leave the echo as a usable reason
+        # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -1542,8 +1547,16 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
-    def test_private_awf_formatted_real_reason_still_usable(self) -> None:
-        result = _parse_verdict_result("AWF-VERDICT: FALSE POSITIVE: `stale review boilerplate`")
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "AWF-VERDICT: FALSE POSITIVE: `stale review boilerplate`",
+            "AWF-VERDICT: FALSE POSITIVE: **stale review boilerplate**",
+            "AWF-VERDICT: FALSE POSITIVE: __stale review boilerplate__",
+        ],
+    )
+    def test_private_awf_formatted_real_reason_still_usable(self, stdout: str) -> None:
+        result = _parse_verdict_result(stdout)
 
         assert result.verdict == "false_positive"
         assert result.reason == "stale review boilerplate"
