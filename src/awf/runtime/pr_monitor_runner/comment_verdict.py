@@ -161,6 +161,12 @@ async def _retain_failed_run_salvage_despite_cancellation(
     Persist ONLY the item's ``__salvaged_fix_*`` keys (merged onto DB state) —
     never full ``_persist_state``, which would flush mid-burst unconfirmed
     verdicts that ``CancelledError`` skips rolling back (PRRT_kwDOSJAM6s6Zmur3).
+
+    After the shielded work finishes, re-raise any cancellation observed while
+    awaiting the shield. Non-cancel callers (``ProviderRecoveryRetryError``,
+    ownership/mirror/head) would otherwise re-raise the original error and drop
+    the cancel (PRRT_kwDOSJAM6s6ZoX2e) — same save+re-raise contract as
+    clarification cleanup and successful FIXED tip persist.
     """
 
     async def _capture_retain_and_persist() -> None:
@@ -189,14 +195,18 @@ async def _retain_failed_run_salvage_despite_cancellation(
                 await persist(workspace_id, state, salvage_item_id=salvage_item_id)
 
     retain_task = asyncio.create_task(_capture_retain_and_persist())
+    cancellation: asyncio.CancelledError | None = None
     while True:
         try:
             await asyncio.shield(retain_task)
-            return
-        except asyncio.CancelledError:
+            break
+        except asyncio.CancelledError as exc:
+            cancellation = exc
             if retain_task.done():
                 retain_task.result()
-                return
+                break
+    if cancellation is not None:
+        raise cancellation
 
 
 def _retain_or_clear_failed_run_salvage(
