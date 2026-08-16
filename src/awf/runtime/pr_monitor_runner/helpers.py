@@ -297,30 +297,76 @@ _MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s+")
 _MAX_VERDICT_REASON_LENGTH = 500
 
 
-def _normalize_markdown_fence_line(line: str) -> str:
-    """Strip container indent and one list marker for fence *open* matching.
+# CommonMark blockquote line prefix: optional 0–3 spaces, then one or more
+# ``>`` markers (optional space after each). Used when closing a fence that
+# opened inside a blockquote so ``> ``` `` matches without peeling ``>`` inside
+# top-level fences (PRRT_kwDOSJAM6s6ZnAyG).
+_MARKDOWN_BLOCKQUOTE_FENCE_LINE_PREFIX = re.compile(r"^ {0,3}(?:>[ \t]?)+")
 
-    List-nested openers such as ``- ```text`` are not top-level fence lines, and
-    continuation content is often only two-space indented (so it misses the
-    indented-code check). Normalize before matching so those regions stay
-    shielded from verdict selection. Closers must not use this helper — peeling
-    a list marker would treat ``- ``` `` inside a top-level fence as a closer.
+
+def _normalize_markdown_fence_line(line: str) -> str:
+    """Strip container indent, blockquotes, and list markers for fence *open* matching.
+
+    List- or blockquote-nested openers such as ``- ```text`` / ``> ```text`` are
+    not top-level fence lines, and continuation content is often only two-space
+    indented (so it misses the indented-code check). Normalize before matching
+    so those regions stay shielded from verdict selection. Closers must not use
+    this helper — peeling a list or blockquote marker would treat ``- ``` `` /
+    ``> ``` `` inside a top-level fence as a closer.
     """
-    return _MARKDOWN_LIST_PREFIX.sub("", line.lstrip(" \t"), count=1)
+    rest = line.lstrip(" \t")
+    # Peel blockquote and list in either order (``> - ``` `` / ``- > ``` ``).
+    while True:
+        prev = rest
+        rest = _MARKDOWN_BLOCKQUOTE_PREFIX.sub("", rest, count=1)
+        rest = _MARKDOWN_LIST_PREFIX.sub("", rest, count=1)
+        if rest == prev:
+            return rest
 
 
 def _markdown_fence_list_container_indent(line: str) -> int:
     """Column width of leading indent plus list marker on a fence opener.
 
-    ``10. ```text`` → 4; ``- ```text`` → 2; top-level fences → 0. Closers for
-    list-nested openers may carry this indent plus CommonMark's optional 0–3
-    spaces relative to the container (PRRT_kwDOSJAM6s6ZmsZS).
+    ``10. ```text`` → 4; ``- ```text`` → 2; ``> - ```text`` → 2; top-level /
+    blockquote-only fences → 0. Closers for list-nested openers may carry this
+    indent plus CommonMark's optional 0–3 spaces relative to the container
+    (PRRT_kwDOSJAM6s6ZmsZS). Blockquote width is tracked separately and stripped
+    before this indent is applied on closers.
     """
-    leading_ws = len(line) - len(line.lstrip(" \t"))
-    list_match = _MARKDOWN_LIST_PREFIX.match(line.lstrip(" \t"))
-    if list_match is None:
+    rest = line.lstrip(" \t")
+    leading_ws = len(line) - len(rest)
+    had_blockquote = False
+    list_width = 0
+    while True:
+        bq = _MARKDOWN_BLOCKQUOTE_PREFIX.match(rest)
+        if bq is not None:
+            had_blockquote = True
+            rest = rest[bq.end() :]
+            continue
+        lst = _MARKDOWN_LIST_PREFIX.match(rest)
+        if lst is not None:
+            list_width = lst.end()
+            rest = rest[lst.end() :]
+            continue
+        break
+    if list_width == 0:
         return 0
-    return leading_ws + list_match.end()
+    if had_blockquote:
+        return list_width
+    return leading_ws + list_width
+
+
+def _markdown_fence_opened_in_blockquote(line: str) -> bool:
+    """Return whether a fence opener carries a Markdown blockquote container."""
+    rest = line.lstrip(" \t")
+    while True:
+        bq = _MARKDOWN_BLOCKQUOTE_PREFIX.match(rest)
+        if bq is not None:
+            return True
+        lst = _MARKDOWN_LIST_PREFIX.match(rest)
+        if lst is None:
+            return False
+        rest = rest[lst.end() :]
 
 
 def _markdown_fence_open_marker(line: str) -> str | None:
@@ -331,7 +377,13 @@ def _markdown_fence_open_marker(line: str) -> str | None:
     return opened.group("fence") or opened.group("fence_tilde")
 
 
-def _markdown_fence_closes(line: str, *, fence: str, container_indent: int = 0) -> bool:
+def _markdown_fence_closes(
+    line: str,
+    *,
+    fence: str,
+    container_indent: int = 0,
+    blockquote_container: bool = False,
+) -> bool:
     """Return whether ``line`` closes a code fence opened with ``fence``.
 
     CommonMark allows at most three leading spaces on a closing fence relative
@@ -339,18 +391,25 @@ def _markdown_fence_closes(line: str, *, fence: str, container_indent: int = 0) 
     ``- ``` `` inside an open fence is fence content, not a closer. Do not
     unrestricted-lstrip: four-space-indented content under a top-level opener
     (container_indent 0) that looks like a fence must stay inside the open
-    region.
+    region. Blockquote-opened fences strip a matching ``>`` container before
+    the indent check; top-level fences must not peel ``>`` (PRRT_kwDOSJAM6s6ZnAyG).
     """
     # List-nested closers (``    ``` `` under ``10. ```text``) need the
     # container indent; absolute 0–3 alone never closes them
     # (PRRT_kwDOSJAM6s6ZmsZS). Unlimited strip would still treat top-level
     # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
+    candidate = line
+    if blockquote_container:
+        bq = _MARKDOWN_BLOCKQUOTE_FENCE_LINE_PREFIX.match(line)
+        if bq is None:
+            return False
+        candidate = line[bq.end() :]
     min_indent = container_indent
     max_indent = container_indent + 3
     return (
         re.match(
             rf"^ {{{min_indent},{max_indent}}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$",
-            line,
+            candidate,
         )
         is not None
     )
@@ -359,21 +418,28 @@ def _markdown_fence_closes(line: str, *, fence: str, container_indent: int = 0) 
 def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     """Yield stripped stdout lines outside Markdown code regions.
 
-    Skips multiline fenced blocks (including list-nested openers after
-    normalizing container indent and list prefixes) and CommonMark
-    indented-code lines (four spaces of indent, including a leading tab or
-    1–3 spaces plus a tab) so quoted example markers cannot override an
-    authoritative unfenced verdict. Same-line wrapped fences
-    (`` ```verdict``` ``) are still yielded so ``_CODE_FORMATTED_VERDICT_LINE``
-    can accept them. Unclosed fences shield every subsequent line.
+    Skips multiline fenced blocks (including list- and blockquote-nested
+    openers after normalizing container prefixes) and CommonMark indented-code
+    lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
+    tab) so quoted example markers cannot override an authoritative unfenced
+    verdict. Same-line wrapped fences (`` ```verdict``` ``) are still yielded
+    so ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences shield
+    every subsequent line.
     """
     fence: str | None = None
     fence_container_indent = 0
+    fence_blockquote_container = False
     for line in stdout.splitlines():
         if fence is not None:
-            if _markdown_fence_closes(line, fence=fence, container_indent=fence_container_indent):
+            if _markdown_fence_closes(
+                line,
+                fence=fence,
+                container_indent=fence_container_indent,
+                blockquote_container=fence_blockquote_container,
+            ):
                 fence = None
                 fence_container_indent = 0
+                fence_blockquote_container = False
             continue
         if _MARKDOWN_INDENTED_CODE_LINE.match(line):
             continue
@@ -381,6 +447,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
         if opened is not None:
             fence = opened
             fence_container_indent = _markdown_fence_list_container_indent(line)
+            fence_blockquote_container = _markdown_fence_opened_in_blockquote(line)
             continue
         yield line.strip()
 

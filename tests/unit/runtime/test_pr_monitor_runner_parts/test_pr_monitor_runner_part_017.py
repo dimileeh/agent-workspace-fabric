@@ -391,6 +391,58 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: FIXED: done\n"
+                "> ```text\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> ```\n"
+            ),
+            (
+                "AWF-VERDICT: FIXED: done\n"
+                "> - ```text\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                ">   ```\n"
+            ),
+        ],
+        ids=["blockquote_fence", "blockquote_list_fence"],
+    )
+    def test_private_awf_verdict_ignores_blockquote_nested_fenced_example(
+        self,
+        stdout: str,
+    ) -> None:
+        # Blockquote-contained fences (``> ```text`` / ``> - ```text``) are not
+        # top-level openers. Without peeling ``>`` for open/close matching, the
+        # example is yielded as a later attempt and fails closed over an earlier
+        # FIXED (PRRT_kwDOSJAM6s6ZnAyG).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "done"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_blockquote_prefix_inside_fence_does_not_close(
+        self,
+    ) -> None:
+        # Closer matching must not peel blockquote markers for top-level fences:
+        # ``> ``` `` inside an open fence is content, not a closer.
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "```\n"
+            "example closer:\n"
+            "> ```\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "```\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ordered_list_fence_closer_uses_container_indent(
         self,
     ) -> None:
