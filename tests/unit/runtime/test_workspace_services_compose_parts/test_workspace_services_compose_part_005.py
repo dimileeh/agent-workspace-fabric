@@ -495,7 +495,6 @@ def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_overri
     ("var_name", "var_val"),
     [
         ("GOOGLE_APPLICATION_CREDENTIALS", "/host/service-account.json"),
-        ("GOOGLE_API_KEY", "AIzaSyLegacyKey"),
         ("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29.obsolete_bearer_token"),
     ],
 )
@@ -508,3 +507,17 @@ def test_retired_google_auth_not_forwarded_by_legacy_host_auth(var_name: str, va
     assert env == ()
     assert var_name not in AGENT_AUTH_ENV_VARS
     assert var_name in _AGENT_AUTH_SECRET_ENV_VARS
+
+
+@pytest.mark.unit
+def test_google_api_key_forwarded_by_legacy_host_auth() -> None:
+    # GOOGLE_API_KEY in AGENT_AUTH_ENV_VARS allows agent_environment_with_legacy_host_auth
+    # to forward Google API key placeholders to Compose agent containers while preserving secret redaction.
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_API_KEY": "AIzaSyLegacyKey"},
+    )
+
+    assert env == (("GOOGLE_API_KEY", "${GOOGLE_API_KEY}"),)
+    assert "GOOGLE_API_KEY" in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_API_KEY" in _AGENT_AUTH_SECRET_ENV_VARS
