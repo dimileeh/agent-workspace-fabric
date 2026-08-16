@@ -328,6 +328,34 @@ async def test_explicit_non_fix_verdicts_survive_dirty_or_hosted_advance(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "AWF-VERDICT: FALSE POSITIVE: printed before crash",
+        "AWF-VERDICT: DEFER: printed before crash",
+    ],
+)
+async def test_explicit_false_positive_or_defer_ignored_on_cli_failure(
+    stdout: str,
+) -> None:
+    """Nonzero CLI exit must not resolve via a pre-crash FALSE POSITIVE/DEFER."""
+    start = "a" * 40
+    runner = _evidence_runner(stdout=stdout, dirty=False, heads=[start], returncode=1)
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_cli_fail_explicit_non_fix",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "agent_failed"
+
+
+@pytest.mark.unit
 async def test_hosted_fixed_requires_terminal_head_advance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

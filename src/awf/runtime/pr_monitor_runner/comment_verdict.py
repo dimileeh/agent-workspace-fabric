@@ -367,7 +367,10 @@ async def _invoke_cli_for_verdict_result(
     parsed = _parse_verdict_result(result_stdout)
     if parsed.verdict in {"false_positive", "defer"}:
         # Never upgrade an explicit non-fix marker because dirty or hosted head
-        # advanced (strand prevention over guessing).
+        # advanced (strand prevention over guessing). But a nonzero CLI exit means
+        # the run did not complete — do not resolve/defer from a pre-crash marker.
+        if cli_failed:
+            return VerdictResult(verdict="agent_failed")
         return parsed
     if parsed.verdict == "needs_human":
         # Keep explicit NEEDS_HUMAN (and successful fail-closed parses). Only map
