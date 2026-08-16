@@ -190,6 +190,7 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -236,7 +237,7 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -349,6 +350,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -400,7 +402,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -486,6 +488,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_cleanup_failure(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -529,7 +532,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_cleanup_failure(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -607,6 +610,7 @@ async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_r
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -653,7 +657,7 @@ async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_r
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -734,6 +738,7 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -806,7 +811,7 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -881,6 +886,7 @@ async def test_execute_repairs_mirror_hooks_path_after_baseline_coverage_cleanup
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -950,7 +956,7 @@ async def test_execute_repairs_mirror_hooks_path_after_baseline_coverage_cleanup
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -1038,6 +1044,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
         _log_store = None
         _runner = _Runner()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -1127,7 +1134,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -1202,6 +1209,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -1279,7 +1287,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,
@@ -1352,6 +1360,7 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
         _log_store = None
         _runner = object()
         _usage_sampler = None
+        _agent_runtime_executor = None
         _validation = _Validation()
 
         async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
@@ -1416,7 +1425,7 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
     monkeypatch.setattr(
         execution_flow,
         "get_adapter",
-        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=(), is_hosted=False),
     )
     monkeypatch.setattr(
         execution_flow,

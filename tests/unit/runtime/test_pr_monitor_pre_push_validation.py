@@ -946,6 +946,53 @@ async def test_pre_push_validation_runs_profile_coverage_before_push(
 
 
 @pytest.mark.unit
+async def test_hosted_pre_push_validation_passes_pr_identity_to_profile_coverage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Hosted coverage-only validation should target the adopted PR identity."""
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=277)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "7" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=_coverage_result(tmp_path),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(runtime_executor=object()),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.calls) == 1
+    assert len(validation.coverage_calls) == 1
+    phase_pr_identity = validation.calls[0]["pr_identity"]
+    coverage_pr_identity = validation.coverage_calls[0]["pr_identity"]
+    assert coverage_pr_identity == phase_pr_identity
+    assert isinstance(coverage_pr_identity, dict)
+    assert coverage_pr_identity["pr_number"] == 277
+    assert coverage_pr_identity["head_ref"] == f"awf/{workspace_id}"
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_tracked_side_effect_after_validation_blocks_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

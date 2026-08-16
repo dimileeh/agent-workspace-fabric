@@ -50,6 +50,9 @@ test("desktop theme screenshots cover dashboard, details, and fullscreen logs", 
   await waitForConsoleReady(page);
 
   await expect(page.getByRole("heading", { name: "Merge Queue" })).toBeVisible();
+  // G6: Merge Queue rows must not render a merged timestamp field/label.
+  await expect(page.getByText(/^merged /i)).toHaveCount(0);
+  await expect(page.getByText("Merged", { exact: true })).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-awf-theme", "dark");
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-dashboard.png"), fullPage: true });

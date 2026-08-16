@@ -33,6 +33,7 @@ RETIRED_OPERATOR_SCRIPTS = (
 
 SUPPORTED_SCRIPTS = {
     "check_release_artifacts.py",
+    "cloudbuild_provenance.py",
     "first_run_smoke.py",
     "generate_install_manifest.py",
     "generate_openapi.py",

@@ -102,6 +102,7 @@ def _make_executor(
     pr_monitor_factory: Any = None,
     compose: Any = None,
     validation: Any = None,
+    hosted_validation: Any = None,
     pr_creator: Any = None,
     log_store: LogStore | None = None,
     max_validation_fix_passes: int = 5,
@@ -127,6 +128,7 @@ def _make_executor(
         ),
         pr_monitor_factory=pr_monitor_factory,
         log_store=log_store,
+        hosted_validation=hosted_validation,
     )
 
 

@@ -84,16 +84,65 @@ def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_verifies_pinned_cursor_release_before_extracting() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
+    assert (
+        "ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4"
+        in dockerfile
+    )
+    assert (
+        "ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb"
+        in dockerfile
+    )
+    assert "https://cursor.com/install" not in dockerfile
+    assert 'cursor_dpkg_arch="$(dpkg --print-architecture)"' in dockerfile
+    assert 'amd64) cursor_arch="x64"; expected_hash="${CURSOR_X64_SHA256}"' in dockerfile
+    assert 'arm64) cursor_arch="arm64"; expected_hash="${CURSOR_ARM64_SHA256}"' in dockerfile
+    assert "Unsupported Cursor CLI architecture: $cursor_dpkg_arch" in dockerfile
+    assert (
+        "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/"
+        "${cursor_arch}/agent-cli-package.tar.gz"
+    ) in dockerfile
+    assert (
+        'cursor_archive="/tmp/cursor-agent-${CURSOR_VERSION}-${cursor_arch}.tar.gz"' in dockerfile
+    )
+    assert "trap 'rm -f \"$cursor_archive\"' EXIT" in dockerfile
+    assert 'actual_hash="$(sha256sum "$cursor_archive")"' in dockerfile
+    assert 'actual_hash="${actual_hash%% *}"' in dockerfile
+    assert 'if [ "$actual_hash" != "$expected_hash" ]; then' in dockerfile
+    assert "Cursor CLI checksum mismatch for ${CURSOR_VERSION}/${cursor_arch}" in dockerfile
+    assert 'tar --strip-components=1 -xzf "$cursor_archive"' in dockerfile
+    assert dockerfile.index('if [ "$actual_hash" != "$expected_hash" ]; then') < dockerfile.index(
+        'tar --strip-components=1 -xzf "$cursor_archive"'
+    )
+
+
+@pytest.mark.unit
 def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.130.0" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.158" in dockerfile
-    assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
-    assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
-    assert "Cursor CLI tracks the official installer" in dockerfile
-    assert "ARG GROK_VERSION=0.2.14" in dockerfile
+    assert "ARG CODEX_VERSION=0.147.0" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.226" in dockerfile
+    assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
+    assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
+    assert "ARG GROK_VERSION=0.2.94" in dockerfile
+    assert "ARG ANTIGRAVITY_VERSION=1.1.13" in dockerfile
+    assert (
+        "ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9"
+        in dockerfile
+    )
+    assert (
+        "ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8"
+        in dockerfile
+    )
+    assert "github.com/google-antigravity/antigravity-cli/releases/download/" in dockerfile
+    assert "install -m 0755 /tmp/antigravity /usr/local/bin/agy" in dockerfile
+    assert "test -x /usr/local/bin/agy" in dockerfile
+    assert "agy --version" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
@@ -107,7 +156,6 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert 'ln -sf "$(command -v node)" /usr/local/bin/node' not in dockerfile
     assert "cursor-agent" in dockerfile
     assert "install -d -m 0755 /opt/cursor" in dockerfile
-    assert "curl https://cursor.com/install -fsS | HOME=/opt/cursor bash" in dockerfile
     assert 'cursor_path="/opt/cursor/.local/bin/cursor-agent"' in dockerfile
     assert 'ln -sf "$cursor_path" /usr/local/bin/cursor-agent' in dockerfile
     assert 'install -m 0755 "$cursor_path" /usr/local/bin/cursor-agent' not in dockerfile
@@ -118,15 +166,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index("curl https://cursor.com/install -fsS")
-    assert (
-        "USER agent\n"
-        "WORKDIR /workspace\n\n"
-        "RUN set -eux; \\\n"
-        "    command -v cursor-agent; \\\n"
-        "    test -x /usr/local/bin/cursor-agent; \\\n"
-        "    cursor-agent --version"
-    ) in dockerfile
+    ) < dockerfile.index("ARG CURSOR_VERSION=2026.07.20-8cc9c0b")
     assert "npm install -g cursor-agent" not in dockerfile
     assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
     assert "https://x.ai/cli/install.sh" not in dockerfile
@@ -140,6 +180,42 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "gemini --version" in dockerfile
     assert "opencode --version" in dockerfile
     assert "grok --version" in dockerfile
+    assert "agy --version" in dockerfile
+    assert (
+        "USER agent\n"
+        "WORKDIR /workspace\n\n"
+        "RUN set -eux; \\\n"
+        "    command -v cursor-agent; \\\n"
+        "    test -x /usr/local/bin/cursor-agent; \\\n"
+        "    cursor-agent --version; \\\n"
+        "    command -v agy; \\\n"
+        "    test -x /usr/local/bin/agy; \\\n"
+        "    agy --version"
+    ) in dockerfile
+
+
+@pytest.mark.unit
+def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
+    """Verify pinned CLIs still parse the arguments used by AWF adapters."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "codex --version || true" not in dockerfile
+    assert (
+        "codex exec --dangerously-bypass-approvals-and-sandbox "
+        "--model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+    ) in dockerfile
+
+    assert "gemini --version || true" not in dockerfile
+    assert (
+        'gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null'
+    ) in dockerfile
+
+    assert "grok --version || true" not in dockerfile
+    assert (
+        'grok -p "" --always-approve --no-alt-screen --no-auto-update '
+        "--output-format plain --model grok-build --help >/dev/null"
+    ) in dockerfile
+    assert "agy --help >/dev/null" in dockerfile
 
 
 @pytest.mark.unit

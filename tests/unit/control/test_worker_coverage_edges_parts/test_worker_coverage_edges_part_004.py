@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
@@ -25,6 +26,9 @@ from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
+from tests.unit.control.test_worker_coverage_edges_parts.test_worker_coverage_edges_part_002 import (
+    _worker,
+)
 
 
 @pytest.fixture
@@ -285,3 +289,63 @@ async def test_active_worker_restart_remonitor_operation_id_returns_none_when_ab
             )
             is None
         )
+
+
+@pytest.mark.unit
+async def test_forget_execution_task_ignores_replaced_task(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression coverage for forget execution task ignores replaced task."""
+    worker = _worker(factory)
+
+    async def _pending() -> None:
+        await asyncio.Event().wait()
+
+    tracked = asyncio.create_task(_pending())
+    stale = asyncio.create_task(_pending())
+    worker._execution_tasks["ws_replaced"] = tracked  # noqa: SLF001
+    worker._execution_task_kinds["ws_replaced"] = (  # noqa: SLF001
+        worker_dispatch_methods._ExecutionTaskKind.READY
+    )
+    try:
+        # A late done-callback from a previously cancelled task must not evict the
+        # task that currently owns the slot (identity guard).
+        worker._forget_execution_task("ws_replaced", stale)  # noqa: SLF001
+        assert worker._execution_tasks["ws_replaced"] is tracked  # noqa: SLF001
+        assert (
+            worker._execution_task_kinds["ws_replaced"]  # noqa: SLF001
+            is worker_dispatch_methods._ExecutionTaskKind.READY
+        )
+
+        # The matching task clears both slot-accounting maps together.
+        worker._forget_execution_task("ws_replaced", tracked)  # noqa: SLF001
+        assert "ws_replaced" not in worker._execution_tasks  # noqa: SLF001
+        assert "ws_replaced" not in worker._execution_task_kinds  # noqa: SLF001
+    finally:
+        for task in (tracked, stale):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.unit
+async def test_reconcile_drops_monitor_kind_when_task_already_gone(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Drop stale monitor-resume kind entries when the workspace row is already gone."""
+    worker = _worker(factory)
+    # Simulate a monitor resume that finished concurrently during the status load:
+    # the kind entry lingers while its task is already gone and the workspace row
+    # is absent (so it is no longer monitoring_pr). Reconcile should drop the stale
+    # kind entry without logging a cancellation or raising.
+    worker._execution_task_kinds["ws_vanished"] = (  # noqa: SLF001
+        worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+    assert "ws_vanished" not in worker._execution_task_kinds  # noqa: SLF001
+    assert not any(
+        event.get("event") == "worker.stale_monitor_execution_task_cancelled" for event in captured
+    )

@@ -13,19 +13,28 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
 from awf.control.executor.constants import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
 )
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
+    _record_hosted_monitor_handoff_setup_completed,
+    _run_hosted_monitor_handoff_profile_setup,
     _run_monitor_handoff_profile_setup,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.inspection import RuntimeService
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
+    ValidateCommandProbeTarget,
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationResult,
 )
+from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
     _seed_ready,
@@ -35,7 +44,6 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
 )
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_017 import (
     _PR_ADOPTION_POLICY,
-    _OkSetupValidation,
 )
 
 _IMPORTED_FIXTURES = (factory, fake)
@@ -73,6 +81,77 @@ class _ExplodingSetupValidation:
         return ValidationResult()
 
 
+class _HostedSetupValidation:
+    def __init__(
+        self,
+        trace: list[str],
+        *,
+        result: ValidationResult | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.phase_kwargs: list[dict[str, Any]] = []
+        self._trace = trace
+        self._result = result or ValidationResult()
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(tuple(phase_names))
+        self.phase_kwargs.append(dict(kwargs))
+        self._trace.append("hosted_setup")
+        return self._result
+
+
+class _HostedSetupPreflightValidation(_HostedSetupValidation):
+    async def run_profile_tool_preflight(
+        self,
+        *,
+        workspace_id: str,
+        profile: object,
+    ) -> ValidationResult:
+        del workspace_id, profile
+        self._trace.append("preflight")
+        return ValidationResult()
+
+
+class _HostedSetupPreflightProbeValidation(_HostedSetupPreflightValidation):
+    def __init__(
+        self,
+        trace: list[str],
+        *,
+        probe_result: ValidateToolProbeResult,
+    ) -> None:
+        super().__init__(trace)
+        self.probe_kwargs: list[dict[str, Any]] = []
+        self._probe_result = probe_result
+
+    async def probe_validate_command_tools(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: object,
+        worktree_path: Path | None = None,
+        pr_identity: dict[str, object] | None = None,
+    ) -> ValidateToolProbeResult:
+        self.probe_kwargs.append(
+            {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": compose_file,
+                "profile": profile,
+                "worktree_path": worktree_path,
+                "pr_identity": pr_identity,
+            }
+        )
+        self._trace.append("probe")
+        return self._probe_result
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("stack_state", "expected"),
@@ -85,16 +164,48 @@ class _ExplodingSetupValidation:
 )
 async def test_compose_runtime_usable_after_restart_failure_requires_running_stack(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     stack_state: str,
     expected: bool,
 ) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
     async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
-        return monitor_handoff_module.RuntimeSnapshot(stack_state=stack_state)
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state=stack_state,
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                ),
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres-id",
+                    image="postgres",
+                    state="running",
+                ),
+            ],
+        )
 
     monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
 
     assert (
-        await monitor_handoff_module._compose_runtime_usable_after_restart_failure("awf_x")
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+        )
         is expected
     )
 
@@ -102,13 +213,250 @@ async def test_compose_runtime_usable_after_restart_failure_requires_running_sta
 @pytest.mark.unit
 async def test_compose_runtime_usable_after_restart_failure_rejects_inspection_error(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
     async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
         raise RuntimeError("docker inspect unavailable")
 
     monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
 
-    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure("awf_x")
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_x",
+        compose_file,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "compose_text",
+    [
+        None,
+        "services: [\n",
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_allows_unreadable_services(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    compose_text: str | None,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    if compose_text is not None:
+        compose_file.write_text(compose_text, encoding="utf-8")
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_x",
+        compose_file,
+    )
+
+
+@pytest.mark.unit
+async def test_compose_runtime_usable_after_restart_failure_rejects_partial_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_x",
+        compose_file,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("service", "active_profiles", "expected"),
+    [
+        (None, set(), True),
+        ({}, set(), True),
+        ({"profiles": []}, set(), True),
+        ({"profiles": "debug"}, set(), True),
+        ({"profiles": [""]}, set(), True),
+        ({"profiles": ["debug"]}, set(), False),
+        ({"profiles": ["debug"]}, {"debug"}, True),
+        ({"profiles": ["debug"]}, {"*"}, True),
+    ],
+)
+def test_compose_service_enabled_for_active_profiles(
+    service: object,
+    active_profiles: set[str],
+    expected: bool,
+) -> None:
+    assert (
+        monitor_handoff_module._compose_service_enabled_for_active_profiles(
+            service,
+            active_profiles=active_profiles,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("active_profiles", "expected"),
+    [
+        (None, True),
+        ("metrics", True),
+        ("debug", False),
+        ("*", False),
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_honors_active_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_profiles: str | None,
+    expected: bool,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  debug:
+    image: awf-debug
+    profiles:
+      - debug
+""",
+        encoding="utf-8",
+    )
+    if active_profiles is None:
+        monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    else:
+        monkeypatch.setenv("COMPOSE_PROFILES", active_profiles)
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("oneshot_status", "expected"),
+    [
+        ("Exited (0) 2 minutes ago", True),
+        ("Exited (1) 2 minutes ago", False),
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_handles_completed_oneshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    oneshot_status: str,
+    expected: bool,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  migrate:
+    image: awf-migrate
+  agent:
+    image: awf-agent
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="migrate",
+                    container_id="migrate-id",
+                    image="awf-migrate",
+                    state="exited",
+                    status=oneshot_status,
+                ),
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                ),
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres-id",
+                    image="postgres",
+                    state="running",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+        )
+        is expected
+    )
 
 
 class TestExecutorMonitorHandoffSetupSplit:
@@ -654,60 +1002,468 @@ class TestExecutorMonitorHandoffSetupSplit:
 
 class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
     @pytest.mark.unit
-    async def test_feature_handoff_stale_status_after_monitor_built_skips(
+    async def test_record_hosted_monitor_handoff_setup_completed_allows_monitoring_pr_race(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Successful hosted setup keeps durable evidence after handoff advances."""
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED_VALIDATING")
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code="SEED_MONITORING_PR",
+            )
+            await s.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        ok = await _record_hosted_monitor_handoff_setup_completed(
+            _Executor(),
+            workspace_id=workspace_id,
+        )
+
+        assert ok is True
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_record_hosted_monitor_handoff_setup_completed_skips_terminal_status(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Hosted setup completion evidence is only valid before terminal states."""
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.status = WorkspaceStatus.completed.value
+            await s.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        ok = await _record_hosted_monitor_handoff_setup_completed(
+            _Executor(),
+            workspace_id=workspace_id,
+        )
+
+        assert ok is False
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert completed_events == []
+
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_repairs_mirror_hooks_before_preflight(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted setup repairs Core mirror hooks before preflight can enter monitor work."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightValidation(trace)
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        mark_failed_calls: list[dict[str, Any]] = []
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await s.commit()
+
+        class _Executor:
+            _session_factory = factory
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        def _mirror_path_for_worktree(path: Path) -> Path:
+            assert path == worktree_path
+            return mirror_path
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            return True
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            _mirror_path_for_worktree,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id=workspace_id,
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is True
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks", "preflight"]
+        assert mark_failed_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
+        assert completed_events[0].payload == {
+            "source": "hosted_pr_adoption",
+            "phase_names": ["setup", "pre_agent"],
+            "profile_preflight_passed": True,
+        }
+
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_probes_validate_tools_before_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted setup fails early when setup leaves a validate executable missing."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightProbeValidation(
+            trace,
+            probe_result=ValidateToolProbeResult(
+                missing=(ValidateCommandProbeTarget(tool="ruff", command="ruff check src/awf"),),
+                probe_ran=True,
+            ),
+        )
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        compose_file = tmp_path / "compose.yml"
+        profile = object()
+        mark_failed_calls: list[dict[str, Any]] = []
+        completion_calls: list[str] = []
+
+        class _Executor:
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _path: mirror_path,
+        )
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            return True
+
+        async def _record_completed(_executor: object, *, workspace_id: str) -> bool:
+            completion_calls.append(workspace_id)
+            trace.append("completed")
+            return True
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "_record_hosted_monitor_handoff_setup_completed",
+            _record_completed,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-hosted",
+            profile=profile,
+            compose_project="awf_x",
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is False
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks", "probe"]
+        assert validation.probe_kwargs == [
+            {
+                "workspace_id": "ws-hosted",
+                "compose_project": "awf_x",
+                "compose_file": compose_file,
+                "profile": profile,
+                "worktree_path": worktree_path,
+                "pr_identity": {"pr_number": 42},
+            }
+        ]
+        assert completion_calls == []
+        assert len(mark_failed_calls) == 1
+        failure = mark_failed_calls[0]
+        assert failure["failure_reason"] == FailureReason.profile_resolution_failure
+        assert failure["reason_code"] == PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE
+        assert failure["details"] == {"missing_tools": ["ruff"]}
+        assert "`ruff check src/awf`" in failure["message"]
+
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_mirror_repair_failure_blocks_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A poisoned Core mirror fails hosted handoff before profile preflight."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightValidation(trace)
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        mark_failed_calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _path: mirror_path,
+        )
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            raise OSError("could not lock config")
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-hosted",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is False
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks"]
+        assert len(mark_failed_calls) == 1
+        assert mark_failed_calls[0]["failure_reason"] == FailureReason.infrastructure_failure
+        assert mark_failed_calls[0]["reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert "after successful hosted monitor handoff setup" in mark_failed_calls[0]["message"]
+
+    @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_delegates_profile_setup_before_monitor(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Feature handoff skips monitor.run when status changes after monitor build."""
-        # Mirror of the release case for the adopted-feature-PR handoff: the
-        # monitor builds, but the workspace leaves ``running`` before adoption is
-        # persisted, so the handoff records a stale-action skip and stops.
-        validation = _OkSetupValidation()
+        """Hosted adopted PR setup runs through the hosted delegate before monitor entry."""
+        monitor_runs: list[str] = []
+        trace: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_validation = _HostedSetupValidation(trace)
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
         ws_id = await _seed_ready(
             factory,
             task_kind="sync_feature_pr",
-            task_policy=_PR_ADOPTION_POLICY,
+            task_policy=hosted_policy,
         )
 
         class _Monitor:
             async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
-                """Fail fast if stale-status fencing did not skip monitor execution."""
-                raise AssertionError("monitor must not run after a stale-status skip")
+                trace.append("monitor")
+                monitor_runs.append(workspace_id)
 
         executor = _make_executor(
             fake,
             factory,
             tmp_path,
-            validation=validation,
+            validation=local_validation,
+            hosted_validation=hosted_validation,
             pr_monitor_factory=lambda *_a, **_k: _Monitor(),
         )
 
-        original_build = executor._build_handoff_pr_monitor
-
-        async def _build_handoff_pr_monitor(**kwargs: Any) -> Any:
-            """Cancel the workspace after monitor build to simulate a stale-status race."""
-            monitor = await original_build(**kwargs)
-            async with factory() as s:
-                repo = WorkspaceRepository(s)
-                ws = await repo.get(ws_id)
-                assert ws is not None
-                await repo.transition(
-                    ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED"
-                )
-                await s.commit()
-            return monitor
-
-        monkeypatch.setattr(executor, "_build_handoff_pr_monitor", _build_handoff_pr_monitor)
-
         await executor.execute(ws_id)
 
+        assert local_validation.calls == []
+        assert hosted_validation.calls == [("setup", "pre_agent")]
+        assert trace == ["hosted_setup", "monitor"]
+        assert hosted_validation.phase_kwargs[0]["compose_project"] == "awf_x"
+        assert hosted_validation.phase_kwargs[0]["compose_file"] == (
+            tmp_path / "work" / "compose" / ws_id / "compose.yml"
+        )
+        assert hosted_validation.phase_kwargs[0]["worktree_path"] == (
+            _test_worktrees_root(factory) / ws_id
+        )
+        assert hosted_validation.phase_kwargs[0]["pr_identity"]["pr_number"] == 42
+        assert hosted_validation.phase_kwargs[0]["pr_identity"]["head_ref"] == "awf/x"
+        assert monitor_runs == [ws_id]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.cancelled.value
-            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
-            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
-            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_setup_failure_blocks_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A hosted setup command failure must fail the handoff before monitor entry."""
+        monitor_runs: list[str] = []
+        trace: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_validation = _HostedSetupValidation(
+            trace,
+            result=ValidationResult(commands=[_credential_setup_command_failure(tmp_path)]),
+        )
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=hosted_policy,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=local_validation,
+            hosted_validation=hosted_validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert local_validation.calls == []
+        assert hosted_validation.calls == [("setup", "pre_agent")]
+        assert trace == ["hosted_setup"]
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.service_startup_failure.value
+            assert "profile setup failed" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_missing_hosted_validation_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Hosted handoff must fail clearly if no hosted validation delegate is wired."""
+        monitor_runs: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=hosted_policy,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=local_validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert local_validation.calls == []
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert "no hosted validation runner configured" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE

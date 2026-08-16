@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -533,13 +533,13 @@ def _cleanup_steps_from_mapping(
 
 def _cleanup_status(value: object) -> WorkspaceCleanupStatus:
     if value in {"succeeded", "partial", "skipped"}:
-        return cast(WorkspaceCleanupStatus, value)
+        return value
     return "partial"
 
 
 def _cleanup_step_status(value: object) -> WorkspaceCleanupStepStatus:
     if value in {"succeeded", "failed", "skipped"}:
-        return cast(WorkspaceCleanupStepStatus, value)
+        return value
     return "failed"
 
 
@@ -795,3 +795,28 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         # through ``cancelled`` and the force guard applies.
         WorkspaceStatus.recovering,
     }
+
+
+async def _emit_blocked_attention_cleared(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+) -> None:
+    """Emit ``workspace.attention_cleared`` for a protected-gate blocked episode end.
+
+    Claim-resume and monitor-origin guide already emit on their exits. Operator
+    cancel/stop/forced-destroy can leave ``blocked`` via ``blocked → cancelled``
+    without those paths — subscribers would otherwise retain an active episode.
+    """
+    from awf.common.attention_events import (
+        ATTENTION_CLEARED_EVENT_TYPE,
+        blocked_attention_payload,
+    )
+
+    await repo.add_event(
+        workspace,
+        event_type=ATTENTION_CLEARED_EVENT_TYPE,
+        payload=blocked_attention_payload(
+            block_reason_code=workspace.block_reason_code,
+            block_type=workspace.block_type,
+        ),
+    )

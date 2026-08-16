@@ -250,6 +250,25 @@ class PRStatus:
     the state-filtered pending count for ``unresolved_reviews``.
     """
     base_behind_count: int  # commits on base not in head (local rev-list)
+    head_ref: str | None = None
+    """Current PR head branch reported by the forge for this snapshot."""
+    base_ref: str | None = None
+    """Current PR base (target) branch reported by the forge for this snapshot.
+
+    ``None`` when the forge payload did not carry one; consumers must treat that
+    as "unknown", never as "unchanged"."""
+    base_ref_drifted: bool = False
+    """The live PR base differs from the workspace's persisted ``branch_base``.
+
+    Derived by the RUNNER (``decide`` stays pure) in
+    ``_fetch_status_for_decision``, which is the single place that knows the
+    expected base. It matters because merge policy is base-dependent:
+    ``auto_merge`` is resolved once at provision time against
+    ``workspace.branch_base`` (``monitor.auto_merge.by_base_branch``), so a PR
+    retargeted afterwards — e.g. from an auto-merging ``development`` to a
+    human-gated ``main`` — would otherwise be merged under the stale branch's
+    policy. The default ``False`` means "no drift observed", so an unknown base
+    never fabricates a block."""
     blocking_reviews: tuple[ReviewComment, ...] = ()
     """Effective review-level blockers used only for merge gating.
     """

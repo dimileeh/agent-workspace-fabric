@@ -22,6 +22,7 @@ from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
 from awf.control.executor.constants import (
@@ -39,7 +40,10 @@ from awf.control.executor.helpers import (
     _provider_recovery_default_model_for_monitor_handoff,
     _redacted_exception_traceback,
 )
-from awf.control.executor.monitor_handoff_setup import _MonitorHandoffSetupFailureError
+from awf.control.executor.monitor_handoff_setup import (
+    _MonitorHandoffSetupFailureError,
+    _run_hosted_monitor_handoff_profile_setup,
+)
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -63,7 +67,8 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
-from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
 _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
@@ -88,6 +93,12 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+
+
+def _hosted_handoff_pr_identity(workspace: Workspace) -> dict[str, object]:
+    return hosted_pr_identity_for_workspace(workspace)
+
+
 _remove_compose_environment_targets = _companion_env._remove_compose_environment_targets
 _represent_compose_interpolation_string = _companion_env._represent_compose_interpolation_string
 _restore_compose_environment_list_refs = _companion_env._restore_compose_environment_list_refs
@@ -104,6 +115,12 @@ class ResumeHandoff:
     compose_project: str
     compose_file: Path
     run_kwargs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ComposeRuntimeRequirements:
+    service_names: set[str]
+    successful_completion_services: set[str]
 
 
 class MonitorResumePreStartError(Exception):
@@ -179,6 +196,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         if recovered_remote_push_branch:
             ws.remote_push_branch = recovered_remote_push_branch
 
+    workspace_is_hosted = pr_adoption_is_hosted(ws.task_policy)
     missing = _missing_monitor_recovery_metadata(ws)
     if missing:
         await self._mark_failed(
@@ -192,10 +210,16 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         )
         return None
 
-    compose_project = ws.compose_project_name
+    compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     compose_file_path = ws.compose_file_path
-    assert compose_project is not None
-    assert compose_file_path is not None
+    compose_file = (
+        Path(compose_file_path)
+        if compose_file_path
+        else self._config.compose_projects_root / workspace_id / "compose.yml"
+    )
+    if not workspace_is_hosted:
+        assert ws.compose_project_name is not None
+        assert compose_file_path is not None
     profile = None
     companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
     companion_specs_resolved = False
@@ -244,61 +268,72 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
-    try:
-        _precheck_required_companion_env_secrets_for_resume(
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        _refresh_optional_companion_env_secrets_for_resume(
-            workspace_id=workspace_id,
-            compose_file=Path(compose_file_path),
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        await self._compose.ensure_project_up(
-            project_name=compose_project,
-            compose_file=Path(compose_file_path),
-            workspace_id=workspace_id,
-            wait=True,
-            compose_up_timeout_seconds=compose_up_timeout_seconds,
-            force_recreate=True,
-        )
-    except CompanionEnvSecretPrecheckError as exc:
-        _log.error(
-            "executor.resume_companion_env_secret_precheck_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
-        )
-        return None
-    except ComposeOperationError as exc:
-        _log.error(
-            "executor.resume_compose_up_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-        )
-        if not await _compose_runtime_usable_after_restart_failure(compose_project):
+    if not workspace_is_hosted:
+        try:
+            _precheck_required_companion_env_secrets_for_resume(
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            _refresh_optional_companion_env_secrets_for_resume(
+                workspace_id=workspace_id,
+                compose_file=compose_file,
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            await self._compose.ensure_project_up(
+                project_name=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                wait=True,
+                compose_up_timeout_seconds=compose_up_timeout_seconds,
+                force_recreate=True,
+            )
+        except CompanionEnvSecretPrecheckError as exc:
+            _log.error(
+                "executor.resume_companion_env_secret_precheck_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=str(compose_file),
+                error=exc,
+                event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+            )
             return None
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
-        )
+        except ComposeOperationError as exc:
+            _log.error(
+                "executor.resume_compose_up_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=str(compose_file),
+                error=exc,
+            )
+            runtime_usable = await _compose_runtime_usable_after_restart_failure(
+                compose_project,
+                compose_file,
+            )
+            if not runtime_usable:
+                _log.warning(
+                    "executor.resume_compose_up_failed_runtime_unusable",
+                    workspace_id=workspace_id,
+                    compose_project_name=compose_project,
+                    reason_code=exc.reason_code,
+                )
+                return None
+            _log.warning(
+                "executor.resume_compose_up_failed_runtime_still_usable",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -314,6 +349,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=(
+                    self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
+                ),
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -425,7 +463,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     return ResumeHandoff(
         monitor=monitor,
         compose_project=compose_project,
-        compose_file=Path(compose_file_path),
+        compose_file=compose_file,
         run_kwargs=run_kwargs,
     )
 
@@ -484,7 +522,10 @@ async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
     return await RuntimeInspector().inspect(compose_project)
 
 
-async def _compose_runtime_usable_after_restart_failure(compose_project: str) -> bool:
+async def _compose_runtime_usable_after_restart_failure(
+    compose_project: str,
+    compose_file: Path,
+) -> bool:
     """Return whether monitor resume can proceed after a compose restart failure."""
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
@@ -494,7 +535,158 @@ async def _compose_runtime_usable_after_restart_failure(compose_project: str) ->
             compose_project_name=compose_project,
         )
         return False
-    return snapshot.stack_state == "running"
+    if snapshot.stack_state != "running":
+        return False
+    requirements = _compose_runtime_requirements_from_file(compose_file)
+    if requirements is None:
+        _log.warning(
+            "executor.resume_compose_runtime_expected_services_unavailable_continuing",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return True
+    expected_services = requirements.service_names
+    if not expected_services:
+        _log.warning(
+            "executor.resume_compose_runtime_missing_expected_services",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return False
+    ready_services = {
+        service.name
+        for service in snapshot.services
+        if _compose_runtime_service_satisfied_after_restart_failure(
+            service,
+            successful_completion_services=requirements.successful_completion_services,
+        )
+    }
+    missing_services = expected_services - ready_services
+    if missing_services:
+        _log.warning(
+            "executor.resume_compose_runtime_partial_stack",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+            missing_services=sorted(missing_services),
+        )
+        return False
+    return True
+
+
+def _compose_runtime_requirements_from_file(
+    compose_file: Path,
+) -> _ComposeRuntimeRequirements | None:
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_runtime_service_parse_failed",
+            compose_file=str(compose_file),
+        )
+        return None
+    if not isinstance(payload, dict):
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
+    active_profiles = {
+        profile.strip()
+        for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
+        if profile.strip()
+    }
+    active_services = {
+        name: service
+        for name, service in services.items()
+        if isinstance(name, str)
+        and name
+        and _compose_service_enabled_for_active_profiles(
+            service,
+            active_profiles=active_profiles,
+        )
+    }
+    service_names = set(active_services)
+    return _ComposeRuntimeRequirements(
+        service_names=service_names,
+        successful_completion_services=_compose_successful_completion_service_names(
+            active_services,
+            service_names=service_names,
+        ),
+    )
+
+
+def _compose_service_enabled_for_active_profiles(
+    service: object,
+    *,
+    active_profiles: set[str],
+) -> bool:
+    """Mirror Compose's default service selection for ``COMPOSE_PROFILES``."""
+    if not isinstance(service, dict):
+        return True
+    profiles = service.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        return True
+    declared_profiles = {profile for profile in profiles if isinstance(profile, str) and profile}
+    if len(declared_profiles) != len(profiles):
+        # Keep malformed service definitions conservative. Compose itself rejects
+        # them, but an already-running service must not be silently waived here.
+        return True
+    return "*" in active_profiles or not declared_profiles.isdisjoint(active_profiles)
+
+
+def _compose_successful_completion_service_names(
+    services: Mapping[str, object],
+    *,
+    service_names: set[str],
+) -> set[str]:
+    names: set[str] = set()
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        depends_on = service.get("depends_on")
+        if not isinstance(depends_on, dict):
+            continue
+        for dependency_name, dependency_config in depends_on.items():
+            if not isinstance(dependency_name, str) or dependency_name not in service_names:
+                continue
+            if not isinstance(dependency_config, dict):
+                continue
+            condition = dependency_config.get("condition")
+            if (
+                isinstance(condition, str)
+                and condition.strip().lower() == "service_completed_successfully"
+            ):
+                names.add(dependency_name)
+    return names
+
+
+def _compose_runtime_service_satisfied_after_restart_failure(
+    service: RuntimeService,
+    *,
+    successful_completion_services: set[str],
+) -> bool:
+    if _compose_runtime_service_ready(service):
+        return True
+    if service.name not in successful_completion_services:
+        return False
+    return _compose_runtime_service_completed_successfully(service)
+
+
+def _compose_runtime_service_ready(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "running":
+        return False
+    health = (service.health or "").strip().lower()
+    return health not in {"starting", "unhealthy"}
+
+
+def _compose_runtime_service_completed_successfully(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "exited":
+        return False
+    status = (service.status or "").strip().lower()
+    return re.match(r"^exited\s*\(\s*0\s*\)(?:\s|$)", status) is not None
 
 
 def _precheck_required_companion_env_secrets_for_resume(
@@ -566,7 +758,8 @@ async def _reject_unsupported_task_kind(
     if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
         message = (
             "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-            "release/manual PR via PR adoption with auto_merge=false instead."
+            "release/manual PR via PR adoption instead (auto_merge defaults to "
+            "false, giving the manual/no-auto-merge gate)."
         )
         if _get_active_recovery_payload(workspace) is not None:
             await self._finish_active_recovery_operations(
@@ -727,7 +920,18 @@ async def _prepare_handoff_pr_monitor_profile(
             profile=profile,
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
-        if not await self._run_monitor_handoff_profile_setup(
+        if pr_adoption_is_hosted(workspace.task_policy):
+            if not await _run_hosted_monitor_handoff_profile_setup(
+                self,
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+                pr_identity=_hosted_handoff_pr_identity(workspace),
+            ):
+                return None
+        elif not await self._run_monitor_handoff_profile_setup(
             workspace_id=workspace_id,
             profile=profile,
             compose_project=compose_project,
@@ -974,14 +1178,26 @@ async def _build_handoff_pr_monitor(
                 profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-        if run_profile_setup and not await self._run_monitor_handoff_profile_setup(
-            workspace_id=workspace_id,
-            profile=profile,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            worktree_path=worktree_path,
-        ):
-            return None
+        if run_profile_setup:
+            if pr_adoption_is_hosted(workspace.task_policy):
+                if not await _run_hosted_monitor_handoff_profile_setup(
+                    self,
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    pr_identity=_hosted_handoff_pr_identity(workspace),
+                ):
+                    return None
+            elif not await self._run_monitor_handoff_profile_setup(
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            ):
+                return None
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.running,
@@ -1000,6 +1216,11 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=(
+                    self._agent_runtime_executor
+                    if pr_adoption_is_hosted(workspace.task_policy)
+                    else None
+                ),
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
@@ -1083,7 +1304,9 @@ async def _build_handoff_pr_monitor(
     # CLI, so ensure/pull the model now — while still ``running`` — instead of
     # letting OpenCode fail later as an opaque ``AGENT_CLI_FAILED``. No-op for
     # non-OpenCode runtimes and for a sidecar daemon unreachable from the worker.
-    if not await self._ensure_ollama_model_or_mark_failed(
+    if not pr_adoption_is_hosted(
+        workspace.task_policy
+    ) and not await self._ensure_ollama_model_or_mark_failed(
         workspace_id=workspace_id,
         ws=workspace,
     ):

@@ -13,15 +13,50 @@ from awf.db.enums import AgentRuntime
 
 @register_adapter
 class GeminiAdapter(AgentAdapter):
+    """Adapter that runs Google Gemini CLI in AWF workspaces."""
+
     runtime = AgentRuntime.gemini
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the Gemini runtime identity."""
         return AgentRuntime.gemini
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family used for Gemini runs."""
         del model
         return "google"
+
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Gemini hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the
+        ``GEMINI_*`` / ``GOOGLE_*`` auth, Vertex, and ADC entries in
+        ``AGENT_AUTH_ENV_VARS`` so a hosted executor can resolve and inject the
+        same credentials a local Compose run would surface, including the
+        Vertex AI / Application Default Credentials backends.
+
+        ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here:
+        it is a *file-backed* credential (its value is a filesystem path), so
+        the hosted path carries the matching mount target through
+        ``AgentRuntimeExecRequest.file_auth_mount_targets`` instead of treating
+        the path as an env-only credential. The local Compose path bind-mounts
+        the referenced file via ``_build_host_auth_mounts`` so the path the env
+        var points at exists and ADC/Vertex auth works; env-only passthrough on
+        the hosted path would inject a dangling
+        ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the file absent.
+        """
+        return (
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_AUTH_MECHANISM",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+        )
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         # Gemini CLI 0.41.2 documents -p/--prompt as non-interactive mode;

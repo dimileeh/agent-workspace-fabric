@@ -31,20 +31,84 @@ can serve. The tuple only supplies the default model when none is requested.
 
 DEFAULT_OLLAMA_OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 
+# Non-Ollama provider API key names OpenCode can consume for a provider-qualified
+# model (``openai/...``, ``anthropic/...``, ``google/...``, ``xai/...``). Mirrors
+# ``_OPENCODE_PROVIDER_ENV_KEYS`` in ``provider_readiness_helpers`` and the
+# matching entries in ``AGENT_AUTH_ENV_VARS`` so the hosted (non-compose) path
+# surfaces the same provider credentials the local Compose path and create-time
+# readiness admission accept. Names only — the hosted executor resolves values
+# out-of-band; secret values are never transported.
+OPENCODE_PROVIDER_API_KEY_NAMES = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+)
+
+
+def opencode_provider_for_model(model: str | None) -> str:
+    """Return the provider family for a selected OpenCode model."""
+    active_model = model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+    if "/" in active_model:
+        return active_model.split("/", 1)[0]
+    return "ollama"
+
 
 @register_adapter
 class OpenCodeAdapter(AgentAdapter):
+    """Adapter that runs OpenCode CLI in AWF workspaces."""
+
     runtime = AgentRuntime.opencode
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the OpenCode runtime identity."""
         return AgentRuntime.opencode
 
     def get_provider(self, model: str | None) -> str:
-        active_model = model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
-        if "/" in active_model:
-            return active_model.split("/", 1)[0]
-        return "ollama"
+        """Return the provider family for the selected OpenCode model."""
+        return opencode_provider_for_model(model or self._default_model)
+
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """OpenCode hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the Ollama
+        base-URL / API-key entries in ``AGENT_AUTH_ENV_VARS`` so a hosted
+        executor can resolve and inject the same daemon endpoint and credential
+        a local Compose run would surface. The Ollama base URL is required for
+        the OpenCode launcher prelude to resolve the daemon out-of-band.
+
+        OpenCode also supports provider-qualified models (``openai/...``,
+        ``anthropic/...``, ``google/...``, ``xai/...``) served by their own
+        cloud providers, not the local Ollama daemon. Create-time readiness
+        admits those workspaces when the matching provider API key
+        (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / etc.) is present, and the
+        local Compose path passes those names via ``AGENT_AUTH_ENV_VARS``. The
+        hosted path must surface the same provider API key names or a hosted job
+        for such a model launches without auth even though the workspace was
+        admitted and works locally. Include the non-Ollama provider API key
+        names OpenCode can use, mirroring
+        ``_OPENCODE_PROVIDER_ENV_KEYS`` / ``AGENT_AUTH_ENV_VARS``. The list is
+        the full union rather than model-specific because this property is
+        evaluated before the per-run model override is known and the hosted
+        executor resolves only the names whose backing values exist.
+        """
+        return (
+            "AWF_OPENCODE_OLLAMA_BASE_URL",
+            "OLLAMA_HOST",
+            "OLLAMA_API_KEY",
+            *OPENCODE_PROVIDER_API_KEY_NAMES,
+            # Non-secret OpenCode shell-tool runtime tuning. The local Compose
+            # path carries this name via ``AGENT_AUTH_ENV_VARS`` so the agent
+            # container receives the bash-tool timeout default; the hosted path
+            # must surface the same name or an injected hosted executor cannot
+            # inject it and OpenCode falls back to its own bash timeout while the
+            # same workspace behaves differently under Compose. Not a secret.
+            "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        )
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         requested_model = (model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]).strip()

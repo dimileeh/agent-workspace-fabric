@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.adapters.runtime_executor import AgentRuntimeGitPreparation
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
@@ -32,6 +33,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
@@ -57,13 +59,28 @@ class FakeAdapter(AgentAdapter):
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
+    hosted_pr_identities: list[dict[str, Any] | None] = field(default_factory=list)
+    profiles: list[WorkspaceProfile | None] = field(default_factory=list)
+    worktree_paths: list[Path | None] = field(default_factory=list)
 
-    def __init__(self, *, default_model: str | None = None) -> None:  # type: ignore[override]
+    def __init__(  # type: ignore[override]
+        self,
+        *,
+        default_model: str | None = None,
+        runtime_executor: object | None = None,
+    ) -> None:
         """Store queue-backed run results for this test adapter."""
-        super().__init__(runner=None, default_model=default_model)  # type: ignore[arg-type]
+        super().__init__(  # type: ignore[arg-type]
+            runner=None,
+            default_model=default_model,
+            runtime_executor=runtime_executor,  # type: ignore[arg-type]
+        )
         self._queued = []
         self.calls = []
         self.workspace_ids = []
+        self.hosted_pr_identities = []
+        self.profiles = []
+        self.worktree_paths = []
 
     def get_provider(self, model: str | None) -> str:
         """Return the fixed fake provider identifier."""
@@ -93,7 +110,7 @@ class FakeAdapter(AgentAdapter):
             else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
         )
 
-    async def run(  # type: ignore[override]
+    async def run(
         self,
         *,
         compose_project: str,
@@ -102,10 +119,17 @@ class FakeAdapter(AgentAdapter):
         model: str | None = None,
         workspace_id: str | None = None,
         log_source: str = "agent",
+        hosted_pr_identity: dict[str, Any] | None = None,
+        git_preparation: AgentRuntimeGitPreparation | None = None,
+        profile: WorkspaceProfile | None = None,
+        worktree_path: Path | None = None,
     ) -> AgentRunResult:
         """Consume one queued result and log the dispatched prompt."""
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
+        self.hosted_pr_identities.append(hosted_pr_identity)
+        self.profiles.append(profile)
+        self.worktree_paths.append(worktree_path)
         if self._log_store and workspace_id:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,
@@ -146,6 +170,8 @@ class RecordedSleep:
 def pr_payload(
     *,
     head_sha: str = "abc1234567890def",
+    head_ref: str | None = None,
+    base_ref: str = "development",
     created_at: str = "2026-05-06T10:00:00Z",
     committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
@@ -161,6 +187,10 @@ def pr_payload(
     comments: list[dict] | None = None,
 ) -> str:
     """Build a GraphQL-like PR payload for monitor status helpers.
+
+    ``base_ref`` is the PR's live base branch; tests driving a workspace whose
+    ``branch_base`` is not ``development`` must pass their own, otherwise the
+    monitor reads the snapshot as a PR retargeted after provisioning and blocks.
 
     ``check_contexts_total_count`` sets the rollup ``contexts.totalCount`` that
     drives ``PRStatus.no_checks_observed`` (a present-but-empty rollup reports
@@ -178,6 +208,7 @@ def pr_payload(
                     "pullRequest": {
                         "number": 42,
                         "createdAt": created_at,
+                        "headRefName": head_ref,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
@@ -185,7 +216,7 @@ def pr_payload(
                         "closed": closed,
                         "merged": merged,
                         "mergeCommit": {"oid": merge_commit_sha} if merged else None,
-                        "baseRef": {"name": "development", "target": {"oid": "base0"}},
+                        "baseRef": {"name": base_ref, "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [
                                 {
@@ -345,6 +376,7 @@ def make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
+    delete_source_branch_on_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
     non_check_reviewer_settle_seconds: float = 0,
@@ -357,6 +389,7 @@ def make_runner(
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
+    workspace_profile: WorkspaceProfile | None = None,
     gh: Any | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> PullRequestMonitorRunner:
@@ -368,6 +401,7 @@ def make_runner(
         "gh": gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         "monitor_config": MonitorConfig(
             auto_merge=auto_merge,
+            delete_source_branch_on_merge=delete_source_branch_on_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
@@ -385,6 +419,7 @@ def make_runner(
         "worktrees_root": worktrees_root,
         "log_store": log_store,
         "provider_recovery_default_model": provider_recovery_default_model,
+        "workspace_profile": workspace_profile,
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root

@@ -47,6 +47,8 @@ awf workspace adopt-pr \
   --repo owner/repo \
   --pr 123 \
   --auto-merge \
+  --external-id CLOUD-TASK-42 \
+  --task-class test_task \
   --reason "attach AWF to existing PR"
 ```
 
@@ -59,14 +61,24 @@ awf workspace adopt-pr \
   --initial-review-grace-period-seconds 900
 ```
 
-`--auto-merge` is the default. It lets the monitor merge after comments,
-checks, freshness, validation provenance, merge queue policy, and the initial
-review grace window are clean. `--no-auto-merge` keeps AWF monitoring and
-repairing the PR, but a human must merge it.
+Auto-merge is opt-in. Omit both flags to use the repo/profile default (off
+unless configured in `monitor.auto_merge`). Pass `--auto-merge` to let the
+monitor merge after comments, checks, freshness, validation provenance, merge queue
+policy, and the initial review grace window are clean. `--no-auto-merge` keeps
+AWF monitoring and repairing the PR, but a human must merge it.
 
 `initial_review_grace_period_seconds` is optional. Omit it to use the resolved
 profile monitor policy; the profile default is 900 seconds. Set it to `0` only
 for explicit fast-path tests.
+
+Optional adoption identity inputs (parity with workspace create):
+
+- `--external-id` / `external_id`: optional external task id persisted on the
+  adopted workspace and task. Omit it to use the generated repo/PR adoption
+  identity.
+- `--task-class` / `task_class`: optional task class for scheduling and policy
+  parity (`docs_task`, `test_task`, `refactor_task`, `migration_task`,
+  `dependency_task`, or `build_config_task`). Omit it to leave the class unset.
 
 Retry with the same raw grace override used by the first adoption request. An
 omitted/null value means "use the profile policy" and is stored separately from
@@ -109,6 +121,8 @@ curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
     "pr_number": 123,
     "auto_merge": true,
     "initial_review_grace_period_seconds": 900,
+    "external_id": "CLOUD-TASK-42",
+    "task_class": "test_task",
     "reason": "attach AWF to existing PR"
   }'
 ```
@@ -130,6 +144,8 @@ call instead of shelling out:
     "pr_number": 123,
     "auto_merge": true,
     "initial_review_grace_period_seconds": 900,
+    "external_id": "CLOUD-TASK-42",
+    "task_class": "test_task",
     "reason": "attach AWF to existing PR"
   }
 }
@@ -138,8 +154,8 @@ call instead of shelling out:
 The MCP response mirrors `PullRequestMonitorAdoptionResponse`. Structured
 terminal PR errors include `PR_ALREADY_CLOSED`, `PR_ALREADY_MERGED`,
 `PR_NOT_FOUND`, `INVALID_GITHUB_REPO`, `PR_ADOPTION_INPUT_REQUIRED`,
-`PR_METADATA_FETCH_FAILED`, `PR_METADATA_INVALID`, and
-`PR_ADOPTION_POLICY_CONFLICT`.
+`PR_METADATA_FETCH_FAILED`, `PR_METADATA_INVALID`,
+`PR_ADOPTION_POLICY_CONFLICT`, and `TASK_EXTERNAL_ID_CONFLICT`.
 
 ## Idempotency And Retries
 
@@ -151,8 +167,8 @@ create another monitor workspace.
 
 Policy changes on an existing live adoption return
 `PR_ADOPTION_POLICY_CONFLICT`. That includes changes to `repo_url`, `agent`,
-`model`, `effort`, `profile_ref`, inline profile, `auto_merge`, or
-`initial_review_grace_period_seconds`.
+`model`, `effort`, `profile_ref`, inline profile, `auto_merge`,
+`initial_review_grace_period_seconds`, `external_id`, or `task_class`.
 
 For idempotent retries, omitted/null and explicit `900` are different adoption
 policies. If the first request omitted the grace override, later REST or MCP
@@ -169,6 +185,13 @@ requests the default/no-override policy, so a replay that omits those fields
 conflicts with an existing live adoption pinned to explicit `agent_model` or
 `agent_effort` values from prior `model` or `effort` inputs.
 
+Adoption identity retries follow the same live-policy rule: omit `external_id`
+to use the generated repo/PR adoption identity, and omit `task_class` to leave
+the class unset. Changing either value on a live adoption returns
+`PR_ADOPTION_POLICY_CONFLICT`. An explicit `external_id` that already belongs to
+a different task scope returns `TASK_EXTERNAL_ID_CONFLICT` instead of attaching
+or creating under the wrong identity.
+
 Terminal adoption retries: destroyed, destroying, cancelled, failed, completed,
 and superseded adoption rows are not reused as live monitor attachments. AWF
 fetches fresh PR metadata, creates a fresh monitor workspace with
@@ -176,7 +199,10 @@ fetches fresh PR metadata, creates a fresh monitor workspace with
 it still owns the deterministic key, and records previous terminal adoption
 lineage on the new workspace. If stale task idempotency data remains from an
 older adoption, AWF allocates a generated task key so the fresh monitor is not
-linked back to stale task scope or title.
+linked back to stale task scope or title. Terminal re-adoption with the same
+explicit `external_id` supersedes the prior row's external-id slot so the fresh
+monitor can reclaim that identity; an omitted `external_id` on terminal retry
+mints a generated generation rather than reusing a stale owned slot.
 
 Closed or merged GitHub PRs are rejected before workspace creation with
 structured errors such as `PR_ALREADY_CLOSED` and `PR_ALREADY_MERGED`.

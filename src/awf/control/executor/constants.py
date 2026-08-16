@@ -62,6 +62,12 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 
 PR_MONITOR_SETUP_FAILED_REASON_CODE = "PR_MONITOR_SETUP_FAILED"
 
+HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE = (
+    "workspace.hosted_monitor_handoff_setup_completed"
+)
+
+HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE = "HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED"
+
 # Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the
 # profile's ``setup`` phase is the only thing that provisions the workspace. If
 # a ``validate``-phase command's executable is still not on PATH after setup,

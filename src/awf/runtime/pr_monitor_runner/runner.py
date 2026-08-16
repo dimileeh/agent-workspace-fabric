@@ -43,6 +43,7 @@ from awf.common.github_client import RepoRef
 from awf.common.github_retry import GitHubRetryContext, github_retry_context
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig, MonitorState, decide
@@ -100,6 +101,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         workspace_runtime_context: str = "",
+        workspace_profile: WorkspaceProfile | None = None,
         provider_recovery_default_model: str | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -118,6 +120,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
         self._workspace_runtime_context = workspace_runtime_context
+        self._workspace_profile = workspace_profile
         self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
         self._work_dir = _infer_service_work_dir(worktrees_root)
@@ -325,6 +328,13 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     cleared_retry_state = True
                 if cleared_retry_state:
                     await self._persist_state(workspace_id, state)
+                current_head_ref = status.head_ref
+                state.current_pr_head_ref = (
+                    current_head_ref.strip()
+                    if isinstance(current_head_ref, str) and current_head_ref.strip()
+                    else None
+                )
+                state.current_pr_head_ref_checked = True
                 feedback_state_changed = await self._refresh_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -335,8 +345,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 if feedback_state_changed:
                     await self._persist_state(workspace_id, state)
 
-                # Determine the remote push target for this workspace.
-                # ``remote_push_branch`` is the canonical destination.
+                # Determine the remote push target for this workspace. A live PR
+                # snapshot is authoritative after a branch rename; the persisted
+                # branch remains the fallback for older forge/test snapshots.
                 #
                 # Pre-migration fallback — task-kind-conditional:
                 #   * ``feature_branch_pr``: ``branch_name`` (e.g. ``awf/<id>``)
@@ -348,7 +359,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 #     PR's head. Refuse and fail fast instead; the row
                 #     predates this migration and must be re-attached
                 #     fresh (which will populate remote_push_branch).
-                remote_branch = ws.remote_push_branch
+                remote_branch = state.current_pr_head_ref or ws.remote_push_branch
                 if remote_branch is None and ws.task_kind == "feature_branch_pr":
                     remote_branch = ws.branch_name
                 if not remote_branch:

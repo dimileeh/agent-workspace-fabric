@@ -29,6 +29,7 @@ async def _post_workflow_scope_notification_best_effort(
             status=status,
             state=state,
             blocker_reason=blocker_reason,
+            preserve_full_blocker_reason=True,
         )
     except ForgeClientError as exc:
         # A Bitbucket workspace posts the human hint through ``BitbucketClient``,

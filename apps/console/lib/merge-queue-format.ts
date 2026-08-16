@@ -355,10 +355,6 @@ function summarizeQueueIdentity(
   };
 }
 
-export function mergeQueueMergedAt(item: Pick<MergeQueueItem, "merged_at" | "status" | "updated_at">): string | null {
-  return item.merged_at ?? (item.status === "completed" ? item.updated_at : null);
-}
-
 interface RequiredNextActionDefinition {
   label: string;
   tone: QueueTone;

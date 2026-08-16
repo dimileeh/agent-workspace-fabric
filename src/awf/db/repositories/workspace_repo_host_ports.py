@@ -13,6 +13,7 @@ from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
 )
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.models import ResourceReservation, Workspace, WorkspaceEvent
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
@@ -198,6 +199,9 @@ async def find_host_port_conflicts(
     statuses runtime metadata is deliberately not checked: an active
     workspace that never reached compose launch still holds an intended
     port claim that must block concurrent requests at dispatch time.
+    Explicit hosted PR-adoption rows are excluded because hosted
+    execution does not start a local Compose stack, so rendered profile
+    service ports are not local Docker host-port claims.
     Terminal workspaces (failed, cancelled, completed, destroyed)
     conflict when their runtime metadata or legacy row shape means they
     may still own a Docker Compose project and their runtime has not
@@ -363,6 +367,9 @@ async def find_host_port_conflicts(
     conflicts: builtins.list[HostPortConflict] = []
     seen: builtins.set[builtins.tuple[str, int]] = set()
     for row in rows:
+        if pr_adoption_is_hosted(row.task_policy):
+            continue
+
         for hp in host_ports_from_task_policy_companions(row.task_policy):
             if hp in host_ports_set:
                 key = (row.id, hp)

@@ -43,6 +43,7 @@ async def _seed_open_candidate(
     owned_paths: list[str],
     resolved_profile: dict | None = None,
     task_policy: dict | None = None,
+    auto_merge: bool = False,
 ) -> tuple[str, str]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -57,6 +58,7 @@ async def _seed_open_candidate(
             owned_paths=owned_paths,
             resolved_profile=resolved_profile,
             task_policy=task_policy,
+            auto_merge=auto_merge,
         )
         task = await TaskRepository(session).create_or_get(
             repo_url=workspace.repo_url,
@@ -314,6 +316,10 @@ async def test_refresh_resolves_blocking_findings_and_clears_policy_block(
                 "allowlist_patterns": ["generated/**"],
             }
         },
+        # ``candidate.ready`` now requires the workspace to opt into auto-merge;
+        # this test asserts the candidate becomes auto-merge-ready once the
+        # out-of-scope block clears, so seed the opt-in intent.
+        auto_merge=True,
     )
 
     async with factory() as session:

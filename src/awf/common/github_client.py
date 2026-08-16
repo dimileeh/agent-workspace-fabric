@@ -483,6 +483,8 @@ class GitHubClient:
 
         return PRStatus(
             number=pr["number"],
+            head_ref=_clean_optional_str(pr.get("headRefName")),
+            base_ref=_clean_optional_str(_dig(pr, "baseRef", "name")),
             head_sha=pr["headRefOid"],
             mergeable=mergeable,
             check_state=check_state,
@@ -828,6 +830,68 @@ class GitHubClient:
                 body,
             ],
             operation="gh pr comment",
+            retry_policy=RetryPolicy.NEVER,
+        )
+
+    async def fetch_pull_request_body(self, *, repo: RepoRef, pr_number: int) -> str:
+        """Return a pull request's current description body.
+
+        Used by release-PR sync to reconcile *only* AWF's managed merge-policy
+        section into a reused PR — preserving any human-authored release notes,
+        checklists, or context rather than overwriting the whole description. A
+        read, so ``READ`` retry policy lets a transient blip recover. ``gh``'s
+        ``--jq`` emits the raw body plus one trailing newline; strip only that so
+        the body's internal formatting is preserved faithfully.
+
+        A PR opened without a description has a JSON ``null`` body, which a bare
+        ``.body`` filter renders as the literal text ``null``. That sentinel would
+        reach release-PR reconciliation as human-authored content and be written
+        back as a description reading "null", so the ``// ""`` alternative maps it
+        to an empty body at the source (same shape as the ``// empty`` fallback in
+        the post-merge SHA read). Filtering here rather than normalizing the
+        rendered output also keeps a description whose literal text *is* ``null``
+        intact — the two are indistinguishable once ``gh`` has rendered them.
+        """
+        result = await self._run_gh_command(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                repo.slug(),
+                "--json",
+                "body",
+                "--jq",
+                '.body // ""',
+            ],
+            operation="gh pr view body",
+            retry_policy=RetryPolicy.READ,
+        )
+        return result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout
+
+    async def update_pull_request_body(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        """Overwrite an existing PR's description.
+
+        Used by release-PR sync to reconcile a reused PR's advertised merge
+        policy: a PR opened earlier under one ``auto_merge`` resolution is reused
+        without re-running the creator that applies the body, so its description
+        can contradict the policy the attached monitor now enforces. Setting the
+        body is idempotent, so ``NEVER`` retry keeps a transient blip from issuing
+        a duplicate edit; the caller treats a failure as a reason-coded error.
+        """
+        await self._run_gh_command(
+            [
+                "gh",
+                "pr",
+                "edit",
+                str(pr_number),
+                "--repo",
+                repo.slug(),
+                "--body",
+                body,
+            ],
+            operation="gh pr edit body",
             retry_policy=RetryPolicy.NEVER,
         )
 

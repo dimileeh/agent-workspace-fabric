@@ -40,6 +40,14 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_bounds_large_reason_before_state_persistence(self) -> None:
+        result = _parse_verdict_result(f"AWF-VERDICT: NEEDS_HUMAN: {'x' * 10_000}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == f"{'x' * 499}…"
+        assert len(result.reason) == 500
+
+    @pytest.mark.unit
     def test_private_awf_verdict_uses_final_line_not_prompt_echo(self) -> None:
         stdout = (
             'Re-reading: "print AWF-VERDICT: NEEDS_HUMAN: <what you need> and exit."\n'

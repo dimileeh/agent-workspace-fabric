@@ -10,6 +10,7 @@ from awf.control.executor import ollama_model as _ollama_model
 from awf.control.executor import planning_conformance as _planning_conformance
 from awf.control.executor import planning_ops as _planning_ops
 from awf.control.executor import quality_methods as _quality_methods
+from awf.control.executor import quality_resource_ops as _quality_resource_ops
 from awf.control.executor import state_ops as _state_ops
 from awf.control.executor import validation_ops as _validation_ops
 
@@ -105,10 +106,10 @@ class ExecutorDelegatesMixin:
     _measure_and_persist_baseline_coverage = _quality_methods._measure_and_persist_baseline_coverage
     _run_final_coverage_gate = _quality_methods._run_final_coverage_gate
     _parallel_worker_cpu_limit_for_workspace = (
-        _quality_methods._parallel_worker_cpu_limit_for_workspace
+        _quality_resource_ops._parallel_worker_cpu_limit_for_workspace
     )
     _refresh_supply_chain_policy_for_workspace = (
-        _quality_methods._refresh_supply_chain_policy_for_workspace
+        _quality_resource_ops._refresh_supply_chain_policy_for_workspace
     )
     _verify_recovered_post_agent_commit = _quality_methods._verify_recovered_post_agent_commit
     _verify_recovered_post_agent_commit_or_mark_failed = (
