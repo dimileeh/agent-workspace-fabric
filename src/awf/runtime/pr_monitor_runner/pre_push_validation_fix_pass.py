@@ -429,9 +429,15 @@ async def _commit_changes_present_in_head(
     # ``-z`` preserves pathname bytes (including newlines). Without it, Git
     # C-quotes such names; ``splitlines()`` then feeds the quoted spelling to
     # ``ls-tree``, both lookups miss, and empty==empty falsely retains salvage
-    # (PRRT_kwDOSJAM6s6ZmCZz).
+    # (PRRT_kwDOSJAM6s6ZmCZz). Prefer raw ``stdout_bytes``: the runner's
+    # ``stdout`` string is UTF-8-decoded with ``errors="replace"``, which
+    # rewrites invalid-UTF-8 pathnames to U+FFFD and makes ``ls-tree`` miss
+    # (PRRT_kwDOSJAM6s6ZmviP).
     try:
-        paths = _changed_paths_from_name_only_z(paths_result.stdout or "")
+        if paths_result.stdout_bytes is not None:
+            paths = _changed_paths_from_name_only_z(paths_result.stdout_bytes)
+        else:
+            paths = _changed_paths_from_name_only_z(paths_result.stdout or "")
     except ProtectedScopeDiffError:
         return False
     if not paths:

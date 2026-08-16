@@ -34,6 +34,10 @@ class CommandResult:
     stdout: str
     stderr: str
     reason_code: str | None = None
+    # Raw stdout when the runner captured bytes (e.g. AsyncioSubprocessRunner).
+    # Callers that need exact pathname bytes from ``-z`` Git output must prefer
+    # this over ``stdout``, which is UTF-8-decoded with ``errors="replace"``.
+    stdout_bytes: bytes | None = None
 
     @property
     def ok(self) -> bool:
@@ -138,6 +142,7 @@ class AsyncioSubprocessRunner:
             returncode=proc.returncode,
             stdout=stdout_bytes.decode("utf-8", errors="replace"),
             stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            stdout_bytes=stdout_bytes,
         )
 
     async def run_streaming(

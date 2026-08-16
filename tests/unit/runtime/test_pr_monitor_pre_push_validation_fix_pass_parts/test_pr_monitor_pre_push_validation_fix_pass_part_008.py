@@ -949,6 +949,85 @@ async def test_commit_changes_present_in_head_rejects_newline_pathname_overwrite
 
 
 @pytest.mark.unit
+async def test_commit_changes_present_in_head_retains_invalid_utf8_pathname(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Invalid-UTF-8 pathnames must survive runner decode for salvage retention.
+
+    ``AsyncioSubprocessRunner`` decodes ``diff-tree -z`` with ``errors="replace"``,
+    so a legal Git pathname containing ``\\xff`` becomes a different U+FFFD spelling.
+    ``ls-tree`` then misses every lookup and valid salvage is discarded
+    (PRRT_kwDOSJAM6s6ZmviP). Path records must be taken from raw stdout bytes.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-qm", "base")
+
+    weird_name = b"bad-\xff-name.txt"
+    (repo / os.fsdecode(weird_name)).write_text("salvaged\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "-A"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "salvage invalid utf-8 pathname"],
+        check=True,
+        capture_output=True,
+    )
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "later.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-qm", "unrelated while invalid pathname salvage preserved")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    subprocess.run(
+        ["git", "-C", str(repo), "--literal-pathspecs", "rm", "-f", "--", weird_name],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "other.txt").write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-qm", "remove invalid utf-8 pathname")
+    removed = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=removed,
+    )
+
+
+@pytest.mark.unit
 async def test_commit_changes_present_in_head_rejects_pathspec_magic_filename_revert(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
