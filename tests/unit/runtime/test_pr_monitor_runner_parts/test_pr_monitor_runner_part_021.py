@@ -129,10 +129,14 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: ~~<one-sentence justification>~~",
             "AWF-VERDICT: FALSE POSITIVE: ~~<reason>~~",
             "AWF-VERDICT: FALSE POSITIVE: ~~`<one-sentence justification>`~~",
+            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>](https://example.com)",
+            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`](https://example.com)",
+            "AWF-VERDICT: FALSE POSITIVE: [~~<reason>~~](https://example.com)",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
             "AWF-VERDICT: FIXED: **<one-sentence summary>**",
             "AWF-VERDICT: FIXED: *<one-sentence summary>*",
             "AWF-VERDICT: FIXED: ~~<one-sentence summary>~~",
+            "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com)",
         ],
     )
     def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
@@ -140,7 +144,8 @@ class TestParseVerdict:
         # template placeholder must not leave the echo as a usable reason
         # (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZopxG).
         # Single emphasis is peeled only when the enclosed value is
-        # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU).
+        # placeholder-shaped (PRRT_kwDOSJAM6s6ZoDQU). Markdown link labels are
+        # peeled the same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -189,6 +194,11 @@ class TestParseVerdict:
             # around a template placeholder (PRRT_kwDOSJAM6s6ZoDQU).
             ("AWF-VERDICT: FALSE POSITIVE: _already_fixed_", "_already_fixed_"),
             ("AWF-VERDICT: FALSE POSITIVE: _snake_case_reason_", "_snake_case_reason_"),
+            # Markdown links with real labels stay intact (PRRT_kwDOSJAM6s6Zos6S).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate](https://example.com)",
+                "[stale review boilerplate](https://example.com)",
+            ),
         ],
     )
     def test_private_awf_single_emphasis_non_placeholder_reason_still_usable(
@@ -265,6 +275,18 @@ class TestParseVerdict:
                 "AWF-VERDICT: DEFER: _<what to track> AWF-VERDICT: FALSE POSITIVE: cite_",
                 "verdict_placeholder_echo",
             ),
+            # Markdown-link peel must use absorbed-placeholder detection
+            # (PRRT_kwDOSJAM6s6Zos6S).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification> "
+                "AWF-VERDICT: FIXED: cited](https://example.com)",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FIXED: [<one-sentence summary> "
+                "AWF-VERDICT: FALSE POSITIVE: cite](https://example.com)",
+                "fixed_placeholder_echo",
+            ),
         ],
     )
     def test_private_awf_placeholder_with_absorbed_same_line_citation_fail_closed(
@@ -276,7 +298,8 @@ class TestParseVerdict:
         # the whole-reason placeholder check by folding later FIXED/DEFER/
         # FALSE POSITIVE citations into the reason (#822 PRRT_kwDOSJAM6s6Znin1).
         # Emphasis wrappers around the absorbed form must still peel and fail
-        # closed (PRRT_kwDOSJAM6s6ZoGYD).
+        # closed (PRRT_kwDOSJAM6s6ZoGYD). Markdown link labels likewise
+        # (PRRT_kwDOSJAM6s6Zos6S).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"

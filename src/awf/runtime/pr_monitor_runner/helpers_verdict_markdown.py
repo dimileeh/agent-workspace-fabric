@@ -9,6 +9,7 @@ __all__ = (
     "_CODE_FORMATTED_VERDICT_LINE",
     "_VERDICT_REASON_INLINE_QUOTE_WRAPPER",
     "_VERDICT_REASON_INLINE_EMPHASIS_WRAPPER",
+    "_VERDICT_REASON_INLINE_LINK_WRAPPER",
     "_VERDICT_REASON_PYTHON_DUNDER",
     "_MARKDOWN_FENCE_OPEN",
     "_MARKDOWN_INDENTED_CODE_LINE",
@@ -112,6 +113,10 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r"_\s*(?P<em_under>.*?)\s*_"
     r")$"
 )
+# Whole-reason Markdown links (``[<…>](https://example.com)``). Peeled only when
+# the label is placeholder-shaped — same gate as single emphasis — so a real
+# linked justification stays usable (PRRT_kwDOSJAM6s6Zos6S).
+_VERDICT_REASON_INLINE_LINK_WRAPPER = re.compile(r"^\[\s*(?P<label>.*?)\s*\]\s*\([^)\n]*\)$")
 _VERDICT_REASON_PYTHON_DUNDER = re.compile(r"^__[A-Za-z_][A-Za-z0-9_]*__$")
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
 # contain backticks (so same-line wraps like `` ```verdict``` `` are not
