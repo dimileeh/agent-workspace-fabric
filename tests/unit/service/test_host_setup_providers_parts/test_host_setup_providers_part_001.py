@@ -8,8 +8,8 @@ import pytest
 
 from awf.host_setup.config import HostSetupConfig, ProviderConfig
 from awf.host_setup.providers import orchestrate_provider_setup
+from tests.unit.service.test_host_setup_credentials_parts._helpers import _FAKE_TOKEN
 from tests.unit.service.test_host_setup_providers import (
-    _FAKE_TOKEN,
     _HttpSpy,
     _settings,
     _SubprocessSpy,
