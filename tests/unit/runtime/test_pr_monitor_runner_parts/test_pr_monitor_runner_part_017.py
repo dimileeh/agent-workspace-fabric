@@ -290,6 +290,60 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_in_indented_code_block(self) -> None:
+        # Markdown also represents code without fences (four-space indent). An
+        # unconditional strip would promote the example to the final verdict and
+        # resolve a blocked thread (PRRT_kwDOSJAM6s6ZlsjH).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n    AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_tab_indented_code_example(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n\tAWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_indented_only_quote_is_markerless(self) -> None:
+        stdout = "    AWF-VERDICT: FALSE POSITIVE: example\n"
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "unrecognized_or_markerless_verdict"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_indented_placeholder_does_not_poison_final(self) -> None:
+        stdout = (
+            "AWF-VERDICT: FIXED: committed the indent skip\n"
+            "    AWF-VERDICT: FIXED: <one-sentence summary>\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the indent skip"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_three_space_indent_still_counts(self) -> None:
+        # CommonMark indented code requires four spaces; lighter indent is prose.
+        result = _parse_verdict_result("   AWF-VERDICT: DEFER: track follow-up separately")
+
+        assert result.verdict == "defer"
+        assert result.reason == "track follow-up separately"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_fenced_example_with_info_string(self) -> None:
         stdout = (
             "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"

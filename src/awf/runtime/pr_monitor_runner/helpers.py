@@ -245,6 +245,9 @@ _MARKDOWN_FENCE_OPEN = re.compile(
     r"(?P<fence_tilde>~{3,})[^~\n]*"
     r")[ \t]*$"
 )
+# CommonMark indented code (four spaces or a tab). Unconditional ``str.strip``
+# would promote example markers inside these regions to authoritative finals.
+_MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}|\t)")
 # Leading Markdown list markers agents often emit before a canonical verdict line
 # (``- AWF-VERDICT: …``, ``1. AWF-VERDICT: …``). Strip only for attempt
 # classification so a final garbled list-prefixed marker still fails closed —
@@ -272,17 +275,21 @@ def _markdown_fence_closes(line: str, *, fence: str) -> bool:
 
 
 def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
-    """Yield stripped stdout lines outside multiline Markdown code fences.
+    """Yield stripped stdout lines outside Markdown code regions.
 
-    Same-line wrapped fences (`` ```verdict``` ``) are still yielded so
-    ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences shield
-    every subsequent line.
+    Skips multiline fenced blocks and CommonMark indented-code lines (four
+    spaces or a tab) so quoted example markers cannot override an authoritative
+    unfenced verdict. Same-line wrapped fences (`` ```verdict``` ``) are still
+    yielded so ``_CODE_FORMATTED_VERDICT_LINE`` can accept them. Unclosed fences
+    shield every subsequent line.
     """
     fence: str | None = None
     for line in stdout.splitlines():
         if fence is not None:
             if _markdown_fence_closes(line, fence=fence):
                 fence = None
+            continue
+        if _MARKDOWN_INDENTED_CODE_LINE.match(line):
             continue
         opened = _markdown_fence_open_marker(line)
         if opened is not None:
@@ -360,8 +367,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     last_awf_mention_recognized = False
     saw_awf_mention = False
-    # Skip multiline fenced regions so quoted example verdicts cannot override
-    # an authoritative unfenced marker (PRRT_kwDOSJAM6s6ZlqAE).
+    # Skip fenced and indented code regions so quoted example verdicts cannot
+    # override an authoritative unfenced marker (PRRT_kwDOSJAM6s6ZlqAE /
+    # PRRT_kwDOSJAM6s6ZlsjH).
     for stripped in _iter_non_fenced_verdict_lines(stdout):
         for verdict_line in _verdict_line_candidates(stripped):
             # Multiple markers on one line are separate verdict units — do not
