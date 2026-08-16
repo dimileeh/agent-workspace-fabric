@@ -524,9 +524,96 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+    # Tip evidence must survive FIXED accept so a later push/resolve requeue can
+    # still prove a no-change FIXED at this HEAD (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+
+@pytest.mark.unit
+async def test_successful_fixed_evidence_survives_publication_requeue(
+    tmp_path: Path,
+) -> None:
+    """Ordinary FIXED tip evidence must survive push/resolve addressed clear.
+
+    After a contentful FIXED, fix_cycle may clear the addressed verdict when push
+    fails or resolve is requeued. The retry starts at the same tip and correctly
+    prints FIXED with no further change — that must remain fix_committed, not
+    fixed_without_head_advance (PRRT_kwDOSJAM6s6ZnvBN).
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+    from awf.runtime.pr_monitor_runner.helpers import _clear_addressed_state_by_id
+
+    start = "a" * 40
+    tip = "b" * 40
+    item_id = "PRRT_kwDOSJAM6s6ZnvBN"
+    body_hash = "feedback_body_hash_publication"
+    workspace_id = "ws_publication_evidence"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    first_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: ordinary successful commit",
+        dirty=True,
+        heads=[tip],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    first_runner._worktrees_root = tmp_path
+
+    first = await comments._invoke_cli_for_verdict_result(
+        first_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert first.verdict == "fix_committed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == tip
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    state.mark_addressed(item_id, "fix_committed")
+    _clear_addressed_state_by_id(state, item_id)
+    assert item_id not in state.threads_addressed_ids
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == tip
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: still fixed after push failure",
+        dirty=False,
+        heads=[tip],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=tip,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "still fixed after push failure"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == tip
 
 
 @pytest.mark.unit
@@ -647,9 +734,8 @@ async def test_salvage_preserved_across_successful_synthetic_needs_human(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after guidance"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -822,8 +908,8 @@ async def test_salvage_retained_before_provider_recovery_retry_raise(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after recovery"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -982,8 +1068,8 @@ async def test_salvage_retained_when_commit_sink_raises_after_head_advance(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after sink raise"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -1124,8 +1210,8 @@ async def test_salvage_retained_when_commit_sink_task_cancelled_after_head_advan
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after sink cancel"
-    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -1265,8 +1351,8 @@ async def test_salvage_retained_when_agent_cancelled_after_self_commit(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after agent cancel"
-    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -1423,8 +1509,8 @@ async def test_salvage_retained_when_service_recovery_guard_exits_after_self_com
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after recovery guard exit"
-    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -1554,8 +1640,8 @@ async def test_salvage_persisted_when_agent_raises_unexpected_after_self_commit(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after unexpected crash"
-    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -1708,8 +1794,8 @@ async def test_salvage_persisted_when_post_exception_mirror_repair_fails_after_s
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after mirror repair failure"
-    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
-    assert _salvaged_fix_body_hash_state_key(item_id) not in reloaded.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert reloaded.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit
@@ -2162,7 +2248,8 @@ async def test_salvaged_fix_evidence_survives_later_head_advance(
     )
     assert retry.verdict == "fix_committed"
     assert retry.reason == "confirmed salvaged fix after burst"
-    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
 
 
 @pytest.mark.unit

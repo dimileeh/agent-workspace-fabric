@@ -340,16 +340,19 @@ async def _invoke_cli_for_verdict_result(
     evidence for FIXED claims. Operator hints pass False so GitHub-side /
     no-code directives can complete without a local commit.
 
-    ``evidence_item_id`` scopes dirty-salvage retention so a later successful
+    ``evidence_item_id`` scopes tip-evidence retention so a later successful
     FIXED retry for the same thread/comment can confirm a prior failed-run
-    salvage (HEAD still at the salvaged tip when the retry also started there,
-    or descending from both the salvaged SHA and the retry start with the
-    salvaged first-parent changes still present in the tip tree) without
-    accepting that failed invocation's verdict. ``evidence_body_hash`` binds
-    that salvage to the feedback body that produced it so an edited thread
-    cannot reuse stale salvage while ``agent_failed`` skips stale-body cleanup.
-    Salvage is never retained for ``isolated_worktree_host_path`` runs: those
-    tips are discarded with the clarification checkout.
+    salvage or an ordinary successful tip that has not yet been pushed/resolved
+    (HEAD still at the tip when the retry also started there, or descending
+    from both the salvaged SHA and the retry start with the salvaged
+    first-parent changes still present in the tip tree) without accepting a
+    failed invocation's verdict. ``evidence_body_hash`` binds that evidence to
+    the feedback body that produced it so an edited thread cannot reuse stale
+    tip keys while ``agent_failed`` skips stale-body cleanup. Tip evidence is
+    retained across FIXED accept and addressed-state clear until publication
+    succeeds (PRRT_kwDOSJAM6s6ZnvBN). Evidence is never retained for
+    ``isolated_worktree_host_path`` runs: those tips are discarded with the
+    clarification checkout.
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -847,7 +850,29 @@ async def _invoke_cli_for_verdict_result(
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
         if item_fix_evidence:
-            _clear_retained_salvage()
+            # Keep tip evidence until push/resolve succeed. Clearing here (or
+            # omitting ordinary successful-commit keys) converts a later
+            # no-change FIXED after publication requeue into
+            # fixed_without_head_advance (PRRT_kwDOSJAM6s6ZnvBN). Refresh keys
+            # when this invocation advanced HEAD; leave prior salvage when the
+            # accept only confirmed retained tip evidence.
+            if (
+                (local_head_advanced or hosted_head_advanced or dirty_fix_evidence)
+                and state is not None
+                and salvage_item_id is not None
+                and salvage_body_hash is not None
+                and item_end_head is not None
+                and item_start_head is not None
+                and isolated_worktree_host_path is None
+            ):
+                state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
+                state.mark_addressed(
+                    _salvaged_fix_body_hash_state_key(salvage_item_id),
+                    salvage_body_hash,
+                )
+                state.mark_addressed(
+                    _salvaged_fix_start_state_key(salvage_item_id), item_start_head
+                )
             return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt

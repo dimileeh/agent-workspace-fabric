@@ -68,15 +68,6 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key as _outdated_resolve_requeued_key,
 )
-from awf.runtime.monitor_state_keys import (
-    _salvaged_fix_body_hash_state_key as _salvaged_fix_body_hash_state_key,
-)
-from awf.runtime.monitor_state_keys import (
-    _salvaged_fix_head_state_key as _salvaged_fix_head_state_key,
-)
-from awf.runtime.monitor_state_keys import (
-    _salvaged_fix_start_state_key as _salvaged_fix_start_state_key,
-)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckFailureLogResult,
@@ -1685,15 +1676,20 @@ def _mark_review_comment_addressed(
 
 
 def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
+    """Clear verdict/body/reason markers for ``item_id``.
+
+    Preserve ``__salvaged_fix_*`` tip evidence: push failure and transient
+    resolve requeue clear addressed state so the item can be re-invoked, but the
+    committed tip must remain available as no-change FIXED evidence
+    (PRRT_kwDOSJAM6s6ZnvBN). Body-hash mismatch and explicit non-FIXED paths in
+    ``comment_verdict`` still drop salvage when feedback moves on.
+    """
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
-    state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(item_id), None)
-    state.threads_addressed_ids.pop(_salvaged_fix_body_hash_state_key(item_id), None)
-    state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(
