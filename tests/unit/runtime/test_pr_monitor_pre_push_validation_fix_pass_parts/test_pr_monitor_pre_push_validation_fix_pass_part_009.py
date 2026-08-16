@@ -263,6 +263,61 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
 
 
 @pytest.mark.unit
+def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
+    """Baseline tips that append a rebinding of a salvage-changed name fail closed.
+
+    ``git merge-file`` can cleanly reproduce a descendant that keeps
+    ``FEATURE_ENABLED = True`` and appends ``FEATURE_ENABLED = False`` when
+    surrounding context exists; equality with HEAD would then falsely retain
+    salvage. Only names whose last binding line changed vs parent count, so
+    unrelated appends / later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _salvage_changed_binding_names,
+        _tip_extra_can_supersede_modified_salvage,
+    )
+
+    parent = "x = 1\nFEATURE_ENABLED = False\ny = 2\n"
+    commit = "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+    assert _salvage_changed_binding_names(parent_blob=parent, commit_blob=commit) == {
+        "FEATURE_ENABLED"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED = False\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 3\nFEATURE_ENABLED = False\n"),
+    )
+    # Unrelated append / later hunk must not look like supersession.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nother = 1\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 3\n",
+    )
+    # Comment-only append cannot supersede.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\n# FEATURE_ENABLED = False\n",
+    )
+    # Rebinding an unchanged name (x) must not reject.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9\n",
+    )
+
+
+@pytest.mark.unit
 def test_bytes_unsafe_for_text_merge_distinguishes_intentional_fffd() -> None:
     """Strict UTF-8 / NUL gate must allow intentional U+FFFD, reject invalid bytes."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
@@ -1502,4 +1557,81 @@ async def test_commit_changes_present_in_head_fail_closed_on_salvage_merge_tmpdi
         worktree_path=repo,
         commit=salvage,
         head=later_hunk,
+    )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_baseline_appended_rebind(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Baseline-backed salvage must reject a tip that appends a disabling rebind.
+
+    Salvage flips ``FEATURE_ENABLED`` False→True in a multi-line file. A later tip
+    that keeps that line and appends ``FEATURE_ENABLED = False`` merges cleanly
+    under ``git merge-file``, so equality-with-HEAD alone would retain stale
+    FIXED evidence. Unrelated appends must still retain (PRRT_kwDOSJAM6s6Zp_3j).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "flags.py").write_text(
+        "x = 1\nFEATURE_ENABLED = False\ny = 2\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "flags.py")
+    _git(repo, "commit", "-qm", "base feature disabled")
+    (repo / "flags.py").write_text(
+        "x = 1\nFEATURE_ENABLED = True\ny = 2\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "flags.py")
+    _git(repo, "commit", "-qm", "salvage enables feature")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "flags.py").write_text(
+        "x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED = False\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "flags.py")
+    _git(repo, "commit", "-qm", "tip appends disabling rebind")
+    rebound = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "checkout", "-q", "-B", "unrelated-append", salvage)
+    (repo / "flags.py").write_text(
+        "x = 1\nFEATURE_ENABLED = True\ny = 2\nother = 1\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "flags.py")
+    _git(repo, "commit", "-qm", "tip unrelated append")
+    unrelated = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=unrelated,
+    )
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=rebound,
     )

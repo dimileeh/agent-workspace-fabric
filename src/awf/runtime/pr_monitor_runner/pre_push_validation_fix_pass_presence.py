@@ -222,37 +222,88 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
 
 
+def _binding_name_for_line(raw_line: str) -> str | None:
+    """Return the binding name on ``raw_line``, or None when it is not a binding.
+
+    Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
+    count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
+    and ``define`` is allowed, matching open-``#if`` scanning;
+    PRRT_kwDOSJAM6s6Zp_sv).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//"):
+        return None
+    if stripped.startswith("#") and _DEFINE_DIRECTIVE_LINE_RE.match(stripped) is None:
+        return None
+    for pattern in (
+        _DEFINE_BINDING_RE,
+        _DEF_BINDING_RE,
+        _CLASS_BINDING_RE,
+        _FUNCTION_BINDING_RE,
+        _LET_CONST_BINDING_RE,
+        _ASSIGN_BINDING_RE,
+    ):
+        match = pattern.match(raw_line)
+        if match is not None:
+            return match.group(1)
+    return None
+
+
 def _binding_names(text: str) -> set[str]:
     """Return names bound by assignments / defs / defines in ``text``.
 
     Used to detect when appended tip content rebinds a name from an added salvage
     blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``), which
     keeps a line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM).
-    Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
-    count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
-    and ``define`` is allowed, matching open-``#if`` scanning;
-    PRRT_kwDOSJAM6s6Zp_sv).
     """
     names: set[str] = set()
     for raw_line in text.splitlines():
-        stripped = raw_line.lstrip(" \t")
-        if stripped.startswith("//"):
-            continue
-        if stripped.startswith("#") and _DEFINE_DIRECTIVE_LINE_RE.match(stripped) is None:
-            continue
-        for pattern in (
-            _DEFINE_BINDING_RE,
-            _DEF_BINDING_RE,
-            _CLASS_BINDING_RE,
-            _FUNCTION_BINDING_RE,
-            _LET_CONST_BINDING_RE,
-            _ASSIGN_BINDING_RE,
-        ):
-            match = pattern.match(raw_line)
-            if match is not None:
-                names.add(match.group(1))
-                break
+        name = _binding_name_for_line(raw_line)
+        if name is not None:
+            names.add(name)
     return names
+
+
+def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set[str]:
+    """Return names whose last binding line differs between parent and salvage."""
+    parent_last: dict[str, str] = {}
+    for raw_line in parent_blob.splitlines():
+        name = _binding_name_for_line(raw_line)
+        if name is not None:
+            parent_last[name] = raw_line
+    changed: set[str] = set()
+    commit_last: dict[str, str] = {}
+    for raw_line in commit_blob.splitlines():
+        name = _binding_name_for_line(raw_line)
+        if name is not None:
+            commit_last[name] = raw_line
+    for name, line in commit_last.items():
+        if parent_last.get(name) != line:
+            changed.add(name)
+    return changed
+
+
+def _tip_extra_can_supersede_modified_salvage(
+    *, parent_blob: str, commit_blob: str, head_blob: str
+) -> bool:
+    """Return True when tip-only lines rebind a name the salvage changed vs parent.
+
+    Baseline-backed retention uses clean ``git merge-file`` equality with HEAD.
+    A tip can keep the salvage hunk and append a later rebinding of the same
+    name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``); with
+    surrounding context merge-file reproduces that tip cleanly, so equality
+    alone would retain stale FIXED evidence. Only names whose last binding line
+    changed vs parent count — unrelated appends and later hunks stay retained
+    (PRRT_kwDOSJAM6s6Zp_3j).
+    """
+    changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
+    if not changed:
+        return False
+    commit_lines = set(commit_blob.splitlines())
+    extra_lines = [line for line in head_blob.splitlines() if line not in commit_lines]
+    if not extra_lines:
+        return False
+    return bool(changed & _binding_names("\n".join(extra_lines) + "\n"))
 
 
 def _suffix_can_supersede_added_salvage(*, salvage: str, suffix: str) -> bool:
@@ -336,7 +387,10 @@ async def _commit_changes_present_in_head(
     (OID differs) while the salvage hunk remains applied; that must still count
     as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs with a baseline is
     checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
-    result equals head. A no-baseline addition (new path) cannot use that
+    result equals head, then rejecting tip-only lines that rebind a name the
+    salvage changed vs parent (appended ``FEATURE_ENABLED = False`` after a
+    False→True salvage; PRRT_kwDOSJAM6s6Zp_3j). A no-baseline addition (new path)
+    cannot use that
     3-way model; retain when the salvage blob remains a line-boundary-aligned
     prefix or suffix of the tip blob so append/prepend keep evidence while
     mid-line modifications, mid-file disabling wrappers (``#if 0`` / comments /
@@ -525,10 +579,20 @@ async def _commit_changes_present_in_head(
                 # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
                 if not merge_result.ok:
                     return False
-                return _merge_file_result_matches_head(
+                if not _merge_file_result_matches_head(
                     head_raw=head_raw,
                     stdout=merge_result.stdout,
                     stdout_bytes=merge_result.stdout_bytes,
+                ):
+                    return False
+                # Clean merge can still keep the salvage hunk while a later tip
+                # appends a rebinding of a salvage-changed name; reject that
+                # supersession (added-file path already does via
+                # ``_suffix_can_supersede_added_salvage``; PRRT_kwDOSJAM6s6Zp_3j).
+                return not _tip_extra_can_supersede_modified_salvage(
+                    parent_blob=parent_raw.decode("utf-8"),
+                    commit_blob=commit_raw.decode("utf-8"),
+                    head_blob=head_raw.decode("utf-8"),
                 )
         except OSError:
             return False

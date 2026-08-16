@@ -86,6 +86,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
     _raw_blob_from_cat_file_result as _raw_blob_from_cat_file_result,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _salvage_changed_binding_names as _salvage_changed_binding_names,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _tip_extra_can_supersede_modified_salvage as _tip_extra_can_supersede_modified_salvage,
+)
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
     _open_merge_candidate_head_sha,
