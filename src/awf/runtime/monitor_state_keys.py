@@ -82,9 +82,22 @@ def _salvaged_fix_head_state_key(item_id: str) -> str:
 
     Pair with ``_salvaged_fix_body_hash_state_key`` so a later no-change FIXED
     cannot reuse salvage created for a prior feedback body after the reviewer
-    edits the thread while ``agent_failed`` skips stale-body cleanup.
+    edits the thread while ``agent_failed`` skips stale-body cleanup. Pair with
+    ``_salvaged_fix_start_state_key`` so descendant reuse verifies the full
+    failed-run ``start..salvage`` delta, not only the tip's first-parent changes.
     """
     return f"__salvaged_fix_head__:{item_id}"
+
+
+def _salvaged_fix_start_state_key(item_id: str) -> str:
+    """Persisted invocation-start SHA bound to a retained salvage tip.
+
+    A failed run may create multiple commits (H1 review fix, H2 unrelated) and
+    retain only the tip. Descendant reuse must diff against this start SHA so a
+    later tip that reverts an earlier salvage commit while preserving the tip's
+    first-parent change cannot confirm FIXED (PRRT_kwDOSJAM6s6ZmG-B).
+    """
+    return f"__salvaged_fix_start__:{item_id}"
 
 
 def _salvaged_fix_body_hash_state_key(item_id: str) -> str:

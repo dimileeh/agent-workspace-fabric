@@ -107,8 +107,9 @@ def _evidence_runner(
         worktree_path: Path,
         commit: str,
         head: str,
+        baseline: str | None = None,
     ) -> bool:
-        del worktree_path, commit, head
+        del worktree_path, commit, head, baseline
         if commit_changes_present is not None:
             return commit_changes_present
         # Default: descendant tips preserve salvage content for legacy stubs.
@@ -459,6 +460,7 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     from awf.runtime.monitor_state_keys import (
         _salvaged_fix_body_hash_state_key,
         _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
     )
 
     start = "a" * 40
@@ -494,6 +496,7 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     assert failed.verdict == "agent_failed"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == start
 
     retry_runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: confirmed salvaged fix",
@@ -520,6 +523,7 @@ async def test_salvaged_dirty_fix_evidence_carries_into_successful_retry(
     assert retry.reason == "confirmed salvaged fix"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -1065,6 +1069,60 @@ async def test_salvaged_fix_evidence_fail_closed_without_content_helper(
     assert retry.reason == "fixed_without_head_advance"
     assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
     assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_fail_closed_without_retained_start(
+    tmp_path: Path,
+) -> None:
+    """Descendant salvage reuse must not confirm when the start SHA is missing.
+
+    Legacy retained tip+body without the failed-run start cannot prove the full
+    multi-commit delta (PRRT_kwDOSJAM6s6ZmG-B).
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_no_start"
+    body_hash = "feedback_body_hash_no_start"
+    workspace_id = "ws_salvage_no_start"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(_salvaged_fix_head_state_key(item_id), salvaged)
+    state.mark_addressed(_salvaged_fix_body_hash_state_key(item_id), body_hash)
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse without start baseline",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_changes_present=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

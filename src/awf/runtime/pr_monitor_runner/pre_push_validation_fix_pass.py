@@ -211,22 +211,27 @@ async def _commit_changes_present_in_head(
     worktree_path: Path,
     commit: str,
     head: str,
+    baseline: str | None = None,
 ) -> bool:
-    """Return True when ``commit``'s first-parent changes still appear in ``head``.
+    """Return True when ``commit``'s changes vs ``baseline`` still appear in ``head``.
 
     Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
     reuse therefore requires either an identical tree at ``head``, or that
-    **every** path changed by ``commit`` vs its first parent still carries the
+    **every** path changed by ``commit`` vs ``baseline`` still carries the
     salvage commit's complete tree entry at ``head`` (mode, type, and object id —
-    not merely a blob OID that differs from the parent). A deleted path is an
-    empty entry: it counts as present only when the parent still had the path and
-    ``head`` remains absent (both-missing bogus lookups fail closed). A
-    third-content overwrite (A→B salvage, later tip to C) must fail closed even
-    though C≠A — otherwise a no-change FIXED retry can reuse stale salvage after
-    B is gone. Mode-only salvage (e.g. chmod +x) that a later tip reverts must
-    likewise fail closed, because Git stores mode separately from the object id.
-    Partial or full reverts and revert-then-unrelated tips fail closed. Root
-    commits and unresolved objects also fail closed.
+    not merely a blob OID that differs from the baseline). ``baseline`` defaults
+    to the tip's first parent; callers that retain a failed-run tip must pass the
+    invocation start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is
+    checked as the full ``start..tip`` delta — otherwise a later tip that reverts
+    H1 while preserving H2 falsely retains evidence (PRRT_kwDOSJAM6s6ZmG-B). A
+    deleted path is an empty entry: it counts as present only when the baseline
+    still had the path and ``head`` remains absent (both-missing bogus lookups
+    fail closed). A third-content overwrite (A→B salvage, later tip to C) must
+    fail closed even though C≠A — otherwise a no-change FIXED retry can reuse
+    stale salvage after B is gone. Mode-only salvage (e.g. chmod +x) that a later
+    tip reverts must likewise fail closed, because Git stores mode separately
+    from the object id. Partial or full reverts and revert-then-unrelated tips
+    fail closed. Root commits and unresolved objects also fail closed.
     """
     git_env = _git_env_for_merge_safety_object_lookup()
 
@@ -275,8 +280,16 @@ async def _commit_changes_present_in_head(
     if commit_tree.lower() == head_tree.lower():
         return True
 
-    parent = await _rev_parse(f"{commit_sha}^")
+    baseline_sha = (baseline or "").strip()
+    if baseline_sha:
+        # Resolve through rev-parse so abbreviated / symbolic baselines compare
+        # as full object ids against commit/head trees.
+        parent = await _rev_parse(baseline_sha)
+    else:
+        parent = await _rev_parse(f"{commit_sha}^")
     if not parent:
+        return False
+    if parent.lower() == commit_sha.lower():
         return False
     parent_tree = await _rev_parse(f"{parent}^{{tree}}")
     if not parent_tree:
@@ -311,9 +324,9 @@ async def _commit_changes_present_in_head(
         return False
 
     for path in paths:
-        # Distinguish deletions with full parent/commit/head entries. Empty
-        # commit+head is retained salvage only when the parent still had a
-        # concrete entry; bogus/C-quoted paths miss parent and commit alike;
+        # Distinguish deletions with full baseline/commit/head entries. Empty
+        # commit+head is retained salvage only when the baseline still had a
+        # concrete entry; bogus/C-quoted paths miss baseline and commit alike;
         # any re-add at head fails closed (PRRT_kwDOSJAM6s6ZmEAd / ZmEG6).
         parent_entry = await _tree_entry_at(parent, path)
         commit_entry = await _tree_entry_at(commit_sha, path)

@@ -1114,3 +1114,83 @@ async def test_commit_changes_present_in_head_fail_closed_on_empty_diff_or_missi
         commit=commit,
         head=head,
     )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_rejects_earlier_multi_commit_revert(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Multi-commit salvage must verify start..tip, not only tip^..tip.
+
+    A failed run that creates H1 (review fix) then H2 (unrelated) retains H2. The
+    first-parent delta is only H1..H2. A later tip that reverts H1 while preserving
+    H2 must fail closed when ``baseline`` is the invocation start SHA
+    (PRRT_kwDOSJAM6s6ZmG-B).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.txt").write_text("base-a\n", encoding="utf-8")
+    (repo / "b.txt").write_text("base-b\n", encoding="utf-8")
+    _git(repo, "add", "a.txt", "b.txt")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.txt").write_text("fix-a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "H1 review fix")
+    h1 = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "b.txt").write_text("unrelated-b\n", encoding="utf-8")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-qm", "H2 unrelated")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Later tip: revert H1's fix, keep H2's unrelated change.
+    (repo / "a.txt").write_text("base-a\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "revert H1 keep H2")
+    later = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Control: later tip that preserves both H1 and H2 deltas.
+    _git(repo, "checkout", "-q", "-B", "both-preserved", salvage)
+    (repo / "c.txt").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-qm", "preserve full start..salvage")
+    preserved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert h1 != salvage
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=salvage,
+        baseline=start,
+    )
+    assert await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=preserved,
+        baseline=start,
+    )
+    # First-parent-only check would still see H2's b.txt and wrongly return True.
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=later,
+        baseline=start,
+    )

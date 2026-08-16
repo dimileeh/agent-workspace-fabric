@@ -74,6 +74,9 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _salvaged_fix_head_state_key as _salvaged_fix_head_state_key,
 )
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_start_state_key as _salvaged_fix_start_state_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckFailureLogResult,
@@ -969,6 +972,7 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
     state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(item_id), None)
     state.threads_addressed_ids.pop(_salvaged_fix_body_hash_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(

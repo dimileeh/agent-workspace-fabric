@@ -19,6 +19,7 @@ from awf.node.git_manager import (
 from awf.runtime.monitor_state_keys import (
     _salvaged_fix_body_hash_state_key,
     _salvaged_fix_head_state_key,
+    _salvaged_fix_start_state_key,
 )
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -424,13 +425,16 @@ async def _invoke_cli_for_verdict_result(
     # salvage while leaving it in history; equality without a matching start
     # would also accept a backward reset that discards that later tip. Bind the
     # feedback body hash so an edited thread cannot reuse salvage created for
-    # prior feedback while agent_failed skips stale cleanup.
+    # prior feedback while agent_failed skips stale cleanup. Bind the invocation
+    # start SHA so descendant reuse verifies the full start..salvage delta when
+    # the failed run created multiple commits (PRRT_kwDOSJAM6s6ZmG-B).
     def _clear_retained_salvage() -> None:
         if state is not None and salvage_item_id is not None:
             state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(salvage_item_id), None)
             state.threads_addressed_ids.pop(
                 _salvaged_fix_body_hash_state_key(salvage_item_id), None
             )
+            state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
 
     if (
         cli_failed
@@ -439,9 +443,11 @@ async def _invoke_cli_for_verdict_result(
         and salvage_body_hash is not None
         and local_head_advanced
         and item_end_head is not None
+        and item_start_head is not None
     ):
         state.mark_addressed(_salvaged_fix_head_state_key(salvage_item_id), item_end_head)
         state.mark_addressed(_salvaged_fix_body_hash_state_key(salvage_item_id), salvage_body_hash)
+        state.mark_addressed(_salvaged_fix_start_state_key(salvage_item_id), item_start_head)
 
     if cli_failed:
         # Provider recovery may raise retry/fallback/auth and skip later parse
@@ -480,6 +486,9 @@ async def _invoke_cli_for_verdict_result(
             state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(salvage_item_id))
             or ""
         ).strip()
+        retained_start = (
+            state.threads_addressed_ids.get(_salvaged_fix_start_state_key(salvage_item_id)) or ""
+        ).strip()
         if retained_head and retained_body and retained_body == salvage_body_hash:
             # Only reuse the salvage tip when this retry also started there;
             # otherwise require end to remain a descendant of both the retry
@@ -490,6 +499,9 @@ async def _invoke_cli_for_verdict_result(
                 retained_salvage_evidence = (
                     item_start_head is not None and item_start_head.lower() == retained_head.lower()
                 )
+            elif not retained_start:
+                # Legacy unbound start — cannot verify the full failed-run delta.
+                _clear_retained_salvage()
             else:
                 # Equality alone accepts H2→H1 resets that discard another item's
                 # tip after item-start ancestry already rejected the backward move.
@@ -523,13 +535,14 @@ async def _invoke_cli_for_verdict_result(
                         worktree_path=worktree_path,
                         commit=retained_head,
                         head=item_end_head,
+                        baseline=retained_start,
                     )
                 )
                 if ancestry_ok and callable(changes_present) and not content_ok:
                     # Later commits undid the salvage; drop so it cannot linger.
                     _clear_retained_salvage()
                 retained_salvage_evidence = content_ok
-        elif retained_head or retained_body:
+        elif retained_head or retained_body or retained_start:
             # Feedback moved on or legacy unbound salvage — drop so it cannot linger.
             _clear_retained_salvage()
     item_fix_evidence = item_fix_evidence or retained_salvage_evidence
