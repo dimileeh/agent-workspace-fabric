@@ -646,10 +646,10 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             external_id: str,
         ) -> bool:
             probe_calls["n"] += 1
-            # First supersession attempt probes preferred twice (workspace + task).
+            # Shared workspace+task allocation probes preferred once per attempt.
             # Lie "free" so both assign nonce 0; flush hits uq_tasks_external_id
             # and the savepoint retry must allocate the salted alternate.
-            if probe_calls["n"] <= 2 and external_id == preferred_superseded:
+            if probe_calls["n"] == 1 and external_id == preferred_superseded:
                 return False
             return await original_occupied(session, external_id)
 
@@ -693,6 +693,82 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert fresh_workspace.task_external_id == explicit_id
             assert fresh_task.external_id == explicit_id
             assert probe_calls["n"] >= 2
+
+    @pytest.mark.unit
+    async def test_supersede_keeps_matching_external_ids_across_occupancy_flip(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Matching prior IDs must share one superseded slot despite mid-probe churn.
+
+        Dual occupancy probes can see preferred free then occupied between the
+        workspace and task awaits. Workspace.task_external_id is not under
+        uq_tasks_external_id, so flush would succeed with divergent terminal IDs
+        unless allocation is shared when the previous values match.
+        """
+        explicit_id = "CLOUD-TASK-DUAL-RELEASE"
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                )
+            )
+            preferred_superseded = adoption_module._superseded_adoption_external_id(
+                external_id=explicit_id,
+                workspace_id=first.workspace_id,
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        preferred_probe_count = {"n": 0}
+        original_occupied = adoption_module._task_external_id_occupied
+
+        async def flip_preferred_after_first_probe(
+            session: AsyncSession,
+            external_id: str,
+        ) -> bool:
+            if external_id == preferred_superseded:
+                preferred_probe_count["n"] += 1
+                # First look: free. Later looks: occupied (concurrent claim).
+                return preferred_probe_count["n"] > 1
+            return await original_occupied(session, external_id)
+
+        monkeypatch.setattr(
+            adoption_module,
+            "_task_external_id_occupied",
+            flip_preferred_after_first_probe,
+        )
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        async with factory() as session:
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert old_workspace.task_external_id == preferred_superseded
+            assert old_task.external_id == preferred_superseded
+            assert preferred_probe_count["n"] == 1
 
     @pytest.mark.unit
     def test_superseded_external_id_stays_within_column_bounds(self) -> None:

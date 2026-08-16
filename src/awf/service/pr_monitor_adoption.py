@@ -277,17 +277,33 @@ class PullRequestMonitorAdoptionService:
                 # way TaskRepository.create_or_get does, without poisoning the
                 # outer adoption savepoint / advisory-lock transaction.
                 async with self._session.begin_nested():
-                    workspace.task_external_id = await _release_superseded_adoption_external_id(
-                        self._session,
-                        previous_workspace_external_id,
-                        workspace_id=workspace.id,
-                    )
-                    if owned_task is not None:
-                        owned_task.external_id = await _release_superseded_adoption_external_id(
+                    # Matching prior IDs must share one allocation. Separate
+                    # occupancy probes can see preferred free then occupied
+                    # between awaits; workspace.task_external_id is not under
+                    # uq_tasks_external_id, so flush would keep divergent slots.
+                    if (
+                        owned_task is not None
+                        and previous_task_external_id == previous_workspace_external_id
+                    ):
+                        released_external_id = await _release_superseded_adoption_external_id(
                             self._session,
-                            previous_task_external_id,
+                            previous_workspace_external_id,
                             workspace_id=workspace.id,
                         )
+                        workspace.task_external_id = released_external_id
+                        owned_task.external_id = released_external_id
+                    else:
+                        workspace.task_external_id = await _release_superseded_adoption_external_id(
+                            self._session,
+                            previous_workspace_external_id,
+                            workspace_id=workspace.id,
+                        )
+                        if owned_task is not None:
+                            owned_task.external_id = await _release_superseded_adoption_external_id(
+                                self._session,
+                                previous_task_external_id,
+                                workspace_id=workspace.id,
+                            )
                     await WorkspaceRepository(self._session).advance_workspace_version(workspace)
                     await self._session.flush()
                 break
