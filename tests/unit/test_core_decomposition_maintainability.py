@@ -54,6 +54,11 @@ BARREL_MODULES = {
     Path("src/awf/runtime/pr_monitor_runner/shared.py"),
     Path("src/awf/control/worker/shared.py"),
 }
+COLLECTION_SHIMS = {
+    Path("tests/unit/api/routes/test_health.py"),
+    Path("tests/unit/control/worker/test_worker_coverage_edges_part_001.py"),
+    Path("tests/unit/control/worker/test_worker_coverage_edges_part_002.py"),
+}
 ORCHESTRATOR_FILES = {
     Path("src/awf/control/executor/base.py"): {
         "ExecutorConfig",
@@ -124,6 +129,29 @@ def test_first_party_python_has_no_hydration_or_file_level_suppressions() -> Non
             offenders[path.as_posix()] = matches
 
     assert offenders == {}
+
+
+def test_wildcard_collection_shims_are_not_default_collectable() -> None:
+    offenders: list[str] = []
+    for path in COLLECTION_SHIMS:
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        has_wildcard_import = any(
+            isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
+            for node in module.body
+        )
+        has_non_collectable_marker = any(
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__test__" for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is False
+            for node in module.body
+        )
+        if has_wildcard_import and not has_non_collectable_marker:
+            offenders.append(path.as_posix())
+
+    assert offenders == []
 
 
 def test_public_facades_export_only_explicit_compatibility_names() -> None:
