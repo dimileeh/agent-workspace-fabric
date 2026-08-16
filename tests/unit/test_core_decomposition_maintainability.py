@@ -6,6 +6,8 @@ import ast
 import re
 from pathlib import Path
 
+import tests.conftest as root_conftest
+
 FIRST_PARTY_ROOTS = (
     Path("src"),
     Path("tests"),
@@ -76,6 +78,12 @@ ORCHESTRATOR_FILES = {
 }
 
 
+class _FakePytestConfig:
+    def __init__(self, rootpath: Path, args: list[str]) -> None:
+        self.rootpath = rootpath
+        self.args = args
+
+
 def _first_party_code_files() -> list[Path]:
     files: list[Path] = []
     for root in FIRST_PARTY_ROOTS:
@@ -132,26 +140,35 @@ def test_first_party_python_has_no_hydration_or_file_level_suppressions() -> Non
 
 
 def test_wildcard_collection_shims_are_not_default_collectable() -> None:
-    offenders: list[str] = []
+    assert root_conftest._COMPATIBILITY_SHIM_TEST_PATHS == COLLECTION_SHIMS
+
+    rootpath = Path.cwd()
+    offenders: dict[str, list[str]] = {}
     for path in COLLECTION_SHIMS:
         module = ast.parse(path.read_text(encoding="utf-8"))
         has_wildcard_import = any(
             isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
             for node in module.body
         )
-        has_non_collectable_marker = any(
-            isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "__test__" for target in node.targets
-            )
-            and isinstance(node.value, ast.Constant)
-            and node.value.value is False
-            for node in module.body
+        default_discovery_ignore = root_conftest.pytest_ignore_collect(
+            path,
+            _FakePytestConfig(rootpath, ["tests"]),
         )
-        if has_wildcard_import and not has_non_collectable_marker:
-            offenders.append(path.as_posix())
+        explicit_target_ignore = root_conftest.pytest_ignore_collect(
+            path,
+            _FakePytestConfig(rootpath, [path.as_posix()]),
+        )
+        matches: list[str] = []
+        if not has_wildcard_import:
+            matches.append("missing wildcard import")
+        if default_discovery_ignore is not True:
+            matches.append("not ignored during default discovery")
+        if explicit_target_ignore is not None:
+            matches.append("ignored when explicitly targeted")
+        if matches:
+            offenders[path.as_posix()] = matches
 
-    assert offenders == []
+    assert offenders == {}
 
 
 def test_public_facades_export_only_explicit_compatibility_names() -> None:
