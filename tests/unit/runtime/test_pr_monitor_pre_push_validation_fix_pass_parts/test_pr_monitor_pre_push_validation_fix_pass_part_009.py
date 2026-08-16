@@ -1085,3 +1085,68 @@ async def test_commit_changes_present_in_head_rejects_earlier_multi_commit_rever
         head=later,
         baseline=start,
     )
+
+
+@pytest.mark.unit
+async def test_commit_changes_present_in_head_fail_closed_on_salvage_merge_tmpdir(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merge-file retention must fail closed when temp-dir creation raises OSError.
+
+    ``_salvage_entry_retained`` writes parent/ours/theirs blobs into a temporary
+    directory for ``git merge-file``. Creation or write failures must return
+    False rather than escaping ``_commit_changes_present_in_head`` and crashing
+    FIXED evidence checking (PRRT_kwDOSJAM6s6ZoX2i).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-middle\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "base multi-line")
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-salvaged\nline4\nline5-other\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "salvage middle hunk")
+    salvage = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "a.py").write_text(
+        "line1\nline2\nline3-salvaged\nline4\nline5-later\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-qm", "later tip different hunk")
+    later_hunk = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    class _TemporaryDirectoryFailure:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise OSError("temporary directory unavailable")
+
+    monkeypatch.setattr(fix_pass.tempfile, "TemporaryDirectory", _TemporaryDirectoryFailure)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    # Without the OSError guard this raises and crashes FIXED evidence checking.
+    assert not await pre_push_validation._commit_changes_present_in_head(
+        runner,
+        worktree_path=repo,
+        commit=salvage,
+        head=later_hunk,
+    )

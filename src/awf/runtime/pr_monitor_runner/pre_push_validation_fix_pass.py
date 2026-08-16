@@ -394,33 +394,43 @@ async def _commit_changes_present_in_head(
         if any(_bytes_unsafe_for_text_merge(raw) for raw in (parent_raw, head_raw, commit_raw)):
             return False
 
-        with tempfile.TemporaryDirectory(prefix="awf-salvage-merge-", dir="/tmp") as tmp:
-            tmp_dir = Path(tmp)
-            base_path = tmp_dir / "base"
-            ours_path = tmp_dir / "ours"
-            theirs_path = tmp_dir / "theirs"
-            base_path.write_bytes(parent_raw)
-            ours_path.write_bytes(head_raw)
-            theirs_path.write_bytes(commit_raw)
-            merge_result = await self._deps.runner.run(
-                git_worktree_command(
-                    worktree_path,
-                    "merge-file",
-                    "-p",
-                    str(ours_path),
-                    str(base_path),
-                    str(theirs_path),
-                ),
-                env=git_env,
-            )
-            # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
-            if not merge_result.ok:
-                return False
-            return _merge_file_result_matches_head(
-                head_raw=head_raw,
-                stdout=merge_result.stdout,
-                stdout_bytes=merge_result.stdout_bytes,
-            )
+        # Honor TMPDIR (do not hardcode /tmp). Creation/write I/O must fail
+        # closed as False so FIXED evidence checking cannot crash the fix cycle
+        # (PRRT_kwDOSJAM6s6ZoX2i). ignore_cleanup_errors keeps a successful
+        # retention result from being rewritten by cleanup-only OSError.
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="awf-salvage-merge-",
+                ignore_cleanup_errors=True,
+            ) as tmp:
+                tmp_dir = Path(tmp)
+                base_path = tmp_dir / "base"
+                ours_path = tmp_dir / "ours"
+                theirs_path = tmp_dir / "theirs"
+                base_path.write_bytes(parent_raw)
+                ours_path.write_bytes(head_raw)
+                theirs_path.write_bytes(commit_raw)
+                merge_result = await self._deps.runner.run(
+                    git_worktree_command(
+                        worktree_path,
+                        "merge-file",
+                        "-p",
+                        str(ours_path),
+                        str(base_path),
+                        str(theirs_path),
+                    ),
+                    env=git_env,
+                )
+                # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
+                if not merge_result.ok:
+                    return False
+                return _merge_file_result_matches_head(
+                    head_raw=head_raw,
+                    stdout=merge_result.stdout,
+                    stdout_bytes=merge_result.stdout_bytes,
+                )
+        except OSError:
+            return False
 
     commit_sha = commit.strip()
     head_sha = head.strip()
