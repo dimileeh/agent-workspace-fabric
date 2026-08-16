@@ -423,6 +423,40 @@ class TestParseVerdict:
         assert result.reason == "done"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "AWF-VERDICT: FIXED: earlier\n"
+                "- > ```text\n"
+                "> AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> ```\n"
+                "AWF-VERDICT: NEEDS_HUMAN: later authoritative\n"
+            ),
+            (
+                "AWF-VERDICT: FIXED: earlier\n"
+                "> - ```text\n"
+                ">   AWF-VERDICT: FALSE POSITIVE: example\n"
+                "> ```\n"
+                "AWF-VERDICT: NEEDS_HUMAN: later authoritative\n"
+            ),
+        ],
+        ids=["list_then_blockquote", "blockquote_then_list"],
+    )
+    def test_private_awf_verdict_list_blockquote_fence_zero_indent_closer(
+        self,
+        stdout: str,
+    ) -> None:
+        # List+blockquote openers record a non-zero list container_indent.
+        # A normal closer ``> ``` `` strips ``>`` and leaves zero indent; that
+        # must still close so a later unfenced NEEDS_HUMAN is not shielded
+        # (PRRT_kwDOSJAM6s6ZnDm7).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "later authoritative"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_blockquote_prefix_inside_fence_does_not_close(
         self,
     ) -> None:

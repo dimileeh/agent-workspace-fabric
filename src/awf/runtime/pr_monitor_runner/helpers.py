@@ -393,6 +393,9 @@ def _markdown_fence_closes(
     (container_indent 0) that looks like a fence must stay inside the open
     region. Blockquote-opened fences strip a matching ``>`` container before
     the indent check; top-level fences must not peel ``>`` (PRRT_kwDOSJAM6s6ZnAyG).
+    After that strip, allow indent ``0 .. container_indent+3`` so a normal
+    ``> ``` `` closer still matches list+blockquote openers whose list width
+    was recorded as ``container_indent`` (PRRT_kwDOSJAM6s6ZnDm7).
     """
     # List-nested closers (``    ``` `` under ``10. ```text``) need the
     # container indent; absolute 0–3 alone never closes them
@@ -404,7 +407,12 @@ def _markdown_fence_closes(
         if bq is None:
             return False
         candidate = line[bq.end() :]
-    min_indent = container_indent
+        # ``>`` peel removes the column occupied by list markers that sat
+        # inside/after the quote (``- > ``` `` / ``> - ``` ``). Requiring
+        # ``container_indent`` spaces on the residual would reject ``> ``` ``.
+        min_indent = 0
+    else:
+        min_indent = container_indent
     max_indent = container_indent + 3
     return (
         re.match(
