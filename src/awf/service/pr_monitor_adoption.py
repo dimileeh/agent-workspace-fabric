@@ -1139,7 +1139,8 @@ def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> 
     The naive ``{id}:superseded:{workspace_id}`` form is preferred for short IDs.
     Explicit IDs may be up to 128 characters; appending the marker and workspace
     id then overflows ``String(128)``, so long IDs use a digest prefix that still
-    contains ``:superseded:`` for detection and remains unique per pair.
+    ends with ``:superseded:{workspace_id}`` (or a digest of it) for detection
+    and remains unique per pair.
     """
     candidate = f"{external_id}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
     if len(candidate) <= _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
@@ -1154,8 +1155,18 @@ def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> 
     return f"{digest[:40]}{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}"
 
 
-def _is_superseded_adoption_external_id(external_id: str) -> bool:
-    return _SUPERSEDED_EXTERNAL_ID_MARKER in external_id
+def _is_superseded_adoption_external_id(external_id: str, *, workspace_id: str) -> bool:
+    """True when *external_id* is the supersession slot encoded for *workspace_id*.
+
+    Caller-controlled IDs may embed the ``:superseded:`` substring. Only IDs that
+    match this workspace's encoding are treated as already released, so a later
+    re-adoption can free the original slot instead of hitting TASK_EXTERNAL_ID_CONFLICT.
+    """
+    suffix = f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_id}"
+    if len(suffix) < _ADOPTION_EXTERNAL_ID_MAX_LENGTH:
+        return external_id.endswith(suffix)
+    workspace_digest = hashlib.sha256(workspace_id.encode()).hexdigest()
+    return external_id.endswith(f"{_SUPERSEDED_EXTERNAL_ID_MARKER}{workspace_digest[:40]}")
 
 
 def _release_superseded_adoption_external_id(
@@ -1165,10 +1176,13 @@ def _release_superseded_adoption_external_id(
 ) -> str | None:
     """Rewrite an active adoption external ID into a superseded slot.
 
-    Already-superseded values (and ``None``) are left unchanged so a second
-    supersession pass does not nest ``:superseded:`` markers.
+    Values already encoded for *workspace_id* (and ``None``) are left unchanged
+    so a second supersession pass does not nest ``:superseded:`` markers.
     """
-    if external_id is None or _is_superseded_adoption_external_id(external_id):
+    if external_id is None or _is_superseded_adoption_external_id(
+        external_id,
+        workspace_id=workspace_id,
+    ):
         return external_id
     return _superseded_adoption_external_id(
         external_id=external_id,

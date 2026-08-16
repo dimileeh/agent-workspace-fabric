@@ -215,10 +215,6 @@ class TestPullRequestMonitorAdoptionServicePart003:
             repo_slug="dimileeh/aira-web",
             pr_number=277,
         )
-        already_superseded_external_id = adoption_module._superseded_adoption_external_id(
-            external_id=adoption_external_id,
-            workspace_id="prior-generation",
-        )
         task_generation_key = f"{logical_key}:g1"
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(
@@ -233,6 +229,10 @@ class TestPullRequestMonitorAdoptionServicePart003:
             assert result.task_id is not None
             task = await TaskRepository(session).get(result.task_id)
             assert task is not None
+            already_superseded_external_id = adoption_module._superseded_adoption_external_id(
+                external_id=adoption_external_id,
+                workspace_id=workspace.id,
+            )
             workspace.status = WorkspaceStatus.destroyed.value
             workspace.task_external_id = already_superseded_external_id
             task.idempotency_key = task_generation_key

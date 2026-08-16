@@ -256,6 +256,69 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             assert await _count(session, Task) == 2
 
     @pytest.mark.unit
+    async def test_terminal_readoption_releases_explicit_id_containing_superseded_marker(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Caller IDs may embed ``:superseded:``; supersession must still free the slot.
+
+        Substring detection would leave the terminal task holding the requested ID,
+        so a later re-adoption with a changed PR title raises TASK_EXTERNAL_ID_CONFLICT.
+        """
+        explicit_id = "LEGACY:superseded:TICKET-9"
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: first")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                    task_class=TaskClass.test_task,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            second = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: second")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    external_id=explicit_id,
+                    task_class=TaskClass.test_task,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        async with factory() as session:
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            fresh_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            fresh_task = await session.get(Task, second.task_id)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert fresh_workspace is not None
+            assert fresh_task is not None
+            expected_superseded = adoption_module._superseded_adoption_external_id(
+                external_id=explicit_id,
+                workspace_id=first.workspace_id,
+            )
+            assert old_workspace.task_external_id == expected_superseded
+            assert old_task.external_id == expected_superseded
+            assert fresh_workspace.task_external_id == explicit_id
+            assert fresh_task.external_id == explicit_id
+            assert await _count(session, Task) == 2
+
+    @pytest.mark.unit
     async def test_terminal_readoption_with_changed_identity_releases_prior_external_id(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -466,7 +529,10 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             workspace_id=workspace_id,
         )
         assert len(superseded) <= 128
-        assert adoption_module._is_superseded_adoption_external_id(superseded)
+        assert adoption_module._is_superseded_adoption_external_id(
+            superseded,
+            workspace_id=workspace_id,
+        )
         assert superseded != long_id
         other = adoption_module._superseded_adoption_external_id(
             external_id="F" * 90,
@@ -482,7 +548,15 @@ class TestPullRequestMonitorAdoptionExternalIdTaskClass:
             workspace_id=huge_workspace_id,
         )
         assert len(pathological) <= 128
-        assert adoption_module._is_superseded_adoption_external_id(pathological)
+        assert adoption_module._is_superseded_adoption_external_id(
+            pathological,
+            workspace_id=huge_workspace_id,
+        )
+        # Caller-controlled IDs that merely embed the marker are not "already released".
+        assert not adoption_module._is_superseded_adoption_external_id(
+            "LEGACY:superseded:TICKET-9",
+            workspace_id=workspace_id,
+        )
 
     @pytest.mark.unit
     async def test_terminal_readoption_bounds_long_explicit_external_id(
