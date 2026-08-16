@@ -1012,6 +1012,14 @@ def _raise_if_existing_workspace_is_not_requested_adoption(
     ):
         return
 
+    # History matching requires structured pr_adoption identity, so legacy rows
+    # with None / non-object task_policy fall through to this idempotency-key
+    # path. The canonical key already encodes repo+PR; accept when the row is
+    # still an adoption task kind so replay can treat missing agent policy as
+    # empty instead of spuriously conflicting on identity.
+    if not adoption and workspace.task_kind == PR_ADOPTION_TASK_KIND:
+        return
+
     raise PRMonitorAdoptionError(
         error_code="PR_ADOPTION_POLICY_CONFLICT",
         message=(
