@@ -238,8 +238,9 @@ _VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
 # ``__<…>__``, and single ``*<…>*`` / ``_<…>_``). Same peel loop as ticks/quotes
 # so template-placeholder echoes still fail closed (PRRT_kwDOSJAM6s6ZoAz9).
 # Strong is always peeled; single emphasis is peeled only when the enclosed
-# value is placeholder-shaped so snake_case / ``_name_`` identifiers stay
-# intact (PRRT_kwDOSJAM6s6ZoDQU). Whole-reason Python dunders (``__init__``,
+# value is placeholder-shaped (whole-reason or absorbed same-line citation)
+# so snake_case / ``_name_`` identifiers stay intact (PRRT_kwDOSJAM6s6ZoDQU,
+# PRRT_kwDOSJAM6s6ZoGYD). Whole-reason Python dunders (``__init__``,
 # ``__name__``) also match ``__…__``; those are skipped in the peel loop
 # (PRRT_kwDOSJAM6s6ZoC7B). Strong alts must precede single-emphasis alts.
 _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
@@ -1018,16 +1019,20 @@ _RESOLVABLE_PLACEHOLDER_LABELS = {
 }
 
 
-def _verdict_reason_is_template_placeholder(reason: str) -> bool:
-    """Return whether ``reason`` is a prompt-template placeholder echo.
+def _normalized_verdict_reason_is_template_placeholder(cleaned: str) -> bool:
+    """Return whether an already-normalized reason is a template-placeholder echo.
 
     Whole-reason matches cover the common case. Same-line absorption can also
     fold later ``AWF-VERDICT`` citations into a leading placeholder prefix; that
-    must still fail closed even though the absorbed markers prevent a
-    whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-shaped tags
-    that continue with real prose (no absorbed marker) stay usable.
+    must still count as placeholder-shaped even though the absorbed markers
+    prevent a whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-
+    shaped tags that continue with real prose (no absorbed marker) stay usable.
+
+    Callers must pass text that has already been through
+    ``_normalize_verdict_reason_inline_formatting`` (or an equivalent peel) so
+    the single-emphasis peel gate can reuse this without re-entering normalize
+    (PRRT_kwDOSJAM6s6ZoGYD).
     """
-    cleaned = _normalize_verdict_reason_inline_formatting(reason.strip())
     if not cleaned:
         return False
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
@@ -1037,6 +1042,12 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
         return False
     prefix = _normalize_verdict_reason_inline_formatting(cleaned[: marker.start()])
     return bool(prefix) and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(prefix) is not None
+
+
+def _verdict_reason_is_template_placeholder(reason: str) -> bool:
+    """Return whether ``reason`` is a prompt-template placeholder echo."""
+    cleaned = _normalize_verdict_reason_inline_formatting(reason.strip())
+    return _normalized_verdict_reason_is_template_placeholder(cleaned)
 
 
 def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
@@ -1068,13 +1079,14 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
                 break
             inner = next(g for g in emphasis_match.groups() if g is not None).strip()
             # Single emphasis: peel only when the enclosed value is
-            # placeholder-shaped (after nested tick/quote/strong unwrap).
+            # placeholder-shaped — whole-reason or absorbed same-line citation
+            # (PRRT_kwDOSJAM6s6ZoDQU, PRRT_kwDOSJAM6s6ZoGYD).
             if (
                 emphasis_match.group("em_star") is not None
                 or emphasis_match.group("em_under") is not None
             ):
                 normalized_inner = _normalize_verdict_reason_inline_formatting(inner)
-                if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(normalized_inner) is None:
+                if not _normalized_verdict_reason_is_template_placeholder(normalized_inner):
                     break
                 cleaned = normalized_inner
                 continue

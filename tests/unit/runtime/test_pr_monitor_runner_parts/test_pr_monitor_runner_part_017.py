@@ -1641,6 +1641,26 @@ class TestParseVerdict:
                 "AWF-VERDICT: DEFER: <what to track> AWF-VERDICT: FALSE POSITIVE: cite",
                 "verdict_placeholder_echo",
             ),
+            # Single-emphasis peel must use absorbed-placeholder detection, not
+            # only the whole-reason regex (#822 PRRT_kwDOSJAM6s6ZoGYD).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: *<one-sentence justification> "
+                "AWF-VERDICT: FIXED: cited*",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: _<one-sentence justification> "
+                "AWF-VERDICT: DEFER: track later_",
+                "verdict_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: FIXED: *<one-sentence summary> AWF-VERDICT: FALSE POSITIVE: cite*",
+                "fixed_placeholder_echo",
+            ),
+            (
+                "AWF-VERDICT: DEFER: _<what to track> AWF-VERDICT: FALSE POSITIVE: cite_",
+                "verdict_placeholder_echo",
+            ),
         ],
     )
     def test_private_awf_placeholder_with_absorbed_same_line_citation_fail_closed(
@@ -1651,6 +1671,8 @@ class TestParseVerdict:
         # Same-line absorption must not let a template-placeholder prefix evade
         # the whole-reason placeholder check by folding later FIXED/DEFER/
         # FALSE POSITIVE citations into the reason (#822 PRRT_kwDOSJAM6s6Znin1).
+        # Emphasis wrappers around the absorbed form must still peel and fail
+        # closed (PRRT_kwDOSJAM6s6ZoGYD).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
