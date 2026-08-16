@@ -712,3 +712,48 @@ def test_prune_and_migrate_retired_agent_promotes_fallback() -> None:
         None,
         {"agent": "opencode", "model": "opencode-1"},
     ]
+
+
+def test_prune_and_migrate_retired_agent_respects_consumed_fallback_attempt_number() -> None:
+    policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "codex", "model": "gpt-5.5"},
+                {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+            ]
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 1,
+            "launched_fallback_attempts": 1,
+        },
+    }
+    pruned, target_agent = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    assert target_agent == "claude_code"
+    assert pruned["agent_model"] == "claude-3-7-sonnet"
+    assert pruned["provider_recovery"]["fallbacks"] == [
+        {"agent": "codex", "model": "gpt-5.5"},
+        None,
+    ]
+
+
+def test_prune_and_migrate_retired_agent_respects_max_fallback_attempts_exhaustion() -> None:
+    policy = {
+        "provider_recovery": {
+            "max_fallback_attempts": 0,
+            "fallbacks": [
+                {"agent": "codex", "model": "gpt-5.5"},
+                {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 0,
+            "launched_fallback_attempts": 0,
+        },
+    }
+    pruned, target_agent = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    assert target_agent == "gemini"
+    assert "agent_model" not in pruned
+    assert pruned["provider_recovery"]["fallbacks"] == [
+        {"agent": "codex", "model": "gpt-5.5"},
+        {"agent": "claude_code", "model": "claude-3-7-sonnet"},
+    ]

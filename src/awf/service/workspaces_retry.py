@@ -646,9 +646,10 @@ def _prune_and_migrate_retired_agent(
     and promote a launchable fallback if current_agent is retired.
 
     Replacing retired slots with None placeholders preserves fallback attempt indexes.
-    If current_agent is retired/unlaunchable and a launchable fallback exists,
-    promotes the first launchable fallback as the new primary agent, updates agent_model,
-    and sets its slot in fallbacks to None.
+    If current_agent is retired/unlaunchable and a remaining approved launchable
+    fallback exists (respecting provider_recovery_state and max_fallback_attempts),
+    promotes that fallback as the new primary agent, updates agent_model, and sets
+    its slot in fallbacks to None.
     """
     recovery = policy.get("provider_recovery")
     if not isinstance(recovery, Mapping):
@@ -663,20 +664,29 @@ def _prune_and_migrate_retired_agent(
     promoted_index: int | None = None
     target_agent = current_agent
 
+    if not is_primary_launchable:
+        from awf.service.provider_recovery import (
+            _select_fallback_target_with_index,
+            parse_provider_recovery_policy,
+            parse_provider_recovery_state,
+        )
+
+        rec_policy = parse_provider_recovery_policy(policy)
+        rec_state = parse_provider_recovery_state(policy)
+        fallback_target, target_index = _select_fallback_target_with_index(rec_policy, rec_state)
+        if fallback_target is not None:
+            promoted_index = target_index
+            target_agent = fallback_target.agent
+            policy["agent_model"] = fallback_target.model
+
     pruned: list[Any] = []
     for idx, item in enumerate(raw_fallbacks):
-        if isinstance(item, Mapping):
+        if idx == promoted_index:
+            pruned.append(None)
+        elif isinstance(item, Mapping):
             fb_agent = item.get("agent")
             if fb_agent is not None and is_launchable_agent(fb_agent):
-                if not is_primary_launchable and promoted_index is None:
-                    promoted_index = idx
-                    target_agent = getattr(fb_agent, "value", str(fb_agent))
-                    fb_model = item.get("model")
-                    if fb_model and isinstance(fb_model, str):
-                        policy["agent_model"] = fb_model
-                    pruned.append(None)
-                else:
-                    pruned.append(item)
+                pruned.append(item)
             else:
                 pruned.append(None)
         else:
