@@ -130,6 +130,8 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     )
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    # Per-item start-head object probe (fail-closed path; PRRT_kwDOSJAM6s6ZoHvG).
+    cmd.queue_result(returncode=0)
     # Start-head object existence may or may not probe via FakeCommandRunner
     # (empty-queue default is ok=True). Do not queue a blank result here — it
     # would be consumed by the settle GraphQL poll and break JSON parsing.
@@ -146,9 +148,14 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
     async def _commit_dirty(**_kwargs: object) -> bool:
         return True
 
+    rev_parse_calls = {"n": 0}
+
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
-        # Keep per-item ancestry unevaluable so the dirty-commit stub is the
-        # item-scoped FIXED evidence (empty mkdir is not a real git worktree).
+        # First call satisfies the per-item start-head probe; later calls return
+        # None so ancestry stays unevaluable and dirty-commit is FIXED evidence.
+        rev_parse_calls["n"] += 1
+        if rev_parse_calls["n"] == 1:
+            return "abc1234567890def"
         return None
 
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)

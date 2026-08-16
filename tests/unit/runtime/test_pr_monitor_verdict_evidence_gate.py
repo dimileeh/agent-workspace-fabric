@@ -3568,7 +3568,8 @@ async def test_fix_cycle_two_item_burst_only_evidenced_fixed_resolves(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    # No worktree: per-item HEAD probing falls back to the cycle-start SHA so
+    # this burst regression stays focused on resolve gating (PRRT_kwDOSJAM6s6ZoHvG).
 
     async def _address_thread(**kwargs: object) -> str:
         thread = kwargs["thread"]
