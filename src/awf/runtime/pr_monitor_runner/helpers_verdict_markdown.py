@@ -53,6 +53,7 @@ __all__ = (
     "_html_type7_block_opens",
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
+    "_markdown_is_indented_code_line",
     "_iter_non_fenced_verdict_lines",
 )
 
@@ -131,7 +132,8 @@ _MARKDOWN_FENCE_OPEN = re.compile(
 # CommonMark indented code: four spaces of indent, treating tabs as stops of
 # four columns — so a leading tab or 1–3 spaces plus a tab also qualifies.
 # Unconditional ``str.strip`` would promote example markers inside these
-# regions to authoritative finals.
+# regions to authoritative finals. Blockquote-nested indented code is detected
+# by ``_markdown_is_indented_code_line`` (peel ``>`` first; PRRT_kwDOSJAM6s6Zoxg4).
 _MARKDOWN_INDENTED_CODE_LINE = re.compile(r"^(?: {4,}| {0,3}\t)")
 # Raw Markdown HTML code regions. Agents quote example verdicts inside these;
 # they are not fenced or indented code, so the line iterator must track them
@@ -505,6 +507,42 @@ def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0)
     return _HTML_BLANK_LINE.match(rest) is not None
 
 
+def _markdown_is_indented_code_line(line: str) -> bool:
+    """Return whether ``line`` is CommonMark indented code (incl. in blockquotes).
+
+    Top-level indented code matches ``_MARKDOWN_INDENTED_CODE_LINE`` directly.
+    Blockquote-nested examples such as ``>     AWF-VERDICT: …`` begin with
+    ``>``, so the raw-line regex misses them; peel each ``>`` container marker
+    (plus at most one following space/tab, and optional 0–3 spaces before the
+    next nested ``>``) before re-testing. Do not use greedy ``(?:>\\s*)+``
+    stripping — that would consume the four-column code indent itself and let
+    attempt detection treat the example as a garbled final
+    (PRRT_kwDOSJAM6s6Zoxg4).
+    """
+    if _MARKDOWN_INDENTED_CODE_LINE.match(line):
+        return True
+    rest = line
+    lead = re.match(r"^ {0,3}", rest)
+    if lead is None:  # pragma: no cover - `` {0,3}`` always matches
+        return False
+    rest = rest[lead.end() :]
+    peeled = False
+    while True:
+        bq = re.match(r"^>[ \t]?", rest)
+        if bq is None:
+            break
+        rest = rest[bq.end() :]
+        peeled = True
+        nest_lead = re.match(r"^ {0,3}", rest)
+        if nest_lead is None:  # pragma: no cover - `` {0,3}`` always matches
+            break
+        if rest[nest_lead.end() :].startswith(">"):
+            rest = rest[nest_lead.end() :]
+            continue
+        break
+    return peeled and _MARKDOWN_INDENTED_CODE_LINE.match(rest) is not None
+
+
 def _markdown_fence_closes(
     line: str,
     *,
@@ -583,7 +621,9 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     Skips multiline fenced blocks (including list- and blockquote-nested
     openers after normalizing container prefixes), CommonMark indented-code
     lines (four spaces of indent, including a leading tab or 1–3 spaces plus a
-    tab), raw HTML type-1 / example code blocks (``pre`` / ``code`` /
+    tab, and the same indent after peeling blockquote containers so
+    ``>     example`` stays shielded — PRRT_kwDOSJAM6s6Zoxg4), raw HTML
+    type-1 / example code blocks (``pre`` / ``code`` /
     ``script`` / ``style`` / ``textarea``, including list- and
     blockquote-nested openers), HTML comment blocks (``<!-- … -->``,
     including nested openers), CommonMark type-3–5 raw HTML blocks
@@ -649,7 +689,7 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
                 html_blank_terminated = False
                 html_blank_terminated_blockquote_depth = 0
             continue
-        if _MARKDOWN_INDENTED_CODE_LINE.match(line):
+        if _markdown_is_indented_code_line(line):
             continue
         if _html_comment_opens(line):
             # Same-line ``<!-- … -->`` is an example wrapper — skip it.

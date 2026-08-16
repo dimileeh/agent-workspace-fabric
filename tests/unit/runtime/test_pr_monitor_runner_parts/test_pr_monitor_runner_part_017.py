@@ -1144,6 +1144,52 @@ class TestParseVerdict:
         assert result.reason == "committed the indent skip"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_blockquote_indented_code_example(self) -> None:
+        # Four-column indented code inside a blockquote starts with ``>``, so a
+        # raw-line indent check misses it; attempt detection then peels the
+        # quote and treats the example as a garbled final (PRRT_kwDOSJAM6s6Zoxg4).
+        stdout = (
+            "AWF-VERDICT: FIXED: committed the quote-indent skip\n"
+            ">     AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "committed the quote-indent skip"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "quoted_indent",
+        [
+            ">     ",
+            ">>     ",
+            "> >     ",
+            "> \t",
+            "   >     ",
+        ],
+        ids=[
+            "single_bq_four_spaces",
+            "nested_bq_four_spaces",
+            "spaced_nested_bq_four_spaces",
+            "bq_space_tab",
+            "indented_bq_four_spaces",
+        ],
+    )
+    def test_private_awf_verdict_ignores_nested_blockquote_indented_code(
+        self, quoted_indent: str
+    ) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            f"{quoted_indent}AWF-VERDICT: FALSE POSITIVE: example\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_three_space_indent_still_counts(self) -> None:
         # CommonMark indented code requires four spaces; lighter indent is prose.
         result = _parse_verdict_result("   AWF-VERDICT: DEFER: track follow-up separately")
