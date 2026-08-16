@@ -418,6 +418,42 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_yaml,
         head_blob="x: 1\nfeature_enabled: true\ny: 2\n# feature_enabled: false\n",
     )
+    # Nested YAML leaves under different parents must not collide as bare
+    # ``enabled``. Salvage of ``feature.enabled`` plus a tip that adds
+    # ``logging.enabled`` still merge-file-matches HEAD; unqualified keys would
+    # discard salvage and leave a later FIXED retry as fixed_without_head_advance
+    # (PRRT_kwDOSJAM6s6ZqZo2).
+    parent_nested_yaml = "feature:\n  enabled: false\nlogging:\n  level: info\n"
+    commit_nested_yaml = "feature:\n  enabled: true\nlogging:\n  level: info\n"
+    nested_yaml_changed = _salvage_changed_binding_names(
+        parent_blob=parent_nested_yaml, commit_blob=commit_nested_yaml
+    )
+    assert "feature.enabled" in nested_yaml_changed
+    assert "enabled" not in nested_yaml_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_nested_yaml,
+        commit_blob=commit_nested_yaml,
+        head_blob=("feature:\n  enabled: true\nlogging:\n  level: info\n  enabled: false\n"),
+    )
+    # Same-parent tip rebind of the salvaged nested leaf still supersedes.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_nested_yaml,
+        commit_blob=commit_nested_yaml,
+        head_blob=("feature:\n  enabled: true\n  enabled: false\nlogging:\n  level: info\n"),
+    )
+    # Quoted mapping openers with empty values nest the same way.
+    parent_quoted_nested = '"feature":\n  enabled: false\n"logging":\n  level: info\n'
+    commit_quoted_nested = '"feature":\n  enabled: true\n"logging":\n  level: info\n'
+    quoted_nested_changed = _salvage_changed_binding_names(
+        parent_blob=parent_quoted_nested, commit_blob=commit_quoted_nested
+    )
+    assert "feature.enabled" in quoted_nested_changed
+    assert "enabled" not in quoted_nested_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_quoted_nested,
+        commit_blob=commit_quoted_nested,
+        head_blob=('"feature":\n  enabled: true\n"logging":\n  level: info\n  enabled: false\n'),
+    )
     # Quoted JSON mapping keys must supersede the same way; otherwise a tip that
     # keeps salvage `"feature-enabled": true` and appends a later duplicate
     # false cleanly merge-file-matches HEAD while consumers take the final

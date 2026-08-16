@@ -55,6 +55,17 @@ _DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-
 # directives; spaced form must match the same whitespace rule as open-``#if``
 # scanning (PRRT_kwDOSJAM6s6Zp_sv).
 _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
+# YAML / mapping ``key:`` (or quoted ``"key":`` / ``'key':``) with no same-line
+# scalar — only optional whitespace and a ``#`` comment. These open an
+# indentation scope so nested leaves qualify as ``parent.leaf`` rather than
+# colliding as bare ``leaf`` across unrelated mappings (PRRT_kwDOSJAM6s6ZqZo2).
+_YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+    r'|"[^"\n]+"'
+    r"|'[^'\n]+'"
+    r")[ \t]*:[ \t]*(?:#.*)?$"
+)
 
 
 def _advance_string_or_block_comment_state(
@@ -427,10 +438,13 @@ def _is_declaration_opener_line(raw_line: str) -> bool:
 
 
 def _opens_nested_binding_scope(raw_line: str) -> bool:
-    """Return True when ``raw_line`` opens a nestable def/class/function scope.
+    """Return True when ``raw_line`` opens a nestable binding scope.
 
-    Assignments, ``#define``, and ``let``/``const``/``var`` bind a name but do
-    not push an enclosing scope for qualified keys (PRRT_kwDOSJAM6s6ZqKN3).
+    Def/class/function openers push scopes for qualified keys
+    (``A.ok``; PRRT_kwDOSJAM6s6ZqKN3). YAML/mapping ``key:`` lines with no
+    same-line scalar also push so ``feature.enabled`` and ``logging.enabled``
+    stay distinct (PRRT_kwDOSJAM6s6ZqZo2). Assignments with values, ``#define``,
+    and ``let``/``const``/``var`` bind a name but do not push.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//"):
@@ -440,7 +454,7 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     for pattern in (_DEF_BINDING_RE, _CLASS_BINDING_RE, _FUNCTION_BINDING_RE):
         if pattern.match(raw_line) is not None:
             return True
-    return False
+    return _YAML_MAPPING_SCOPE_OPENER_RE.match(raw_line) is not None
 
 
 def _line_indent(raw_line: str) -> int:
@@ -482,11 +496,12 @@ def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
 def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
     """Map each scoped binding key to the span of its last occurrence in ``text``.
 
-    Keys are qualified by enclosing def/class/function scopes (``A.ok``) so
-    same-named methods on different classes do not collide
-    (PRRT_kwDOSJAM6s6ZqKN3). Lines that start inside ``/*`` or a triple-quoted
-    string are ignored so docstring prose does not invent bindings
-    (PRRT_kwDOSJAM6s6ZqPO9).
+    Keys are qualified by enclosing def/class/function scopes (``A.ok``) and by
+    YAML/mapping openers with no same-line scalar (``feature.enabled``) so
+    same-named leaves under different parents do not collide
+    (PRRT_kwDOSJAM6s6ZqKN3, PRRT_kwDOSJAM6s6ZqZo2). Lines that start inside
+    ``/*`` or a triple-quoted string are ignored so docstring prose does not
+    invent bindings (PRRT_kwDOSJAM6s6ZqPO9).
     """
     lines = text.splitlines()
     last_start: dict[str, int] = {}
@@ -617,10 +632,11 @@ def _tip_extra_can_supersede_modified_salvage(
     full-line multiset would over-reject surplus salvage assignment copies
     (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
     bindings (PRRT_kwDOSJAM6s6ZqHvh). Parent-only (deleted) salvage names also
-    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY). Tip-extra
+    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).     Tip-extra
     binding keys are resolved against the full tip blob so an unrelated later
     ``def ok`` under another class does not collide with salvaged ``A.ok``
-    (PRRT_kwDOSJAM6s6ZqKN3).
+    (PRRT_kwDOSJAM6s6ZqKN3), and nested YAML ``logging.enabled`` does not
+    collide with salvaged ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:
