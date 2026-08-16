@@ -26,6 +26,7 @@ __all__ = (
     "_HTML_TYPE7_ATTR",
     "_HTML_TYPE7_BLOCK_OPEN",
     "_HTML_COMPLETE_CODE_OPEN",
+    "_HTML_COMPLETE_CODE_SELF_CLOSING",
     "_HTML_BLANK_LINE",
     "_MARKDOWN_LIST_PREFIX",
     "_MARKDOWN_TASK_LIST_CHECKBOX",
@@ -40,6 +41,7 @@ __all__ = (
     "_markdown_fence_open_marker",
     "_html_code_block_open_tag",
     "_html_code_block_closes",
+    "_html_code_close_appears_later",
     "_html_comment_opens",
     "_html_comment_closes",
     "_html_processing_instruction_opens",
@@ -52,6 +54,7 @@ __all__ = (
     "_html_type6_block_opens",
     "_html_type7_block_opens",
     "_html_complete_code_opens",
+    "_html_complete_code_self_closes",
     "_html_blank_terminated_block_closes",
     "_markdown_fence_closes",
     "_markdown_is_indented_code_line",
@@ -60,7 +63,7 @@ __all__ = (
 )
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from awf.runtime.pr_monitor_runner.constants import (
     _REDACTION,
@@ -283,9 +286,14 @@ _HTML_TYPE7_BLOCK_OPEN = re.compile(
 )
 # Complete ``<code …>`` / ``<code/>`` on its own line (type-7 shape). Used to
 # divert from pure blank-termination into hybrid close-tag + blank-tail
-# shielding (PRRT_kwDOSJAM6s6ZpPQA).
+# shielding (PRRT_kwDOSJAM6s6ZpPQA). Self-closing ``<code/>`` stays on the
+# blank-terminated path — hybrid never sees ``</code>`` (PRRT_kwDOSJAM6s6ZpTPI).
 _HTML_COMPLETE_CODE_OPEN = re.compile(
     rf"^ {{0,3}}<code{_HTML_TYPE7_ATTR}*\s*/?>[ \t]*$",
+    re.IGNORECASE,
+)
+_HTML_COMPLETE_CODE_SELF_CLOSING = re.compile(
+    rf"^ {{0,3}}<code{_HTML_TYPE7_ATTR}*\s*/>[ \t]*$",
     re.IGNORECASE,
 )
 _HTML_BLANK_LINE = re.compile(r"^[ \t]*$")
@@ -562,9 +570,31 @@ def _html_complete_code_opens(line: str) -> bool:
     Complete ``<code>`` tags match the type-7 line shape but need hybrid
     shielding: close-tag through ``</code>`` so interior blanks do not end
     early, then blank-terminated tail after the closer (PRRT_kwDOSJAM6s6ZpPQA /
-    PRRT_kwDOSJAM6s6ZpLqP). Normalize containers like other raw-HTML openers.
+    PRRT_kwDOSJAM6s6ZpLqP). Self-closing and never-closed openers stay on pure
+    blank termination (PRRT_kwDOSJAM6s6ZpTPI). Normalize containers like other
+    raw-HTML openers.
     """
     return _HTML_COMPLETE_CODE_OPEN.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_complete_code_self_closes(line: str) -> bool:
+    """Return whether ``line`` is a complete self-closing ``<code/>`` tag.
+
+    Self-closing complete ``<code/>`` never reaches ``</code>``, so hybrid
+    close-tag + blank-tail shielding would suppress every later marker through
+    EOF (PRRT_kwDOSJAM6s6ZpTPI). Normalize containers like other raw-HTML
+    openers.
+    """
+    return _HTML_COMPLETE_CODE_SELF_CLOSING.match(_normalize_markdown_fence_line(line)) is not None
+
+
+def _html_code_close_appears_later(lines: Sequence[str], start: int) -> bool:
+    """Return whether a ``</code>`` closer appears at or after ``start``.
+
+    Used so never-closed complete ``<code>`` openers keep type-7 blank
+    termination instead of hybrid forever-shielding (PRRT_kwDOSJAM6s6ZpTPI).
+    """
+    return any(_html_code_block_closes(later, "code") for later in lines[start:])
 
 
 def _html_blank_terminated_block_closes(line: str, *, blockquote_depth: int = 0) -> bool:
@@ -729,7 +759,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     ``_CODE_FORMATTED_VERDICT_LINE`` can accept them; same-line HTML wrappers
     and comments are skipped entirely. Unclosed fences, HTML code blocks, HTML
     comments, type-3–5 raw HTML blocks, or type-6/7 blank-terminated blocks
-    shield every subsequent line.
+    shield every subsequent line. Complete ``<code>`` openers use hybrid
+    close-tag + blank-tail only when a later ``</code>`` exists; self-closing
+    ``<code/>`` and never-closed ``<code>`` stay blank-terminated
+    (PRRT_kwDOSJAM6s6ZpTPI).
     """
     fence: str | None = None
     fence_container_indent = 0
@@ -743,7 +776,8 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
     html_blank_terminated = False
     html_blank_terminated_blockquote_depth = 0
     html_code_blank_tail = False
-    for line in stdout.splitlines():
+    lines = stdout.splitlines()
+    for idx, line in enumerate(lines):
         if fence is not None:
             if _markdown_fence_closes(
                 line,
@@ -820,8 +854,10 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
         # ``<code>`` lines match type 7 but take hybrid close-tag + blank-tail
         # shielding so interior blanks do not end early while markers after
         # ``</code>`` stay shielded until the blank (PRRT_kwDOSJAM6s6ZpLqP /
-        # PRRT_kwDOSJAM6s6ZpPQA). Incomplete / same-line ``<code…`` still fall
-        # through to the close-tag path below.
+        # PRRT_kwDOSJAM6s6ZpPQA) — only when a later ``</code>`` exists.
+        # Self-closing ``<code/>`` and never-closed ``<code>`` stay on pure
+        # blank termination (PRRT_kwDOSJAM6s6ZpTPI). Incomplete / same-line
+        # ``<code…`` still fall through to the close-tag path below.
         if _html_type6_block_opens(line) or _html_type7_block_opens(line):
             # Type 6/7 continue until a blank line (same-line wrappers still
             # skip the opener line itself). Track opener blockquote depth so
@@ -830,9 +866,20 @@ def _iter_non_fenced_verdict_lines(stdout: str) -> Iterable[str]:
             # PRRT_kwDOSJAM6s6ZnblF).
             opened_bq_depth = _markdown_blockquote_container_depth(line)
             if _html_complete_code_opens(line):
-                if not _html_code_block_closes(line, "code"):
+                # Same-line ``<code…></code>`` (rare attribute-embedded closer)
+                # stays a one-line skip, matching the prior hybrid gate.
+                if _html_code_block_closes(line, "code"):
+                    continue
+                if not _html_complete_code_self_closes(line) and _html_code_close_appears_later(
+                    lines, idx + 1
+                ):
                     html_tag = "code"
                     html_code_blank_tail = True
+                    html_blank_terminated_blockquote_depth = opened_bq_depth
+                elif not _html_blank_terminated_block_closes(
+                    line, blockquote_depth=opened_bq_depth
+                ):
+                    html_blank_terminated = True
                     html_blank_terminated_blockquote_depth = opened_bq_depth
                 continue
             if not _html_blank_terminated_block_closes(line, blockquote_depth=opened_bq_depth):

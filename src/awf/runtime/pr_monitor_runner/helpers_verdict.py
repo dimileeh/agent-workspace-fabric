@@ -47,6 +47,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_COMPLETE_CODE_OPEN as _HTML_COMPLETE_CODE_OPEN,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _HTML_COMPLETE_CODE_SELF_CLOSING as _HTML_COMPLETE_CODE_SELF_CLOSING,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _HTML_DECLARATION_CLOSE as _HTML_DECLARATION_CLOSE,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -128,6 +131,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_code_block_open_tag as _html_code_block_open_tag,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_code_close_appears_later as _html_code_close_appears_later,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_comment_closes as _html_comment_closes,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
@@ -135,6 +141,9 @@ from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_complete_code_opens as _html_complete_code_opens,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
+    _html_complete_code_self_closes as _html_complete_code_self_closes,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _html_declaration_closes as _html_declaration_closes,
@@ -190,6 +199,7 @@ __all__ = (
     "_HTML_COMMENT_OPEN",
     "_HTML_COMMENT_CLOSE",
     "_HTML_COMPLETE_CODE_OPEN",
+    "_HTML_COMPLETE_CODE_SELF_CLOSING",
     "_HTML_PROCESSING_INSTRUCTION_OPEN",
     "_HTML_PROCESSING_INSTRUCTION_CLOSE",
     "_HTML_DECLARATION_OPEN",
@@ -214,9 +224,11 @@ __all__ = (
     "_markdown_fence_open_marker",
     "_html_code_block_open_tag",
     "_html_code_block_closes",
+    "_html_code_close_appears_later",
     "_html_comment_opens",
     "_html_comment_closes",
     "_html_complete_code_opens",
+    "_html_complete_code_self_closes",
     "_html_processing_instruction_opens",
     "_html_processing_instruction_closes",
     "_html_declaration_opens",

@@ -366,6 +366,50 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_self_closing_html_code_blank_terminates(
+        self,
+    ) -> None:
+        # Hybrid close-tag mode for complete ``<code>`` never sees ``</code>``
+        # on ``<code/>``, so blank-tail never starts and a real trailing FIXED
+        # stays suppressed through EOF (PRRT_kwDOSJAM6s6ZpTPI). Self-closing
+        # must stay blank-terminated like other type-7 tags.
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            "<code/>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "\n"
+            "AWF-VERDICT: FIXED: real trailing fix\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real trailing fix"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_never_closed_html_code_blank_terminates(
+        self,
+    ) -> None:
+        # Never-closed complete ``<code>`` also never reaches blank-tail under
+        # hybrid mode, so blanks no longer end shielding and FIXED after the
+        # blank is suppressed through EOF (PRRT_kwDOSJAM6s6ZpTPI). Without a
+        # later ``</code>``, use type-7 blank termination.
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            "<code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "\n"
+            "AWF-VERDICT: FIXED: real trailing fix\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real trailing fix"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "tag",
         ["script", "style", "textarea"],
