@@ -230,13 +230,14 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
-# Multiline Markdown fences (CommonMark-style). Info strings may not contain the
-# fence character, so same-line wraps (`` ```verdict``` ``) are not openers.
+# Multiline Markdown fences (CommonMark-style). Backtick info strings may not
+# contain backticks (so same-line wraps like `` ```verdict``` `` are not
+# openers). Tilde info strings may include ``~`` (e.g. ``~~~ lang~option``).
 # Markers inside an open fence must not participate in verdict selection.
 _MARKDOWN_FENCE_OPEN = re.compile(
     r"^ {0,3}(?:"
     r"(?P<fence>`{3,})[^`\n]*|"
-    r"(?P<fence_tilde>~{3,})[^~\n]*"
+    r"(?P<fence_tilde>~{3,})[^\n]*"
     r")[ \t]*$"
 )
 # CommonMark indented code: four spaces of indent, treating tabs as stops of

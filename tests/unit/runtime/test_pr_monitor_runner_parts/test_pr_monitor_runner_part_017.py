@@ -1339,6 +1339,26 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_tilde_fence_with_tilde_in_info_string(
+        self,
+    ) -> None:
+        # CommonMark allows ``~`` in tilde-fence info strings (unlike backticks).
+        # Rejecting ``~~~ lang~option`` leaves the body unfenced so an example
+        # FALSE POSITIVE can override an earlier NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6Znz-z).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "~~~ lang~option\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "~~~\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_unfenced_after_closed_fence_still_wins(self) -> None:
         stdout = (
             "```\n"
