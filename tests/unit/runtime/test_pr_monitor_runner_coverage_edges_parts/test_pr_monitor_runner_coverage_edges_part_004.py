@@ -787,6 +787,7 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
     )
     workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="")  # merge-base --is-ancestor (hosted sync record)
     cmd.queue_result(returncode=0, stdout="")  # dirty status
     cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # end head rev-parse
     runner = make_runner(

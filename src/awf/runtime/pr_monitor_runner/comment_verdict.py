@@ -340,7 +340,26 @@ async def _invoke_cli_for_verdict_result(
                     descendant=item_end_head,
                 )
             )
-    hosted_head_advanced = bool(state is not None and state.hosted_terminal_head_advanced)
+    # Hosted sync may set hosted_terminal_head_advanced; re-verify forward
+    # ancestry of last_push_sha so a lateral/older remote rewrite cannot satisfy
+    # FIXED via the flag after local ancestry correctly rejected the same move.
+    hosted_head_advanced = False
+    if state is not None and state.hosted_terminal_head_advanced:
+        synced_head = (state.last_push_sha or "").strip() or None
+        if (
+            item_start_head is not None
+            and synced_head is not None
+            and synced_head.lower() != item_start_head.lower()
+        ):
+            descends = getattr(runner, "_head_descends_from", None)
+            if callable(descends) and worktree_path.exists():
+                hosted_head_advanced = bool(
+                    await descends(
+                        worktree_path=worktree_path,
+                        ancestor=item_start_head,
+                        descendant=synced_head,
+                    )
+                )
     # Dirty commit attributable to this invocation is also item-scoped evidence when
     # HEAD comparison is unavailable (stub runners / missing worktree).
     item_fix_evidence = local_head_advanced or hosted_head_advanced or bool(committed_dirty_changes)

@@ -330,18 +330,25 @@ async def test_explicit_non_fix_verdicts_survive_dirty_or_hosted_advance(
 @pytest.mark.unit
 async def test_hosted_fixed_requires_terminal_head_advance(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_fixed"
+    (tmp_path / workspace_id).mkdir()
     runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: hosted repair committed",
         dirty=False,
         heads=[start],
+        head_descends=True,
     )
+    runner._worktrees_root = tmp_path
     state = MonitorState(last_push_sha=start)
 
     async def _run_with_hosted_advance(**kwargs: object) -> AgentRunResult:
         state_arg = kwargs.get("state")
         assert isinstance(state_arg, MonitorState)
+        state_arg.last_push_sha = synced
         state_arg.hosted_terminal_head_advanced = True
         return AgentRunResult(
             returncode=0,
@@ -355,7 +362,7 @@ async def test_hosted_fixed_requires_terminal_head_advance(
 
     result = await comments._invoke_cli_for_verdict_result(
         runner,
-        workspace_id="ws_hosted_fixed",
+        workspace_id=workspace_id,
         prompt="p",
         commit_message="fix: x",
         compose_project="proj",
@@ -371,13 +378,17 @@ async def test_hosted_fixed_requires_terminal_head_advance(
 @pytest.mark.unit
 async def test_hosted_fixed_without_head_advance_stays_unresolved(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     start = "a" * 40
+    workspace_id = "ws_hosted_no_advance"
+    (tmp_path / workspace_id).mkdir()
     runner = _evidence_runner(
         stdout="AWF-VERDICT: FIXED: hosted no advance",
         dirty=False,
         heads=[start],
     )
+    runner._worktrees_root = tmp_path
     state = MonitorState(last_push_sha=start)
 
     async def _run_without_advance(**kwargs: object) -> AgentRunResult:
@@ -394,7 +405,58 @@ async def test_hosted_fixed_without_head_advance_stays_unresolved(
 
     result = await comments._invoke_cli_for_verdict_result(
         runner,
-        workspace_id="ws_hosted_no_advance",
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_hosted_lateral_rewrite_does_not_count_as_fix_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-forward hosted tip rewrite must not satisfy FIXED via the advance flag."""
+    start = "a" * 40
+    lateral = "c" * 40
+    workspace_id = "ws_hosted_lateral"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: hosted force-push dropped the fix",
+        dirty=False,
+        heads=[lateral],
+        head_descends=False,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_with_lateral_hosted_rewrite(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        # Simulate _record_hosted_terminal_head_sync wrongly trusting SHA inequality
+        # alone (pre-fix), or a stale True flag after a non-descendant sync tip.
+        state_arg.last_push_sha = lateral
+        state_arg.hosted_terminal_head_advanced = True
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted force-push dropped the fix",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_with_lateral_hosted_rewrite
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
         prompt="p",
         commit_message="fix: x",
         compose_project="proj",
@@ -410,18 +472,25 @@ async def test_hosted_fixed_without_head_advance_stays_unresolved(
 @pytest.mark.unit
 async def test_hosted_advance_does_not_accept_markerless_parse(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_markerless"
+    (tmp_path / workspace_id).mkdir()
     runner = _evidence_runner(
         stdout="plain hosted reply with no marker",
         dirty=False,
-        heads=["b" * 40],
+        heads=[synced],
+        head_descends=True,
     )
+    runner._worktrees_root = tmp_path
     state = MonitorState(last_push_sha=start)
 
     async def _run_markerless_with_advance(**kwargs: object) -> AgentRunResult:
         state_arg = kwargs.get("state")
         assert isinstance(state_arg, MonitorState)
+        state_arg.last_push_sha = synced
         state_arg.hosted_terminal_head_advanced = True
         return AgentRunResult(
             returncode=0,
@@ -435,7 +504,7 @@ async def test_hosted_advance_does_not_accept_markerless_parse(
 
     result = await comments._invoke_cli_for_verdict_result(
         runner,
-        workspace_id="ws_hosted_markerless",
+        workspace_id=workspace_id,
         prompt="p",
         commit_message="fix: x",
         compose_project="proj",
