@@ -589,7 +589,7 @@ def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
     """Return the inner text of one outer placeholder-gated wrapper, or None.
 
     Covers single emphasis, safe inline HTML (em/strong/span), and whole-reason
-    Markdown links/images (inline or reference-style).
+    Markdown links/images (inline, full/collapsed reference, or shortcut).
     """
     emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
     if emphasis_match is not None and (
@@ -702,12 +702,13 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     (`` `<one-sentence justification>` `` / ``"<…>"`` / ``**<…>**`` /
     ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_`` /
     ``[<…>](https://example.com)`` / ``![<…>](https://example.com)`` /
-    ``[<…>][ref]`` / ``[<…>][]`` / ``<em>&lt;…&gt;</em>`` /
+    ``[<…>][ref]`` / ``[<…>][]`` / ``[<…>]`` / ``<em>&lt;…&gt;</em>`` /
     ``<strong>…</strong>`` / ``<span>…</span>``). Those wrappers must not
     defeat whole-reason placeholder detection
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
     PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
-    PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL, PRRT_kwDOSJAM6s6ZpdhJ).
+    PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL, PRRT_kwDOSJAM6s6Zp8jK,
+    PRRT_kwDOSJAM6s6ZpdhJ).
 
     Conditional peels (single emphasis / safe HTML / links) stay
     placeholder-gated, but the gate uses bounded iterative peeling rather than

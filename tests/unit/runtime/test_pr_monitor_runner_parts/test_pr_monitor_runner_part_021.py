@@ -163,6 +163,14 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: ![<reason>][]",
             "AWF-VERDICT: FALSE POSITIVE: [ <reason>][details]",
             "AWF-VERDICT: FALSE POSITIVE: [<reason>] [details]",
+            # Shortcut reference ``[label]`` / ``![label]`` must peel when the
+            # label is placeholder-shaped (PRRT_kwDOSJAM6s6Zp8jK).
+            "AWF-VERDICT: FALSE POSITIVE: [<reason>]",
+            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>]",
+            "AWF-VERDICT: FALSE POSITIVE: ![<reason>]",
+            "AWF-VERDICT: FALSE POSITIVE: [ <reason>]",
+            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`]",
+            "AWF-VERDICT: FIXED: [<one-sentence summary>]",
             "AWF-VERDICT: FIXED: [<one-sentence summary>][]",
             "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com/a_(b))",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
@@ -232,7 +240,8 @@ class TestParseVerdict:
         # image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M) and
         # destinations with balanced / escaped parentheses
         # (PRRT_kwDOSJAM6s6ZpLqR). Reference-style ``[label][ref]`` /
-        # ``[label][]`` forms likewise (PRRT_kwDOSJAM6s6ZpXSL).
+        # ``[label][]`` forms likewise (PRRT_kwDOSJAM6s6ZpXSL), including
+        # shortcut ``[label]`` / ``![label]`` (PRRT_kwDOSJAM6s6Zp8jK).
         # HTML entity-escaped whole-reason echoes must also fail closed
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
         # CommonMark backslash escapes (``\<reason\>``) likewise
@@ -432,6 +441,16 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate][details]",
                 "![stale review boilerplate][details]",
             ),
+            # Shortcut references with real labels stay intact
+            # (PRRT_kwDOSJAM6s6Zp8jK).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate]",
+                "[stale review boilerplate]",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate]",
+                "![stale review boilerplate]",
+            ),
             # Safe inline HTML around real prose is not peeled (PRRT_kwDOSJAM6s6ZpdhJ).
             (
                 "AWF-VERDICT: FALSE POSITIVE: <em>stale review boilerplate</em>",
@@ -474,6 +493,11 @@ class TestParseVerdict:
             ("[ <reason>][details]", "<reason>"),
             ("[<reason>] [details]", "<reason>"),
             (r"[<reason>][det\[ail\]]", "<reason>"),
+            # Shortcut reference / image (PRRT_kwDOSJAM6s6Zp8jK).
+            ("[<reason>]", "<reason>"),
+            ("![<reason>]", "<reason>"),
+            ("[ <reason>]", "<reason>"),
+            ("[<reason> ]", "<reason>"),
             # Newline / unbalanced / trailing content / non-links do not match.
             ("[<reason>](https://example.com/a\n_(b))", None),
             ("[<reason>](https://example.com/a_(b)", None),
@@ -481,7 +505,7 @@ class TestParseVerdict:
             ("[<reason>][details\nx]", None),
             ("[<reason>][details", None),
             ("[<reason>][details]x", None),
-            ("[<reason>]", None),
+            ("[<reason>]x", None),
             ("<reason>", None),
             ("", None),
         ],
@@ -493,7 +517,8 @@ class TestParseVerdict:
     ) -> None:
         # Direct parser contract for balanced / escaped destinations and
         # rejection cases (PRRT_kwDOSJAM6s6ZpLqR), plus reference-style
-        # ``[label][ref]`` / ``[label][]`` (PRRT_kwDOSJAM6s6ZpXSL).
+        # ``[label][ref]`` / ``[label][]`` (PRRT_kwDOSJAM6s6ZpXSL) and
+        # shortcut ``[label]`` / ``![label]`` (PRRT_kwDOSJAM6s6Zp8jK).
         assert _verdict_reason_inline_link_label(reason) == expected_label
 
     @pytest.mark.unit
