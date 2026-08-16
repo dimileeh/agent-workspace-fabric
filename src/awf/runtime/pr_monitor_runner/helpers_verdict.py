@@ -566,11 +566,12 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     Markdown images
     (`` `<one-sentence justification>` `` / ``"<…>"`` / ``**<…>**`` /
     ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_`` /
-    ``[<…>](https://example.com)`` / ``![<…>](https://example.com)``). Those
-    wrappers must not defeat whole-reason placeholder detection
+    ``[<…>](https://example.com)`` / ``![<…>](https://example.com)`` /
+    ``[<…>][ref]`` / ``[<…>][]``). Those wrappers must not defeat whole-reason
+    placeholder detection
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
     PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
-    PRRT_kwDOSJAM6s6ZpLqR).
+    PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL).
     """
     cleaned = reason.strip()
     while cleaned:
@@ -607,10 +608,11 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
             continue
         link_label = _verdict_reason_inline_link_label(cleaned)
         if link_label is not None:
-            # Markdown links / images: peel only when the label is
-            # placeholder-shaped so a real linked or imaged justification
-            # remains usable (PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M).
-            # Destinations may include balanced / escaped parentheses
+            # Markdown links / images (inline or reference-style): peel only
+            # when the label is placeholder-shaped so a real linked or imaged
+            # justification remains usable (PRRT_kwDOSJAM6s6Zos6S,
+            # PRRT_kwDOSJAM6s6Zo-5M, PRRT_kwDOSJAM6s6ZpXSL). Inline
+            # destinations may include balanced / escaped parentheses
             # (PRRT_kwDOSJAM6s6ZpLqR).
             inner = link_label.strip()
             normalized_inner = _normalize_verdict_reason_inline_formatting(inner)

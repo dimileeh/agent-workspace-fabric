@@ -125,25 +125,28 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r")$"
 )
 # Whole-reason Markdown links (``[<…>](https://example.com)``) and images
-# (``![<…>](https://example.com)``). Peeled only when the label is
+# (``![<…>](https://example.com)``), plus reference-style forms
+# (``[<…>][ref]`` / ``[<…>][]``). Peeled only when the label is
 # placeholder-shaped — same gate as single emphasis — so a real linked /
 # imaged justification stays usable (PRRT_kwDOSJAM6s6Zos6S,
-# PRRT_kwDOSJAM6s6Zo-5M). Destinations may contain balanced parentheses or
-# backslash-escaped ``(`` / ``)``; a plain ``[^)]*`` stop would leave
-# ``[<reason>](https://example.com/a_(b))`` unpeeled and accept the echo as
-# a substantive reason (PRRT_kwDOSJAM6s6ZpLqR).
+# PRRT_kwDOSJAM6s6Zo-5M, PRRT_kwDOSJAM6s6ZpXSL). Destinations may contain
+# balanced parentheses or backslash-escaped ``(`` / ``)``; a plain ``[^)]*``
+# stop would leave ``[<reason>](https://example.com/a_(b))`` unpeeled and
+# accept the echo as a substantive reason (PRRT_kwDOSJAM6s6ZpLqR).
 _VERDICT_REASON_PYTHON_DUNDER = re.compile(r"^__[A-Za-z_][A-Za-z0-9_]*__$")
 
 
 def _verdict_reason_inline_link_label(reason: str) -> str | None:
     """Return the label when ``reason`` is a whole-reason Markdown link/image.
 
-    Matches ``[label](destination)`` and ``![label](destination)`` spanning the
-    entire string. Label selection is non-greedy (earliest ``]\\s*(`` that
-    yields a destination consuming the rest of the string), matching the prior
-    ``.*?`` regex. Destinations allow nested balanced parentheses and
-    backslash-escaped characters; newlines abort matching
-    (PRRT_kwDOSJAM6s6ZpLqR).
+    Matches inline ``[label](destination)`` / ``![label](destination)`` and
+    reference-style ``[label][ref]`` / ``[label][]`` (and image variants)
+    spanning the entire string. Label selection is non-greedy (earliest
+    ``]\\s*(`` or ``]\\s*[`` that yields a destination/ref consuming the rest
+    of the string). Destinations allow nested balanced parentheses;
+    reference ids allow nested balanced brackets; both allow backslash-escaped
+    characters. Newlines abort matching (PRRT_kwDOSJAM6s6ZpLqR,
+    PRRT_kwDOSJAM6s6ZpXSL). Shortcut ``[label]`` alone is not matched.
     """
     if reason.startswith("!["):
         after_open = 2
@@ -157,14 +160,17 @@ def _verdict_reason_inline_link_label(reason: str) -> str | None:
     while label_start < n and reason[label_start] in " \t":
         label_start += 1
 
-    # Non-greedy: try each ``]`` followed by optional whitespace and ``(``.
+    # Non-greedy: try each ``]`` followed by optional whitespace and ``(`` or
+    # ``[`` (inline destination vs reference-style id).
     j = label_start
     while j < n:
         if reason[j] == "]":
             k = j + 1
             while k < n and reason[k] in " \t":
                 k += 1
-            if k < n and reason[k] == "(":
+            if k < n and reason[k] in "([":
+                open_ch = reason[k]
+                close_ch = ")" if open_ch == "(" else "]"
                 depth = 1
                 p = k + 1
                 while p < n and depth > 0:
@@ -174,9 +180,9 @@ def _verdict_reason_inline_link_label(reason: str) -> str | None:
                     if ch == "\\" and p + 1 < n:
                         p += 2
                         continue
-                    if ch == "(":
+                    if ch == open_ch:
                         depth += 1
-                    elif ch == ")":
+                    elif ch == close_ch:
                         depth -= 1
                     p += 1
                 if depth == 0 and p == n:

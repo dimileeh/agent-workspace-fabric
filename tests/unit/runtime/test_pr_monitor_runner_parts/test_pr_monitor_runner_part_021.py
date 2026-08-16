@@ -149,6 +149,17 @@ class TestParseVerdict:
             # Optional whitespace after ``[`` / before ``(`` still peels.
             "AWF-VERDICT: FALSE POSITIVE: [ <reason>](https://example.com/a_(b))",
             "AWF-VERDICT: FALSE POSITIVE: [<reason>] (https://example.com/a_(b))",
+            # Reference-style links / images must peel when the label is
+            # placeholder-shaped (PRRT_kwDOSJAM6s6ZpXSL).
+            "AWF-VERDICT: FALSE POSITIVE: [<reason>][details]",
+            "AWF-VERDICT: FALSE POSITIVE: [<reason>][]",
+            "AWF-VERDICT: FALSE POSITIVE: [<one-sentence justification>][details]",
+            "AWF-VERDICT: FALSE POSITIVE: [`<one-sentence justification>`][]",
+            "AWF-VERDICT: FALSE POSITIVE: ![<reason>][details]",
+            "AWF-VERDICT: FALSE POSITIVE: ![<reason>][]",
+            "AWF-VERDICT: FALSE POSITIVE: [ <reason>][details]",
+            "AWF-VERDICT: FALSE POSITIVE: [<reason>] [details]",
+            "AWF-VERDICT: FIXED: [<one-sentence summary>][]",
             "AWF-VERDICT: FIXED: [<one-sentence summary>](https://example.com/a_(b))",
             "AWF-VERDICT: FIXED: `<one-sentence summary>`",
             "AWF-VERDICT: FIXED: **<one-sentence summary>**",
@@ -200,7 +211,8 @@ class TestParseVerdict:
         # same way when placeholder-shaped (PRRT_kwDOSJAM6s6Zos6S), including
         # image wrappers with a leading ``!`` (PRRT_kwDOSJAM6s6Zo-5M) and
         # destinations with balanced / escaped parentheses
-        # (PRRT_kwDOSJAM6s6ZpLqR).
+        # (PRRT_kwDOSJAM6s6ZpLqR). Reference-style ``[label][ref]`` /
+        # ``[label][]`` forms likewise (PRRT_kwDOSJAM6s6ZpXSL).
         # HTML entity-escaped whole-reason echoes must also fail closed
         # (PRRT_kwDOSJAM6s6Zoyj2), including nested escapes (PRRT_kwDOSJAM6s6Zo4bG).
         # CommonMark backslash escapes (``\<reason\>``) likewise
@@ -309,6 +321,20 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate](https://example.com/a_(b))",
                 "[stale review boilerplate](https://example.com/a_(b))",
             ),
+            # Reference-style links with real labels stay intact
+            # (PRRT_kwDOSJAM6s6ZpXSL).
+            (
+                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate][details]",
+                "[stale review boilerplate][details]",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: [stale review boilerplate][]",
+                "[stale review boilerplate][]",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate][details]",
+                "![stale review boilerplate][details]",
+            ),
         ],
     )
     def test_private_awf_single_emphasis_non_placeholder_reason_still_usable(
@@ -330,10 +356,21 @@ class TestParseVerdict:
             ("[ <reason>](https://example.com)", "<reason>"),
             ("[<reason>] (https://example.com)", "<reason>"),
             (r"[<reason>](https://example.com/a_\(b\))", "<reason>"),
+            # Reference-style full / collapsed forms (PRRT_kwDOSJAM6s6ZpXSL).
+            ("[<reason>][details]", "<reason>"),
+            ("[<reason>][]", "<reason>"),
+            ("![<reason>][details]", "<reason>"),
+            ("![<reason>][]", "<reason>"),
+            ("[ <reason>][details]", "<reason>"),
+            ("[<reason>] [details]", "<reason>"),
+            (r"[<reason>][det\[ail\]]", "<reason>"),
             # Newline / unbalanced / trailing content / non-links do not match.
             ("[<reason>](https://example.com/a\n_(b))", None),
             ("[<reason>](https://example.com/a_(b)", None),
             ("[<reason>](https://example.com/a_(b))x", None),
+            ("[<reason>][details\nx]", None),
+            ("[<reason>][details", None),
+            ("[<reason>][details]x", None),
             ("[<reason>]", None),
             ("<reason>", None),
             ("", None),
@@ -345,7 +382,8 @@ class TestParseVerdict:
         expected_label: str | None,
     ) -> None:
         # Direct parser contract for balanced / escaped destinations and
-        # rejection cases (PRRT_kwDOSJAM6s6ZpLqR).
+        # rejection cases (PRRT_kwDOSJAM6s6ZpLqR), plus reference-style
+        # ``[label][ref]`` / ``[label][]`` (PRRT_kwDOSJAM6s6ZpXSL).
         assert _verdict_reason_inline_link_label(reason) == expected_label
 
     @pytest.mark.unit
