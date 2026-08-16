@@ -501,15 +501,17 @@ def _markdown_fence_closes(
     """Return whether ``line`` closes a code fence opened with ``fence``.
 
     CommonMark allows at most three leading spaces on a closing fence relative
-    to the opener's list container. Do not peel list markers: a line like
-    ``- ``` `` inside an open fence is fence content, not a closer. Do not
-    unrestricted-lstrip: four-space-indented content under a top-level opener
-    (container_indent 0) that looks like a fence must stay inside the open
-    region. Blockquote-opened fences peel exactly ``blockquote_depth`` single
-    ``>`` container markers (and intervening list markers) before the indent
-    check — unrestricted ``>+`` would treat nested ``>> ``` `` as a closer for
-    a depth-1 opener (PRRT_kwDOSJAM6s6Zn213). Top-level fences must not peel
-    ``>`` (PRRT_kwDOSJAM6s6ZnAyG). Before that strip, allow
+    to the opener's list container. Tabs expand to column stops of four before
+    that indent check, so a list-nested closer like ``\\t~~~`` under
+    ``- ~~~text`` matches (PRRT_kwDOSJAM6s6Zolex). Do not peel list markers: a
+    line like ``- ``` `` inside an open fence is fence content, not a closer.
+    Do not unrestricted-lstrip: four-space-indented content under a top-level
+    opener (container_indent 0) that looks like a fence must stay inside the
+    open region. Blockquote-opened fences peel exactly ``blockquote_depth``
+    single ``>`` container markers (and intervening list markers) before the
+    indent check — unrestricted ``>+`` would treat nested ``>> ``` `` as a
+    closer for a depth-1 opener (PRRT_kwDOSJAM6s6Zn213). Top-level fences must
+    not peel ``>`` (PRRT_kwDOSJAM6s6ZnAyG). Before that strip, allow
     ``0 .. container_indent+3`` spaces ahead of ``>`` so ordered-list+blockquote
     continuations (``    > ``` `` under ``10. > ```text``) match
     (PRRT_kwDOSJAM6s6ZnHH2). After that strip, allow indent
@@ -520,15 +522,18 @@ def _markdown_fence_closes(
     # List-nested closers (``    ``` `` under ``10. ```text``) need the
     # container indent; absolute 0–3 alone never closes them
     # (PRRT_kwDOSJAM6s6ZmsZS). Unlimited strip would still treat top-level
-    # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo).
-    candidate = line
+    # ``    ``` `` as a closer (PRRT_kwDOSJAM6s6ZmqRo). Expand tabs first so
+    # ``\\t~~~`` under a list opener is measured in columns, not as a literal
+    # tab that the spaces-only indent regex would miss (PRRT_kwDOSJAM6s6Zolex).
+    expanded = line.expandtabs(4)
+    candidate = expanded
     if blockquote_depth > 0:
         # Absolute `` {0,3}`` before ``>`` misses list-continuation closers
         # such as ``    > ``` `` when ``container_indent`` is 4.
-        lead = re.match(rf"^ {{{0},{container_indent + 3}}}", line)
+        lead = re.match(rf"^ {{{0},{container_indent + 3}}}", expanded)
         if lead is None:  # pragma: no cover - `` {0,N}`` always matches
             return False
-        rest = line[lead.end() :]
+        rest = expanded[lead.end() :]
         remaining = blockquote_depth
         while remaining > 0:
             bq = re.match(r"^>[ \t]?", rest)

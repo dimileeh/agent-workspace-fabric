@@ -1311,6 +1311,46 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "reason"),
+        [
+            (
+                (
+                    "- ~~~text\n"
+                    "  AWF-VERDICT: FALSE POSITIVE: example\n"
+                    "\t~~~\n"
+                    "AWF-VERDICT: FIXED: closed tab-indented list fence\n"
+                ),
+                "closed tab-indented list fence",
+            ),
+            (
+                (
+                    "10. ~~~text\n"
+                    "    AWF-VERDICT: FALSE POSITIVE: example\n"
+                    "\t~~~\n"
+                    "AWF-VERDICT: FIXED: closed tab-indented ordered fence\n"
+                ),
+                "closed tab-indented ordered fence",
+            ),
+        ],
+        ids=["unordered_list", "ordered_list"],
+    )
+    def test_private_awf_verdict_list_fence_tab_indented_closer(
+        self,
+        stdout: str,
+        reason: str,
+    ) -> None:
+        # CommonMark expands a leading tab to four indent columns. List-nested
+        # openers (``- ~~~text`` / ``10. ~~~text``) may therefore close with
+        # ``\t~~~``. A spaces-only indent regex misses that closer and shields
+        # every later line, including a real top-level FIXED
+        # (PRRT_kwDOSJAM6s6Zolex).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == reason
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ordered_list_fence_closer_uses_container_indent(
         self,
     ) -> None:
