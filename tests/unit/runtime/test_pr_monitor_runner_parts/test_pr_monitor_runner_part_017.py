@@ -320,6 +320,29 @@ class TestParseVerdict:
         assert result.reason == "clarify intent"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_ignores_markers_after_html_code_until_blank(
+        self,
+    ) -> None:
+        # CommonMark treats complete ``<code>`` openers as type 7 (blank-
+        # terminated), not type 1. Ending the shield at ``</code>`` lets a
+        # FALSE POSITIVE before the blank override NEEDS_HUMAN
+        # (PRRT_kwDOSJAM6s6ZpLqP).
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: clarify intent\n"
+            "\n"
+            "<code>\n"
+            "example inside\n"
+            "</code>\n"
+            "AWF-VERDICT: FALSE POSITIVE: example\n"
+            "\n"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "clarify intent"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "tag",
         ["script", "style", "textarea"],
