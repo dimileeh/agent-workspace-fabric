@@ -639,10 +639,18 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
 async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Agent resolution replies must not re-queue a thread already FIXED with evidence.
+
+    Fail-closed contract: markerless prose is never ``fix_committed``. This
+    regression uses an explicit ``AWF-VERDICT: FIXED`` plus attributable
+    same-item commit evidence so the thread resolves once and the agent's
+    own resolution reply does not trigger a second address pass.
+    """
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed in commit cafebabe")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit cafebabe")
     changed_thread = {
         "id": "T_same",
         "isResolved": False,
@@ -658,7 +666,7 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
                 },
                 {
                     "databaseId": 102,
-                    "bodyText": "fixed in commit cafebabe",
+                    "bodyText": "AWF-VERDICT: FIXED: fixed in commit cafebabe",
                     "author": {"login": "dimileeh"},
                     "viewerDidAuthor": True,
                 },
@@ -675,6 +683,11 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
     initial_thread = ReviewThread(
         thread_id="T_same",
