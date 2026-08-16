@@ -17,7 +17,8 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 # Binding targets that an appended tip can rebind to supersede added salvage.
 _ASSIGN_BINDING_RE = re.compile(
-    r"(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(?:"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
     r"(?:"
     r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
     r"|"
@@ -28,6 +29,15 @@ _ASSIGN_BINDING_RE = re.compile(
     # empty / scalar value still counts so config overrides fail closed
     # (PRRT_kwDOSJAM6s6ZqNAk).
     r"[ \t]*:[ \t]*(?!=)"
+    r")"
+    r"|"
+    # Quoted JSON/YAML mapping keys (``"feature-enabled": …`` / ``'k': …``).
+    # Identifier-only matching left these unbound so a tip could append a
+    # duplicate key after salvage and still reuse FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZqQfh).
+    r'"([^"\n]+)"[ \t]*:[ \t]*(?!=)'
+    r"|"
+    r"'([^'\n]+)'[ \t]*:[ \t]*(?!=)"
     r")"
 )
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -309,7 +319,10 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     ):
         match = pattern.match(raw_line)
         if match is not None:
-            return match.group(1)
+            for group in match.groups():
+                if group:
+                    return group
+            return None
     return None
 
 
@@ -317,12 +330,13 @@ def _binding_names(text: str) -> set[str]:
     """Return names bound by assignments / defs / defines in ``text``.
 
     Used to detect when appended tip content rebinds a name from an added salvage
-    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, or YAML
-    ``feature_enabled: true`` then ``feature_enabled: false``), which keeps a
+    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, YAML
+    ``feature_enabled: true`` then ``feature_enabled: false``, or quoted JSON
+    ``"feature-enabled": true`` then ``"feature-enabled": false``), which keeps a
     line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqNAk). Lines that start inside ``/*`` or a triple-quoted
-    string are skipped so Google-style docstring Args prose cannot falsely
-    supersede (PRRT_kwDOSJAM6s6ZqPO9).
+    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh). Lines that start inside ``/*``
+    or a triple-quoted string are skipped so Google-style docstring Args prose
+    cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
     """
     names: set[str] = set()
     in_block_comment = False

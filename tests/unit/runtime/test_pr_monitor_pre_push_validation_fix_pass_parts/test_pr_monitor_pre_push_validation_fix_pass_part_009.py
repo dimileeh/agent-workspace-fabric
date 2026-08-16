@@ -115,6 +115,30 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="feature_enabled: true\n",
         head_blob="feature_enabled: true\nother_key: 1\n",
     )
+    # Quoted JSON/YAML mapping keys (incl. hyphenated) must supersede like bare
+    # identifiers; identifier-only matching left `"feature-enabled"` unbound so
+    # an appended duplicate kept a line-aligned prefix and reused stale FIXED
+    # evidence (PRRT_kwDOSJAM6s6ZqQfh).
+    assert not _added_salvage_blob_retained(
+        commit_blob='"feature-enabled": true\n',
+        head_blob='"feature-enabled": true\n"feature-enabled": false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='"feature-enabled": true\n',
+        head_blob=('"feature-enabled": true\n"other": 1\n"feature-enabled": false\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="'feature-enabled': true\n",
+        head_blob="'feature-enabled': true\n'feature-enabled': false\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='"feature-enabled": true\n',
+        head_blob='"feature-enabled": true\n# "feature-enabled": false\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='"feature-enabled": true\n',
+        head_blob='"feature-enabled": true\n"other-key": 1\n',
+    )
     # Docstring / block-comment prose that reuses a salvage assignment name
     # (Google-style ``Args:`` / ``timeout: Seconds…``) must not count as a
     # YAML-style rebind; otherwise benign documentation drops FIXED evidence
@@ -363,6 +387,44 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_yaml,
         commit_blob=commit_yaml,
         head_blob="x: 1\nfeature_enabled: true\ny: 2\n# feature_enabled: false\n",
+    )
+    # Quoted JSON mapping keys must supersede the same way; otherwise a tip that
+    # keeps salvage `"feature-enabled": true` and appends a later duplicate
+    # false cleanly merge-file-matches HEAD while consumers take the final
+    # false (PRRT_kwDOSJAM6s6ZqQfh). Keep the salvage key line byte-identical so
+    # only the appended duplicate is tip-extra (trailing commas would retarget
+    # the salvage line itself).
+    parent_json = '{\n  "feature-enabled": false\n}\n'
+    commit_json = '{\n  "feature-enabled": true\n}\n'
+    assert _salvage_changed_binding_names(parent_blob=parent_json, commit_blob=commit_json) == {
+        "feature-enabled"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_json,
+        commit_blob=commit_json,
+        head_blob=('{\n  "feature-enabled": true\n  "other": 1\n  "feature-enabled": false\n}\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_json,
+        commit_blob=commit_json,
+        head_blob=('{\n  "feature-enabled": true\n}\n"feature-enabled": false\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_json,
+        commit_blob=commit_json,
+        head_blob=('{\n  "feature-enabled": true\n  "other": 1\n}\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_json,
+        commit_blob=commit_json,
+        head_blob=('{\n  "feature-enabled": true\n}\n# "feature-enabled": false\n'),
+    )
+    parent_json_sq = "{\n  'feature-enabled': false\n}\n"
+    commit_json_sq = "{\n  'feature-enabled': true\n}\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_json_sq,
+        commit_blob=commit_json_sq,
+        head_blob=("{\n  'feature-enabled': true\n  'other': 1\n  'feature-enabled': false\n}\n"),
     )
     # Tip-extra Google-style docstring prose must not supersede a real salvage
     # assignment rebind (PRRT_kwDOSJAM6s6ZqPO9).
