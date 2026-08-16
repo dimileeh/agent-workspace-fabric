@@ -439,6 +439,10 @@ class PullRequestMonitorAdoptionService:
                 previous_terminal_adoptions
                 and task.idempotency_key == logical_idempotency_key
                 and await _task_has_existing_attempt(self._session, task.id)
+                # Reuse may stamp the adoption key onto a joined null-key source
+                # task. Supersession preserves that row; rejoin it instead of
+                # treating the logical key as a prior adoption-owned generation.
+                and not await _task_has_non_adoption_attempt(self._session, task.id)
             ):
                 if explicit_external_id:
                     raise TaskExternalIdConflictError(effective_external_id)
@@ -771,6 +775,25 @@ async def _next_adoption_task_idempotency_key(
 
 async def _task_has_existing_attempt(session: AsyncSession, task_id: str) -> bool:
     stmt = select(TaskAttempt.id).where(TaskAttempt.task_id == task_id).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def _task_has_non_adoption_attempt(session: AsyncSession, task_id: str) -> bool:
+    """True when *task_id* has an attempt from a non-PR-adoption workspace.
+
+    Joined same-scope source workspaces keep the default ``task_kind`` and are
+    the signal that a reuse-stamped logical adoption key must be rejoined on
+    terminal re-adoption rather than treated as an owned generation slot.
+    """
+    stmt = (
+        select(TaskAttempt.id)
+        .join(Workspace, Workspace.id == TaskAttempt.workspace_id)
+        .where(
+            TaskAttempt.task_id == task_id,
+            Workspace.task_kind != PR_ADOPTION_TASK_KIND,
+        )
+        .limit(1)
+    )
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
