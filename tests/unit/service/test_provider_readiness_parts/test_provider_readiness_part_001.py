@@ -163,7 +163,7 @@ def test_selected_provider_preflight_blocks_missing_strict_auth(tmp_path: Path) 
 
     assert result["provider"] == "codex"
     assert result["agent"] == "codex"
-    assert result["model"] == "gpt-5.5"
+    assert result["model"] == "gpt-5.6-sol"
     assert result["readiness_status"] == "blocked"
     assert result["auth_status"] == "fail"
     assert result["auth_source"] == "not_observed"
@@ -292,7 +292,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
 
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
-        ("claude_code", "claude_code", "claude-opus-4-8", "ok"),
+        ("claude_code", "claude_code", "claude-opus-5", "ok"),
         ("cursor", "cursor", "sonnet-4-thinking", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),

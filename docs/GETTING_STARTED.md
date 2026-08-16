@@ -408,8 +408,8 @@ Default agent models and effort are centralized in
 
 | Agent | Default model | AWF effort |
 | --- | --- | --- |
-| `claude_code` | `claude-opus-4-8` | `xhigh` passed through to Claude Code |
-| `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
+| `claude_code` | `claude-opus-5` | `xhigh` passed through to Claude Code |
+| `codex` | `gpt-5.6-sol` | `xhigh` via `model_reasoning_effort` |
 | `cursor` | `sonnet-4-thinking` | `xhigh` uses the thinking-capable model variant; no separate Cursor effort flag |
 | `antigravity` | `gemini-3.1-pro-preview` | Effort accepted/recorded but never emitted (`agy` rejects `--effort` in API-key mode; OAuth uses composite slugs) |
 | `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking (deprecated personal path; retained for enterprise) |

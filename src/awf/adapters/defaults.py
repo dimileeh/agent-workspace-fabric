@@ -11,8 +11,8 @@ from awf.db.enums import AgentRuntime
 
 DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
-        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-4-8", effort="xhigh"),
-        AgentRuntime.codex: AgentDefaults(model="gpt-5.5", effort="xhigh"),
+        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5", effort="xhigh"),
+        AgentRuntime.codex: AgentDefaults(model="gpt-5.6-sol", effort="xhigh"),
         # Cursor documents model selection but not a portable effort flag.
         # Use the thinking-capable Sonnet variant as AWF's high-effort default.
         AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_THINKING_MODEL, effort="xhigh"),
