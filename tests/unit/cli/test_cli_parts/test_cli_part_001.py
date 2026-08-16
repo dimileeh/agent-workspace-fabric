@@ -47,6 +47,8 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
     assert "--owned-path" in visible_help
     assert "--execution" in visible_help
+    assert "--external-id" in visible_help
+    assert "--task-class" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
