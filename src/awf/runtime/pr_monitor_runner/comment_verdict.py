@@ -706,6 +706,16 @@ async def _invoke_cli_for_verdict_result(
             )
             state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(salvage_item_id), None)
 
+    async def _clear_retained_salvage_durably() -> None:
+        # In-memory pops alone are lost when settle-sleep cancel reloads DB state
+        # before full ``_persist_state``. Persist selective deletions the same
+        # way adds already do (PRRT_kwDOSJAM6s6Zn212).
+        _clear_retained_salvage()
+        if state is not None and salvage_item_id is not None:
+            persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+            if callable(persist):
+                await persist(workspace_id, state, salvage_item_id=salvage_item_id)
+
     retain_for_failed_run = cli_failed or commit_sink_error is not None
     _retain_or_clear_failed_run_salvage(
         state=state,
@@ -824,7 +834,7 @@ async def _invoke_cli_for_verdict_result(
         # the run did not complete — do not resolve/defer from a pre-crash marker.
         # Drop any dirty salvage from this crash so a later no-change FIXED retry
         # cannot treat a non-FIXED attempt as item evidence.
-        _clear_retained_salvage()
+        await _clear_retained_salvage_durably()
         if cli_failed:
             return VerdictResult(verdict="agent_failed")
         return parsed
@@ -842,7 +852,7 @@ async def _invoke_cli_for_verdict_result(
             verdict=parsed.verdict,
             reason=parsed.reason,
         ):
-            _clear_retained_salvage()
+            await _clear_retained_salvage_durably()
         return parsed
     if parsed.verdict == "fix_committed":
         # Hosted recovery may sync a terminal SHA and set advance evidence before
@@ -892,11 +902,11 @@ async def _invoke_cli_for_verdict_result(
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt
             # documents FIXED without a code change for that path.
-            _clear_retained_salvage()
+            await _clear_retained_salvage_durably()
             return parsed
         reason = redact_audit_text("fixed_without_head_advance")
         return VerdictResult(verdict="needs_human", reason=reason or "fixed_without_head_advance")
     if cli_failed:
         return VerdictResult(verdict="agent_failed")
-    _clear_retained_salvage()
+    await _clear_retained_salvage_durably()
     return parsed

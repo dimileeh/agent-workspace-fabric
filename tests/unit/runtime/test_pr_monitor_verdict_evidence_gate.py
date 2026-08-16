@@ -955,6 +955,147 @@ async def test_successful_explicit_needs_human_clears_retained_salvage(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("non_fix_stdout", "expected_verdict"),
+    [
+        (
+            "AWF-VERDICT: FALSE POSITIVE: earlier salvage was for a misread",
+            "false_positive",
+        ),
+        (
+            "AWF-VERDICT: DEFER: track follow-up; salvage no longer applies",
+            "defer",
+        ),
+        (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose; drop salvage",
+            "needs_human",
+        ),
+    ],
+)
+async def test_successful_non_fix_clears_invalidated_salvage_durably(
+    tmp_path: Path,
+    non_fix_stdout: str,
+    expected_verdict: str,
+) -> None:
+    """Explicit non-FIXED must durable-clear salvage before return.
+
+    Adding salvage already calls ``_persist_failed_run_salvage_durably``. Clearing
+    only in memory left DB keys intact across settle-sleep cancel / worker reload,
+    so a later no-change FIXED could reuse evidence the completed non-fix
+    verdict invalidated (PRRT_kwDOSJAM6s6Zn212). Persist selective deletions the
+    same way — never full ``_persist_state``.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    salvaged = "b" * 40
+    start = "a" * 40
+    item_id = f"PRRT_kwDOSJAM6s6Zn212_{expected_verdict}"
+    body_hash = f"feedback_body_hash_durable_clear_{expected_verdict}"
+    workspace_id = f"ws_durable_clear_invalidated_salvage_{expected_verdict}"
+    earlier_unconfirmed = f"PRRT_earlier_unconfirmed_durable_clear_{expected_verdict}"
+    (tmp_path / workspace_id).mkdir()
+    # Simulate reload of previously persisted salvage tip evidence.
+    state = MonitorState()
+    state.mark_addressed(earlier_unconfirmed, "fix_committed")
+    state.mark_addressed(_salvaged_fix_head_state_key(item_id), salvaged)
+    state.mark_addressed(_salvaged_fix_body_hash_state_key(item_id), body_hash)
+    state.mark_addressed(_salvaged_fix_start_state_key(item_id), start)
+    persisted_snapshots: list[dict[str, str | None]] = []
+    persist_state_calls = 0
+
+    async def _persist_failed_run_salvage_durably(
+        _workspace_id: str,
+        persisted: MonitorState,
+        *,
+        salvage_item_id: str,
+    ) -> None:
+        snap: dict[str, str | None] = {}
+        for key in (
+            _salvaged_fix_head_state_key(salvage_item_id),
+            _salvaged_fix_body_hash_state_key(salvage_item_id),
+            _salvaged_fix_start_state_key(salvage_item_id),
+        ):
+            snap[key] = persisted.threads_addressed_ids.get(key)
+        persisted_snapshots.append(snap)
+
+    async def _persist_state(_workspace_id: str, _persisted: MonitorState) -> None:
+        nonlocal persist_state_calls
+        persist_state_calls += 1
+
+    clear_runner = _evidence_runner(
+        stdout=non_fix_stdout,
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    clear_runner._worktrees_root = tmp_path
+    clear_runner._persist_failed_run_salvage_durably = _persist_failed_run_salvage_durably
+    clear_runner._persist_state = _persist_state
+
+    cleared = await comments._invoke_cli_for_verdict_result(
+        clear_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert cleared.verdict == expected_verdict
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+    assert persisted_snapshots, "successful non-FIXED must durable-persist salvage clear"
+    assert persisted_snapshots[-1].get(_salvaged_fix_head_state_key(item_id)) is None
+    assert persisted_snapshots[-1].get(_salvaged_fix_body_hash_state_key(item_id)) is None
+    assert persisted_snapshots[-1].get(_salvaged_fix_start_state_key(item_id)) is None
+    assert persist_state_calls == 0
+    assert earlier_unconfirmed not in {
+        k for snap in persisted_snapshots for k in snap if snap[k] is not None
+    }
+
+    # Simulate worker reload after settle-sleep cancel: only durable salvage keys.
+    reloaded = MonitorState()
+    for key, value in persisted_snapshots[-1].items():
+        if value is not None:
+            reloaded.threads_addressed_ids[key] = value
+    assert earlier_unconfirmed not in reloaded.threads_addressed_ids
+    assert _salvaged_fix_head_state_key(item_id) not in reloaded.threads_addressed_ids
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: must not reuse invalidated salvage",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=reloaded,
+        operation_start_head=salvaged,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
 async def test_salvage_retained_before_provider_recovery_retry_raise(
     tmp_path: Path,
 ) -> None:
