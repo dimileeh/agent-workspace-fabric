@@ -291,21 +291,56 @@ def _is_declaration_opener_line(raw_line: str) -> bool:
     return False
 
 
+def _line_indent(raw_line: str) -> int:
+    """Return leading space/tab count for ``raw_line``."""
+    return len(raw_line) - len(raw_line.lstrip(" \t"))
+
+
+def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
+    """Return opener-plus-body lines for the binding starting at ``start``.
+
+    Continues through blank lines and lines indented strictly deeper than the
+    opener so body-only edits (same ``def``/``class``/``function`` line, different
+    body) compare as a changed binding (PRRT_kwDOSJAM6s6ZqHvh). Trailing blanks
+    after the last body line are dropped for stable comparison.
+    """
+    opener = lines[start]
+    opener_indent = _line_indent(opener)
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() == "":
+            end += 1
+            continue
+        if _line_indent(line) <= opener_indent:
+            break
+        end += 1
+    while end > start + 1 and lines[end - 1].strip() == "":
+        end -= 1
+    return tuple(lines[start:end])
+
+
+def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
+    """Map each binding name to the span of its last occurrence in ``text``."""
+    lines = text.splitlines()
+    last_start: dict[str, int] = {}
+    for idx, raw_line in enumerate(lines):
+        name = _binding_name_for_line(raw_line)
+        if name is not None:
+            last_start[name] = idx
+    return {name: _binding_span_at(lines, start) for name, start in last_start.items()}
+
+
 def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set[str]:
-    """Return names whose last binding line differs between parent and salvage."""
-    parent_last: dict[str, str] = {}
-    for raw_line in parent_blob.splitlines():
-        name = _binding_name_for_line(raw_line)
-        if name is not None:
-            parent_last[name] = raw_line
+    """Return names whose last binding span differs between parent and salvage.
+
+    Spans include declaration bodies, not only opener lines, so body-only
+    function/class edits count as changed bindings (PRRT_kwDOSJAM6s6ZqHvh).
+    """
+    parent_spans = _last_binding_spans(parent_blob)
     changed: set[str] = set()
-    commit_last: dict[str, str] = {}
-    for raw_line in commit_blob.splitlines():
-        name = _binding_name_for_line(raw_line)
-        if name is not None:
-            commit_last[name] = raw_line
-    for name, line in commit_last.items():
-        if parent_last.get(name) != line:
+    for name, span in _last_binding_spans(commit_blob).items():
+        if parent_spans.get(name) != span:
             changed.add(name)
     return changed
 
@@ -319,12 +354,14 @@ def _tip_extra_can_supersede_modified_salvage(
     A tip can keep the salvage hunk and append a later rebinding of the same
     name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``); with
     surrounding context merge-file reproduces that tip cleanly, so equality
-    alone would retain stale FIXED evidence. Only names whose last binding line
-    changed vs parent count — unrelated appends and later hunks stay retained
-    (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use set difference except for
-    declaration openers, which need multiset counting so same-signature
-    redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij); full-line multiset
-    would over-reject surplus salvage assignment copies (PRRT_kwDOSJAM6s6ZqGeU).
+    alone would retain stale FIXED evidence. Only names whose last binding span
+    (opener plus indented body) changed vs parent count — unrelated appends and
+    later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use set
+    difference except for declaration openers, which need multiset counting so
+    same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
+    full-line multiset would over-reject surplus salvage assignment copies
+    (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
+    bindings (PRRT_kwDOSJAM6s6ZqHvh).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:

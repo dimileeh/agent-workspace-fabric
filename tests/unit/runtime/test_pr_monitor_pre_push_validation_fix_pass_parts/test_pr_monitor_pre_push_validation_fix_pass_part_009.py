@@ -329,9 +329,11 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     commit_indented = "class C:\n    FEATURE_ENABLED = True\n"
     assert _salvage_changed_binding_names(
         parent_blob=parent_indented, commit_blob=commit_indented
-    ) == {"FEATURE_ENABLED"}
+    ) == {"C", "FEATURE_ENABLED"}
     # Same indented assignment text reused in a later local hunk — identical line
     # text, so only full-line multiset would treat the surplus copy as tip-extra.
+    # Enclosing class ``C`` is also in ``changed`` because the class span body
+    # changed, but tip extras here bind only ``helper`` (PRRT_kwDOSJAM6s6ZqGeU).
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_indented,
         commit_blob=commit_indented,
@@ -377,6 +379,47 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob="x = 1\n#define GUARD 1\n",
         head_blob="x = 1\n#define GUARD 1\n#define GUARD 0\n",
     )
+    # Body-only salvage of an existing declaration keeps the same opener line.
+    # Comparing opener text alone would omit the name from ``changed``, so a tip
+    # that appends a same-signature redefinition would retain stale FIXED
+    # evidence after a clean merge-file match (PRRT_kwDOSJAM6s6ZqHvh).
+    parent_body = "x = 1\ndef guard():\n    return False\n"
+    commit_body = "x = 1\ndef guard():\n    return True\n"
+    head_body_redef = "x = 1\ndef guard():\n    return True\ndef guard():\n    return False\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_body, commit_blob=commit_body) == {
+        "guard"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_body,
+        commit_blob=commit_body,
+        head_blob=head_body_redef,
+    )
+    parent_class = "x = 1\nclass Guard:\n    def ok(self):\n        return False\n"
+    commit_class = "x = 1\nclass Guard:\n    def ok(self):\n        return True\n"
+    assert "Guard" in _salvage_changed_binding_names(
+        parent_blob=parent_class, commit_blob=commit_class
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_class,
+        commit_blob=commit_class,
+        head_blob=(
+            "x = 1\nclass Guard:\n    def ok(self):\n        return True\n"
+            "class Guard:\n    def ok(self):\n        return False\n"
+        ),
+    )
+    assert _salvage_changed_binding_names(
+        parent_blob="x = 1\nfunction guard() {\n  return false;\n}\n",
+        commit_blob="x = 1\nfunction guard() {\n  return true;\n}\n",
+    ) == {"guard"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\nfunction guard() {\n  return false;\n}\n",
+        commit_blob="x = 1\nfunction guard() {\n  return true;\n}\n",
+        head_blob=(
+            "x = 1\nfunction guard() {\n  return true;\n}\nfunction guard() {\n  return false;\n}\n"
+        ),
+    )
+    # Unchanged body must not mark the binding changed.
+    assert _salvage_changed_binding_names(parent_blob=commit_body, commit_blob=commit_body) == set()
     # Comment / non-directive hash lines are not declaration openers; they must
     # not flip tip-extra multiset accounting (PRRT_kwDOSJAM6s6ZqGeU).
     assert not _tip_extra_can_supersede_modified_salvage(
