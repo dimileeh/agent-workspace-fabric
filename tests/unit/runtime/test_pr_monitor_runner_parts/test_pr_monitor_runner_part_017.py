@@ -1514,6 +1514,42 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "stdout",
+        [
+            "AWF-VERDICT: FALSE POSITIVE: `<one-sentence justification>`",
+            "AWF-VERDICT: FALSE POSITIVE: ``<one-sentence justification>``",
+            'AWF-VERDICT: FALSE POSITIVE: "<one-sentence justification>"',
+            "AWF-VERDICT: FALSE POSITIVE: '<one-sentence justification>'",
+            'AWF-VERDICT: FALSE POSITIVE: "`<one-sentence justification>`"',
+            "AWF-VERDICT: FIXED: `<one-sentence summary>`",
+        ],
+    )
+    def test_private_awf_formatted_placeholder_reason_fail_closed(self, stdout: str) -> None:
+        # Balanced quote/backtick wrappers around a template placeholder must not
+        # leave the echo as a usable reason (PRRT_kwDOSJAM6s6Zn-VK).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason in {"verdict_placeholder_echo", "fixed_placeholder_echo"}
+
+    @pytest.mark.unit
+    def test_private_awf_quote_only_reason_sanitizes_to_none(self) -> None:
+        # Empty quote wrappers are not usable reasons; after unwrap they behave
+        # like a bare empty FALSE POSITIVE (reasonless, still false_positive).
+        result = _parse_verdict_result('AWF-VERDICT: FALSE POSITIVE: ""')
+
+        assert result.verdict == "false_positive"
+        assert result.reason is None
+
+    @pytest.mark.unit
+    def test_private_awf_formatted_real_reason_still_usable(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FALSE POSITIVE: `stale review boilerplate`")
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "stale review boilerplate"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("stdout", "expected_reason"),
         [
             (

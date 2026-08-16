@@ -230,6 +230,10 @@ _VERDICT_REASON_REDACTION_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+_VERDICT_REASON_INLINE_QUOTE_WRAPPER = re.compile(
+    r'^(?:"\s*(?P<dq>.*?)\s*"|\'\s*(?P<sq>.*?)\s*\'|'
+    r"“\s*(?P<cdq>.*?)\s*”|‘\s*(?P<csq>.*?)\s*’)$"
+)
 # Multiline Markdown fences (CommonMark-style). Backtick info strings may not
 # contain backticks (so same-line wraps like `` ```verdict``` `` are not
 # openers). Tilde info strings may include ``~`` (e.g. ``~~~ lang~option``).
@@ -1006,7 +1010,7 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     whole-reason match (PRRT_kwDOSJAM6s6Znin1). Leading template-shaped tags
     that continue with real prose (no absorbed marker) stay usable.
     """
-    cleaned = reason.strip()
+    cleaned = _normalize_verdict_reason_inline_formatting(reason.strip())
     if not cleaned:
         return False
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
@@ -1014,7 +1018,29 @@ def _verdict_reason_is_template_placeholder(reason: str) -> bool:
     marker = _AWF_VERDICT_MARKER.search(cleaned)
     if marker is None or marker.start() == 0:
         return False
-    return _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned[: marker.start()]) is not None
+    prefix = _normalize_verdict_reason_inline_formatting(cleaned[: marker.start()])
+    return bool(prefix) and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(prefix) is not None
+
+
+def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
+    """Peel balanced outer quote/backtick wrappers from a verdict reason.
+
+    Agents often echo prompt placeholders inside inline code or quotes
+    (`` `<one-sentence justification>` `` / ``"<…>"``). Those wrappers must not
+    defeat whole-reason placeholder detection (PRRT_kwDOSJAM6s6Zn-VK).
+    """
+    cleaned = reason.strip()
+    while cleaned:
+        tick_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(cleaned)
+        if tick_match is not None:
+            cleaned = tick_match.group("line").strip()
+            continue
+        quote_match = _VERDICT_REASON_INLINE_QUOTE_WRAPPER.fullmatch(cleaned)
+        if quote_match is not None:
+            cleaned = next(g for g in quote_match.groups() if g is not None).strip()
+            continue
+        break
+    return cleaned
 
 
 def _last_awf_resolvable_reason_is_placeholder(stdout: str, *, verdict: Verdict) -> bool:
@@ -1628,7 +1654,7 @@ def _sanitize_verdict_reason(reason: str | None) -> str | None:
     """Redact, bound, and normalize a verdict reason, dropping unusable content."""
     if reason is None:
         return None
-    cleaned = redact_secrets(reason).strip()
+    cleaned = _normalize_verdict_reason_inline_formatting(redact_secrets(reason).strip())
     if not cleaned:
         return None
     if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
