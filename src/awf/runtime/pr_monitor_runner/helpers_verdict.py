@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.comments import (
@@ -243,6 +244,10 @@ __all__ = (
     "_FIXED_REASON_ABSORBABLE_LABELS",
     "_awf_verdict_leading_fixed_absorbs_later_marker",
     "_EXPLICIT_VERDICT_CORRECTION_SEPARATOR",
+    "_EXPLICIT_VERDICT_CORRECTION_SEARCH_WINDOW",
+    "_prefix_has_explicit_verdict_correction_separator",
+    "_AwfVerdictDelimiterState",
+    "_advance_awf_verdict_delimiter_state",
     "_awf_verdict_marker_unambiguously_separate_attempt",
     "_awf_verdict_marker_embedded_in_reason_prose",
     "_ascii_quote_is_backslash_escaped",
@@ -746,16 +751,28 @@ def _awf_verdict_segments(verdict_line: str) -> list[str]:
         return [verdict_line]
     if verdict_line[: matches[0].start()].strip():
         return [verdict_line]
+    # One forward delimiter pass for every later marker. Rescanning the prefix
+    # per token is quadratic in attacker-/agent-controlled output size
+    # (PRRT_kwDOSJAM6s6ZpHXP).
+    delimiter_state = _AwfVerdictDelimiterState()
     split_starts = [matches[0].start()]
+    leading_start = matches[0].start()
     for match in matches[1:]:
-        if _awf_verdict_marker_embedded_in_reason_prose(verdict_line, match.start()):
+        _advance_awf_verdict_delimiter_state(verdict_line, delimiter_state, match.start())
+        if delimiter_state.inside_quote_or_code:
             continue
         if _awf_verdict_leading_hard_block_absorbs_later_marker(
-            verdict_line, matches[0].start(), match.start()
+            verdict_line,
+            leading_start,
+            match.start(),
+            delimiter_state=delimiter_state,
         ):
             continue
         if _awf_verdict_leading_fixed_absorbs_later_marker(
-            verdict_line, matches[0].start(), match.start()
+            verdict_line,
+            leading_start,
+            match.start(),
+            delimiter_state=delimiter_state,
         ):
             continue
         split_starts.append(match.start())
@@ -780,7 +797,11 @@ def _awf_verdict_leading_hard_block(verdict_line: str, match_start: int) -> bool
 
 
 def _awf_verdict_leading_hard_block_absorbs_later_marker(
-    verdict_line: str, leading_start: int, later_start: int
+    verdict_line: str,
+    leading_start: int,
+    later_start: int,
+    *,
+    delimiter_state: _AwfVerdictDelimiterState | None = None,
 ) -> bool:
     """Return whether a ``NEEDS_HUMAN`` leader keeps a later same-line marker as rationale.
 
@@ -792,14 +813,20 @@ def _awf_verdict_leading_hard_block_absorbs_later_marker(
     """
     if not _awf_verdict_leading_hard_block(verdict_line, leading_start):
         return False
-    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
+    return not _awf_verdict_marker_unambiguously_separate_attempt(
+        verdict_line, later_start, delimiter_state=delimiter_state
+    )
 
 
 _FIXED_REASON_ABSORBABLE_LABELS = frozenset({"fixed", "false positive", "defer"})
 
 
 def _awf_verdict_leading_fixed_absorbs_later_marker(
-    verdict_line: str, leading_start: int, later_start: int
+    verdict_line: str,
+    leading_start: int,
+    later_start: int,
+    *,
+    delimiter_state: _AwfVerdictDelimiterState | None = None,
 ) -> bool:
     """Return whether a nonblocking leader keeps a later same-line marker as rationale.
 
@@ -827,7 +854,9 @@ def _awf_verdict_leading_fixed_absorbs_later_marker(
     later_label = re.sub(r"[\s_]+", " ", later.group("label").strip().lower())
     if later_label not in _FIXED_REASON_ABSORBABLE_LABELS:
         return False
-    return not _awf_verdict_marker_unambiguously_separate_attempt(verdict_line, later_start)
+    return not _awf_verdict_marker_unambiguously_separate_attempt(
+        verdict_line, later_start, delimiter_state=delimiter_state
+    )
 
 
 # Explicit self-correction before a later same-line marker
@@ -840,8 +869,111 @@ _EXPLICIT_VERDICT_CORRECTION_SEPARATOR = re.compile(
     r"(?is)(?:^|[\s;,.:—–]|(?<![A-Za-z0-9])-)(?:correction|corrected\s+to)\s*:\s*\Z"
 )
 
+# \Z-anchored correction probes only need a short trailing window. Searching the
+# full prefix per marker would stay quadratic after the delimiter scan fix
+# (PRRT_kwDOSJAM6s6ZpHXP). Oversized gaps still fail closed (stay absorbed).
+_EXPLICIT_VERDICT_CORRECTION_SEARCH_WINDOW = 256
 
-def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_start: int) -> bool:
+
+def _prefix_has_explicit_verdict_correction_separator(verdict_line: str, match_start: int) -> bool:
+    """Return whether the prefix before ``match_start`` ends with a correction separator."""
+    if match_start <= 0:
+        return False
+    start = max(0, match_start - _EXPLICIT_VERDICT_CORRECTION_SEARCH_WINDOW)
+    # ``endpos`` makes ``\Z`` match at ``match_start`` without copying the prefix.
+    return bool(_EXPLICIT_VERDICT_CORRECTION_SEPARATOR.search(verdict_line, start, match_start))
+
+
+@dataclass(slots=True)
+class _AwfVerdictDelimiterState:
+    """Mutable quote/code-span cursor for linear same-line marker scans."""
+
+    inside_ascii_double: bool = False
+    inside_ascii_single: bool = False
+    inside_backtick: bool = False
+    backtick_open_len: int = 0
+    inside_curly_double: bool = False
+    inside_curly_single: bool = False
+    last_close_end: int = -1
+    cursor: int = 0
+
+    @property
+    def inside_quote_or_code(self) -> bool:
+        return (
+            self.inside_ascii_double
+            or self.inside_ascii_single
+            or self.inside_backtick
+            or self.inside_curly_double
+            or self.inside_curly_single
+        )
+
+
+def _advance_awf_verdict_delimiter_state(
+    verdict_line: str, state: _AwfVerdictDelimiterState, until: int
+) -> None:
+    """Advance ``state`` by scanning ``verdict_line[state.cursor:until]``.
+
+    Callers must pass non-decreasing ``until`` values so multi-marker lines pay
+    linear work in the line length instead of rescanning each prefix.
+    """
+    if until < state.cursor:
+        msg = "delimiter scan cursor must advance forward"
+        raise ValueError(msg)
+    index = state.cursor
+    while index < until:
+        char = verdict_line[index]
+        if char == '"':
+            if _ascii_double_quote_is_delimiter(verdict_line, index, state.inside_ascii_double):
+                if state.inside_ascii_double:
+                    state.last_close_end = index + 1
+                state.inside_ascii_double = not state.inside_ascii_double
+            index += 1
+        elif char == "'":
+            if _ascii_single_quote_is_delimiter(verdict_line, index, state.inside_ascii_single):
+                if state.inside_ascii_single:
+                    state.last_close_end = index + 1
+                state.inside_ascii_single = not state.inside_ascii_single
+            index += 1
+        elif char == "`":
+            run_len = 1
+            while index + run_len < until and verdict_line[index + run_len] == "`":
+                run_len += 1
+            if state.inside_backtick:
+                if run_len == state.backtick_open_len:
+                    state.inside_backtick = False
+                    state.backtick_open_len = 0
+                    state.last_close_end = index + run_len
+            else:
+                state.inside_backtick = True
+                state.backtick_open_len = run_len
+            index += run_len
+        elif char == "“":
+            state.inside_curly_double = True
+            index += 1
+        elif char == "”":
+            if state.inside_curly_double:
+                state.last_close_end = index + 1
+            state.inside_curly_double = False
+            index += 1
+        elif char == "‘":
+            state.inside_curly_single = True
+            index += 1
+        elif char == "’":
+            if state.inside_curly_single:
+                state.last_close_end = index + 1
+            state.inside_curly_single = False
+            index += 1
+        else:
+            index += 1
+    state.cursor = until
+
+
+def _awf_verdict_marker_unambiguously_separate_attempt(
+    verdict_line: str,
+    match_start: int,
+    *,
+    delimiter_state: _AwfVerdictDelimiterState | None = None,
+) -> bool:
     """Return whether ``match_start`` is an unambiguous separate trailing attempt.
 
     Distinguishes a real trailing verdict jammed against a finished citation
@@ -851,74 +983,30 @@ def _awf_verdict_marker_unambiguously_separate_attempt(verdict_line: str, match_
     """
     if match_start <= 0:
         return False
-    last_close_end = -1
-    inside_ascii_double = False
-    inside_ascii_single = False
-    inside_backtick = False
-    backtick_open_len = 0
-    inside_curly_double = False
-    inside_curly_single = False
-    skip_until = 0
-    prefix = verdict_line[:match_start]
-    for index, char in enumerate(prefix):
-        if index < skip_until:
-            continue
-        if char == '"':
-            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
-                if inside_ascii_double:
-                    last_close_end = index + 1
-                inside_ascii_double = not inside_ascii_double
-        elif char == "'":
-            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
-                if inside_ascii_single:
-                    last_close_end = index + 1
-                inside_ascii_single = not inside_ascii_single
-        elif char == "`":
-            run_len = 1
-            while index + run_len < match_start and prefix[index + run_len] == "`":
-                run_len += 1
-            if inside_backtick:
-                if run_len == backtick_open_len:
-                    inside_backtick = False
-                    backtick_open_len = 0
-                    last_close_end = index + run_len
-            else:
-                inside_backtick = True
-                backtick_open_len = run_len
-            skip_until = index + run_len
-        elif char == "“":
-            inside_curly_double = True
-        elif char == "”":
-            if inside_curly_double:
-                last_close_end = index + 1
-            inside_curly_double = False
-        elif char == "‘":
-            inside_curly_single = True
-        elif char == "’":
-            if inside_curly_single:
-                last_close_end = index + 1
-            inside_curly_single = False
-    inside_quote_or_code = (
-        inside_ascii_double
-        or inside_ascii_single
-        or inside_backtick
-        or inside_curly_double
-        or inside_curly_single
-    )
+    if delimiter_state is None:
+        delimiter_state = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state(verdict_line, delimiter_state, match_start)
+    elif delimiter_state.cursor != match_start:
+        _advance_awf_verdict_delimiter_state(verdict_line, delimiter_state, match_start)
     if (
-        last_close_end >= 0
-        and not inside_quote_or_code
-        and not verdict_line[last_close_end:match_start].strip()
+        delimiter_state.last_close_end >= 0
+        and not delimiter_state.inside_quote_or_code
+        and not verdict_line[delimiter_state.last_close_end : match_start].strip()
     ):
         return True
     # Explicit self-corrections split even without a closed quote span
     # (PRRT_kwDOSJAM6s6Znm-N). Stay absorbed when still inside an open span.
-    return (not inside_quote_or_code) and bool(
-        _EXPLICIT_VERDICT_CORRECTION_SEPARATOR.search(prefix)
+    return (not delimiter_state.inside_quote_or_code) and (
+        _prefix_has_explicit_verdict_correction_separator(verdict_line, match_start)
     )
 
 
-def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start: int) -> bool:
+def _awf_verdict_marker_embedded_in_reason_prose(
+    verdict_line: str,
+    match_start: int,
+    *,
+    delimiter_state: _AwfVerdictDelimiterState | None = None,
+) -> bool:
     """Return whether a same-line marker is quoted inside earlier reason text.
 
     Distinguishes prose citations of the marker grammar from real trailing
@@ -943,50 +1031,12 @@ def _awf_verdict_marker_embedded_in_reason_prose(verdict_line: str, match_start:
     """
     if match_start <= 0:
         return False
-    inside_ascii_double = False
-    inside_ascii_single = False
-    inside_backtick = False
-    backtick_open_len = 0
-    inside_curly_double = False
-    inside_curly_single = False
-    skip_until = 0
-    prefix = verdict_line[:match_start]
-    for index, char in enumerate(prefix):
-        if index < skip_until:
-            continue
-        if char == '"':
-            if _ascii_double_quote_is_delimiter(verdict_line, index, inside_ascii_double):
-                inside_ascii_double = not inside_ascii_double
-        elif char == "'":
-            if _ascii_single_quote_is_delimiter(verdict_line, index, inside_ascii_single):
-                inside_ascii_single = not inside_ascii_single
-        elif char == "`":
-            run_len = 1
-            while index + run_len < match_start and prefix[index + run_len] == "`":
-                run_len += 1
-            if inside_backtick:
-                if run_len == backtick_open_len:
-                    inside_backtick = False
-                    backtick_open_len = 0
-            else:
-                inside_backtick = True
-                backtick_open_len = run_len
-            skip_until = index + run_len
-        elif char == "“":
-            inside_curly_double = True
-        elif char == "”":
-            inside_curly_double = False
-        elif char == "‘":
-            inside_curly_single = True
-        elif char == "’":
-            inside_curly_single = False
-    return (
-        inside_ascii_double
-        or inside_ascii_single
-        or inside_backtick
-        or inside_curly_double
-        or inside_curly_single
-    )
+    if delimiter_state is None:
+        delimiter_state = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state(verdict_line, delimiter_state, match_start)
+    elif delimiter_state.cursor != match_start:
+        _advance_awf_verdict_delimiter_state(verdict_line, delimiter_state, match_start)
+    return delimiter_state.inside_quote_or_code
 
 
 def _ascii_quote_is_backslash_escaped(verdict_line: str, index: int) -> bool:
@@ -1174,12 +1224,16 @@ def _awf_verdict_segment_is_attempt(segment: str) -> bool:
     first match had leading text (PRRT_kwDOSJAM6s6ZmWN6).
     """
     stripped = _strip_markdown_attempt_prefixes(segment)
+    delimiter_state = _AwfVerdictDelimiterState()
     for match in _AWF_VERDICT_MARKER.finditer(stripped):
         if match.start() == 0:
             return True
         # Unquoted later markers fail closed; only confident quote/backtick
-        # embeddings are treated as prose citations of the grammar.
-        if not _awf_verdict_marker_embedded_in_reason_prose(stripped, match.start()):
+        # embeddings are treated as prose citations of the grammar. Advance the
+        # shared delimiter cursor so multi-marker segments stay linear
+        # (PRRT_kwDOSJAM6s6ZpHXP).
+        _advance_awf_verdict_delimiter_state(stripped, delimiter_state, match.start())
+        if not delimiter_state.inside_quote_or_code:
             return True
     return False
 

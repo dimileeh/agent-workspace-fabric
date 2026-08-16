@@ -69,3 +69,29 @@ class TestParseVerdict:
         assert _monitor_state_verdict("defer") == "defer"
         assert _monitor_state_verdict("agent_failed") == "agent_failed"
         assert _monitor_state_verdict("fixed") == "fix_committed"
+
+    @pytest.mark.unit
+    def test_many_same_line_quoted_citations_keep_leading_false_positive(self) -> None:
+        # Many same-line quoted marker citations must absorb into the leading
+        # resolvable verdict via one forward delimiter pass — rescanning each
+        # prefix is quadratic in attacker-/agent-controlled output
+        # (PRRT_kwDOSJAM6s6ZpHXP).
+        citation = ' also cite "AWF-VERDICT: FIXED: example"'
+        stdout = "AWF-VERDICT: FALSE POSITIVE: base rationale" + (citation * 2500)
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "false_positive"
+        assert result.reason is not None
+        assert result.reason.startswith("base rationale")
+
+    @pytest.mark.unit
+    def test_many_same_line_unquoted_citations_keep_leading_false_positive(self) -> None:
+        # Unquoted mid-reason citations still absorb under FALSE POSITIVE; the
+        # linear delimiter cursor must preserve that gate at scale.
+        citation = " AWF-VERDICT: FIXED: cited grammar"
+        stdout = "AWF-VERDICT: FALSE POSITIVE: base rationale" + (citation * 2500)
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "false_positive"
+        assert result.reason is not None
+        assert result.reason.startswith("base rationale")
