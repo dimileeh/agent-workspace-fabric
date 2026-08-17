@@ -102,14 +102,16 @@ _YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
 )
 # Scalar YAML sequence items (``- name: a``) open an identity scope so sibling
 # items do not collapse shared leaves into ``features.enabled``
-# (PRRT_kwDOSJAM6s6ZqxYE). Requires a non-empty same-line scalar; empty
-# ``- nested:`` openers stay on ``_YAML_MAPPING_SCOPE_OPENER_RE``.
-# Quoted values may contain ``#``; bare values still stop at a ``#`` comment
-# so ``"a#1"`` / ``"a#2"`` stay distinct identities (PRRT_kwDOSJAM6s6Zq135).
+# (PRRT_kwDOSJAM6s6ZqxYE). Bare keys allow ``-`` like assign bindings so
+# ``- feature-name: a`` opens identity (PRRT_kwDOSJAM6s6Zq13_). Requires a
+# non-empty same-line scalar; empty ``- nested:`` openers stay on
+# ``_YAML_MAPPING_SCOPE_OPENER_RE``. Quoted values may contain ``#``; bare
+# values still stop at a ``#`` comment so ``"a#1"`` / ``"a#2"`` stay distinct
+# identities (PRRT_kwDOSJAM6s6Zq135).
 _YAML_SCALAR_SEQUENCE_ITEM_RE = re.compile(
     r"^[ \t]*-[ \t]+(?:"
     r"(?!(?:else|try|except|finally)[ \t]*:)"
-    r"(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<bare>[A-Za-z_][A-Za-z0-9_-]*)"
     r'|(?P<double>"[^"\n]+")'
     r"|(?P<single>'[^'\n]+')"
     r")[ \t]*:[ \t]*(?P<value>"

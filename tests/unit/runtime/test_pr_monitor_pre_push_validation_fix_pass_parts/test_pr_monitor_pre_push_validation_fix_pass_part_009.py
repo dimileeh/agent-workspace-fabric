@@ -716,6 +716,32 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_seq_sibling,
         head_blob=("features:\n  - name: a\n    enabled: true\n    enabled: false\n"),
     )
+    # Bare hyphenated sequence-item keys (``- feature-name: a``) must open the
+    # same identity scope as underscore keys; omitting ``-`` from the bare
+    # class left siblings collapsing to ``features.enabled``
+    # (PRRT_kwDOSJAM6s6Zq13_).
+    parent_hyphen_seq = "features:\n  - feature-name: a\n    enabled: false\n"
+    commit_hyphen_seq = "features:\n  - feature-name: a\n    enabled: true\n"
+    hyphen_seq_changed = _salvage_changed_binding_names(
+        parent_blob=parent_hyphen_seq, commit_blob=commit_hyphen_seq
+    )
+    assert "features.feature-name.a.enabled" in hyphen_seq_changed
+    assert "features.feature-name.a" in hyphen_seq_changed
+    assert "features.enabled" not in hyphen_seq_changed
+    assert "enabled" not in hyphen_seq_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_hyphen_seq,
+        commit_blob=commit_hyphen_seq,
+        head_blob=(
+            "features:\n  - feature-name: a\n    enabled: true\n"
+            "  - feature-name: b\n    enabled: false\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_hyphen_seq,
+        commit_blob=commit_hyphen_seq,
+        head_blob=("features:\n  - feature-name: a\n    enabled: true\n    enabled: false\n"),
+    )
     # Quoted scalars may contain ``#``; truncating at ``#`` would collapse
     # ``"a#1"`` / ``"a#2"`` to the same identity and falsely supersede salvage
     # when a sibling tip rebinds (PRRT_kwDOSJAM6s6Zq135).
