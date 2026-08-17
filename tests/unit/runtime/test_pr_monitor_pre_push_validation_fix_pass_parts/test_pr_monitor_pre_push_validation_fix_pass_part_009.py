@@ -532,6 +532,16 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="feature.enabled = true\n",
         head_blob="feature.enabled = true\nother.key = 1\n",
     )
+    # Tip-extra bare/root call must not match scoped binding ``feature.enabled``
+    # via ``name.*`` prefix (PRRT_kwDOSJAM6s6ZrsE0).
+    assert _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob="feature.enabled = true\nfeature()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob="feature.enabled = true\nfeature[key]()\n",
+    )
     # Docstring / block-comment prose that reuses a salvage assignment name
     # (Google-style ``Args:`` / ``timeout: Seconds…``) must not count as a
     # YAML-style rebind; otherwise benign documentation drops FIXED evidence
@@ -1590,6 +1600,24 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_toml_dot,
         commit_blob=commit_toml_dot,
         head_blob="feature.enabled = true\nother.key = 1\n",
+    )
+    # Root tip call ``feature()`` / ``feature[key]()`` must not supersede via
+    # ``name.*`` against binding key ``feature.enabled`` (PRRT_kwDOSJAM6s6ZrsE0).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob="feature.enabled = true\nfeature()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob="feature.enabled = true\nfeature[key]()\n",
+    )
+    # Full dotted tip call of the salvaged key still supersedes.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob="feature.enabled = true\nfeature.enabled()\n",
     )
     # Distinct dotted / quoted-dot keys must not cross-supersede
     # (PRRT_kwDOSJAM6s6ZqoYV).

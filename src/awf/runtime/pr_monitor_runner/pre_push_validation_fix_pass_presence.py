@@ -1049,22 +1049,32 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
+def _candidate_keys_include_call_name(
+    candidate_keys: set[str],
+    name: str,
+    *,
+    receiver_prefix_keys: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     """True when ``name`` matches a candidate key, scoped leaf, or dotted root.
 
     Exact and ``*.{name}`` leaf matches cover bare and scoped callees. A
     computed-member tip (``guard["disable"]()``) emits only the receiver
     ``guard`` while salvage call-count diffs may list ``guard.disable`` /
-    ``guard.enable``; treat ``name`` as matching any ``name.*`` candidate so
-    those restores still supersede (PRRT_kwDOSJAM6s6ZroRa).
+    ``guard.enable``; treat ``name`` as matching any ``name.*`` key in
+    ``receiver_prefix_keys`` (call-count candidates only) so those restores
+    still supersede (PRRT_kwDOSJAM6s6ZroRa). Prefix must not run against
+    scoped binding keys such as ``feature.enabled``: tip-extra ``feature()``
+    would otherwise drop still-present salvage (PRRT_kwDOSJAM6s6ZrsE0).
     """
     if name in candidate_keys:
         return True
     suffix = f".{name}"
     if any(key.endswith(suffix) for key in candidate_keys):
         return True
+    if not receiver_prefix_keys:
+        return False
     prefix = f"{name}."
-    return any(key.startswith(prefix) for key in candidate_keys)
+    return any(key.startswith(prefix) for key in receiver_prefix_keys)
 
 
 def _call_site_name_counts(text: str) -> Counter[str]:
@@ -1114,7 +1124,11 @@ def _salvage_changed_call_names(*, parent_blob: str, commit_blob: str) -> set[st
 
 
 def _tip_extra_calls_candidate_keys(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+    *,
+    baseline_blob: str,
+    head_blob: str,
+    candidate_keys: set[str],
+    receiver_prefix_keys: set[str] | frozenset[str] = frozenset(),
 ) -> bool:
     """Return True when tip-extra lines call a candidate-bound name.
 
@@ -1123,6 +1137,9 @@ def _tip_extra_calls_candidate_keys(
     ``enable_guard()``, or ``guard.disable()`` after ``guard.enable()``
     (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE). Lines that start inside
     ``/*`` or a triple-quoted string are ignored, matching binding scanners.
+    ``receiver_prefix_keys`` enables ``name.*`` matching for call-count
+    receivers only (PRRT_kwDOSJAM6s6ZroRa; not binding keys —
+    PRRT_kwDOSJAM6s6ZrsE0).
     """
     if not candidate_keys:
         return False
@@ -1146,7 +1163,11 @@ def _tip_extra_calls_candidate_keys(
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
         for name in _call_site_names_for_line(raw_line):
-            if _candidate_keys_include_call_name(candidate_keys, name):
+            if _candidate_keys_include_call_name(
+                candidate_keys,
+                name,
+                receiver_prefix_keys=receiver_prefix_keys,
+            ):
                 return True
     return False
 
@@ -1265,13 +1286,15 @@ def _tip_extra_can_supersede_modified_salvage(
         candidate_keys=changed,
     ):
         return True
-    call_candidates = changed | _salvage_changed_call_names(
-        parent_blob=parent_blob, commit_blob=commit_blob
-    )
+    call_names = _salvage_changed_call_names(parent_blob=parent_blob, commit_blob=commit_blob)
+    call_candidates = changed | call_names
     return _tip_extra_calls_candidate_keys(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=call_candidates,
+        # Prefix match only call-count keys (``guard.disable``), never scoped
+        # binding keys (``feature.enabled``) — PRRT_kwDOSJAM6s6ZrsE0.
+        receiver_prefix_keys=call_names,
     )
 
 
