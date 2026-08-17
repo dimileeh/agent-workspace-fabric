@@ -579,10 +579,10 @@ def _yaml_scalar_sequence_item_scope(raw_line: str) -> tuple[str, str] | None:
     if match is None:
         return None
     raw_key = match.group("bare") or match.group("double") or match.group("single")
-    if raw_key is None:
+    if raw_key is None:  # pragma: no cover - alternation always captures a key group
         return None
     value = _normalize_yaml_sequence_item_scalar(match.group("value"))
-    if not value:
+    if not value:  # pragma: no cover - value alt requires non-empty scalar text
         return None
     item_key = _normalize_assign_binding_name(raw_key, requote_non_bare=False)
     return (f"{item_key}.{value}", item_key)

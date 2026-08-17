@@ -320,7 +320,9 @@ def _normalize_assign_binding_name(name: str, *, requote_non_bare: bool = True) 
         else:
             segments.append(raw)
         pos = match.end()
-    if pos != length or not segments:
+    if (
+        pos != length or not segments
+    ):  # pragma: no cover - defensive; loop exits only at EOS with segments
         return name
     return ".".join(
         _format_normalized_assign_key_segment(segment, requote_non_bare=requote_non_bare)
@@ -367,7 +369,7 @@ def _binding_name_for_line(raw_line: str) -> str | None:
                         return _normalize_subscript_binding_name(group)
                     requote_non_bare = pattern is not _ASSIGN_BINDING_RE or "=" in match.group(0)
                     return _normalize_assign_binding_name(group, requote_non_bare=requote_non_bare)
-            return None
+            return None  # pragma: no cover - binding regexes always capture a name group
     return None
 
 

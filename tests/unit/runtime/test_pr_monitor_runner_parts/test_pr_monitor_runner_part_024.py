@@ -274,6 +274,32 @@ class TestParseVerdict:
         assert result.reason == "real trailing"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_closing_curly_double_adjacent_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        # Typographic ``“…”`` close must set last_close_end like ASCII so a jammed
+        # trailing marker after NEEDS_HUMAN still splits (#822 coverage edge).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite “x”AWF-VERDICT: FALSE POSITIVE: real trailing"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_closing_curly_single_adjacent_trailing_marker_still_splits(
+        self,
+    ) -> None:
+        # Typographic ``‘…’`` close must likewise allow an unambiguous trailing
+        # attempt after NEEDS_HUMAN (#822 coverage edge).
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: cite ‘x’AWF-VERDICT: FALSE POSITIVE: real trailing"
+        )
+
+        assert result.verdict == "false_positive"
+        assert result.reason == "real trailing"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_closing_backtick_adjacent_trailing_marker_still_splits(
         self,
     ) -> None:
@@ -609,3 +635,78 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason == "empty_verdict_output"
+
+
+class TestAwfVerdictDelimiterHelpers:
+    """Direct edges for delimiter scan helpers not reached via parse alone."""
+
+    @pytest.mark.unit
+    def test_match_start_zero_and_reverse_cursor_fail_closed(self) -> None:
+        from awf.runtime.pr_monitor_runner.helpers_verdict_delimiters import (
+            _advance_awf_verdict_delimiter_state,
+            _awf_verdict_marker_embedded_in_reason_prose,
+            _awf_verdict_marker_unambiguously_separate_attempt,
+            _AwfVerdictDelimiterState,
+            _prefix_has_explicit_verdict_correction_separator,
+        )
+
+        assert _prefix_has_explicit_verdict_correction_separator("x", 0) is False
+        assert _awf_verdict_marker_unambiguously_separate_attempt("x", 0) is False
+        assert _awf_verdict_marker_embedded_in_reason_prose("x", 0) is False
+
+        state = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state("abc", state, 3)
+        with pytest.raises(ValueError, match="must advance forward"):
+            _advance_awf_verdict_delimiter_state("abc", state, 1)
+
+    @pytest.mark.unit
+    def test_delimiter_state_none_and_cursor_mismatch_rescan(self) -> None:
+        from awf.runtime.pr_monitor_runner.helpers_verdict_delimiters import (
+            _advance_awf_verdict_delimiter_state,
+            _awf_verdict_marker_embedded_in_reason_prose,
+            _awf_verdict_marker_unambiguously_separate_attempt,
+            _AwfVerdictDelimiterState,
+        )
+
+        # ``delimiter_state=None`` builds a fresh cursor for both helpers.
+        assert _awf_verdict_marker_embedded_in_reason_prose('say "x" more', 5) is True
+        assert _awf_verdict_marker_unambiguously_separate_attempt('cite "x"AWF', 8) is True
+
+        # Stale cursor must be advanced to ``match_start`` before deciding.
+        stale = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state('say "hi" AWF', stale, 4)
+        assert (
+            _awf_verdict_marker_embedded_in_reason_prose('say "hi" AWF', 9, delimiter_state=stale)
+            is False
+        )
+        # Cursor already at ``match_start`` skips the rescan branch.
+        aligned = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state('say "hi" AWF', aligned, 5)
+        assert (
+            _awf_verdict_marker_embedded_in_reason_prose('say "hi" AWF', 5, delimiter_state=aligned)
+            is True
+        )
+        fresh = _AwfVerdictDelimiterState()
+        assert (
+            _awf_verdict_marker_unambiguously_separate_attempt(
+                'cite "x"AWF', 8, delimiter_state=fresh
+            )
+            is True
+        )
+
+    @pytest.mark.unit
+    def test_orphan_curly_closes_do_not_mark_last_close_end(self) -> None:
+        from awf.runtime.pr_monitor_runner.helpers_verdict_delimiters import (
+            _advance_awf_verdict_delimiter_state,
+            _AwfVerdictDelimiterState,
+        )
+
+        state = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state("plain ” more", state, 8)
+        assert state.inside_curly_double is False
+        assert state.last_close_end == -1
+
+        state_s = _AwfVerdictDelimiterState()
+        _advance_awf_verdict_delimiter_state("plain ’ more", state_s, 8)
+        assert state_s.inside_curly_single is False
+        assert state_s.last_close_end == -1
