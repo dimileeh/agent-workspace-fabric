@@ -567,32 +567,6 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     return None
 
 
-def _is_declaration_opener_line(raw_line: str) -> bool:
-    """Return True for def/class/function/let/const/var/#define opener lines.
-
-    Same-signature redefinitions reuse identical opener text, so tip-extra
-    detection needs multiset counting for these lines. Assignments are excluded:
-    value rebinds already change line text, and surplus copies of salvage
-    assignment text in unrelated hunks must not look like supersession
-    (PRRT_kwDOSJAM6s6ZqGeU).
-    """
-    stripped = raw_line.lstrip(" \t")
-    if stripped.startswith("//"):
-        return False
-    if stripped.startswith("#") and _DEFINE_DIRECTIVE_LINE_RE.match(stripped) is None:
-        return False
-    for pattern in (
-        _DEFINE_BINDING_RE,
-        _DEF_BINDING_RE,
-        _CLASS_BINDING_RE,
-        _FUNCTION_BINDING_RE,
-        _LET_CONST_BINDING_RE,
-    ):
-        if pattern.match(raw_line) is not None:
-            return True
-    return False
-
-
 def _normalize_yaml_sequence_item_scalar(raw: str) -> str:
     """Strip surrounding quotes from a YAML sequence-item scalar for identity."""
     value = raw.strip()
@@ -797,23 +771,45 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
 def _tip_extra_line_indices(*, commit_blob: str, head_blob: str) -> set[int]:
     """Return head line indices that are tip-only vs the salvage commit blob.
 
-    Declaration openers use multiset counting so same-signature redefinitions
-    remain tip-extra (PRRT_kwDOSJAM6s6ZqDij); other lines use set difference so
-    surplus salvage assignment copies are not tip-extra (PRRT_kwDOSJAM6s6ZqGeU).
+    Full-line multiset counting keeps same-signature declaration redefinitions
+    tip-extra (PRRT_kwDOSJAM6s6ZqDij) and also preserves surplus assignment
+    occurrences when an earlier identical copy remains in the salvage blob
+    (PRRT_kwDOSJAM6s6ZrFdv). Callers that intersect tip-extra binding keys must
+    still require last-binding span inequality so surplus identical assignment
+    copies do not look like supersession (PRRT_kwDOSJAM6s6ZqGeU).
     """
-    commit_lines = commit_blob.splitlines()
-    commit_set = set(commit_lines)
-    opener_remaining = Counter(line for line in commit_lines if _is_declaration_opener_line(line))
+    remaining = Counter(commit_blob.splitlines())
     extra: set[int] = set()
     for idx, line in enumerate(head_blob.splitlines()):
-        if _is_declaration_opener_line(line):
-            if opener_remaining[line] > 0:
-                opener_remaining[line] -= 1
-            else:
-                extra.add(idx)
-        elif line not in commit_set:
+        if remaining[line] > 0:
+            remaining[line] -= 1
+        else:
             extra.add(idx)
     return extra
+
+
+def _tip_extra_keys_supersede_baseline(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra lines rebind a candidate with a new last span.
+
+    Multiset tip-extra indices alone treat surplus identical assignment copies
+    as tip-only; requiring last-binding inequality keeps those retained
+    (PRRT_kwDOSJAM6s6ZqGeU) while duplicate-occurrence overrides that change
+    the effective final binding still supersede (PRRT_kwDOSJAM6s6ZrFdv).
+    """
+    if not candidate_keys:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
+    overlapping = candidate_keys & tip_extra_keys
+    if not overlapping:
+        return False
+    baseline_spans = _last_binding_spans(baseline_blob)
+    head_spans = _last_binding_spans(head_blob)
+    return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
 
 
 def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[str]:
@@ -902,27 +898,25 @@ def _tip_extra_can_supersede_modified_salvage(
     binding span (opener plus indented body) changed vs parent count — unrelated
     appends and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j,
     PRRT_kwDOSJAM6s6ZqseO, PRRT_kwDOSJAM6s6ZqxX4, PRRT_kwDOSJAM6s6ZrBJF). Tip-extra
-    lines use
-    set difference except for declaration openers, which need multiset counting
-    so same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
-    full-line multiset would over-reject surplus salvage assignment copies
-    (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
-    bindings (PRRT_kwDOSJAM6s6ZqHvh). Parent-only (deleted) salvage names also
-    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).     Tip-extra binding keys are resolved against the full tip blob so an
-    unrelated later ``def ok`` under another class does not collide with salvaged
-    ``A.ok`` (PRRT_kwDOSJAM6s6ZqKN3), nested YAML ``logging.enabled`` does not
-    collide with salvaged ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2), and
-    TOML ``[logging] enabled`` does not collide with salvaged
-    ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
+    lines use full-line multiset counting so same-signature redefinitions and
+    duplicate assignment occurrences stay tip-extra (PRRT_kwDOSJAM6s6ZqDij,
+    PRRT_kwDOSJAM6s6ZrFdv); last-binding span inequality then filters surplus
+    identical salvage assignment copies (PRRT_kwDOSJAM6s6ZqGeU). Body-only
+    declaration edits still count as changed bindings (PRRT_kwDOSJAM6s6ZqHvh).
+    Parent-only (deleted) salvage names also count so tip reintroduction
+    supersedes (PRRT_kwDOSJAM6s6ZqKGY). Tip-extra binding keys are resolved
+    against the full tip blob so an unrelated later ``def ok`` under another
+    class does not collide with salvaged ``A.ok`` (PRRT_kwDOSJAM6s6ZqKN3),
+    nested YAML ``logging.enabled`` does not collide with salvaged
+    ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2), and TOML ``[logging] enabled``
+    does not collide with salvaged ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
-    if not changed:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=commit_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
-    return bool(changed & tip_extra_keys)
+    return _tip_extra_keys_supersede_baseline(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=changed,
+    )
 
 
 def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool:
@@ -939,13 +933,11 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     if len(head_blob) <= len(salvage):
         return False
     salvage_keys = set(_last_binding_spans(salvage))
-    if not salvage_keys:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=salvage, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
-    return bool(salvage_keys & tip_extra_keys)
+    return _tip_extra_keys_supersede_baseline(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
+    )
 
 
 def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:

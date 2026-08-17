@@ -87,6 +87,17 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = False\n",
     )
+    # Duplicate earlier ``False`` in the salvage blob must not hide an appended
+    # override via set-membership tip-extra accounting (PRRT_kwDOSJAM6s6ZrFdv).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = False\nFEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = False\nFEATURE_ENABLED = True\nFEATURE_ENABLED = False\n"),
+    )
+    # Surplus identical assignment copy keeps last binding equal → retain.
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = True\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED: bool = False\n",
@@ -1186,14 +1197,27 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9\n",
     )
     # Surplus copies of salvage assignment text in an unrelated later hunk must
-    # not look like supersession. Full-line multiset would mark the duplicate
-    # ``FEATURE_ENABLED = True`` as tip-only and drop still-valid FIXED evidence;
-    # assignment rebinds already change line text, so set difference is enough
-    # (PRRT_kwDOSJAM6s6ZqGeU).
+    # not look like supersession. Full-line multiset marks the duplicate
+    # ``FEATURE_ENABLED = True`` as tip-only, but last-binding equality keeps
+    # FIXED evidence (PRRT_kwDOSJAM6s6ZqGeU).
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,
         head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED = True\n",
+    )
+    # When salvage flips only the last of two identical ``False`` assignments
+    # to ``True``, an appended third ``False`` must still supersede: set
+    # membership would hide it behind the unchanged earlier copy
+    # (PRRT_kwDOSJAM6s6ZrFdv).
+    parent_dup = "FEATURE_ENABLED = False\nFEATURE_ENABLED = False\n"
+    commit_dup = "FEATURE_ENABLED = False\nFEATURE_ENABLED = True\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_dup, commit_blob=commit_dup) == {
+        "FEATURE_ENABLED"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup,
+        commit_blob=commit_dup,
+        head_blob=("FEATURE_ENABLED = False\nFEATURE_ENABLED = True\nFEATURE_ENABLED = False\n"),
     )
     parent_indented = "class C:\n    FEATURE_ENABLED = False\n"
     commit_indented = "class C:\n    FEATURE_ENABLED = True\n"
@@ -1201,9 +1225,9 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_indented, commit_blob=commit_indented
     ) == {"C", "C.FEATURE_ENABLED"}
     # Same indented assignment text reused in a later local hunk — identical line
-    # text, so only full-line multiset would treat the surplus copy as tip-extra.
-    # Enclosing class ``C`` is also in ``changed`` because the class span body
-    # changed, but tip extras here bind only ``helper`` (PRRT_kwDOSJAM6s6ZqGeU).
+    # text makes a tip-extra multiset hit, but scoped tip keys bind ``helper`` /
+    # last ``C.FEATURE_ENABLED`` stays equal so FIXED evidence retains
+    # (PRRT_kwDOSJAM6s6ZqGeU).
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_indented,
         commit_blob=commit_indented,
@@ -1211,11 +1235,9 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             "class C:\n    FEATURE_ENABLED = True\ndef helper():\n    FEATURE_ENABLED = True\n"
         ),
     )
-    # Same-signature redefinition reuses the salvage opener line text. A set
-    # difference of tip vs salvage lines drops that duplicate opener from
-    # tip-only extras, so the append looks non-superseding while merge-file
-    # still matches HEAD — unlike the added-blob path, which keeps the literal
-    # suffix. Multiset applies only to declaration openers (PRRT_kwDOSJAM6s6ZqDij).
+    # Same-signature redefinition reuses the salvage opener line text. Tip-extra
+    # multiset counting keeps the duplicate opener tip-only; last-binding span
+    # then differs so the append supersedes (PRRT_kwDOSJAM6s6ZqDij).
     parent_def = "x = 1\n"
     commit_def = "x = 1\ndef guard():\n    return True\n"
     head_redef = "x = 1\ndef guard():\n    return True\ndef guard():\n    return False\n"
@@ -1337,8 +1359,8 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     )
     # Unchanged body must not mark the binding changed.
     assert _salvage_changed_binding_names(parent_blob=commit_body, commit_blob=commit_body) == set()
-    # Comment / non-directive hash lines are not declaration openers; they must
-    # not flip tip-extra multiset accounting (PRRT_kwDOSJAM6s6ZqGeU).
+    # Comment / non-directive hash lines are ordinary tip-extra text; they must
+    # not look like binding supersession (PRRT_kwDOSJAM6s6ZqGeU).
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,
