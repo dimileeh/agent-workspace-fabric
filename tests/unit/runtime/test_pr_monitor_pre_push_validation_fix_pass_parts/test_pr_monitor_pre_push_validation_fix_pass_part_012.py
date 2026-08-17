@@ -50,6 +50,30 @@ def test_call_site_names_skip_definition_prefixed_paren_and_computed_forms() -> 
 
 
 @pytest.mark.unit
+def test_inline_assign_excludes_js_arrow_parameter_equals() -> None:
+    """``=>`` must not bind the arrow parameter as an equals-style rebind.
+
+    Plain ``=(?!=)`` matched the ``=`` in ``=>``, so tip
+    ``const fn = FEATURE_ENABLED => false;`` recorded ``FEATURE_ENABLED`` as a
+    later assignment and discarded retained FIXED salvage
+    (PRRT_kwDOSJAM6s6ZtZ_2).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _binding_names_for_line,
+        _inline_assign_binding_names,
+    )
+
+    assert _inline_assign_binding_names("const fn = FEATURE_ENABLED => false;") == ("fn",)
+    assert "FEATURE_ENABLED" not in _binding_names_for_line("const fn = FEATURE_ENABLED => false;")
+    assert _inline_assign_binding_names("FEATURE_ENABLED => false;") == ()
+    assert _binding_names_for_line("FEATURE_ENABLED => false;") == ()
+    # Real assigns and compounds still bind; ``==`` still does not.
+    assert _inline_assign_binding_names("FEATURE_ENABLED = false;") == ("FEATURE_ENABLED",)
+    assert _inline_assign_binding_names("FEATURE_ENABLED &= false;") == ("FEATURE_ENABLED",)
+    assert _inline_assign_binding_names("FEATURE_ENABLED == false;") == ()
+
+
+@pytest.mark.unit
 def test_subscript_and_assign_key_normalize_edge_spellings() -> None:
     """Subscript / dotted-key normalizers keep identity across edge spellings."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (

@@ -457,6 +457,18 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob=("FEATURE_ENABLED = True\ndef helper(x, FEATURE_ENABLED=False):\n    pass\n"),
     )
+    # JS/TS ``=>`` must not count as equals-style assign; ``=(?!=)`` matched the
+    # ``=`` in ``=>``, so tip ``const fn = FEATURE_ENABLED => false;`` treated the
+    # arrow parameter as a rebind and dropped retained FIXED salvage
+    # (PRRT_kwDOSJAM6s6ZtZ_2).
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob=("FEATURE_ENABLED = true\nconst fn = FEATURE_ENABLED => false;\n"),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\nFEATURE_ENABLED => false;\n",
+    )
     # Bare unpacking / parenthesized walrus after ``,`` / ``(`` are real rebinds,
     # not kwargs — tip-extra must still drop FIXED salvage (PRRT_kwDOSJAM6s6ZsOT0).
     assert not _added_salvage_blob_retained(
