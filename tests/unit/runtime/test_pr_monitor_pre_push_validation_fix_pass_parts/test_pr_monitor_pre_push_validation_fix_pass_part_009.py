@@ -464,6 +464,31 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="check();\n",
         head_blob="/*\n*/ #if 0\ncheck();\n",
     )
+    # Quoted / line-comment ``/*`` in a prepended prefix must not look like an
+    # unterminated block comment or a still-valid salvage suffix is rejected and
+    # a later no-change FIXED becomes fixed_without_head_advance
+    # (PRRT_kwDOSJAM6s6Zq2m_).
+    assert _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob='const marker = "/*";\ncheck();\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="const marker = '/*';\ncheck();\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob='const marker = "\\"/*";\ncheck();\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="// /*\ncheck();\n",
+    )
+    # After a closed ordinary string, a real open ``/*`` still disables.
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob='const marker = "*/"; /*\ncheck();\n',
+    )
     # Closed wrappers before the salvage suffix are fine (benign prepend region).
     assert _added_salvage_blob_retained(
         commit_blob="check();\n",

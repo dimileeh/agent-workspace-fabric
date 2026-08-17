@@ -306,14 +306,20 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     Suffix (prepend) salvage retention must reject tips that place the salvage
     under an unterminated ``/*``, triple-quoted string, or ``#if`` / ``#ifdef`` /
     ``#ifndef`` — those keep a line-aligned suffix while disabling the fix
-    (PRRT_kwDOSJAM6s6ZpaIn). Hash-line bodies are still scanned for trailing
-    ``/*`` / triple-quotes (``#endif /*``, ``#define X /*``), and closing a
-    multi-line ``*/`` keeps line-start so a same-line ``#if`` is not missed
-    (PRRT_kwDOSJAM6s6ZpdMC). Closed wrappers and plain header lines return False.
+    (PRRT_kwDOSJAM6s6ZpaIn). Ordinary ``"..."`` / ``'...'`` strings (with ``\\``
+    escapes) and ``//`` line comments are opaque so a quoted or commented
+    ``/*`` token cannot open block-comment state and reject a still-valid
+    salvage suffix (PRRT_kwDOSJAM6s6Zq2m_). Hash-line bodies are still scanned
+    for trailing ``/*`` / triple-quotes (``#endif /*``, ``#define X /*``), and
+    closing a multi-line ``*/`` keeps line-start so a same-line ``#if`` is not
+    missed (PRRT_kwDOSJAM6s6ZpdMC). Closed wrappers and plain header lines
+    return False.
     """
     in_block_comment = False
     in_triple_double = False
     in_triple_single = False
+    in_double_string = False
+    in_single_string = False
     if_depth = 0
     at_line_start = True
     i = 0
@@ -350,6 +356,43 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
                 at_line_start = True
             i += 1
             continue
+        if in_double_string:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                at_line_start = False
+                continue
+            if ch == '"':
+                in_double_string = False
+            elif ch == "\n":
+                at_line_start = True
+                i += 1
+                continue
+            else:
+                at_line_start = False
+            i += 1
+            continue
+        if in_single_string:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                at_line_start = False
+                continue
+            if ch == "'":
+                in_single_string = False
+            elif ch == "\n":
+                at_line_start = True
+                i += 1
+                continue
+            else:
+                at_line_start = False
+            i += 1
+            continue
+        # ``//`` line comments are opaque: do not treat ``/*`` inside them as
+        # openers (PRRT_kwDOSJAM6s6Zq2m_).
+        if prefix.startswith("//", i):
+            while i < n and prefix[i] != "\n":
+                i += 1
+            at_line_start = False
+            continue
         if prefix.startswith("/*", i):
             in_block_comment = True
             i += 2
@@ -363,6 +406,16 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
         if prefix.startswith("'''", i):
             in_triple_single = True
             i += 3
+            at_line_start = False
+            continue
+        if ch == '"':
+            in_double_string = True
+            i += 1
+            at_line_start = False
+            continue
+        if ch == "'":
+            in_single_string = True
+            i += 1
             at_line_start = False
             continue
         if at_line_start and ch == "#":
@@ -923,7 +976,10 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     (prepend): the match must start at file start or after a newline, and if the
     salvage lacks a trailing newline it must end at EOF or before a newline.
     Suffix retention additionally rejects a prepend that leaves an open block
-    comment, triple-quoted string, or ``#if`` region (PRRT_kwDOSJAM6s6ZpaIn).
+    comment, triple-quoted string, or ``#if`` region (PRRT_kwDOSJAM6s6ZpaIn),
+    while ordinary quoted strings and ``//`` line comments stay opaque so a
+    quoted ``/*`` token cannot falsely reject a valid salvage
+    (PRRT_kwDOSJAM6s6Zq2m_).
     Prefix retention with a non-empty append additionally rejects when the
     appended suffix rebinds a name bound in the salvage
     (PRRT_kwDOSJAM6s6Zp8jM).
