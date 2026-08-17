@@ -947,6 +947,39 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_member,
         head_blob=commit_member + "other.disable()\n",
     )
+    # Same-line multiplicity: parent ``disable_guard(); disable_guard()`` →
+    # salvage ``disable_guard(); enable_guard()`` must count both disable calls
+    # so ``disable_guard`` is a changed candidate; otherwise a tip that appends
+    # ``disable_guard()`` retains stale salvage (PRRT_kwDOSJAM6s6ZriaK).
+    parent_dup = "x = 1\ndisable_guard(); disable_guard()\ny = 2\n"
+    commit_dup = "x = 1\ndisable_guard(); enable_guard()\ny = 2\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_dup, commit_blob=commit_dup) == set()
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup,
+        commit_blob=commit_dup,
+        head_blob=commit_dup + "disable_guard()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup,
+        commit_blob=commit_dup,
+        head_blob=commit_dup + "# disable_guard()\n",
+    )
+    parent_dup_member = "x = 1\nguard.disable(); guard.disable()\ny = 2\n"
+    commit_dup_member = "x = 1\nguard.disable(); guard.enable()\ny = 2\n"
+    assert (
+        _salvage_changed_binding_names(parent_blob=parent_dup_member, commit_blob=commit_dup_member)
+        == set()
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup_member,
+        commit_blob=commit_dup_member,
+        head_blob=commit_dup_member + "guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup_member,
+        commit_blob=commit_dup_member,
+        head_blob=commit_dup_member + "other.disable()\n",
+    )
 
 
 @pytest.mark.unit

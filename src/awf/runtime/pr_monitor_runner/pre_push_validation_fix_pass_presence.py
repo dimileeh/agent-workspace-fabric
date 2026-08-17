@@ -924,12 +924,12 @@ def _executable_call_scan_text(raw_line: str) -> str:
     return "".join(chars)
 
 
-def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
+def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return receiver/callee names for call sites on a line, or empty.
 
-    Bare ``disable_guard()`` yields ``{disable_guard}``. Dotted
+    Bare ``disable_guard()`` yields ``(disable_guard,)``. Dotted
     ``guard.disable()`` / ``a.b.c()`` yields the receiver and the full dotted
-    callee (``{guard, guard.disable}`` / ``{a, a.b.c}``) so tip member calls
+    callee (``(guard, guard.disable)`` / ``(a, a.b.c)``) so tip member calls
     intersect salvage bindings and the same qualified callee — not an unpaired
     method leaf that would collide with ``other.disable()`` or scoped
     ``Guards.disable_guard`` (PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrWwo).
@@ -942,12 +942,14 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     ``//`` / same-line ``/* … */`` comments and string literals are ignored
     (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not call sites: ``def name(`` /
     ``function name(`` / ``class Name(`` are skipped via
-    ``_CALL_SITE_DEFINITION_PREFIX_RE``.
+    ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each call match is emitted once per
+    occurrence (not collapsed by name) so same-line multiplicity is preserved
+    when deriving salvage call-count diffs (PRRT_kwDOSJAM6s6ZriaK).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
-        return frozenset()
-    names: set[str] = set()
+        return ()
+    names: list[str] = []
     scan = _executable_call_scan_text(raw_line)
     for match in _CALL_SITE_RE.finditer(scan):
         prefix = raw_line[: match.start()]
@@ -957,11 +959,11 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
         dotted = match.group(1).replace("?.", ".")
         parts = dotted.split(".")
         if len(parts) == 1:
-            names.add(parts[0])
+            names.append(parts[0])
         else:
-            names.add(parts[0])
-            names.add(dotted)
-    return frozenset(names)
+            names.append(parts[0])
+            names.append(dotted)
+    return tuple(names)
 
 
 def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
@@ -973,7 +975,10 @@ def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bo
 
 
 def _call_site_name_counts(text: str) -> Counter[str]:
-    """Count executable call names in non-comment lines (including nested calls)."""
+    """Count executable call names in non-comment lines (including nested calls).
+
+    Same-line repeated callees each increment (PRRT_kwDOSJAM6s6ZriaK).
+    """
     counts: Counter[str] = Counter()
     in_block_comment = False
     in_triple_double = False
@@ -1002,7 +1007,9 @@ def _salvage_changed_call_names(*, parent_blob: str, commit_blob: str) -> set[st
     ``guard.disable()`` → ``guard.enable()``) leave
     ``_salvage_changed_binding_names`` empty; tip-extra calls that restore the
     prior callee must still supersede (PRRT_kwDOSJAM6s6ZrN5J,
-    PRRT_kwDOSJAM6s6ZrSYE).
+    PRRT_kwDOSJAM6s6ZrSYE). Counts preserve same-line multiplicity so
+    ``disable_guard(); disable_guard()`` → ``disable_guard(); enable_guard()``
+    treats ``disable_guard`` as changed (PRRT_kwDOSJAM6s6ZriaK).
     """
     parent_counts = _call_site_name_counts(parent_blob)
     commit_counts = _call_site_name_counts(commit_blob)
