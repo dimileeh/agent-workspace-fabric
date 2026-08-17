@@ -415,6 +415,43 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_guard,
         head_blob=("x = 1\nguard.enabled = true\ny = 2\ndelete other\n"),
     )
+    # setattr/delattr mutate a salvage attribute without a binding key or a call
+    # name that intersects ``guard.enabled``; recognize the helper target or a
+    # later no-change FIXED reuses stale evidence (PRRT_kwDOSJAM6s6Zu8Kn).
+    parent_py_guard = "x = 1\nguard.enabled = False\ny = 2\n"
+    commit_py_guard = "x = 1\nguard.enabled = True\ny = 2\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=('x = 1\nguard.enabled = True\ny = 2\nsetattr(guard, "enabled", False)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=('x = 1\nguard.enabled = True\ny = 2\ndelattr(guard, "enabled")\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=(
+            'x = 1\nguard.enabled = True\ny = 2\nobject.__setattr__(guard, "enabled", False)\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=('x = 1\nguard.enabled = True\ny = 2\nguard.__setattr__("enabled", False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=('x = 1\nguard.enabled = True\ny = 2\n# setattr(guard, "enabled", False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_py_guard,
+        commit_blob=commit_py_guard,
+        head_blob=('x = 1\nguard.enabled = True\ny = 2\nsetattr(other, "enabled", False)\n'),
+    )
     # Shell ``unset`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZuRSm).
     parent_shell = "x=1\nFEATURE_ENABLED=false\ny=2\n"
     commit_shell = "x=1\nFEATURE_ENABLED=true\ny=2\n"
