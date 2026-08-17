@@ -448,6 +448,33 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nx = (FEATURE_ENABLED := False)\n",
     )
+    # ``del`` removes a salvage binding without a rebind or call site; neither
+    # assign scanner nor call scanner recorded the target, so prefix retention
+    # reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zse8m).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\ndel FEATURE_ENABLED\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nif ready: del FEATURE_ENABLED\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\ndel FEATURE_ENABLED, other\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\ndel FLAGS["enabled"]\n'),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n# del FEATURE_ENABLED\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\ndel other\n",
+    )
     # Typed rebind still supersedes via statement-leading ``name: T =``; the
     # type token alone must not invent a second binding key.
     assert not _added_salvage_blob_retained(

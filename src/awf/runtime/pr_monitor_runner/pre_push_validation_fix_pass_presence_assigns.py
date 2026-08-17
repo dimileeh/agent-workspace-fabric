@@ -182,6 +182,25 @@ _DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-
 # directives; spaced form must match the same whitespace rule as open-``#if``
 # scanning (PRRT_kwDOSJAM6s6Zp_sv).
 _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
+# Python ``del`` targets supersede salvage bindings like rebinds: neither assign
+# nor call scanners previously recorded the deletion, so tip ``del
+# FEATURE_ENABLED`` kept a line-aligned salvage prefix / clean merge-file
+# equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zse8m). Bare,
+# dotted, and subscript targets match assign shapes; comma lists bind each
+# name. Requires whitespace after ``del`` so ``deleted`` is not a false hit.
+_DEL_TARGET = (
+    rf"(?:{_ASSIGN_SUBSCRIPT_TARGET}|"
+    r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+)
+_DEL_TARGET_SCAN = (
+    rf"(?:{_ASSIGN_SUBSCRIPT_TARGET_SCAN}|"
+    r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+)
+_DEL_TARGET_RE = re.compile(_DEL_TARGET_SCAN)
+_INLINE_DEL_BINDING_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))del[ \t]+"
+    rf"({_DEL_TARGET_SCAN}(?:[ \t]*,[ \t]*{_DEL_TARGET_SCAN})*)"
+)
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -426,19 +445,48 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _del_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return names deleted by ``del`` on ``raw_line`` (statement or mid-line).
+
+    Tip-extra ``del FEATURE_ENABLED`` / ``if ready: del FEATURE_ENABLED`` /
+    ``del FLAGS["enabled"]`` must supersede salvage of those bindings; assign
+    and call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6Zse8m).
+    Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
+    ``_executable_call_scan_text``. Subscript spellings recover from
+    ``raw_line`` because scan blanks quoted indices.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for match in _INLINE_DEL_BINDING_RE.finditer(scan):
+        for part_match in _DEL_TARGET_RE.finditer(scan, match.start(1), match.end(1)):
+            raw_name = raw_line[part_match.start() : part_match.end()]
+            name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
     Statement-leading defs/assigns/YAML keys come from ``_binding_name_for_line``.
     Additional mid-line equals-style assigns are appended so compound tip-extra
-    lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y).
+    lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y). Python
+    ``del`` targets are included so deletions supersede without a rebind
+    (PRRT_kwDOSJAM6s6Zse8m).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
-    if primary is None:
-        return inline
-    names: list[str] = [primary]
-    for name in inline:
+    deleted = _del_binding_names(raw_line)
+    if primary is None and not inline and not deleted:
+        return ()
+    names: list[str] = []
+    if primary is not None:
+        names.append(primary)
+    for name in (*inline, *deleted):
         if name not in names:
             names.append(name)
     return tuple(names)
