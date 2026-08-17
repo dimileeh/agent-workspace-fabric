@@ -47,10 +47,14 @@ from awf.node.compose_errors import ComposeOperationError as ComposeOperationErr
 from awf.node.compose_manager_clarification import (
     _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED,
     _PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+    _PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
     _attach_persisted_clarification_model_network,
     _clarification_model_service_names,
     _is_managed_persisted_clarification_service,
     _pending_persisted_clarification_model_network_services,
+    _persisted_clarification_runtime_is_current,
+    clarification_runtime_signature,
+    persisted_clarification_runtime_enum,
 )
 
 _log = get_logger(__name__)
@@ -115,8 +119,18 @@ def upgrade_persisted_clarification_service(
     clarification container the primary worktree and Git credentials. Returns
     the model services whose network declaration changed or whose earlier
     persisted migration remains incomplete; returns ``None`` when clarification
-    was already present and fully reconciled.
+    was already present, targets the current runtime/model, and is fully
+    reconciled.
+
+    A monitoring workspace can fall back to a different agent runtime (or model)
+    in place, which leaves the persisted clarification service frozen on the
+    credentials and model-sidecar route of the runtime that rendered it. The
+    service therefore carries the runtime/model it was rendered for, and a
+    mismatch re-derives it from the persisted agent service rather than
+    short-circuiting.
     """
+    runtime_enum = persisted_clarification_runtime_enum(agent_runtime)
+    runtime_signature = clarification_runtime_signature(runtime_enum, agent_model)
     try:
         document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -130,19 +144,25 @@ def upgrade_persisted_clarification_service(
         agent = services.get("agent")
         agent_image = agent.get("image") if isinstance(agent, Mapping) else None
         agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
-        if _is_managed_persisted_clarification_service(
+        if not _is_managed_persisted_clarification_service(
             services["clarification"],
             legacy_agent_image=agent_image,
             legacy_agent_working_dir=agent_working_dir,
+        ):
+            raise ValueError(
+                "persisted Compose file clarification service conflicts with the managed "
+                "clarification service"
+            )
+        if _persisted_clarification_runtime_is_current(
+            services["clarification"], runtime_signature
         ):
             pending_model_services = _pending_persisted_clarification_model_network_services(
                 document, services
             )
             return pending_model_services or None
-        raise ValueError(
-            "persisted Compose file clarification service conflicts with the managed "
-            "clarification service"
-        )
+        # The runtime/model moved under the persisted stack (in-place provider
+        # fallback). Fall through and re-derive clarification from the agent
+        # service so it carries the selected runtime's credentials and route.
     agent = services.get("agent")
     if not isinstance(agent, dict):
         raise ValueError("persisted Compose file must contain an agent service")
@@ -187,14 +207,6 @@ def upgrade_persisted_clarification_service(
     # Never hand the primary worktree to a reason-only invocation, even if a
     # malformed legacy environment happens to name it as a provider setting.
     provider_auth_mounts = [mount for mount in auth_mounts if mount.target != "/workspace"]
-    runtime_enum: AgentRuntime
-    if isinstance(agent_runtime, AgentRuntime):
-        runtime_enum = agent_runtime
-    else:
-        try:
-            runtime_enum = AgentRuntime(agent_runtime)
-        except ValueError:
-            runtime_enum = AgentRuntime.antigravity
     selected_mounts = _clarification_auth_mounts(
         provider_auth_mounts,
         agent_environment=agent_environment_items,
@@ -254,6 +266,7 @@ def upgrade_persisted_clarification_service(
     clarification: dict[str, object] = {
         "image": image,
         _PERSISTED_CLARIFICATION_SERVICE_MANAGED: True,
+        _PERSISTED_CLARIFICATION_SERVICE_RUNTIME: runtime_signature,
         "working_dir": agent.get("working_dir", "/workspace"),
         "networks": [
             "clarification_egress_net",
@@ -513,6 +526,8 @@ class WorkspaceComposeSpec:
     memory_limit: str | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
     clarification_enabled: bool = False
+    clarification_runtime_signature: str = ""
+    """Runtime/model identity stamped on clarification so fallbacks re-render it."""
     clarification_agent_environment: tuple[tuple[str, str], ...] = ()
     clarification_auth_mounts: tuple[AuthMount, ...] = ()
     clarification_auth_credential_files: tuple[tuple[str, ...], ...] = ()
@@ -680,6 +695,8 @@ class ComposeManager:
             ],
             clarification_enabled=spec.clarification_enabled,
             clarification_service_marker=_PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+            clarification_runtime_marker=_PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
+            clarification_runtime_signature=spec.clarification_runtime_signature,
             clarification_model_services=clarification_model_services,
             clarification_agent_environment=spec.clarification_agent_environment,
             clarification_auth_mounts=[

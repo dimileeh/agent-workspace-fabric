@@ -31,6 +31,7 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
     compose_up_capture_timeout_seconds,
 )
+from awf.node.compose_manager_clarification import clarification_runtime_signature
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
 from awf.node.secret_mounts import LocalSecretLeaseResolution
@@ -1223,6 +1224,10 @@ class ComposeStackLauncher:
             companions=companions,
             auth_mounts=tuple(auth_mounts),
             clarification_enabled=request.clarification_enabled,
+            clarification_runtime_signature=clarification_runtime_signature(
+                request.agent_runtime,
+                request.agent_model,
+            ),
             clarification_agent_environment=_clarification_agent_environment(
                 agent_environment,
                 auth_mounts=auth_mounts,

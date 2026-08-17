@@ -151,6 +151,31 @@ class TestRender:
         }
 
     @pytest.mark.unit
+    def test_renders_clarification_runtime_signature(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """The rendered clarification service records the runtime/model it targets.
+
+        An in-place provider fallback never re-renders the stack, so the stamp is
+        what lets a later isolated re-ask detect that the persisted clarification
+        credentials belong to the runtime the workspace has moved off.
+        """
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_runtime_signature="codex|gpt-5.6-sol",
+                )
+            ).compose_file.read_text()
+        )
+
+        assert (
+            parsed["services"]["clarification"]["x-awf-persisted-clarification-service-runtime"]
+            == "codex|gpt-5.6-sol"
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("provider_target", "credential_file", "untrusted_paths"),
         (

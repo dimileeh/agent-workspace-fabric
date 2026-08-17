@@ -89,6 +89,7 @@ services:
   clarification:
     image: {{ agent_runtime_image | tojson }}
     {{ clarification_service_marker | tojson }}: true
+    {{ clarification_runtime_marker | tojson }}: {{ clarification_runtime_signature | tojson }}
     working_dir: /workspace
     {% if clarification_agent_environment or clarification_auth_mounts %}environment:
       {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}

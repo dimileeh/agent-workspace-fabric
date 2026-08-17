@@ -6,6 +6,7 @@ import os
 from collections.abc import Iterable, Mapping
 from urllib.parse import urlsplit
 
+from awf.db.enums import AgentRuntime
 from awf.service.environment import compose_expand_value
 
 _CLARIFICATION_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
@@ -22,6 +23,43 @@ _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
     "x-awf-persisted-clarification-model-network-reconciled"
 )
 _PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
+_PERSISTED_CLARIFICATION_SERVICE_RUNTIME = "x-awf-persisted-clarification-service-runtime"
+
+
+def persisted_clarification_runtime_enum(agent_runtime: AgentRuntime | str) -> AgentRuntime:
+    """Normalize a live or persisted runtime label to its enum member."""
+    if isinstance(agent_runtime, AgentRuntime):
+        return agent_runtime
+    try:
+        return AgentRuntime(agent_runtime)
+    except ValueError:
+        return AgentRuntime.antigravity
+
+
+def clarification_runtime_signature(
+    agent_runtime: AgentRuntime | str, agent_model: str | None
+) -> str:
+    """Return the runtime/model identity a clarification service was rendered for.
+
+    Stamped onto the rendered service so a later isolated re-ask can tell that a
+    cross-runtime (or cross-model) provider fallback has moved the workspace off
+    the runtime whose credentials the persisted clarification container carries.
+    """
+    return f"{persisted_clarification_runtime_enum(agent_runtime).value}|{agent_model or ''}"
+
+
+def _persisted_clarification_runtime_is_current(service: object, signature: str) -> bool:
+    """Return whether a persisted clarification service targets ``signature``.
+
+    Services rendered before the stamp existed carry no runtime identity; those
+    stay a no-op rather than being rewritten on a guess. Only an explicit
+    mismatch — a cross-runtime/model fallback moving the workspace off the
+    runtime the service was rendered for — reports a stale service.
+    """
+    if not isinstance(service, Mapping):
+        return False
+    persisted = service.get(_PERSISTED_CLARIFICATION_SERVICE_RUNTIME)
+    return not isinstance(persisted, str) or persisted == signature
 
 
 def _is_managed_persisted_clarification_service(
@@ -90,7 +128,12 @@ def _attach_persisted_clarification_model_network(
     services: dict[object, object],
     model_service_names: Iterable[str],
 ) -> tuple[str, ...]:
-    """Attach legacy rendered model services to clarification's dedicated route."""
+    """Attach legacy rendered model services to clarification's dedicated route.
+
+    Idempotent: a re-render (for example after a cross-runtime fallback) must not
+    duplicate a network the sidecar already declares, but the name is still
+    returned so the caller re-runs the runtime attach and reconciliation.
+    """
 
     attached_names: list[str] = []
     for name in model_service_names:
@@ -100,7 +143,8 @@ def _attach_persisted_clarification_model_network(
         service_networks = service.get("networks")
         if not isinstance(service_networks, list) or "awf_net" not in service_networks:
             continue
-        service["networks"] = [*service_networks, "clarification_model_net"]
+        if "clarification_model_net" not in service_networks:
+            service["networks"] = [*service_networks, "clarification_model_net"]
         attached_names.append(name)
     return tuple(attached_names)
 
