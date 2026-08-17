@@ -444,17 +444,32 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
     )
     # Compound assigns must supersede like plain ``=``; otherwise ``&=`` / ``+=``
     # / ``-=`` / ``|=`` / ``^=`` appends keep stale FIXED evidence
-    # (PRRT_kwDOSJAM6s6ZsNCC).
+    # (PRRT_kwDOSJAM6s6ZsNCC). JS logical ``&&=`` / ``||=`` / ``??=`` must too
+    # (PRRT_kwDOSJAM6s6ZyImG).
     for compound_line in (
         "FEATURE_ENABLED &= False\n",
         "FEATURE_ENABLED += 1\n",
         "FEATURE_ENABLED -= 1\n",
         "FEATURE_ENABLED |= True\n",
         "FEATURE_ENABLED ^= True\n",
+        "FEATURE_ENABLED &&= False\n",
+        "FEATURE_ENABLED ||= False\n",
+        "FEATURE_ENABLED ??= False\n",
     ):
         assert not _added_salvage_blob_retained(
             commit_blob="FEATURE_ENABLED = True\n",
             head_blob="FEATURE_ENABLED = True\n" + compound_line,
+        )
+    # Dotted JS property logical assigns after salvage ``guard.enabled = true``
+    # (PRRT_kwDOSJAM6s6ZyImG).
+    for logical_line in (
+        "guard.enabled &&= false\n",
+        "guard.enabled ||= false\n",
+        "guard.enabled ??= false\n",
+    ):
+        assert not _added_salvage_blob_retained(
+            commit_blob="guard.enabled = true\n",
+            head_blob="guard.enabled = true\n" + logical_line,
         )
     # Nested / mid-statement assignments must supersede too: the line-start
     # assign anchor misses ``if ready: FEATURE_ENABLED = False`` and would

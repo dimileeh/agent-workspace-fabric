@@ -98,6 +98,14 @@ def test_inline_assign_excludes_js_arrow_parameter_equals() -> None:
     # Real assigns and compounds still bind; ``==`` still does not.
     assert _inline_assign_binding_names("FEATURE_ENABLED = false;") == ("FEATURE_ENABLED",)
     assert _inline_assign_binding_names("FEATURE_ENABLED &= false;") == ("FEATURE_ENABLED",)
+    # JS logical assigns must bind like ``&=`` (PRRT_kwDOSJAM6s6ZyImG).
+    assert _inline_assign_binding_names("FEATURE_ENABLED &&= false;") == ("FEATURE_ENABLED",)
+    assert _inline_assign_binding_names("FEATURE_ENABLED ||= false;") == ("FEATURE_ENABLED",)
+    assert _inline_assign_binding_names("FEATURE_ENABLED ??= false;") == ("FEATURE_ENABLED",)
+    assert _inline_assign_binding_names("guard.enabled &&= false;") == ("guard.enabled",)
+    assert _inline_assign_binding_names("guard.enabled ||= false;") == ("guard.enabled",)
+    assert _inline_assign_binding_names("guard.enabled ??= false;") == ("guard.enabled",)
+    assert _binding_names_for_line("guard.enabled &&= false;") == ("guard.enabled",)
     assert _inline_assign_binding_names("FEATURE_ENABLED == false;") == ()
 
 

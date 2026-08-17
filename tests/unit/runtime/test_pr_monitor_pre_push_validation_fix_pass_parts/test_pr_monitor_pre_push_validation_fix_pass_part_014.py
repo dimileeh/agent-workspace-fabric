@@ -39,17 +39,33 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 3\nFEATURE_ENABLED = False\n"),
     )
     # Compound assigns supersede salvage like plain ``=`` (PRRT_kwDOSJAM6s6ZsNCC).
+    # JS logical ``&&=`` / ``||=`` / ``??=`` must too (PRRT_kwDOSJAM6s6ZyImG).
     for compound_line in (
         "FEATURE_ENABLED &= False\n",
         "FEATURE_ENABLED += 1\n",
         "FEATURE_ENABLED -= 1\n",
         "FEATURE_ENABLED |= True\n",
         "FEATURE_ENABLED ^= True\n",
+        "FEATURE_ENABLED &&= False\n",
+        "FEATURE_ENABLED ||= False\n",
+        "FEATURE_ENABLED ??= False\n",
     ):
         assert _tip_extra_can_supersede_modified_salvage(
             parent_blob=parent,
             commit_blob=commit,
             head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\n" + compound_line,
+        )
+    parent_guard = "x = 1\nguard.enabled = false\ny = 2\n"
+    commit_guard = "x = 1\nguard.enabled = true\ny = 2\n"
+    for logical_line in (
+        "guard.enabled &&= false\n",
+        "guard.enabled ||= false\n",
+        "guard.enabled ??= false\n",
+    ):
+        assert _tip_extra_can_supersede_modified_salvage(
+            parent_blob=parent_guard,
+            commit_blob=commit_guard,
+            head_blob="x = 1\nguard.enabled = true\ny = 2\n" + logical_line,
         )
     # Subscript assign overrides must supersede: bare/dotted-only binding
     # patterns miss ``FLAGS["enabled"] =`` so clean merge-file equality would

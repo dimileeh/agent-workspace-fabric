@@ -37,11 +37,13 @@ _ASSIGN_SUBSCRIPT_TARGET_SCAN = (
     r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*(?:\[[^\]]*\])+"
 )
 # Plain ``=`` or compound ``+=`` / ``-=`` / ``*=`` / ``/=`` / ``%=`` / ``**=`` /
-# ``//=`` / ``&=`` / ``|=`` / ``^=`` / ``<<=`` / ``>>=``. Longest ops first so
-# ``**=`` is not split as ``*`` + ``*=``. ``==`` and JS/TS ``=>`` are excluded
-# via ``=(?![=>])`` so equality and arrow parameters are not treated as
-# rebinds (PRRT_kwDOSJAM6s6ZsNCC, PRRT_kwDOSJAM6s6ZtZ_2).
-_EQUALS_STYLE_ASSIGN_OP = r"(?:<<=|>>=|\*\*=|//=|[+\-*/%&|^]=|=(?![=>]))"
+# ``//=`` / ``&=`` / ``|=`` / ``^=`` / ``<<=`` / ``>>=`` / JS logical ``&&=`` /
+# ``||=`` / ``??=``. Longest ops first so ``**=`` is not split as ``*`` + ``*=``
+# and ``&&=`` / ``||=`` are not split as ``&=`` / ``|=``. ``==`` and JS/TS ``=>``
+# are excluded via ``=(?![=>])`` so equality and arrow parameters are not
+# treated as rebinds (PRRT_kwDOSJAM6s6ZsNCC, PRRT_kwDOSJAM6s6ZtZ_2,
+# PRRT_kwDOSJAM6s6ZyImG).
+_EQUALS_STYLE_ASSIGN_OP = r"(?:&&=|\|\|=|\?\?=|<<=|>>=|\*\*=|//=|[+\-*/%&|^]=|=(?![=>]))"
 # Statement-leading assign forms (line-start). Mid-statement overrides such as
 # ``if ready: FEATURE_ENABLED = False`` are collected separately via
 # ``_INLINE_ASSIGN_BINDING_RE`` so tip-extra nested rebinds still supersede
