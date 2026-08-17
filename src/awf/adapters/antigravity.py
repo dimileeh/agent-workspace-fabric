@@ -37,7 +37,14 @@ existing file while preserving unrelated keys). ANTIGRAVITY_API_KEY is
 retired.
 
 Output uses ``stream-json`` so the idle stdout watchdog sees continuous events
-(``text``/``json`` buffer until completion).
+(``text``/``json`` buffer until completion). Raw stream-json is *not* the run's
+stdout: AWF parses ``AWF-VERDICT:`` lines out of agent stdout with a
+full-line match, and a JSON-wrapped verdict never matches (it fails closed to
+``needs_human``, so every antigravity thread would escalate). A small python
+bridge therefore runs ``agy`` and decodes each event as it arrives — assistant /
+result text goes to stdout as plaintext lines, every other event goes to stderr
+so the idle watchdog still sees continuous output without polluting stdout
+(PRRT_kwDOSJAM6s6Zi2YW).
 """
 
 from __future__ import annotations
@@ -58,6 +65,85 @@ ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
         "gemini-3.6-flash",
     }
 )
+
+
+# Decodes ``agy --output-format stream-json`` into the plaintext stdout AWF's
+# verdict parser expects, without giving up the continuous-output property that
+# feeds the idle watchdog (PRRT_kwDOSJAM6s6Zi2YW). Runs ``agy`` as a child so
+# its exit status is preserved (a shell pipeline would report the decoder's).
+# Assistant / result text -> stdout; every other event -> stderr; non-JSON lines
+# pass through to stdout unchanged (already plaintext).
+_ANTIGRAVITY_STREAM_JSON_DECODER = r"""
+import json
+import subprocess
+import sys
+
+
+def _text_blocks(content):
+    if isinstance(content, str):
+        return [content]
+    texts = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                texts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+    return texts
+
+
+def _event_text(event):
+    if not isinstance(event, dict):
+        return ""
+    kind = event.get("type")
+    if kind == "assistant":
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else event.get("content")
+        return "".join(_text_blocks(content))
+    if kind == "result":
+        result = event.get("result")
+        return result if isinstance(result, str) else ""
+    return ""
+
+
+def main():
+    try:
+        proc = subprocess.Popen(["agy"] + sys.argv[1:], stdout=subprocess.PIPE)
+    except OSError as exc:
+        sys.stderr.write("failed to start agy: %s\n" % exc)
+        return 127
+    while True:
+        raw = proc.stdout.readline()
+        if not raw:
+            break
+        line = raw.decode("utf-8", "replace")
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except ValueError:
+            # Not stream-json (agy warning / plaintext fallback): already the
+            # shape verdict parsing wants, so keep it on stdout verbatim.
+            sys.stdout.write(line if line.endswith("\n") else line + "\n")
+            sys.stdout.flush()
+            continue
+        text = _event_text(event)
+        if text:
+            sys.stdout.write(text if text.endswith("\n") else text + "\n")
+            sys.stdout.flush()
+            continue
+        # Tool / progress events keep the idle watchdog fed on stderr; stdout
+        # stays plaintext so a JSON-wrapped marker cannot garble the verdict.
+        sys.stderr.write(stripped + "\n")
+        sys.stderr.flush()
+    return proc.wait()
+
+
+raise SystemExit(main())
+"""
 
 
 def _api_key_mode_model_reject_message(model: str) -> str:
@@ -93,6 +179,11 @@ class AntigravityAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the agy print-mode command; prompt bridged via ``$(cat)``.
+
+        ``agy`` is launched through ``_ANTIGRAVITY_STREAM_JSON_DECODER`` so
+        stream-json events reach AWF as plaintext stdout lines (verdict parsing
+        full-matches ``AWF-VERDICT:`` lines) while non-text events still stream
+        on stderr for the idle watchdog (PRRT_kwDOSJAM6s6Zi2YW).
 
         Effort is accepted and recorded on the adapter (``self._default_effort``)
         for policy/observability, but never emitted as ``--effort``: agy
@@ -158,7 +249,10 @@ class AntigravityAdapter(AgentAdapter):
             'refusing to exec" >&2\n'
             "  exit 1\n"
             "fi\n"
-            "exec agy --dangerously-skip-permissions --output-format stream-json "
+            # agy runs under the stream-json decoder (its exit status is
+            # propagated); flags and the final ``-p`` pair are forwarded verbatim.
+            f"exec python3 -c {shlex.quote(_ANTIGRAVITY_STREAM_JSON_DECODER)} "
+            "--dangerously-skip-permissions --output-format stream-json "
             f'--print-timeout 24h{model_flag} -p "$awf_prompt"\n'
         )
         return ["sh", "-lc", script]
