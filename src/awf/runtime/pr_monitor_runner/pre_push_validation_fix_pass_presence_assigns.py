@@ -131,11 +131,19 @@ _SUBSCRIPT_INDEX_NORMALIZE_RE = re.compile(
 # count (PRRT_kwDOSJAM6s6ZsOT0).
 _INLINE_ASSIGN_KWARG_BEFORE_RE = re.compile(r"[(,][ \t]*$")
 # Prior targets in bare ``a, b, name =`` when the last name is kept as an
-# unpacking bind (PRRT_kwDOSJAM6s6ZsOT0).
+# unpacking bind (PRRT_kwDOSJAM6s6ZsOT0). Subscript forms
+# (``FLAGS["enabled"], other =``) use the scan-shape target so blanked
+# indices still match; spelling is recovered from ``raw_line``
+# (PRRT_kwDOSJAM6s6ZsYZx).
+_UNPACK_LHS_TARGET = (
+    rf"(?:{_ASSIGN_SUBSCRIPT_TARGET_SCAN}|"
+    r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+)
+_UNPACK_LHS_TARGET_RE = re.compile(_UNPACK_LHS_TARGET)
 _INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))"
-    r"((?:[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
-    r"(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)*)"
+    rf"(({_UNPACK_LHS_TARGET})"
+    rf"(?:[ \t]*,[ \t]*{_UNPACK_LHS_TARGET})*)"
     r"[ \t]*,[ \t]*$"
 )
 # Type token in statement-leading ``name: T =``: bare ``T =`` after ``ident:``
@@ -312,12 +320,23 @@ def _inline_assign_is_kwarg_or_default(*, before: str, matched: str, name: str) 
     return _paren_depth(before) > 0
 
 
-def _unpacking_lhs_names_before(before: str) -> tuple[str, ...]:
-    """Return prior bare-unpacking targets when ``before`` ends with ``,``."""
+def _unpacking_lhs_names_before(before: str, *, raw_before: str) -> tuple[str, ...]:
+    """Return prior unpacking targets when ``before`` ends with ``,``.
+
+    ``before`` is executable-scan text (quoted subscript indices blanked);
+    ``raw_before`` is the same span of the original line so
+    ``FLAGS["enabled"], other =`` recovers the real key spelling
+    (PRRT_kwDOSJAM6s6ZsYZx).
+    """
     match = _INLINE_UNPACK_LHS_BEFORE_RE.search(before)
     if match is None:
         return ()
-    return tuple(part.strip() for part in match.group(1).split(","))
+    names: list[str] = []
+    for part_match in _UNPACK_LHS_TARGET_RE.finditer(before, match.start(1), match.end(1)):
+        raw_name = raw_before[part_match.start() : part_match.end()]
+        name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
+        names.append(name)
+    return tuple(names)
 
 
 def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
@@ -353,13 +372,16 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
         if _INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE.search(before):
             continue
         # Depth-0 comma before the matched target → bare unpacking; include
-        # earlier LHS names so ``FEATURE_ENABLED, other =`` supersedes too.
+        # earlier LHS names so ``FEATURE_ENABLED, other =`` / subscript
+        # ``FLAGS["enabled"], other =`` supersede too (PRRT_kwDOSJAM6s6ZsOT0,
+        # PRRT_kwDOSJAM6s6ZsYZx).
         if (
             _INLINE_ASSIGN_KWARG_BEFORE_RE.search(before)
             and _paren_depth(before) == 0
             and ":=" not in match.group(0)[len(raw_name) :]
         ):
-            for prior in _unpacking_lhs_names_before(before):
+            raw_before = raw_line[: match.start()]
+            for prior in _unpacking_lhs_names_before(before, raw_before=raw_before):
                 if prior not in names:
                     names.append(prior)
         if name not in names:

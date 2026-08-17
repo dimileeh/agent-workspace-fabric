@@ -406,6 +406,23 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED, other = get_flags()\n",
     )
+    # Subscript priors in unpacking must bind too; bare/dotted-only prior
+    # recovery misses ``FLAGS["enabled"], other =`` and keeps FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZsYZx).
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS["enabled"], other = get_flags()\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=(
+            "FLAGS = {}\nFLAGS[\"enabled\"] = True\nFLAGS['enabled'], other = get_flags()\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nother, FLAGS["enabled"] = get_flags()\n'),
+    )
     assert not _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED := False)\n",
