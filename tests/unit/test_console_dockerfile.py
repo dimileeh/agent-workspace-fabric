@@ -62,9 +62,14 @@ def test_console_runtime_stage_carries_public_path_build_env() -> None:
         "NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH",
         "NEXT_PUBLIC_AWF_CONSOLE_API_BASE",
         "NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE",
+        "NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS",
     ):
         assert f"ARG {name}" in build_stage
         assert f"ENV {name}=" in build_stage or f"ENV {name}=${{{name}}}" in build_stage
         assert f"ARG {name}" in runtime_stage
         assert f"ENV {name}=${{{name}}}" in runtime_stage
         assert runtime_stage.index(f"ARG {name}") < runtime_stage.index("CMD [")
+
+    # Local-compatible empty default for context key names (values never baked).
+    assert "ARG NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS=" in build_stage
+    assert "ARG NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS=" in runtime_stage
