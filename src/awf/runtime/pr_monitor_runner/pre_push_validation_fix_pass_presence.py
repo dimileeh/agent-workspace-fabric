@@ -627,10 +627,12 @@ def _join_incomplete_alias_assign_line(lines: list[str], idx: int) -> str:
 
 
 def _salvaged_alias_reference_names(candidate_keys: set[str]) -> set[str]:
-    """Return bare names a tip may alias to reach salvaged bindings.
+    """Return names a tip may alias or mutate to reach salvaged bindings.
 
-    Includes bare candidate keys, dotted receivers (``guard`` from
-    ``guard.enabled``), and subscript receivers (``FLAGS`` from
+    Includes bare candidate keys, every dotted path prefix through the full key
+    (``config`` and ``config.guard`` from ``config.guard.enabled`` — not only
+    the root, so opaque ``Object.assign(config.guard, …)`` fails closed;
+    PRRT_kwDOSJAM6s6ZyGqh), and subscript receivers (``FLAGS`` from
     ``FLAGS["enabled"]``) so ``const alias = guard`` fails closed
     (PRRT_kwDOSJAM6s6ZxHGP).
     """
@@ -643,7 +645,9 @@ def _salvaged_alias_reference_names(candidate_keys: set[str]) -> set[str]:
             names.add(recv)
             continue
         if "." in key:
-            names.add(key.split(".", 1)[0])
+            parts = key.split(".")
+            for i in range(1, len(parts) + 1):
+                names.add(".".join(parts[:i]))
             continue
         if "[" not in key:
             names.add(key)

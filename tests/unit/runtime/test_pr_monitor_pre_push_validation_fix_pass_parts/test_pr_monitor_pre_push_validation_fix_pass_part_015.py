@@ -430,6 +430,20 @@ def test_opaque_object_assign_shares_salvaged_receiver() -> None:
         commit_blob=salvage,
         head_blob=salvage + "Object.assign(guard, other)\n",
     )
+    # Dotted assign targets are full ``_SETATTR_OBJ`` paths; root-only alias
+    # refs would miss ``Object.assign(config.guard, other)`` vs salvaged
+    # ``config.guard.enabled`` and retain stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZyGqh).
+    nested = "config.guard.enabled = true\n"
+    assert _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=nested,
+        head_blob=nested + "Object.assign(config.guard, other)\n",
+        candidate_keys={"config.guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=nested,
+        head_blob=nested + "Object.assign(config.guard, other)\n",
+    )
 
 
 @pytest.mark.unit
