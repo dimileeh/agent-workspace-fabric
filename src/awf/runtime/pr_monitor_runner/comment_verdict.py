@@ -130,7 +130,11 @@ async def _evaluate_local_head_advance(
     return item_end_head, local_head_advanced, descends, trees_differ
 
 
-async def _await_shield_preserving_cancellation(task: asyncio.Task[Any]) -> None:
+async def _await_shield_preserving_cancellation(
+    task: asyncio.Task[Any],
+    *,
+    prior_cancellation: asyncio.CancelledError | None = None,
+) -> None:
     """Await ``task`` under shield; never let task failure replace CancelledError.
 
     Shield loops used to call ``task.result()`` once the salvage/persist work
@@ -141,8 +145,14 @@ async def _await_shield_preserving_cancellation(task: asyncio.Task[Any]) -> None
     the task is still pending and a later ``shield`` await surfaces the task
     failure: catch that failure only after cancel was observed, retrieve it via
     ``exception()``, and chain it under CancelledError.
+
+    Callers already inside ``except asyncio.CancelledError`` must pass that
+    exception as ``prior_cancellation``. Catching cancel consumes it for later
+    awaits in the handler, so this helper would otherwise start with no cancel
+    and re-raise a salvage/persist failure in place of worker shutdown
+    (PRRT_kwDOSJAM6s6Z0nDb).
     """
-    cancellation: asyncio.CancelledError | None = None
+    cancellation: asyncio.CancelledError | None = prior_cancellation
     while True:
         try:
             await asyncio.shield(task)
@@ -177,6 +187,7 @@ async def _retain_failed_run_salvage_despite_cancellation(
     salvage_body_hash: str | None,
     isolated_worktree_host_path: Path | None,
     result_stdout: str,
+    prior_cancellation: asyncio.CancelledError | None = None,
 ) -> None:
     """Capture post-exit HEAD and retain salvage while an abort is pending.
 
@@ -231,7 +242,10 @@ async def _retain_failed_run_salvage_despite_cancellation(
                 await persist(workspace_id, state, salvage_item_id=salvage_item_id)
 
     retain_task = asyncio.create_task(_capture_retain_and_persist())
-    await _await_shield_preserving_cancellation(retain_task)
+    await _await_shield_preserving_cancellation(
+        retain_task,
+        prior_cancellation=prior_cancellation,
+    )
 
 
 async def _await_failed_run_salvage_persist_shielded(
@@ -619,7 +633,7 @@ async def _invoke_cli_for_verdict_result(
                 )
             except Exception as sink_exc:
                 unexpected_sink_error = sink_exc
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancel_exc:
                 await _retain_failed_run_salvage_despite_cancellation(
                     runner,
                     workspace_id=workspace_id,
@@ -630,6 +644,7 @@ async def _invoke_cli_for_verdict_result(
                     salvage_body_hash=salvage_body_hash,
                     isolated_worktree_host_path=isolated_worktree_host_path,
                     result_stdout=result_stdout,
+                    prior_cancellation=cancel_exc,
                 )
                 raise
         await _retain_failed_run_salvage_despite_cancellation(
@@ -646,7 +661,7 @@ async def _invoke_cli_for_verdict_result(
         if unexpected_sink_error is not None:
             raise unexpected_sink_error from None
         raise
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel_exc:
         # Agent may have self-committed before cancellation; retain HEAD advance
         # before re-raising so a worker reload does not strand the thread as
         # fixed_without_head_advance (PRRT_kwDOSJAM6s6ZmviO).
@@ -660,6 +675,7 @@ async def _invoke_cli_for_verdict_result(
             salvage_body_hash=salvage_body_hash,
             isolated_worktree_host_path=isolated_worktree_host_path,
             result_stdout=result_stdout,
+            prior_cancellation=cancel_exc,
         )
         raise
 
@@ -691,7 +707,7 @@ async def _invoke_cli_for_verdict_result(
             )
         except Exception as sink_exc:
             commit_sink_error = sink_exc
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancel_exc:
             await _retain_failed_run_salvage_despite_cancellation(
                 runner,
                 workspace_id=workspace_id,
@@ -702,6 +718,7 @@ async def _invoke_cli_for_verdict_result(
                 salvage_body_hash=salvage_body_hash,
                 isolated_worktree_host_path=isolated_worktree_host_path,
                 result_stdout=result_stdout,
+                prior_cancellation=cancel_exc,
             )
             raise
 
@@ -870,7 +887,7 @@ async def _invoke_cli_for_verdict_result(
                     salvage_item_id=salvage_item_id,
                 )
             raise commit_sink_error from None
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel_exc:
         await _retain_failed_run_salvage_despite_cancellation(
             runner,
             workspace_id=workspace_id,
@@ -881,6 +898,7 @@ async def _invoke_cli_for_verdict_result(
             salvage_body_hash=salvage_body_hash,
             isolated_worktree_host_path=isolated_worktree_host_path,
             result_stdout=result_stdout,
+            prior_cancellation=cancel_exc,
         )
         raise
 

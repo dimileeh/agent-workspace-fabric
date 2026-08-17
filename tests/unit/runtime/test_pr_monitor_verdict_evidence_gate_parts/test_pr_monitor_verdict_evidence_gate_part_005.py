@@ -892,3 +892,89 @@ async def test_salvage_persist_failure_propagates_without_cancellation() -> None
     persist_task = asyncio.create_task(_failing_persist())
     with pytest.raises(RuntimeError, match="without cancel"):
         await comment_verdict._await_shield_preserving_cancellation(persist_task)
+
+
+@pytest.mark.unit
+async def test_prior_cancellation_preserved_when_shielded_task_fails() -> None:
+    """Caller-caught CancelledError must outrank a later salvage/persist failure.
+
+    When entered from ``except asyncio.CancelledError``, the helper's local
+    cancel starts unset. A failing shielded task must not replace worker
+    shutdown cancellation (PRRT_kwDOSJAM6s6Z0nDb).
+    """
+    import asyncio
+
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    prior = asyncio.CancelledError()
+
+    async def _failing_persist() -> None:
+        raise RuntimeError("salvage persist failed after outer cancel")
+
+    persist_task = asyncio.create_task(_failing_persist())
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await comment_verdict._await_shield_preserving_cancellation(
+            persist_task,
+            prior_cancellation=prior,
+        )
+    assert raised.value is prior
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "after outer cancel" in str(raised.value.__cause__)
+
+
+@pytest.mark.unit
+async def test_retain_salvage_despite_cancellation_forwards_prior_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_retain_failed_run_salvage_despite_cancellation`` must forward outer cancel.
+
+    Call sites catch CancelledError then await retain+persist; without forwarding,
+    a probe/persist failure replaces shutdown cancel (PRRT_kwDOSJAM6s6Z0nDb).
+    """
+    import asyncio
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    prior = asyncio.CancelledError()
+    seen: dict[str, object] = {}
+
+    async def _capture(
+        task: asyncio.Task[object],
+        *,
+        prior_cancellation: asyncio.CancelledError | None = None,
+    ) -> None:
+        seen["prior"] = prior_cancellation
+        if prior_cancellation is not None:
+            raise prior_cancellation
+        await task
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_await_shield_preserving_cancellation",
+        _capture,
+    )
+    monkeypatch.setattr(
+        comment_verdict,
+        "_evaluate_local_head_advance",
+        AsyncMock(return_value=(None, False, None, None)),
+    )
+    monkeypatch.setattr(comment_verdict, "_retain_or_clear_failed_run_salvage", lambda **_: None)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await comment_verdict._retain_failed_run_salvage_despite_cancellation(
+            SimpleNamespace(),
+            workspace_id="ws",
+            worktree_path=Path("/tmp"),
+            item_start_head=None,
+            state=None,
+            salvage_item_id=None,
+            salvage_body_hash=None,
+            isolated_worktree_host_path=None,
+            result_stdout="",
+            prior_cancellation=prior,
+        )
+    assert raised.value is prior
+    assert seen["prior"] is prior
