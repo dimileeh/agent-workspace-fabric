@@ -395,6 +395,46 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n[FEATURE_ENABLED, other] = [False, 1]\n"),
     )
+    # Starred / trailing-comma paren-list unpack must supersede too
+    # (PRRT_kwDOSJAM6s6ZsfLc).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n(FEATURE_ENABLED, *rest) = (False, 1, 2)\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n(*rest, FEATURE_ENABLED) = (1, 2, False)\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n(FEATURE_ENABLED, other,) = (False, 1)\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n(FEATURE_ENABLED,) = (False,)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n[FEATURE_ENABLED, *rest] = [False, 1, 2]\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED, *rest = get_flags()\n"),
+    )
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_sub,
         commit_blob=commit_sub,

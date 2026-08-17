@@ -128,8 +128,10 @@ _SUBSCRIPT_INDEX_NORMALIZE_RE = re.compile(
 # Same-line call kwargs / default parameters: ``name=`` after ``(`` or ``,``
 # is not a rebind (PRRT_kwDOSJAM6s6ZsJyZ). Applied only inside unmatched ``(``
 # … ``)`` and never for ``:=`` so bare unpacking / parenthesized walrus still
-# count (PRRT_kwDOSJAM6s6ZsOT0).
-_INLINE_ASSIGN_KWARG_BEFORE_RE = re.compile(r"[(,][ \t]*$")
+# count (PRRT_kwDOSJAM6s6ZsOT0). Optional ``*`` after the comma so starred
+# unpack finals (``a, *rest =``) still enter prior-LHS recovery
+# (PRRT_kwDOSJAM6s6ZsfLc).
+_INLINE_ASSIGN_KWARG_BEFORE_RE = re.compile(r"[(,][ \t]*(?:\*[ \t]*)?$")
 # Prior targets in bare ``a, b, name =`` when the last name is kept as an
 # unpacking bind (PRRT_kwDOSJAM6s6ZsOT0). Subscript forms
 # (``FLAGS["enabled"], other =``) use the scan-shape target so blanked
@@ -139,17 +141,29 @@ _UNPACK_LHS_TARGET = (
     rf"(?:{_ASSIGN_SUBSCRIPT_TARGET_SCAN}|"
     r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
 )
+# Optional ``*`` for starred unpack targets (``*rest``); name extraction still
+# uses ``_UNPACK_LHS_TARGET_RE`` so the star is not part of the binding key
+# (PRRT_kwDOSJAM6s6ZsfLc).
+_UNPACK_LHS_ITEM = rf"(?:\*[ \t]*)?{_UNPACK_LHS_TARGET}"
 _UNPACK_LHS_TARGET_RE = re.compile(_UNPACK_LHS_TARGET)
 _INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))"
-    rf"(({_UNPACK_LHS_TARGET})"
-    rf"(?:[ \t]*,[ \t]*{_UNPACK_LHS_TARGET})*)"
-    r"[ \t]*,[ \t]*$"
+    rf"(({_UNPACK_LHS_ITEM})"
+    rf"(?:[ \t]*,[ \t]*{_UNPACK_LHS_ITEM})*)"
+    # Final comma before the matched last target; optional ``*`` when that
+    # target is starred (``FEATURE_ENABLED, *rest =``; PRRT_kwDOSJAM6s6ZsfLc).
+    r"[ \t]*,[ \t]*(?:\*[ \t]*)?$"
 )
 # Flat parenthesized / list unpacking LHS before equals-style assign
 # (``(a, b) =`` / ``[a, b] =``). No identifier sits immediately before ``=``,
 # so bare comma-before recovery misses every target (PRRT_kwDOSJAM6s6ZsZ5d).
-_PAREN_LIST_UNPACK_BODY = rf"(?:{_UNPACK_LHS_TARGET})(?:[ \t]*,[ \t]*{_UNPACK_LHS_TARGET})*"
+# Starred items and an optional trailing comma so ``(a, *rest) =`` /
+# ``(a, b,) =`` / ``(a,) =`` still bind (PRRT_kwDOSJAM6s6ZsfLc).
+_PAREN_LIST_UNPACK_BODY = (
+    rf"(?:{_UNPACK_LHS_ITEM})"
+    rf"(?:[ \t]*,[ \t]*{_UNPACK_LHS_ITEM})*"
+    r"(?:[ \t]*,)?"
+)
 _PAREN_LIST_UNPACK_ASSIGN_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))"
     r"(?:"
@@ -376,8 +390,10 @@ def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, 
 
     Parenthesized and list unpacking place ``)`` / ``]`` immediately before
     ``=``, so identifier-before-assign patterns find nothing and would keep
-    stale FIXED salvage (PRRT_kwDOSJAM6s6ZsZ5d). Subscript spellings are
-    recovered from ``raw_line`` because scan blanks quoted indices.
+    stale FIXED salvage (PRRT_kwDOSJAM6s6ZsZ5d). Starred items and trailing
+    commas are included so ``(a, *rest) =`` / ``(a, b,) =`` still bind
+    (PRRT_kwDOSJAM6s6ZsfLc). Subscript spellings are recovered from
+    ``raw_line`` because scan blanks quoted indices.
     """
     names: list[str] = []
     for match in _PAREN_LIST_UNPACK_ASSIGN_RE.finditer(scan):

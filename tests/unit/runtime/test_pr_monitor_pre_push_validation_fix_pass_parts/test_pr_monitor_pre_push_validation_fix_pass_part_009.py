@@ -417,6 +417,32 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n[FEATURE_ENABLED, other] = [False, 1]\n",
     )
+    # Starred / trailing-comma paren-list unpack must bind too; plain-target
+    # bodies miss these and keep FIXED salvage (PRRT_kwDOSJAM6s6ZsfLc).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED, *rest) = (False, 1, 2)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(*rest, FEATURE_ENABLED) = (1, 2, False)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED, other,) = (False, 1)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED,) = (False,)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n[FEATURE_ENABLED, *rest] = [False, 1, 2]\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED, *rest = get_flags()\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
         head_blob=(
