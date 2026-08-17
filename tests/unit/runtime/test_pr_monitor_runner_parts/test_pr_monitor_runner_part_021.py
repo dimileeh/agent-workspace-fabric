@@ -239,6 +239,13 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: <em class='x'>&lt;reason&gt;</em>",
             "AWF-VERDICT: FALSE POSITIVE: <em>`&lt;reason&gt;`</em>",
             "AWF-VERDICT: FALSE POSITIVE: <strong>**<reason>**</strong>",
+            # Quoted ``>`` inside wrapper attributes must not truncate the open
+            # tag and leave a non-placeholder remnant (PRRT_kwDOSJAM6s6ZsvLy).
+            'AWF-VERDICT: FALSE POSITIVE: <span title="1 > 0">&lt;reason&gt;</span>',
+            "AWF-VERDICT: FALSE POSITIVE: <span title='1 > 0'>&lt;reason&gt;</span>",
+            'AWF-VERDICT: FALSE POSITIVE: <em title="1 > 0">&lt;reason&gt;</em>',
+            'AWF-VERDICT: FALSE POSITIVE: <code data-value=">">&lt;reason&gt;</code>',
+            'AWF-VERDICT: FIXED: <span title="1 > 0">&lt;one-sentence summary&gt;</span>',
             # Inline ``<code>`` HTML wrappers (not Markdown ticks) must peel
             # when placeholder-shaped (PRRT_kwDOSJAM6s6Zq76j).
             "AWF-VERDICT: FALSE POSITIVE: <code>&lt;reason&gt;</code>",
@@ -273,7 +280,8 @@ class TestParseVerdict:
         # successively (PRRT_kwDOSJAM6s6ZpHXM). Safe inline HTML wrappers
         # (``<em>`` / ``<strong>`` / ``<span>`` / ``<code>``) peel the same
         # way when placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ,
-        # PRRT_kwDOSJAM6s6Zq76j).
+        # PRRT_kwDOSJAM6s6Zq76j), including attributes whose quoted values
+        # contain ``>`` (PRRT_kwDOSJAM6s6ZsvLy).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -353,6 +361,12 @@ class TestParseVerdict:
         assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</em >") == "x"
         assert _peel_all_outer_html_verdict_reason_wrappers("<code>x</code>") == "x"
         assert _peel_all_outer_html_verdict_reason_wrappers("<code><em>x</em></code>") == "x"
+        assert (
+            _peel_all_outer_html_verdict_reason_wrappers(
+                '<span title="1 > 0">&lt;reason&gt;</span>'
+            )
+            == "&lt;reason&gt;"
+        )
         assert _peel_all_outer_html_verdict_reason_wrappers("plain") == "plain"
         assert _html_wrapper_close_suffix_start("nope", 0, 4, "em") is None
         assert _html_wrapper_close_suffix_start("<em>", 0, 0, "em") is None

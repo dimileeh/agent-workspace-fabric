@@ -126,15 +126,29 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r"_\s*(?P<em_under>.*?)\s*_"
     r")$"
 )
+# CommonMark HTML attribute fragment (unquoted / single- / double-quoted).
+# Shared by type-7 block openers and safe inline verdict HTML wrappers so a
+# quoted ``>`` does not truncate the open tag (PRRT_kwDOSJAM6s6ZnYwM,
+# PRRT_kwDOSJAM6s6ZsvLy).
+_HTML_TYPE7_ATTR = (
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:"
+    r"[^\s\"'=<>`]+|"
+    r"'[^']*'|"
+    r'"[^"]*"'
+    r"))?)"
+)
 # Balanced safe inline HTML wrappers around a reason (``<em>…</em>``,
 # ``<strong>…</strong>``, ``<span>…</span>``, ``<code>…</code>``, optional
 # attributes, case-insensitive). Peeled only when the enclosed value is
 # placeholder-shaped — same gate as single emphasis / Markdown links — so
 # rich-text echoes of ``<em>&lt;reason&gt;</em>`` / ``<code>&lt;reason&gt;</code>``
 # fail closed while real HTML-wrapped prose stays usable
-# (PRRT_kwDOSJAM6s6ZpdhJ, PRRT_kwDOSJAM6s6Zq76j).
+# (PRRT_kwDOSJAM6s6ZpdhJ, PRRT_kwDOSJAM6s6Zq76j). Attribute values use
+# ``_HTML_TYPE7_ATTR`` so a quoted ``>`` (``title="1 > 0"``) does not truncate
+# the open tag and leave a non-placeholder remnant (PRRT_kwDOSJAM6s6ZsvLy).
 _VERDICT_REASON_INLINE_HTML_WRAPPER = re.compile(
-    r"^<(?P<tag>em|strong|span|code)(?:\s[^>]*)?\s*>\s*(?P<inner>.*?)\s*</(?P=tag)\s*>$",
+    rf"^<(?P<tag>em|strong|span|code){_HTML_TYPE7_ATTR}*\s*>\s*(?P<inner>.*?)\s*</(?P=tag)\s*>$",
     re.IGNORECASE,
 )
 # Whole-reason Markdown links (``[<…>](https://example.com)``) and images
@@ -292,17 +306,9 @@ _HTML_TYPE6_BLOCK_OPEN = re.compile(
 # to close-tag + blank-tail hybrid shielding (PRRT_kwDOSJAM6s6ZpLqP /
 # PRRT_kwDOSJAM6s6ZpPQA). Custom elements such as ``<custom-example>`` land
 # here; type-6 tags may also match but are recognized first. Attribute values
-# follow CommonMark (unquoted / single- / double-quoted) so a quoted ``>``
-# (``data-value=">">``) does not truncate the open tag and skip the blank-line
-# shield (PRRT_kwDOSJAM6s6ZnYwM).
-_HTML_TYPE7_ATTR = (
-    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
-    r"(?:\s*=\s*(?:"
-    r"[^\s\"'=<>`]+|"
-    r"'[^']*'|"
-    r'"[^"]*"'
-    r"))?)"
-)
+# follow CommonMark (unquoted / single- / double-quoted) via ``_HTML_TYPE7_ATTR``
+# so a quoted ``>`` (``data-value=">">``) does not truncate the open tag and
+# skip the blank-line shield (PRRT_kwDOSJAM6s6ZnYwM).
 _HTML_TYPE7_BLOCK_OPEN = re.compile(
     r"^ {0,3}(?:"
     r"</[A-Za-z][A-Za-z0-9:-]*\s*>"

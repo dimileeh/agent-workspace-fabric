@@ -803,10 +803,12 @@ def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
     return None
 
 
-# Open tag at a cursor for safe whole-reason HTML wrappers. Attributes allowed;
-# trailing whitespace after ``>`` is consumed so layered peels stay tight.
+# Open tag at a cursor for safe whole-reason HTML wrappers. Attributes allowed
+# via ``_HTML_TYPE7_ATTR`` so a quoted ``>`` does not truncate the open tag
+# (PRRT_kwDOSJAM6s6ZsvLy); trailing whitespace after ``>`` is consumed so
+# layered peels stay tight.
 _VERDICT_REASON_HTML_WRAPPER_OPEN_AT = re.compile(
-    r"<(em|strong|span|code)(?:\s[^>]*)?\s*>\s*",
+    rf"<(em|strong|span|code){_HTML_TYPE7_ATTR}*\s*>\s*",
     re.IGNORECASE,
 )
 
