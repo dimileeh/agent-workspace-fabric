@@ -1434,6 +1434,85 @@ def _join_incomplete_object_mutation_line(lines: list[str], idx: int) -> str:
     return raw_line
 
 
+def _object_mutation_join_last_index(lines: list[str], opener_idx: int) -> int:
+    """Return the last line index consumed when joining from ``opener_idx``."""
+    raw_line = lines[opener_idx]
+    if _object_assign_call_unclosed(raw_line):
+        unclosed = _object_assign_call_unclosed
+    elif _object_define_property_call_unclosed(raw_line):
+        unclosed = _object_define_property_call_unclosed
+    else:
+        return opener_idx
+    joined = raw_line.rstrip()
+    j = opener_idx + 1
+    last = opener_idx
+    while j < len(lines):
+        nxt = lines[j]
+        nxt_stripped = nxt.strip()
+        if _object_assign_join_gap_skippable(nxt_stripped):
+            j += 1
+            continue
+        if nxt_stripped.startswith("/*") and "*/" not in nxt_stripped:
+            j += 1
+            while j < len(lines):
+                close_line = lines[j]
+                j += 1
+                if "*/" not in close_line:
+                    continue
+                after = close_line.split("*/", 1)[1].strip()
+                if after == "":
+                    break
+                joined = f"{joined} {after}"
+                last = j - 1
+                break
+            else:
+                break
+            if not unclosed(joined):
+                break
+            continue
+        joined = f"{joined} {nxt.lstrip(' \t')}"
+        last = j
+        j += 1
+        if not unclosed(joined):
+            break
+    return last
+
+
+def _join_incomplete_object_mutation_line_covering(lines: list[str], idx: int) -> str:
+    """Join ``Object.assign`` / ``defineProperty`` whose args cover ``idx``.
+
+    Tip-extra scanners only visit tip-extra indices. When salvage already has a
+    shared ``Object.assign(`` / ``Object.defineProperty(`` opener and the tip only
+    edits argument lines, forward join from the arg line sees no call — look back
+    for an unclosed opener whose forward join includes ``idx``
+    (PRRT_kwDOSJAM6s6Zy5DN).
+    """
+    forward = _join_incomplete_object_mutation_line(lines, idx)
+    raw = lines[idx]
+    if (
+        _object_assign_call_unclosed(raw)
+        or _object_define_property_call_unclosed(raw)
+        or _object_assign_call_targets(forward)
+        or _object_define_property_call_targets(forward)
+    ):
+        return forward
+    for opener_idx in range(idx - 1, -1, -1):
+        opener_raw = lines[opener_idx]
+        opener_stripped = opener_raw.strip()
+        if opener_stripped == "":
+            continue
+        if not (
+            _object_assign_call_unclosed(opener_raw)
+            or _object_define_property_call_unclosed(opener_raw)
+        ):
+            continue
+        if _object_mutation_join_last_index(lines, opener_idx) >= idx:
+            return _join_incomplete_object_mutation_line(lines, opener_idx)
+        # Nearest unclosed opener closed before ``idx`` — not inside that call.
+        break
+    return forward
+
+
 def _object_define_property_mutation_args_fully_synthesizable(raw_line: str) -> bool:
     """Return True when every ``defineProperty`` property arg is a string literal."""
     calls = _object_define_property_call_targets(raw_line)

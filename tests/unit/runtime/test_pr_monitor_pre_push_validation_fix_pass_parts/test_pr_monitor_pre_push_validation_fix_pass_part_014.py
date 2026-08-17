@@ -642,6 +642,33 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_js_guard,
         head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(\n  guard,\n  other\n);\n"),
     )
+    # Shared Object.assign opener: tip only edits argument lines, so the opener is
+    # not tip-extra. Look-back join must still synthesize target.key / fail closed
+    # on opaque sources (PRRT_kwDOSJAM6s6Zy5DN).
+    parent_shared_assign = "Object.assign(\n  guard,\n  {enabled: false}\n);\n"
+    commit_shared_assign = "Object.assign(\n  guard,\n  {enabled: true}\n);\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_assign,
+        commit_blob=commit_shared_assign,
+        head_blob="Object.assign(\n  guard,\n  {enabled: false}\n);\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_assign,
+        commit_blob=commit_shared_assign,
+        head_blob="Object.assign(\n  guard,\n  other\n);\n",
+    )
+    parent_shared_retarget = "guard.enabled = false\nObject.assign(\n  other,\n  {x: 1}\n);\n"
+    commit_shared_retarget = "guard.enabled = true\nObject.assign(\n  other,\n  {x: 1}\n);\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_retarget,
+        commit_blob=commit_shared_retarget,
+        head_blob=("guard.enabled = true\nObject.assign(\n  guard,\n  {enabled: false}\n);\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_retarget,
+        commit_blob=commit_shared_retarget,
+        head_blob="guard.enabled = true\nObject.assign(\n  guard,\n  other\n);\n",
+    )
     # Object.defineProperty after salvage ``guard.enabled = true`` (PRRT_kwDOSJAM6s6Zy4pR).
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_js_guard,
@@ -698,6 +725,20 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             "x = 1\nguard.enabled = true\ny = 2\n"
             "Object.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n"
         ),
+    )
+    # Shared defineProperty opener: tip only edits the value / property lines
+    # (PRRT_kwDOSJAM6s6Zy5DN).
+    parent_shared_define = 'Object.defineProperty(\n  guard,\n  "enabled",\n  {value: false}\n);\n'
+    commit_shared_define = 'Object.defineProperty(\n  guard,\n  "enabled",\n  {value: true}\n);\n'
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_define,
+        commit_blob=commit_shared_define,
+        head_blob=('Object.defineProperty(\n  guard,\n  "enabled",\n  {value: false}\n);\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_define,
+        commit_blob=commit_shared_define,
+        head_blob=("Object.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n"),
     )
     # Shell ``unset`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZuRSm).
     parent_shell = "x=1\nFEATURE_ENABLED=false\ny=2\n"

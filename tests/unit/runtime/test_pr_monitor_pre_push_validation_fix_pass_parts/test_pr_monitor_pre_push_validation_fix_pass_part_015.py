@@ -421,6 +421,14 @@ def test_object_assign_mutation_binding_names() -> None:
     joined = _join_incomplete_object_assign_line(multi, 0)
     assert not _object_assign_call_unclosed(joined)
     assert _object_assign_mutation_binding_names(joined) == ("guard.enabled",)
+    # Tip-extra argument lines must look back to a shared opener (PRRT_kwDOSJAM6s6Zy5DN).
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _join_incomplete_object_mutation_line_covering,
+    )
+
+    covered = _join_incomplete_object_mutation_line_covering(multi, 2)
+    assert _object_assign_mutation_binding_names(covered) == ("guard.enabled",)
+    assert _join_incomplete_object_mutation_line_covering(["foo = 1"], 0) == "foo = 1"
 
 
 @pytest.mark.unit
@@ -498,6 +506,22 @@ def test_opaque_object_assign_shares_salvaged_receiver() -> None:
     assert _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "Object.assign(\n  other,\n  extra\n);\n",
+    )
+    # Shared opener: tip-extra is only the opaque source line (PRRT_kwDOSJAM6s6Zy5DN).
+    shared_opener_baseline = "Object.assign(\n  guard,\n  {enabled: true}\n);\n"
+    assert _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=shared_opener_baseline,
+        head_blob="Object.assign(\n  guard,\n  other\n);\n",
+        candidate_keys={"guard.enabled"},
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _tip_extra_keys_supersede_baseline,
+    )
+
+    assert _tip_extra_keys_supersede_baseline(
+        baseline_blob=shared_opener_baseline,
+        head_blob="Object.assign(\n  guard,\n  {enabled: false}\n);\n",
+        candidate_keys={"guard.enabled"},
     )
 
 

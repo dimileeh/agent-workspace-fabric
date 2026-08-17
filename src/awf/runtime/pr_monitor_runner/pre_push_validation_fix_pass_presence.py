@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
     _join_incomplete_object_mutation_line as _join_incomplete_object_mutation_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _join_incomplete_object_mutation_line_covering as _join_incomplete_object_mutation_line_covering,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
@@ -801,8 +804,10 @@ def _tip_extra_opaque_object_assign_shares_receiver(
     binding names instead, so unrelated keys keep salvage like
     ``Object.assign(guard, {other: false})``. Multiline
     ``Object.assign(\\n  guard,\\n  …)`` joins continued argument lists before
-    scanning; an opener that remains unclosed with no parseable target after
-    look-ahead also fails closed (PRRT_kwDOSJAM6s6Zyo4_).
+    scanning, looking back from tip-extra argument lines when the shared opener
+    is not tip-extra (PRRT_kwDOSJAM6s6Zy5DN); an opener that remains unclosed
+    with no parseable target after look-ahead also fails closed
+    (PRRT_kwDOSJAM6s6Zyo4_).
     """
     receivers = _salvaged_alias_reference_names(candidate_keys)
     if not receivers:
@@ -826,7 +831,7 @@ def _tip_extra_opaque_object_assign_shares_receiver(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        scan_line = _join_incomplete_object_mutation_line(lines, idx)
+        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
         targets = _object_assign_call_targets(scan_line)
         # Opener with no parseable target after join (still unclosed) — cannot
         # prove the tip does not mutate a salvaged receiver.
@@ -853,8 +858,9 @@ def _tip_extra_opaque_object_define_property_shares_receiver(
     via binding names instead, so unrelated keys keep salvage like
     ``Object.defineProperty(guard, "other", …)``. Multiline
     ``Object.defineProperty(\\n  guard,\\n  …)`` joins continued argument lists
-    before scanning; an opener that remains unclosed with no parseable target
-    after look-ahead also fails closed.
+    before scanning, looking back from tip-extra argument lines when the shared
+    opener is not tip-extra (PRRT_kwDOSJAM6s6Zy5DN); an opener that remains
+    unclosed with no parseable target after look-ahead also fails closed.
     """
     receivers = _salvaged_alias_reference_names(candidate_keys)
     if not receivers:
@@ -878,7 +884,7 @@ def _tip_extra_opaque_object_define_property_shares_receiver(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        scan_line = _join_incomplete_object_mutation_line(lines, idx)
+        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
         targets = _object_define_property_call_targets(scan_line)
         if not targets and _object_define_property_call_unclosed(scan_line):
             return True
@@ -1046,6 +1052,9 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
 
     Lines that start inside ``/*`` or a triple-quoted string are ignored so
     tip-extra docstring prose cannot look like a rebind (PRRT_kwDOSJAM6s6ZqPO9).
+    Tip-extra argument lines of a shared ``Object.assign`` / ``defineProperty``
+    opener look back so synthesizable ``target.key`` bindings still count
+    (PRRT_kwDOSJAM6s6Zy5DN).
     """
     if not line_indices:
         return set()
@@ -1076,7 +1085,10 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
-        scan_line = _join_incomplete_object_mutation_line(lines, idx)
+        if idx in line_indices:
+            scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
+        else:
+            scan_line = _join_incomplete_object_mutation_line(lines, idx)
         names = _binding_names_for_line(scan_line)
         if not names:
             continue
