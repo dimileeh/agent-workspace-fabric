@@ -24,9 +24,13 @@ _CONTROL_FLOW_BARE_HEADER_RE = re.compile(
 # (PRRT_kwDOSJAM6s6ZtYk1). Same-line ``/* … */`` between ``}`` and the keyword is
 # still a continuation (PRRT_kwDOSJAM6s6Zt56f). ``} while`` is excluded —
 # do-while terminators do not open a body for the following line. Group 1 is the
-# keyword so callers can slice the header without re-skipping comments.
+# keyword so callers can slice the header without re-skipping comments. The
+# comment body is the unambiguous ``[^*]*\*+([^/*][^*]*\*+)*/`` form (newlines
+# excluded to keep same-line semantics) rather than a lazy ``.*?`` — the lazy
+# form lets the outer repetition split a ``/**/`` run many ways and backtrack
+# exponentially when the keyword never follows (PRRT_kwDOSJAM6s6Z1Oyq).
 _CONTROL_FLOW_AFTER_BRACE_RE = re.compile(
-    r"\}(?:[ \t]|/\*.*?\*/)*((?:else\s+if|else|catch|finally)\b)"
+    r"\}(?:[ \t]|/\*[^*\n]*\*+(?:[^/*\n][^*\n]*\*+)*/)*((?:else\s+if|else|catch|finally)\b)"
 )
 _CONTROL_FLOW_PAREN_KEYWORD_RE = re.compile(r"^(?:else\s+if|if|while|for|switch|catch)\b")
 _CONTROL_FLOW_BARE_KEYWORD_RE = re.compile(r"^(?:else|do|try|finally)[ \t]*(?:\{[ \t]*)?(?://.*)?$")

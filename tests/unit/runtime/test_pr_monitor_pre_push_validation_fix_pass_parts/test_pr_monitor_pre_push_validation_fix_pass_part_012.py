@@ -258,6 +258,35 @@ def test_brace_continuation_control_flow_prefix_rejects_disabled_salvage() -> No
 
 
 @pytest.mark.unit
+def test_brace_continuation_comment_run_does_not_backtrack_exponentially() -> None:
+    """A long ``}/**//**/…`` run without a keyword must fail fast, not hang.
+
+    The lazy ``/\\*.*?\\*/`` body let the outer repetition split a ``/**/`` run
+    many ways, so a non-matching line drove exponential backtracking and stalled
+    the salvage-presence scan on agent-supplied blobs (PRRT_kwDOSJAM6s6Z1Oyq).
+    """
+    import time
+
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+        _last_brace_control_flow_continuation,
+    )
+
+    pathological = "}" + "/**/" * 40 + "x();"
+    started = time.perf_counter()
+    assert _last_brace_control_flow_continuation(pathological) is None
+    assert time.perf_counter() - started < 2.0
+
+    # Inter-token comment runs are still recognized as brace continuations.
+    match = _last_brace_control_flow_continuation("}" + "/**/" * 40 + "else")
+    assert match is not None
+    assert match.group(1) == "else"
+    assert _last_brace_control_flow_continuation("}/* a */ /* b */catch (e) {") is not None
+    # A ``*/`` closes at the first terminator, so trailing code before the
+    # keyword is not swallowed into the comment.
+    assert _last_brace_control_flow_continuation("}/* a */y*/else") is None
+
+
+@pytest.mark.unit
 def test_string_comment_state_and_ls_tree_meta_edges() -> None:
     """Triple-quote / escape state and ls-tree meta parsing stay fail-closed."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
