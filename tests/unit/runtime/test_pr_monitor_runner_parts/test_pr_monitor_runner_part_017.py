@@ -666,6 +666,34 @@ class TestParseVerdict:
         assert result.reason == "real fix landed"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            (
+                "<!--\nAWF-VERDICT: FALSE POSITIVE: example\n--!>\n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+            (
+                "<!-- AWF-VERDICT: FALSE POSITIVE: example --!>\n"
+                "AWF-VERDICT: FIXED: real fix landed\n"
+            ),
+        ],
+        ids=["multi_line_bang_close", "same_line_bang_close"],
+    )
+    def test_private_awf_verdict_unfenced_after_bang_closed_html_comment_still_wins(
+        self,
+        stdout: str,
+    ) -> None:
+        # ``--!>`` is a comment end tag (HTML "comment end bang state"), so the
+        # trailing marker is the authoritative verdict a reader sees rendered.
+        # Treating only ``-->`` as the closer kept the shield open forever and
+        # silently dropped that real marker (CodeQL py/bad-tag-filter).
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "real fix landed"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_markers_inside_html_processing_instruction(
         self,
     ) -> None:

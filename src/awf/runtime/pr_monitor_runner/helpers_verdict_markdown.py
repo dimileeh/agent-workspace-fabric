@@ -266,8 +266,13 @@ _HTML_CODE_BLOCK_OPEN = re.compile(
 # inside ``<!-- … -->`` overrides an earlier hard block
 # (PRRT_kwDOSJAM6s6ZnN2F). Peel list/blockquote containers on openers like
 # ``<pre>`` / fences so ``- <!--`` / ``> <!--`` still enter comment mode.
+# The closer also accepts ``--!>``: the HTML parser's "comment end bang state"
+# ends a comment on it, so everything after ``--!>`` is visible text to whoever
+# reads the rendered thread. Matching only ``-->`` left the shield open to end
+# of output and silently masked that visible, authoritative marker
+# (CodeQL py/bad-tag-filter).
 _HTML_COMMENT_OPEN = re.compile(r"^ {0,3}<!--")
-_HTML_COMMENT_CLOSE = re.compile(r"-->")
+_HTML_COMMENT_CLOSE = re.compile(r"--!?>")
 # CommonMark HTML blocks type 3–5 (processing instruction / declaration /
 # CDATA). Same shield as comments: agents paste example markers inside
 # ``<?…?>``, ``<!Letter…>``, and ``<![CDATA[…]]>``; without tracking them a
@@ -484,7 +489,7 @@ def _html_comment_opens(line: str) -> bool:
 
 
 def _html_comment_closes(line: str) -> bool:
-    """Return whether ``line`` contains an HTML comment closer (``-->``)."""
+    """Return whether ``line`` contains an HTML comment closer (``-->`` / ``--!>``)."""
     return _HTML_COMMENT_CLOSE.search(line) is not None
 
 
