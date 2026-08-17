@@ -131,6 +131,20 @@ def test_subscript_and_assign_key_normalize_edge_spellings() -> None:
     assert _matching_bracket_closer_index("(a, b", 0) is None
     raw = "(a, b ="
     assert _paren_list_unpack_binding_names(raw, scan=_executable_call_scan_text(raw)) == ()
+    # JS object alias properties bind the value-side target only; keys must not
+    # enter the binding set (PRRT_kwDOSJAM6s6Zv4pl).
+    alias = "({FEATURE_ENABLED: local} = source)"
+    assert _paren_list_unpack_binding_names(alias, scan=_executable_call_scan_text(alias)) == (
+        "local",
+    )
+    shorthand = "({FEATURE_ENABLED} = source)"
+    assert _paren_list_unpack_binding_names(
+        shorthand, scan=_executable_call_scan_text(shorthand)
+    ) == ("FEATURE_ENABLED",)
+    value_target = "({a: FEATURE_ENABLED} = source)"
+    assert _paren_list_unpack_binding_names(
+        value_target, scan=_executable_call_scan_text(value_target)
+    ) == ("FEATURE_ENABLED",)
 
 
 @pytest.mark.unit

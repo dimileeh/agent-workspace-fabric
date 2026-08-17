@@ -580,6 +580,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = true\n",
         head_blob="FEATURE_ENABLED = true\n({a, FEATURE_ENABLED} = obj);\n",
     )
+    # Object-pattern keys are not bindings: ``{FEATURE_ENABLED: local}`` assigns
+    # only ``local``. Treating the key as a rebind falsely drops FIXED salvage
+    # (PRRT_kwDOSJAM6s6Zv4pl). Value-side targets still supersede.
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\n({FEATURE_ENABLED: local} = source);\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\n{FEATURE_ENABLED: local} = source;\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\n({a: FEATURE_ENABLED} = source);\n",
+    )
     # Starred / trailing-comma paren-list unpack must bind too; plain-target
     # bodies miss these and keep FIXED salvage (PRRT_kwDOSJAM6s6ZsfLc).
     assert not _added_salvage_blob_retained(

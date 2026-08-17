@@ -511,6 +511,18 @@ def _matching_bracket_closer_index(text: str, start: int) -> int | None:
     return None
 
 
+def _object_pattern_ident_is_property_key(scan: str, end: int, body_end: int) -> bool:
+    """True when the ident ending at ``end`` is a ``key:`` property in ``{…}``.
+
+    JS ``{FEATURE_ENABLED: local} =`` assigns only ``local``; treating the key
+    as a binding falsely supersedes salvage of that name (PRRT_kwDOSJAM6s6Zv4pl).
+    """
+    j = end
+    while j < body_end and scan[j] in " \t":
+        j += 1
+    return j < body_end and scan[j] == ":"
+
+
 def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, ...]:
     """Return targets from ``(a, b) =`` / ``[a, b] =`` / ``{a} =`` forms on the line.
 
@@ -520,7 +532,9 @@ def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, 
     (PRRT_kwDOSJAM6s6ZsZ5d, PRRT_kwDOSJAM6s6ZtZ_0). Bodies are scanned with
     balanced brackets so nested ``(other, (FEATURE_ENABLED, rest)) =`` /
     ``[other, [FEATURE_ENABLED, rest]] =`` / ``({FEATURE_ENABLED} = …)`` still
-    bind (PRRT_kwDOSJAM6s6ZsnYi). Starred items and trailing commas are
+    bind (PRRT_kwDOSJAM6s6ZsnYi). Object-pattern alias properties record only
+    the value-side target so ``{FEATURE_ENABLED: local}`` binds ``local`` and
+    not the key (PRRT_kwDOSJAM6s6Zv4pl). Starred items and trailing commas are
     included so ``(a, *rest) =`` / ``(a, b,) =`` still bind
     (PRRT_kwDOSJAM6s6ZsfLc). Subscript spellings are recovered from
     ``raw_line`` because scan blanks quoted indices.
@@ -546,7 +560,12 @@ def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, 
             idx += 1
             continue
         body_start, body_end = idx + 1, close
+        is_object_pattern = ch == "{"
         for part_match in _UNPACK_LHS_TARGET_RE.finditer(scan, body_start, body_end):
+            if is_object_pattern and _object_pattern_ident_is_property_key(
+                scan, part_match.end(), body_end
+            ):
+                continue
             raw_name = raw_line[part_match.start() : part_match.end()]
             name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
             if name not in names:
