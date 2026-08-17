@@ -139,6 +139,38 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob='"feature-enabled": true\n',
         head_blob='"feature-enabled": true\n"other-key": 1\n',
     )
+    # TOML bare keys may include hyphens (`feature-enabled = true`). Identifier-
+    # only matching left both salvage and appended rebind unbound, so the tip
+    # kept a line-aligned prefix and reused stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zqip3). Quoted TOML keys use ``=`` (not ``:``).
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature-enabled = true\n",
+        head_blob="feature-enabled = true\nfeature-enabled = false\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature-enabled = true\n",
+        head_blob=("feature-enabled = true\nother = 1\nfeature-enabled = false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature-enabled: true\n",
+        head_blob="feature-enabled: true\nfeature-enabled: false\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='"feature-enabled" = true\n',
+        head_blob='"feature-enabled" = true\n"feature-enabled" = false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="'feature-enabled' = true\n",
+        head_blob="'feature-enabled' = true\n'feature-enabled' = false\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature-enabled = true\n",
+        head_blob="feature-enabled = true\n# feature-enabled = false\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature-enabled = true\n",
+        head_blob="feature-enabled = true\nother-key = 1\n",
+    )
     # Docstring / block-comment prose that reuses a salvage assignment name
     # (Google-style ``Args:`` / ``timeout: Seconds…``) must not count as a
     # YAML-style rebind; otherwise benign documentation drops FIXED evidence
@@ -560,6 +592,35 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_json,
         commit_blob=commit_json,
         head_blob=('{\n  "feature-enabled": true\n}\n# "feature-enabled": false\n'),
+    )
+    # TOML bare / quoted keys with ``=`` and hyphens must supersede like JSON
+    # quoted ``:`` keys (PRRT_kwDOSJAM6s6Zqip3).
+    parent_toml = "feature-enabled = false\n"
+    commit_toml = "feature-enabled = true\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_toml, commit_blob=commit_toml) == {
+        "feature-enabled"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml,
+        commit_blob=commit_toml,
+        head_blob="feature-enabled = true\nfeature-enabled = false\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml,
+        commit_blob=commit_toml,
+        head_blob="feature-enabled = true\nother = 1\nfeature-enabled = false\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml,
+        commit_blob=commit_toml,
+        head_blob="feature-enabled = true\nother-key = 1\n",
+    )
+    parent_toml_q = '"feature-enabled" = false\n'
+    commit_toml_q = '"feature-enabled" = true\n'
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_q,
+        commit_blob=commit_toml_q,
+        head_blob='"feature-enabled" = true\n"feature-enabled" = false\n',
     )
     parent_json_sq = "{\n  'feature-enabled': false\n}\n"
     commit_json_sq = "{\n  'feature-enabled': true\n}\n"

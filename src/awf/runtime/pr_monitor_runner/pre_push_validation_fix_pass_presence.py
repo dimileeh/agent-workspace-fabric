@@ -18,9 +18,11 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # Binding targets that an appended tip can rebind to supersede added salvage.
 # Optional YAML block-sequence marker (``- ``) before the key so list-item
 # mappings bind like nested leaves (PRRT_kwDOSJAM6s6ZqeWt).
+# Bare keys allow ``-`` so TOML / YAML hyphenated names bind
+# (``feature-enabled = true``; PRRT_kwDOSJAM6s6Zqip3).
 _ASSIGN_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:-[ \t]+)?(?:"
-    r"([A-Za-z_][A-Za-z0-9_]*)"
+    r"([A-Za-z_][A-Za-z0-9_-]*)"
     r"(?:"
     r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
     r"|"
@@ -33,13 +35,14 @@ _ASSIGN_BINDING_RE = re.compile(
     r"[ \t]*:[ \t]*(?!=)"
     r")"
     r"|"
-    # Quoted JSON/YAML mapping keys (``"feature-enabled": …`` / ``'k': …``).
-    # Identifier-only matching left these unbound so a tip could append a
-    # duplicate key after salvage and still reuse FIXED evidence
-    # (PRRT_kwDOSJAM6s6ZqQfh).
-    r'"([^"\n]+)"[ \t]*:[ \t]*(?!=)'
+    # Quoted JSON/YAML mapping keys (``"feature-enabled": …`` / ``'k': …``)
+    # and quoted TOML keys (``"feature-enabled" = …``). Identifier-only /
+    # colon-only matching left these unbound so a tip could append a duplicate
+    # key after salvage and still reuse FIXED evidence (PRRT_kwDOSJAM6s6ZqQfh,
+    # PRRT_kwDOSJAM6s6Zqip3).
+    r'"([^"\n]+)"[ \t]*(?::[ \t]*(?!=)|=(?!=))'
     r"|"
-    r"'([^'\n]+)'[ \t]*:[ \t]*(?!=)"
+    r"'([^'\n]+)'[ \t]*(?::[ \t]*(?!=)|=(?!=))"
     r")"
 )
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -392,12 +395,13 @@ def _binding_names(text: str) -> set[str]:
 
     Used to detect when appended tip content rebinds a name from an added salvage
     blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, YAML
-    ``feature_enabled: true`` then ``feature_enabled: false``, or quoted JSON
-    ``"feature-enabled": true`` then ``"feature-enabled": false``), which keeps a
+    ``feature_enabled: true`` then ``feature_enabled: false``, quoted JSON
+    ``"feature-enabled": true`` then ``"feature-enabled": false``, or TOML
+    ``feature-enabled = true`` / ``"feature-enabled" = true``), which keeps a
     line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh). Lines that start inside ``/*``
-    or a triple-quoted string are skipped so Google-style docstring Args prose
-    cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
+    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3). Lines
+    that start inside ``/*`` or a triple-quoted string are skipped so Google-style
+    docstring Args prose cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
     """
     names: set[str] = set()
     in_block_comment = False
