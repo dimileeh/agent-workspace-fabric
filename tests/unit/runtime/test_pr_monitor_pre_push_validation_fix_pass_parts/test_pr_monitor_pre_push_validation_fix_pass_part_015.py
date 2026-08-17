@@ -429,6 +429,32 @@ def test_object_assign_mutation_binding_names() -> None:
     covered = _join_incomplete_object_mutation_line_covering(multi, 2)
     assert _object_assign_mutation_binding_names(covered) == ("guard.enabled",)
     assert _join_incomplete_object_mutation_line_covering(["foo = 1"], 0) == "foo = 1"
+    # Nested mutation openers that close before the tip line must not stop
+    # look-back from the outer shared opener (PRRT_kwDOSJAM6s6ZzLlE).
+    nested = [
+        "Object.assign(guard, {",
+        "  nested: Object.assign(other, {",
+        "    x: 1",
+        "  }),",
+        "  enabled: false",
+        "});",
+    ]
+    nested_covered = _join_incomplete_object_mutation_line_covering(nested, 4)
+    assert _object_assign_mutation_binding_names(nested_covered) == (
+        "guard.nested",
+        "guard.enabled",
+        "other.x",
+    )
+    nested_define = [
+        "Object.assign(guard, {",
+        '  nested: Object.defineProperty(other, "x", {',
+        "    value: 1",
+        "  }),",
+        "  enabled: false",
+        "});",
+    ]
+    nested_define_covered = _join_incomplete_object_mutation_line_covering(nested_define, 4)
+    assert "guard.enabled" in _object_assign_mutation_binding_names(nested_define_covered)
 
 
 @pytest.mark.unit
@@ -521,6 +547,29 @@ def test_opaque_object_assign_shares_salvaged_receiver() -> None:
     assert _tip_extra_keys_supersede_baseline(
         baseline_blob=shared_opener_baseline,
         head_blob="Object.assign(\n  guard,\n  {enabled: false}\n);\n",
+        candidate_keys={"guard.enabled"},
+    )
+    # Nested opener closed before tip-extra must not block outer covering join
+    # (PRRT_kwDOSJAM6s6ZzLlE).
+    nested_baseline = (
+        "Object.assign(guard, {\n"
+        "  nested: Object.assign(other, {\n"
+        "    x: 1\n"
+        "  }),\n"
+        "  enabled: true\n"
+        "});\n"
+    )
+    nested_head = (
+        "Object.assign(guard, {\n"
+        "  nested: Object.assign(other, {\n"
+        "    x: 1\n"
+        "  }),\n"
+        "  enabled: false\n"
+        "});\n"
+    )
+    assert _tip_extra_keys_supersede_baseline(
+        baseline_blob=nested_baseline,
+        head_blob=nested_head,
         candidate_keys={"guard.enabled"},
     )
 

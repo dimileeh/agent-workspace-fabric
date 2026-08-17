@@ -1485,7 +1485,9 @@ def _join_incomplete_object_mutation_line_covering(lines: list[str], idx: int) -
     shared ``Object.assign(`` / ``Object.defineProperty(`` opener and the tip only
     edits argument lines, forward join from the arg line sees no call — look back
     for an unclosed opener whose forward join includes ``idx``
-    (PRRT_kwDOSJAM6s6Zy5DN).
+    (PRRT_kwDOSJAM6s6Zy5DN). Nested mutation openers in earlier arguments may
+    close before ``idx``; skip those and keep looking for an outer opener that
+    still covers the tip line (PRRT_kwDOSJAM6s6ZzLlE).
     """
     forward = _join_incomplete_object_mutation_line(lines, idx)
     raw = lines[idx]
@@ -1508,8 +1510,7 @@ def _join_incomplete_object_mutation_line_covering(lines: list[str], idx: int) -
             continue
         if _object_mutation_join_last_index(lines, opener_idx) >= idx:
             return _join_incomplete_object_mutation_line(lines, opener_idx)
-        # Nearest unclosed opener closed before ``idx`` — not inside that call.
-        break
+        # Nested opener closed before ``idx`` — keep looking for an outer cover.
     return forward
 
 
