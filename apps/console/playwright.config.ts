@@ -6,8 +6,9 @@ const hostedEnv = {
   ...process.env,
   AWF_CONSOLE_DIST_DIR: ".next-hosted",
   NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH: "/workspaces",
-  NEXT_PUBLIC_AWF_CONSOLE_API_BASE: "/workspaces/api/awf",
-  NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE: "/workspaces/api/operator",
+  NEXT_PUBLIC_AWF_CONSOLE_API_BASE: "/api/core-console",
+  NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE: "/api/core-console",
+  NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS: "org_id,project_id",
 };
 
 export default defineConfig({

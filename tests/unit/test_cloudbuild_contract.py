@@ -39,8 +39,9 @@ _RUNTIME_TAG = "${_ARTIFACT_REPOSITORY}/awf-agent-runtime:rc-$COMMIT_SHA"
 _CONSOLE_TAG = "${_ARTIFACT_REPOSITORY}/awf-core-console:rc-$COMMIT_SHA"
 
 _HOSTED_BASE_PATH = "NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH=/workspaces"
-_HOSTED_API_BASE = "NEXT_PUBLIC_AWF_CONSOLE_API_BASE=/workspaces/api/awf"
-_HOSTED_OPERATOR_BASE = "NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE=/workspaces/api/operator"
+_HOSTED_API_BASE = "NEXT_PUBLIC_AWF_CONSOLE_API_BASE=/api/core-console"
+_HOSTED_OPERATOR_BASE = "NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE=/api/core-console"
+_HOSTED_CONTEXT_QUERY_KEYS = "NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS=org_id,project_id"
 
 _FORBIDDEN_AUTH_PRINT = re.compile(
     r"(?i)(echo\s+(\$[A-Z0-9_]*TOKEN|\$[A-Z0-9_]*PASSWORD|\$[A-Z0-9_]*SECRET)|"
@@ -147,10 +148,11 @@ def test_cloudbuild_console_uses_hosted_public_path_build_args() -> None:
     console = _step_by_id(config, "build-and-push-core-console")
     console_args = [str(part) for part in console.get("args", [])]
 
-    assert console_args.count("--build-arg") == 3
+    assert console_args.count("--build-arg") == 4
     assert _HOSTED_BASE_PATH in console_args
     assert _HOSTED_API_BASE in console_args
     assert _HOSTED_OPERATOR_BASE in console_args
+    assert _HOSTED_CONTEXT_QUERY_KEYS in console_args
     # Public path settings only — never tokens/credentials/tenant data.
     assert _FORBIDDEN_SECRET_BUILD_ARG.search("\n".join(console_args)) is None
     assert "AWF_API_TOKEN" not in text
