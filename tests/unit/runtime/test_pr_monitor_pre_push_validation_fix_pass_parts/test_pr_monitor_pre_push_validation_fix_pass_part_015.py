@@ -596,6 +596,8 @@ def test_tip_extra_multiline_alias_of_salvaged_guard_supersedes() -> None:
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
         _added_salvage_blob_retained,
+        _alias_assign_gap_line_is_skippable,
+        _join_incomplete_alias_assign_line,
         _suffix_can_supersede_added_salvage,
         _tip_extra_aliases_salvaged_candidate,
         _tip_extra_can_supersede_modified_salvage,
@@ -619,6 +621,50 @@ def test_tip_extra_multiline_alias_of_salvaged_guard_supersedes() -> None:
         candidate_keys={"guard", "guard.enabled"},
     )
     assert _suffix_can_supersede_added_salvage(salvage=salvage, head_blob=head_gap)
+
+    # Whole-line ``/* … */`` between ``=`` and RHS must also be skipped; treating
+    # the block-comment line as the RHS leaves ``const alias = /* note */``,
+    # which never matches ``_TIP_EXTRA_ALIAS_ASSIGN_RE`` after comment blanking
+    # and would keep stale FIXED evidence (PRRT_kwDOSJAM6s6Zxt0u).
+    assert _alias_assign_gap_line_is_skippable("/* note */")
+    assert not _alias_assign_gap_line_is_skippable("/* note */ guard")
+    assert (
+        _join_incomplete_alias_assign_line(["const alias =", "  /* note */", "  guard;"], 0)
+        == "const alias = guard;"
+    )
+    assert (
+        _join_incomplete_alias_assign_line(["const alias =", "  /* note */ guard;"], 0)
+        == "const alias = /* note */ guard;"
+    )
+    assert (
+        _join_incomplete_alias_assign_line(
+            ["const alias =", "  /* note", "   * more */", "  guard;"], 0
+        )
+        == "const alias = guard;"
+    )
+    assert (
+        _join_incomplete_alias_assign_line(["const alias =", "  /* note", "   */ guard;"], 0)
+        == "const alias = guard;"
+    )
+    # Unclosed multi-line ``/*`` leaves the assign incomplete (fail-closed later).
+    assert _join_incomplete_alias_assign_line(["const alias =", "  /* note"], 0) == (
+        "const alias ="
+    )
+    head_block = salvage + "const alias =\n  /* note */\n  guard;\nalias.enabled = false;\n"
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=head_block,
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert _suffix_can_supersede_added_salvage(salvage=salvage, head_blob=head_block)
+    head_block_multi = (
+        salvage + "const alias =\n  /* note\n   * more */\n  guard;\nalias.enabled = false;\n"
+    )
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=head_block_multi,
+        candidate_keys={"guard", "guard.enabled"},
+    )
 
     parent = "const guard = {};\nguard.enabled = false;\n"
     commit = "const guard = {};\nguard.enabled = true;\n"

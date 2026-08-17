@@ -556,14 +556,30 @@ def _alias_assign_rhs_incomplete(raw_line: str) -> bool:
     return bool(_INCOMPLETE_ALIAS_ASSIGN_LHS_RE.search(code))
 
 
+def _alias_assign_gap_line_is_skippable(stripped: str) -> bool:
+    """Return True when ``stripped`` is only a blank / comment gap before an RHS.
+
+    Whole-line ``/* … */`` must be skipped like ``//`` / ``#``; otherwise look-ahead
+    joins the comment as the RHS and tip-extra alias matching misses the salvaged
+    receiver (PRRT_kwDOSJAM6s6Zxt0u).
+    """
+    if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
+        return True
+    if stripped.startswith("/*") and "*/" in stripped:
+        after = stripped.split("*/", 1)[1].strip()
+        return after == ""
+    return False
+
+
 def _join_incomplete_alias_assign_line(lines: list[str], idx: int) -> str:
     """Join ``lines[idx]`` with the next executable RHS when assign ends at ``=``.
 
     Formatters commonly split ``const alias = guard`` across lines. Per-line
     scanning then never matches ``_TIP_EXTRA_ALIAS_ASSIGN_RE``, so tip-extra
     ``alias.enabled = false`` after salvage would keep stale FIXED evidence
-    (PRRT_kwDOSJAM6s6ZxhFW). Skip blank / line-comment gaps between ``=`` and
-    the RHS; stop at the first non-skipped line.
+    (PRRT_kwDOSJAM6s6ZxhFW). Skip blank / line-comment / whole-line ``/* … */``
+    gaps between ``=`` and the RHS (including multi-line block comments;
+    PRRT_kwDOSJAM6s6Zxt0u); stop at the first non-skipped line.
     """
     raw_line = lines[idx]
     if not _alias_assign_rhs_incomplete(raw_line):
@@ -573,8 +589,26 @@ def _join_incomplete_alias_assign_line(lines: list[str], idx: int) -> str:
     while j < len(lines):
         nxt = lines[j]
         nxt_stripped = nxt.strip()
-        if nxt_stripped == "" or nxt_stripped.startswith("//") or nxt_stripped.startswith("#"):
+        if _alias_assign_gap_line_is_skippable(nxt_stripped):
             j += 1
+            continue
+        # Multi-line block comment opened on this gap line — skip through ``*/``.
+        if nxt_stripped.startswith("/*") and "*/" not in nxt_stripped:
+            j += 1
+            while j < len(lines):
+                close_line = lines[j]
+                j += 1
+                if "*/" not in close_line:
+                    continue
+                after = close_line.split("*/", 1)[1].strip()
+                if after == "":
+                    break
+                parts.append(after)
+                break
+            else:
+                break
+            if len(parts) > 1:
+                break
             continue
         parts.append(nxt.lstrip(" \t"))
         break
