@@ -331,6 +331,31 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob=('FEATURE_ENABLED = True\nmsg = "if ready: FEATURE_ENABLED = False"\n'),
     )
+    # Call kwargs / default parameters / typed-assign type tokens must not count
+    # as inline rebinds; those phantoms would drop still-present FIXED salvage
+    # (PRRT_kwDOSJAM6s6ZsJyZ).
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nconfigure(FEATURE_ENABLED=False)\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\nconfigure(timeout=30, FEATURE_ENABLED=False)\n"),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\ndef helper(FEATURE_ENABLED=False):\n    pass\n"),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\ndef helper(x, FEATURE_ENABLED=False):\n    pass\n"),
+    )
+    # Typed rebind still supersedes via statement-leading ``name: T =``; the
+    # type token alone must not invent a second binding key.
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED: bool = False\n",
+    )
     # Duplicate earlier ``False`` in the salvage blob must not hide an appended
     # override via set-membership tip-extra accounting (PRRT_kwDOSJAM6s6ZrFdv).
     assert not _added_salvage_blob_retained(

@@ -305,6 +305,31 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n# if ready: FEATURE_ENABLED = False\n"),
     )
+    # Kwargs / defaults sharing the salvage name are not rebinds
+    # (PRRT_kwDOSJAM6s6ZsJyZ).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nconfigure(FEATURE_ENABLED=False)\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\ndef helper(FEATURE_ENABLED=False):\n    pass\n"
+        ),
+    )
+    # Unrelated tip kwargs must not collide with salvage-changed kwarg phantoms.
+    parent_kw = "configure(timeout=10)\nFEATURE_ENABLED = False\n"
+    commit_kw = "configure(timeout=30)\nFEATURE_ENABLED = True\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_kw, commit_blob=commit_kw) == {
+        "FEATURE_ENABLED"
+    }
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_kw,
+        commit_blob=commit_kw,
+        head_blob=commit_kw + "other_fn(timeout=99)\n",
+    )
     # Shell ``export NAME=value`` rebinds must supersede like bare assignments
     # (PRRT_kwDOSJAM6s6ZqseO).
     parent_export = "x=1\nexport FEATURE_ENABLED=false\ny=2\n"

@@ -101,6 +101,15 @@ _INLINE_ASSIGN_BINDING_RE = re.compile(
     r"[ \t]*:="
     r")"
 )
+# Same-line call kwargs / default parameters: ``name=`` after ``(`` or ``,``
+# is not a rebind (PRRT_kwDOSJAM6s6ZsJyZ).
+_INLINE_ASSIGN_KWARG_BEFORE_RE = re.compile(r"[(,][ \t]*$")
+# Type token in statement-leading ``name: T =``: bare ``T =`` after ``ident:``
+# must not invent a second binding key (PRRT_kwDOSJAM6s6ZsJyZ). Requires a
+# bare identifier immediately before ``:`` so ``if ready: name =`` still binds.
+_INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE = re.compile(
+    r"(?:^|[;])[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*:[ \t]*$"
+)
 _ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
 _BARE_ASSIGN_KEY_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -607,13 +616,23 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     PRRT_kwDOSJAM6s6ZsD5y). Strings and ``#`` / ``//`` / ``/* … */`` regions are
     blanked via ``_executable_call_scan_text``. Whole-line comments yield no
     names. Bare YAML ``key:`` and typed ``name: T =`` forms are not matched
-    mid-line (typed stays statement-leading).
+    mid-line (typed stays statement-leading). Call kwargs, default parameters,
+    and the type token in ``name: T =`` are skipped so phantoms cannot enter
+    salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
         return ()
     scan = _executable_call_scan_text(raw_line)
-    return tuple(match.group(1) for match in _INLINE_ASSIGN_BINDING_RE.finditer(scan))
+    names: list[str] = []
+    for match in _INLINE_ASSIGN_BINDING_RE.finditer(scan):
+        before = scan[: match.start()]
+        if _INLINE_ASSIGN_KWARG_BEFORE_RE.search(before):
+            continue
+        if _INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE.search(before):
+            continue
+        names.append(match.group(1))
+    return tuple(names)
 
 
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
