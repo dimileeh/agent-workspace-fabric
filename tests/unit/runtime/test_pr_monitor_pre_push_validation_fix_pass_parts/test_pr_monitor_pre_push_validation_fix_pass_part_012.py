@@ -115,6 +115,50 @@ def test_control_flow_prefix_edges_retain_or_reject_added_salvage() -> None:
 
 
 @pytest.mark.unit
+def test_brace_continuation_control_flow_prefix_rejects_disabled_salvage() -> None:
+    """``} else`` / ``} catch`` / same-line ``if {} else`` must open control-flow.
+
+    Column-zero-only header matching missed idiomatic brace continuations, so a
+    prepend could park added salvage under a disabled branch while retention
+    still succeeded (PRRT_kwDOSJAM6s6ZtYk1).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _prefix_opens_control_flow_over_suffix,
+    )
+
+    assert _prefix_opens_control_flow_over_suffix("if (false) {\n} else\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (false) {} else\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (false) {\n  x();\n} else\n") is True
+    assert _prefix_opens_control_flow_over_suffix("try {\n} catch (e)\n") is True
+    assert _prefix_opens_control_flow_over_suffix("try {\n} finally\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (a) {\n} else if (false)\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (\nfalse\n) {} else\n") is True
+    # do-while terminator must not treat the following line as its body.
+    assert _prefix_opens_control_flow_over_suffix("do {\n  x();\n} while (false)\n") is False
+    # Open brace on the continuation still counts via brace depth.
+    assert _prefix_opens_control_flow_over_suffix("if (false) {\n} else {\n") is True
+
+    salvage = "enable_guard();\n"
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="if (false) {\n} else\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="if (false) {} else\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="try {\nx();\n} catch (e)\n" + salvage,
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="do {\nx();\n} while (false)\n" + salvage,
+    )
+
+
+@pytest.mark.unit
 def test_string_comment_state_and_ls_tree_meta_edges() -> None:
     """Triple-quote / escape state and ls-tree meta parsing stay fail-closed."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (

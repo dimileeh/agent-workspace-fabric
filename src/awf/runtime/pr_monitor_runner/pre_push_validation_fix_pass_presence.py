@@ -101,6 +101,13 @@ _CONTROL_FLOW_PAREN_HEADER_START_RE = re.compile(
 _CONTROL_FLOW_BARE_HEADER_RE = re.compile(
     r"^[ \t]*(?:else|do|try|finally)[ \t]*(?:\{[ \t]*)?(?://.*)?$"
 )
+# Idiomatic ``} else`` / ``} catch`` / ``} finally`` / ``} else if`` place the
+# header after a closing brace rather than at column zero
+# (PRRT_kwDOSJAM6s6ZtYk1). ``} while`` is excluded — do-while terminators do not
+# open a body for the following line.
+_CONTROL_FLOW_AFTER_BRACE_RE = re.compile(r"\}[ \t]*(?:else\s+if|else|catch|finally)\b")
+_CONTROL_FLOW_PAREN_KEYWORD_RE = re.compile(r"^(?:else\s+if|if|while|for|switch|catch)\b")
+_CONTROL_FLOW_BARE_KEYWORD_RE = re.compile(r"^(?:else|do|try|finally)[ \t]*(?:\{[ \t]*)?(?://.*)?$")
 _PYTHON_SUITE_HEADER_RE = re.compile(
     r"^[ \t]*(?:async[ \t]+)?(?:def|class)\b[^:\n]*:[ \t]*(#.*)?$"
     r"|^[ \t]*(?:if|elif|else|while|for|try|except|finally|with|match|case)\b"
@@ -498,12 +505,77 @@ def _line_code_without_line_comment(line: str) -> str:
     return line
 
 
+def _keyword_start_after_brace_match(match: re.Match[str]) -> int:
+    """Return the index of the control-flow keyword inside an after-brace match."""
+    # match spans ``}`` + whitespace + keyword; skip the closing brace.
+    i = match.start() + 1
+    while i < match.end() and match.string[i] in " \t":
+        i += 1
+    return i
+
+
+def _last_brace_control_flow_continuation(code: str) -> re.Match[str] | None:
+    """Return the last ``} else`` / ``} catch`` / ``} finally`` / ``} else if`` match.
+
+    Scans outside simple quoted spans so braces inside strings do not fake a
+    continuation (PRRT_kwDOSJAM6s6ZtYk1).
+    """
+    last: re.Match[str] | None = None
+    in_double = False
+    in_single = False
+    i = 0
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if in_double or in_single:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if (in_double and ch == '"') or (in_single and ch == "'"):
+                in_double = in_single = False
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == "}":
+            match = _CONTROL_FLOW_AFTER_BRACE_RE.match(code, i)
+            if match is not None:
+                last = match
+                i = match.end()
+                continue
+        i += 1
+    return last
+
+
+def _control_flow_header_effect(header: str) -> tuple[bool, int | None]:
+    """Return ``(awaiting_body, header_paren_depth)`` for a header starting at a keyword."""
+    stripped = header.lstrip(" \t")
+    if _CONTROL_FLOW_BARE_KEYWORD_RE.match(stripped):
+        return ("{" not in stripped, None)
+    if _CONTROL_FLOW_PAREN_KEYWORD_RE.match(stripped):
+        depth = _delta_brackets_outside_strings(stripped, opens="(", closes=")")
+        if depth > 0:
+            return (False, depth)
+        if "{" not in stripped.split(")", 1)[-1]:
+            return (True, None)
+        return (False, None)
+    return (False, None)
+
+
 def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
     """Return True when ``prefix`` leaves the next line under control-flow.
 
     ``if (false)`` / open ``{`` / Python ``if False:`` prefixes keep an added
     salvage call as a line-aligned suffix while preventing execution; suffix
-    retention must fail closed (PRRT_kwDOSJAM6s6ZtJG5).
+    retention must fail closed (PRRT_kwDOSJAM6s6ZtJG5). Brace-continuation
+    headers (``} else`` / ``} catch`` / same-line ``if (...) {} else``) likewise
+    attach the following line as their body (PRRT_kwDOSJAM6s6ZtYk1).
     """
     brace_depth = 0
     awaiting_body = False
@@ -521,9 +593,16 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
             brace_depth = max(0, brace_depth + brace_delta)
             if header_paren_depth > 0:
                 continue
-            if "{" not in code.split(")", 1)[-1]:
+            cont = _last_brace_control_flow_continuation(code)
+            if cont is not None:
+                awaiting_body, header_paren_depth = _control_flow_header_effect(
+                    code[_keyword_start_after_brace_match(cont) :]
+                )
+            elif "{" not in code.split(")", 1)[-1]:
                 awaiting_body = True
-            header_paren_depth = None
+                header_paren_depth = None
+            else:
+                header_paren_depth = None
             continue
 
         if not stripped:
@@ -533,6 +612,14 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
         if _PYTHON_SUITE_HEADER_RE.match(code):
             awaiting_body = True
             brace_depth = max(0, brace_depth + brace_delta)
+            continue
+
+        cont = _last_brace_control_flow_continuation(code)
+        if cont is not None:
+            brace_depth = max(0, brace_depth + brace_delta)
+            awaiting_body, header_paren_depth = _control_flow_header_effect(
+                code[_keyword_start_after_brace_match(cont) :]
+            )
             continue
 
         if _CONTROL_FLOW_BARE_HEADER_RE.match(code):
