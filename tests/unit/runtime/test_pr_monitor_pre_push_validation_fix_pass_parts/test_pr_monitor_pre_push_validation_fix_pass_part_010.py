@@ -435,6 +435,40 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED, *rest = get_flags()\n"),
     )
+    # Nested paren/list unpacking must supersede too; flat bodies miss nested
+    # targets and keep FIXED salvage (PRRT_kwDOSJAM6s6ZsnYi).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            "(other, (FEATURE_ENABLED, rest)) = (1, (False, 2))\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            "((FEATURE_ENABLED, rest), other) = ((False, 2), 1)\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            "[other, [FEATURE_ENABLED, rest]] = [1, [False, 2]]\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\n"
+            "(other, [FEATURE_ENABLED, rest]) = (1, [False, 2])\n"
+        ),
+    )
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_sub,
         commit_blob=commit_sub,

@@ -443,6 +443,25 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED, *rest = get_flags()\n",
     )
+    # Nested paren/list unpacking: flat body regex misses inner (...)/[...]
+    # items, so no binding is recorded and FIXED salvage is reused
+    # (PRRT_kwDOSJAM6s6ZsnYi).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\n(other, (FEATURE_ENABLED, rest)) = (1, (False, 2))\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\n((FEATURE_ENABLED, rest), other) = ((False, 2), 1)\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\n[other, [FEATURE_ENABLED, rest]] = [1, [False, 2]]\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\n(other, [FEATURE_ENABLED, rest]) = (1, [False, 2])\n"),
+    )
     assert not _added_salvage_blob_retained(
         commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
         head_blob=(
