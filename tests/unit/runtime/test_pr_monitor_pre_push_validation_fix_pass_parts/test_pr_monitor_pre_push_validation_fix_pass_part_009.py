@@ -80,6 +80,60 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="enable_guard()\n",
         head_blob="prefix\nenable_guard()\n",
     )
+    # Salvage that defines enable/disable helpers and ends with enable_guard()
+    # must fail closed when a tip appends disable_guard(): call sites produce no
+    # binding key, so assignment-only matching would retain stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZrJ3a).
+    _guard_salvage = (
+        "def enable_guard():\n    pass\ndef disable_guard():\n    pass\nenable_guard()\n"
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "disable_guard()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "disable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "await disable_guard()\n",
+    )
+    # Commented / unrelated call appends stay retained (behavior-neutral).
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "# disable_guard()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "// disable_guard()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "extra()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "note = 1\n",
+    )
+    # Tip-extra call inside a closed block comment is not executable → retain.
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "/*\ndisable_guard()\n*/\n",
+    )
+    # Scoped salvage defs: tip-extra bare call to the leaf still supersedes.
+    _scoped_guard_salvage = (
+        "class Guards:\n"
+        "    def enable_guard(self):\n"
+        "        pass\n"
+        "    def disable_guard(self):\n"
+        "        pass\n"
+        "Guards().enable_guard()\n"
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_scoped_guard_salvage,
+        head_blob=_scoped_guard_salvage + "disable_guard()\n",
+    )
     # Appended rebinding of a salvage assignment must fail closed: the original
     # addition remains a line-aligned prefix, but the later assignment supersedes
     # it (PRRT_kwDOSJAM6s6Zp8jM).

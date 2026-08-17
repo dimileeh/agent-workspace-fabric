@@ -134,6 +134,12 @@ _TOML_TABLE_HEADER_RE = re.compile(
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})*)"
     r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
 )
+# Bare / ``await`` call sites (``disable_guard()`` / ``await disable_guard();``).
+# Statement-leading identifier then ``(``; ``def``/``function``/``class`` forms
+# do not match because the keyword is not immediately followed by ``(``.
+# Used so tip-extra calls that invoke salvage-bound names fail closed even though
+# calls produce no binding key (PRRT_kwDOSJAM6s6ZrJ3a).
+_CALL_SITE_RE = re.compile(r"(?m)^[ \t]*(?:await[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(")
 
 
 def _advance_string_or_block_comment_state(
@@ -812,6 +818,67 @@ def _tip_extra_keys_supersede_baseline(
     return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
 
 
+def _call_site_name_for_line(raw_line: str) -> str | None:
+    """Return the callee name for a statement-leading call, or ``None``.
+
+    ``#`` / ``//`` comments are ignored. Definitions are not call sites: ``def
+    name(`` / ``function name(`` leave the keyword before ``(`` so
+    ``_CALL_SITE_RE`` does not match them.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return None
+    match = _CALL_SITE_RE.match(raw_line)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
+    """True when ``name`` matches a candidate key or a scoped key's leaf."""
+    if name in candidate_keys:
+        return True
+    suffix = f".{name}"
+    return any(key.endswith(suffix) for key in candidate_keys)
+
+
+def _tip_extra_calls_candidate_keys(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra lines call a candidate-bound name.
+
+    Binding-key intersection misses executable overrides such as appending
+    ``disable_guard()`` after a salvage that defined and invoked
+    ``enable_guard()`` (PRRT_kwDOSJAM6s6ZrJ3a). Lines that start inside ``/*``
+    or a triple-quoted string are ignored, matching binding scanners.
+    """
+    if not candidate_keys:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        name = _call_site_name_for_line(raw_line)
+        if name is not None and _candidate_keys_include_call_name(candidate_keys, name):
+            return True
+    return False
+
+
 def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[str]:
     """Return scoped binding keys whose opener lines fall in ``line_indices``.
 
@@ -920,7 +987,7 @@ def _tip_extra_can_supersede_modified_salvage(
 
 
 def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool:
-    """Return True when tip-appended content rebinds a scoped name from ``salvage``.
+    """Return True when tip-appended content rebinds or calls a name from ``salvage``.
 
     Uses the same parent-qualified keys as the baseline-backed path so nested
     YAML/TOML/class leaves under different parents do not collide as bare
@@ -929,11 +996,21 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     the full tip blob so a same-parent nested rebind under the salvage prefix
     still qualifies. Flat leaf intersection previously discarded retained FIXED
     evidence when an unrelated descendant append shared only the leaf name.
+    Tip-extra call sites that invoke a salvage-bound name also supersede:
+    ``disable_guard()`` after a salvage that defined and called ``enable_guard()``
+    produces no binding key, so assignment-only matching would retain stale
+    FIXED evidence (PRRT_kwDOSJAM6s6ZrJ3a).
     """
     if len(head_blob) <= len(salvage):
         return False
     salvage_keys = set(_last_binding_spans(salvage))
-    return _tip_extra_keys_supersede_baseline(
+    if _tip_extra_keys_supersede_baseline(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
+    ):
+        return True
+    return _tip_extra_calls_candidate_keys(
         baseline_blob=salvage,
         head_blob=head_blob,
         candidate_keys=salvage_keys,
@@ -960,7 +1037,8 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     (PRRT_kwDOSJAM6s6Zq2m_).
     Prefix retention with a non-empty append additionally rejects when the
     appended tip-extra lines rebind a **scoped** name bound in the salvage
-    (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q).
+    (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q) or call a salvage-bound
+    name (``disable_guard()`` after ``enable_guard()``; PRRT_kwDOSJAM6s6ZrJ3a).
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
