@@ -733,6 +733,44 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\ndel other\n"),
     )
+    # JS ``delete`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZtiIE).
+    parent_guard = "x = 1\nguard.enabled = false\ny = 2\n"
+    commit_guard = "x = 1\nguard.enabled = true\ny = 2\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\ndelete guard.enabled\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nif (ready) delete guard.enabled\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\ndelete FLAGS["enabled"]\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\ndelete(guard.enabled)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\ndelete (guard.enabled)\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\n// delete guard.enabled\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_guard,
+        commit_blob=commit_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\ndelete other\n"),
+    )
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,

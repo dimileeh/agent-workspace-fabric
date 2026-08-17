@@ -656,6 +656,38 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\ndel other\n",
     )
+    # JS ``delete`` removes a salvage binding without a rebind or call site the
+    # same way Python ``del`` does; the scanner previously only matched ``del``,
+    # so tip ``delete guard.enabled`` kept a line-aligned salvage prefix and
+    # reused stale FIXED evidence (PRRT_kwDOSJAM6s6ZtiIE).
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\ndelete guard.enabled\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nif (ready) delete guard.enabled\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = true\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = true\ndelete FLAGS["enabled"]\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\ndelete(guard.enabled)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\ndelete (guard.enabled)\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\n// delete guard.enabled\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\ndelete other\n",
+    )
     # Typed rebind still supersedes via statement-leading ``name: T =``; the
     # type token alone must not invent a second binding key.
     assert not _added_salvage_blob_retained(

@@ -208,14 +208,16 @@ _DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-
 # directives; spaced form must match the same whitespace rule as open-``#if``
 # scanning (PRRT_kwDOSJAM6s6Zp_sv).
 _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
-# Python ``del`` targets supersede salvage bindings like rebinds: neither assign
-# nor call scanners previously recorded the deletion, so tip ``del
-# FEATURE_ENABLED`` kept a line-aligned salvage prefix / clean merge-file
-# equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zse8m). Bare,
-# dotted, and subscript targets match assign shapes; comma lists bind each
-# name. Requires whitespace or ``(`` after ``del`` so ``deleted`` is not a
-# false hit. Parenthesized ``del(NAME)`` / ``del (NAME)`` must bind too
-# (PRRT_kwDOSJAM6s6ZsmNH).
+# Python ``del`` / JS ``delete`` targets supersede salvage bindings like
+# rebinds: neither assign nor call scanners previously recorded the deletion,
+# so tip ``del FEATURE_ENABLED`` / ``delete guard.enabled`` kept a
+# line-aligned salvage prefix / clean merge-file equality and reused stale
+# FIXED evidence (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). Bare, dotted,
+# and subscript targets match assign shapes; comma lists bind each name.
+# Requires whitespace or ``(`` after ``del`` / ``delete`` so ``deleted`` is
+# not a false hit. Parenthesized ``del(NAME)`` / ``delete(NAME)`` must bind
+# too (PRRT_kwDOSJAM6s6ZsmNH). ``del(?:ete)?`` keeps both keywords without
+# matching the identifier ``deleted``.
 _DEL_TARGET = (
     rf"(?:{_ASSIGN_SUBSCRIPT_TARGET}|"
     r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
@@ -226,7 +228,7 @@ _DEL_TARGET_SCAN = (
 )
 _DEL_TARGET_RE = re.compile(_DEL_TARGET_SCAN)
 _INLINE_DEL_BINDING_RE = re.compile(
-    r"(?:^|(?<=[^A-Za-z0-9_]))del(?:[ \t]*\([ \t]*|[ \t]+)"
+    r"(?:^|(?<=[^A-Za-z0-9_]))del(?:ete)?(?:[ \t]*\([ \t]*|[ \t]+)"
     rf"({_DEL_TARGET_SCAN}(?:[ \t]*,[ \t]*{_DEL_TARGET_SCAN})*)"
     r"[ \t]*\)?"
 )
@@ -574,12 +576,13 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
 
 
 def _del_binding_names(raw_line: str) -> tuple[str, ...]:
-    """Return names deleted by ``del`` on ``raw_line`` (statement or mid-line).
+    """Return names deleted by ``del`` / ``delete`` on ``raw_line``.
 
     Tip-extra ``del FEATURE_ENABLED`` / ``if ready: del FEATURE_ENABLED`` /
-    ``del FLAGS["enabled"]`` / ``del(FEATURE_ENABLED)`` must supersede salvage
-    of those bindings; assign and call scanners alone leave the salvage
-    retained (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZsmNH).
+    ``del FLAGS["enabled"]`` / ``del(FEATURE_ENABLED)`` / ``delete
+    guard.enabled`` / ``delete(guard.enabled)`` must supersede salvage of
+    those bindings; assign and call scanners alone leave the salvage retained
+    (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZsmNH, PRRT_kwDOSJAM6s6ZtiIE).
     Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
     ``_executable_call_scan_text``. Subscript spellings recover from
     ``raw_line`` because scan blanks quoted indices.
@@ -628,10 +631,10 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     Statement-leading defs/assigns/YAML keys come from ``_binding_name_for_line``.
     Additional mid-line equals-style assigns are appended so compound tip-extra
     lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y). Python
-    ``del`` targets are included so deletions supersede without a rebind
-    (PRRT_kwDOSJAM6s6Zse8m). JS/C/C++ ``++`` / ``--`` update targets are
-    included so increment/decrement supersedes without an equals-style rebind
-    (PRRT_kwDOSJAM6s6Zs-Rb).
+    ``del`` and JS ``delete`` targets are included so deletions supersede
+    without a rebind (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). JS/C/C++
+    ``++`` / ``--`` update targets are included so increment/decrement
+    supersedes without an equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
