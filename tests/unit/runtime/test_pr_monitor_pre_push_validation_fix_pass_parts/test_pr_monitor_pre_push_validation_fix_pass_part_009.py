@@ -134,6 +134,32 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_scoped_guard_salvage,
         head_blob=_scoped_guard_salvage + "disable_guard()\n",
     )
+    # Member-call overrides: tip ``guard.disable()`` must supersede salvage that
+    # bound ``guard`` and called ``guard.enable()``. Bare identifier-then-``(``
+    # matching misses dotted receivers/callees and would retain stale FIXED
+    # evidence (PRRT_kwDOSJAM6s6ZrSYE).
+    _member_guard_salvage = "guard = Guard()\nguard.enable()\n"
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "await guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard.disable();\n",
+    )
+    # Commented / unrelated member calls stay retained.
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "# guard.disable()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "other.disable()\n",
+    )
     # Appended rebinding of a salvage assignment must fail closed: the original
     # addition remains a line-aligned prefix, but the later assignment supersedes
     # it (PRRT_kwDOSJAM6s6Zp8jM).
@@ -742,6 +768,34 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         parent_blob=parent_helper,
         commit_blob=commit_helper,
         head_blob=commit_helper + "FEATURE_ENABLED = False\n",
+    )
+    # Member-call-only flips (``guard.disable()`` → ``guard.enable()``) must
+    # supersede when a tip restores ``guard.disable()`` (PRRT_kwDOSJAM6s6ZrSYE).
+    parent_member = "x = 1\nguard.disable()\ny = 2\n"
+    commit_member = "x = 1\nguard.enable()\ny = 2\n"
+    assert (
+        _salvage_changed_binding_names(parent_blob=parent_member, commit_blob=commit_member)
+        == set()
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "await guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "# guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "other.noop()\n",
     )
 
 

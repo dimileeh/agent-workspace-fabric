@@ -134,12 +134,15 @@ _TOML_TABLE_HEADER_RE = re.compile(
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})*)"
     r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
 )
-# Bare / ``await`` call sites (``disable_guard()`` / ``await disable_guard();``).
-# Statement-leading identifier then ``(``; ``def``/``function``/``class`` forms
-# do not match because the keyword is not immediately followed by ``(``.
-# Used so tip-extra calls that invoke salvage-bound names fail closed even though
-# calls produce no binding key (PRRT_kwDOSJAM6s6ZrJ3a).
-_CALL_SITE_RE = re.compile(r"(?m)^[ \t]*(?:await[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(")
+# Bare / dotted / ``await`` call sites (``disable_guard()`` /
+# ``guard.disable()`` / ``await guard.disable();``). Statement-leading identifier
+# chain then ``(``; ``def``/``function``/``class`` forms do not match because the
+# keyword is not immediately followed by ``(``. Used so tip-extra calls that
+# invoke salvage-bound names fail closed even though calls produce no binding
+# key (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE).
+_CALL_SITE_RE = re.compile(
+    r"(?m)^[ \t]*(?:await[ \t]+)?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)[ \t]*\("
+)
 
 
 def _advance_string_or_block_comment_state(
@@ -818,20 +821,27 @@ def _tip_extra_keys_supersede_baseline(
     return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
 
 
-def _call_site_name_for_line(raw_line: str) -> str | None:
-    """Return the callee name for a statement-leading call, or ``None``.
+def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
+    """Return receiver/callee names for a statement-leading call, or empty.
 
-    ``#`` / ``//`` comments are ignored. Definitions are not call sites: ``def
-    name(`` / ``function name(`` leave the keyword before ``(`` so
-    ``_CALL_SITE_RE`` does not match them.
+    Bare ``disable_guard()`` yields ``{disable_guard}``. Dotted
+    ``guard.disable()`` / ``a.b.c()`` yields the receiver and final callee
+    (``{guard, disable}`` / ``{a, c}``) so tip member calls intersect salvage
+    bindings and method leaves (PRRT_kwDOSJAM6s6ZrSYE). ``#`` / ``//`` comments
+    are ignored. Definitions are not call sites: ``def name(`` / ``function
+    name(`` leave the keyword before ``(`` so ``_CALL_SITE_RE`` does not match
+    them.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
-        return None
+        return frozenset()
     match = _CALL_SITE_RE.match(raw_line)
     if match is None:
-        return None
-    return match.group(1)
+        return frozenset()
+    parts = match.group(1).split(".")
+    if len(parts) == 1:
+        return frozenset(parts)
+    return frozenset({parts[0], parts[-1]})
 
 
 def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
@@ -860,8 +870,7 @@ def _call_site_name_counts(text: str) -> Counter[str]:
         )
         if line_in_non_code or raw_line.strip() == "":
             continue
-        name = _call_site_name_for_line(raw_line)
-        if name is not None:
+        for name in _call_site_names_for_line(raw_line):
             counts[name] += 1
     return counts
 
@@ -869,9 +878,11 @@ def _call_site_name_counts(text: str) -> Counter[str]:
 def _salvage_changed_call_names(*, parent_blob: str, commit_blob: str) -> set[str]:
     """Return call names whose occurrence counts differ between parent and salvage.
 
-    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``) leave
+    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``, or
+    ``guard.disable()`` → ``guard.enable()``) leave
     ``_salvage_changed_binding_names`` empty; tip-extra calls that restore the
-    prior callee must still supersede (PRRT_kwDOSJAM6s6ZrN5J).
+    prior callee must still supersede (PRRT_kwDOSJAM6s6ZrN5J,
+    PRRT_kwDOSJAM6s6ZrSYE).
     """
     parent_counts = _call_site_name_counts(parent_blob)
     commit_counts = _call_site_name_counts(commit_blob)
@@ -889,8 +900,9 @@ def _tip_extra_calls_candidate_keys(
 
     Binding-key intersection misses executable overrides such as appending
     ``disable_guard()`` after a salvage that defined and invoked
-    ``enable_guard()`` (PRRT_kwDOSJAM6s6ZrJ3a). Lines that start inside ``/*``
-    or a triple-quoted string are ignored, matching binding scanners.
+    ``enable_guard()``, or ``guard.disable()`` after ``guard.enable()``
+    (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE). Lines that start inside
+    ``/*`` or a triple-quoted string are ignored, matching binding scanners.
     """
     if not candidate_keys:
         return False
@@ -913,9 +925,9 @@ def _tip_extra_calls_candidate_keys(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        name = _call_site_name_for_line(raw_line)
-        if name is not None and _candidate_keys_include_call_name(candidate_keys, name):
-            return True
+        for name in _call_site_names_for_line(raw_line):
+            if _candidate_keys_include_call_name(candidate_keys, name):
+                return True
     return False
 
 
@@ -1017,13 +1029,14 @@ def _tip_extra_can_supersede_modified_salvage(
     nested YAML ``logging.enabled`` does not collide with salvaged
     ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2), and TOML ``[logging] enabled``
     does not collide with salvaged ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
-    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``) leave
+    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``, or
+    ``guard.disable()`` → ``guard.enable()``) leave
     binding diffs empty; tip-extra calls that restore a prior callee or invoke a
-    salvage-changed binding name supersede (PRRT_kwDOSJAM6s6ZrN5J; compare
-    PRRT_kwDOSJAM6s6ZrJ3a). Call candidates are only changed bindings ∪ changed
-    call names — not every commit binding — so a tip-extra ``helper()`` on an
-    unchanged helper does not drop a still-present binding fix
-    (PRRT_kwDOSJAM6s6ZrR2e).
+    salvage-changed binding name supersede (PRRT_kwDOSJAM6s6ZrN5J,
+    PRRT_kwDOSJAM6s6ZrSYE; compare PRRT_kwDOSJAM6s6ZrJ3a). Call candidates are
+    only changed bindings ∪ changed call names — not every commit binding — so a
+    tip-extra ``helper()`` on an unchanged helper does not drop a still-present
+    binding fix (PRRT_kwDOSJAM6s6ZrR2e).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -1053,9 +1066,10 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     still qualifies. Flat leaf intersection previously discarded retained FIXED
     evidence when an unrelated descendant append shared only the leaf name.
     Tip-extra call sites that invoke a salvage-bound name also supersede:
-    ``disable_guard()`` after a salvage that defined and called ``enable_guard()``
-    produces no binding key, so assignment-only matching would retain stale
-    FIXED evidence (PRRT_kwDOSJAM6s6ZrJ3a).
+    ``disable_guard()`` after a salvage that defined and called ``enable_guard()``,
+    or ``guard.disable()`` after ``guard.enable()``, produces no binding key, so
+    assignment-only matching would retain stale FIXED evidence
+    (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE).
     """
     if len(head_blob) <= len(salvage):
         return False
@@ -1094,7 +1108,8 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     Prefix retention with a non-empty append additionally rejects when the
     appended tip-extra lines rebind a **scoped** name bound in the salvage
     (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q) or call a salvage-bound
-    name (``disable_guard()`` after ``enable_guard()``; PRRT_kwDOSJAM6s6ZrJ3a).
+    name (``disable_guard()`` after ``enable_guard()``, or ``guard.disable()``
+    after ``guard.enable()``; PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE).
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
