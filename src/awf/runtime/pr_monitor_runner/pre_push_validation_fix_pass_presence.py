@@ -965,8 +965,10 @@ def _tip_extra_can_supersede_modified_salvage(
     synthesizes ``guard.enabled``; opaque ``Object.defineProperties(guard, props)``
     fails closed the same way (PRRT_kwDOSJAM6s6ZzifG). ``Reflect.set(guard, "enabled", …)``
     synthesizes ``guard.enabled``; opaque ``Reflect.set(guard, key, …)`` fails closed
-    the same way (PRRT_kwDOSJAM6s6ZzN-l). Tip-extra alias assignments of a salvage-changed
-    name fail closed (PRRT_kwDOSJAM6s6ZxHGP).
+    the same way (PRRT_kwDOSJAM6s6ZzN-l).     Tip-extra alias assignments of a salvage-changed
+    name fail closed (PRRT_kwDOSJAM6s6ZxHGP). Tip-extra ``exec`` / ``eval``
+    (including ``builtins.exec``) fail closed because dynamic evaluation can
+    undo salvaged bindings without a scannable rebind (PRRT_kwDOSJAM6s6Z02Us).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -985,6 +987,8 @@ def _tip_extra_can_supersede_modified_salvage(
         # binding keys (``feature.enabled``) — PRRT_kwDOSJAM6s6ZrsE0.
         receiver_prefix_keys=call_names,
     ):
+        return True
+    if _tip_extra_opaque_dynamic_eval(baseline_blob=commit_blob, head_blob=head_blob):
         return True
     if _tip_extra_opaque_collection_mutator_shares_receiver(
         baseline_blob=commit_blob,
@@ -1061,9 +1065,11 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     object-literal property keys synthesize ``target.key``; opaque descriptor maps
     fail closed on a shared salvaged receiver (PRRT_kwDOSJAM6s6ZzifG). ``Reflect.set``
     string property names synthesize ``target.key``; opaque property names fail closed
-    on a shared salvaged receiver (PRRT_kwDOSJAM6s6ZzN-l). Tip-extra alias
+    on a shared salvaged receiver (PRRT_kwDOSJAM6s6ZzN-l).     Tip-extra alias
     assignments (``const alias = guard``) fail closed so ``alias.enabled = false``
-    cannot keep stale salvage (PRRT_kwDOSJAM6s6ZxHGP).
+    cannot keep stale salvage (PRRT_kwDOSJAM6s6ZxHGP). Tip-extra ``exec`` /
+    ``eval`` fail closed the same way as the modified path
+    (PRRT_kwDOSJAM6s6Z02Us).
     """
     if len(head_blob) <= len(salvage):
         return False
@@ -1084,6 +1090,8 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
         candidate_keys=call_candidates,
         receiver_prefix_keys=call_names,
     ):
+        return True
+    if _tip_extra_opaque_dynamic_eval(baseline_blob=salvage, head_blob=head_blob):
         return True
     if _tip_extra_opaque_collection_mutator_shares_receiver(
         baseline_blob=salvage,
@@ -1206,6 +1214,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque 
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
     _tip_extra_opaque_collection_mutator_shares_receiver as _tip_extra_opaque_collection_mutator_shares_receiver,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_dynamic_eval as _tip_extra_opaque_dynamic_eval,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
     _tip_extra_opaque_object_assign_shares_receiver as _tip_extra_opaque_object_assign_shares_receiver,

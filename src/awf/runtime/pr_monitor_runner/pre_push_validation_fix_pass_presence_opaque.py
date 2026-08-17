@@ -75,6 +75,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_object_
 # (``FLAGS.update(other_flags, other=False)``; PRRT_kwDOSJAM6s6Zxt0p).
 _OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
 
+# Tip-extra dynamic evaluators whose runtime effects cannot be proven by the
+# finite binding/call scanner (``exec("FEATURE_ENABLED = False")`` /
+# ``builtins.eval(...)``). Call names never intersect salvaged bindings, so
+# merge-file retention would keep stale FIXED evidence (PRRT_kwDOSJAM6s6Z02Us).
+_OPAQUE_DYNAMIC_EVAL_CALLEES = frozenset({"exec", "eval"})
+
 # Tip-extra ``const alias = guard`` / ``alias = guard`` where ``guard`` is a
 # salvaged candidate (or receiver of ``guard.enabled`` / ``FLAGS["enabled"]``).
 # Exact-key intersection only sees ``alias`` / ``alias.enabled``, so fail closed
@@ -260,6 +266,53 @@ def _salvaged_subscript_receivers(candidate_keys: set[str]) -> set[str]:
         if recv is not None:
             receivers.add(recv)
     return receivers
+
+
+def _call_name_is_opaque_dynamic_eval(name: str) -> bool:
+    """Return True when ``name`` is ``exec`` / ``eval`` or a dotted alias thereof."""
+    leaf = name.rsplit(".", 1)[-1]
+    return leaf in _OPAQUE_DYNAMIC_EVAL_CALLEES
+
+
+def _tip_extra_opaque_dynamic_eval(*, baseline_blob: str, head_blob: str) -> bool:
+    """Return True when tip-extra lines invoke opaque ``exec`` / ``eval``.
+
+    A descendant can keep a salvaged ``FEATURE_ENABLED = True`` hunk and append
+    ``exec("FEATURE_ENABLED = False")`` in a separate tip-only region. Clean
+    ``git merge-file`` still equals HEAD, while binding/call intersection sees
+    only an unrelated ``exec`` callee and would retain FIXED evidence even
+    though the fix is undone at runtime. Arbitrary source semantics cannot be
+    proven by the finite scanner, so fail closed on any tip-extra dynamic
+    evaluator (including ``builtins.exec`` / unclosed ``exec(`` openers;
+    PRRT_kwDOSJAM6s6Z02Us). Comment-only forms stay retained.
+    """
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        scan_line = raw_line
+        stripped = raw_line.lstrip(" \t")
+        if _is_member_call_continuation(stripped):
+            scan_line = _join_member_call_continuation_line(lines, idx)
+        for name in _call_site_names_for_line(scan_line):
+            if _call_name_is_opaque_dynamic_eval(name):
+                return True
+    return False
 
 
 def _tip_extra_opaque_collection_mutator_shares_receiver(

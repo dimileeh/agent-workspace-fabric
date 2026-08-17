@@ -842,3 +842,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="guard.enabled = True\n",
         head_blob='guard.enabled = True\nsetattr(guard, "other", False)\n',
     )
+    # Tip-extra exec/eval can undo added salvage without a binding-key rebind
+    # (PRRT_kwDOSJAM6s6Z02Us).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob='FEATURE_ENABLED = True\nexec("FEATURE_ENABLED = False")\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob='FEATURE_ENABLED = True\neval("FEATURE_ENABLED = False")\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob='FEATURE_ENABLED = True\nbuiltins.exec("FEATURE_ENABLED = False")\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob='FEATURE_ENABLED = True\n# exec("FEATURE_ENABLED = False")\n',
+    )

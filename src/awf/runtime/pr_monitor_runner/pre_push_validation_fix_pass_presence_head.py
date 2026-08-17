@@ -55,7 +55,9 @@ async def _commit_changes_present_in_head(
     checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
     result equals head, then rejecting tip-only lines that rebind a name the
     salvage changed vs parent (appended ``FEATURE_ENABLED = False`` after a
-    False→True salvage; PRRT_kwDOSJAM6s6Zp_3j). A no-baseline addition (new path)
+    False→True salvage; PRRT_kwDOSJAM6s6Zp_3j). Tip-extra ``exec`` / ``eval`` that
+    can undo salvage at runtime also fail closed (PRRT_kwDOSJAM6s6Z02Us). A
+    no-baseline addition (new path)
     cannot use that
     3-way model; retain when the salvage blob remains a line-boundary-aligned
     prefix or suffix of the tip blob so append/prepend keep evidence while
@@ -252,9 +254,11 @@ async def _commit_changes_present_in_head(
                 ):
                     return False
                 # Clean merge can still keep the salvage hunk while a later tip
-                # appends a rebinding of a salvage-changed name; reject that
+                # appends a rebinding of a salvage-changed name, or an opaque
+                # ``exec`` / ``eval`` that undoes it at runtime; reject that
                 # supersession (added-file path already does via
-                # ``_suffix_can_supersede_added_salvage``; PRRT_kwDOSJAM6s6Zp_3j).
+                # ``_suffix_can_supersede_added_salvage``; PRRT_kwDOSJAM6s6Zp_3j,
+                # PRRT_kwDOSJAM6s6Z02Us).
                 return not _tip_extra_can_supersede_modified_salvage(
                     parent_blob=parent_raw.decode("utf-8"),
                     commit_blob=commit_raw.decode("utf-8"),

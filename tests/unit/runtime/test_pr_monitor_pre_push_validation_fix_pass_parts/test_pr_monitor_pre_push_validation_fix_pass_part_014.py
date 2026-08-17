@@ -582,6 +582,42 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_py_guard,
         head_blob=('x = 1\nguard.enabled = True\ny = 2\nsetattr(other, "enabled", False)\n'),
     )
+    # Dynamic evaluators can undo salvaged bindings without a scannable rebind;
+    # tip-extra exec/eval must fail closed (PRRT_kwDOSJAM6s6Z02Us).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=('x = 1\nFEATURE_ENABLED = True\ny = 2\nexec("FEATURE_ENABLED = False")\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=('x = 1\nFEATURE_ENABLED = True\ny = 2\neval("FEATURE_ENABLED = False")\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            'x = 1\nFEATURE_ENABLED = True\ny = 2\nbuiltins.exec("FEATURE_ENABLED = False")\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            'x = 1\nFEATURE_ENABLED = True\ny = 2\nexec(\n    "FEATURE_ENABLED = False"\n)\n'
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=('x = 1\nFEATURE_ENABLED = True\ny = 2\n# exec("FEATURE_ENABLED = False")\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nFEATURE_ENABLED = True\ny = 3\n",
+    )
     # Object.assign after salvage ``guard.enabled = true`` leaves no binding key
     # and only call names ``Object`` / ``Object.assign``; recognize literal-key
     # mutation or fail closed on opaque sources sharing the salvaged receiver
