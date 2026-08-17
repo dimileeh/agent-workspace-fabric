@@ -369,6 +369,19 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nx = 1; FEATURE_ENABLED = False\n",
     )
+    # Nested / mid-statement typed ``name: T =`` must bind ``name``, not the
+    # type token ``T``. Omitting typed forms from the inline matcher left
+    # ``if ready: FEATURE_ENABLED: bool = False`` recording ``bool`` (and the
+    # semicolon form skipped ``bool`` without recovering ``FEATURE_ENABLED``),
+    # so prefix retention reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zs0s8).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\nif ready: FEATURE_ENABLED: bool = False\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\nx = 1; FEATURE_ENABLED: bool = False\n"),
+    )
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n# if ready: FEATURE_ENABLED = False\n",

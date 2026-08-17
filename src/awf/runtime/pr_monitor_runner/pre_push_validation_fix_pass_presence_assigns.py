@@ -97,9 +97,11 @@ _ASSIGN_BINDING_RE = re.compile(
 )
 # Mid-line / nested ``name =`` / ``name &=`` / ``name :=`` / dotted ``a.b =`` /
 # subscript ``FLAGS["enabled"] =`` (and shell ``export`` / ``declare`` /
-# ``typeset`` / ``readonly`` forms). Typed ``name: T =`` is omitted here: the
-# optional type span would treat ``if ready: FEATURE_ENABLED =`` as a typed
-# bind of ``ready``. Statement-leading typed assigns stay on
+# ``typeset`` / ``readonly`` forms). Typed ``name: T =`` is omitted from the
+# regex itself: an optional type span would treat ``if ready: FEATURE_ENABLED =``
+# as a typed bind of ``ready``. Instead ``_typed_assign_target_before`` recovers
+# the annotated target when the matcher hits the type token ``T``
+# (PRRT_kwDOSJAM6s6Zs0s8). Statement-leading typed assigns also stay on
 # ``_ASSIGN_BINDING_RE``. Bare YAML ``key:`` is also omitted. Dotted paths and
 # subscript targets are captured whole so ``feature.enabled =`` /
 # ``FLAGS["enabled"] =`` do not emit a bare leaf (PRRT_kwDOSJAM6s6ZsD5y,
@@ -163,11 +165,23 @@ _INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
 # via target extraction inside the body (PRRT_kwDOSJAM6s6ZsfLc).
 _AFTER_PAREN_LIST_UNPACK_ASSIGN_RE = re.compile(rf"[ \t]*{_EQUALS_STYLE_ASSIGN_OP}")
 _BRACKET_CLOSE_FOR_OPEN = {"(": ")", "[": "]"}
-# Type token in statement-leading ``name: T =``: bare ``T =`` after ``ident:``
-# must not invent a second binding key (PRRT_kwDOSJAM6s6ZsJyZ). Requires a
-# bare identifier immediately before ``:`` so ``if ready: name =`` still binds.
-_INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE = re.compile(
-    r"(?:^|[;])[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*:[ \t]*$"
+# Trailing ``target: `` before a matched type token in ``target: T =``. The
+# target is recovered so mid-line / nested typed assigns bind ``target`` rather
+# than ``T`` (PRRT_kwDOSJAM6s6Zs0s8). Suite headers are excluded via
+# ``_SUITE_HEADER_BEFORE_RE`` so ``if ready: name =`` still binds ``name``
+# (PRRT_kwDOSJAM6s6ZsJyZ, PRRT_kwDOSJAM6s6ZsD5y).
+_TYPED_ASSIGN_TARGET_BEFORE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*$"
+)
+# Full ``before`` span is a control-flow suite header (``if ready:`` /
+# ``for x in y:`` / ``else:``) when the keyword reaches the closing colon with
+# no nested ``:``. Nested ``if ready: FEATURE_ENABLED:`` has an extra ``:`` so
+# it is not a suite header and the trailing name is a typed-assign target.
+_SUITE_HEADER_BEFORE_RE = re.compile(
+    r"(?:^|[;])[ \t]*(?:"
+    r"(?:async[ \t]+)?(?:if|elif|while|for|with|match|case)\b[^:]*"
+    r"|(?:try|else|finally|except)\b[^:]*"
+    r"):[ \t]*$"
 )
 _ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
 _BARE_ASSIGN_KEY_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
@@ -343,6 +357,24 @@ def _paren_depth(text: str) -> int:
     return depth
 
 
+def _typed_assign_target_before(before: str) -> str | None:
+    """Return annotated target when ``before`` ends with ``target: `` for ``target: T =``.
+
+    Distinguishes typed ``FEATURE_ENABLED: bool =`` (and nested
+    ``if ready: FEATURE_ENABLED: bool =``) from suite headers
+    ``if ready: FEATURE_ENABLED =`` / ``for x in y: name =``, where the
+    trailing ``ident:`` closes the suite and must not mark the following
+    assign as a type token (PRRT_kwDOSJAM6s6Zs0s8, PRRT_kwDOSJAM6s6ZsD5y,
+    PRRT_kwDOSJAM6s6ZsJyZ).
+    """
+    if _SUITE_HEADER_BEFORE_RE.search(before):
+        return None
+    match = _TYPED_ASSIGN_TARGET_BEFORE_RE.search(before)
+    if match is None:
+        return None
+    return match.group(1)
+
+
 def _inline_assign_is_kwarg_or_default(*, before: str, matched: str, name: str) -> bool:
     """True when an equals-style bind is a call kwarg / default, not a rebind.
 
@@ -455,14 +487,16 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     ``if ready: FLAGS["enabled"] = False``; PRRT_kwDOSJAM6s6ZsD5y,
     PRRT_kwDOSJAM6s6ZsQFs). Strings and ``#`` / ``//`` / ``/* … */`` regions are
     blanked via ``_executable_call_scan_text``. Whole-line comments yield no
-    names. Bare YAML ``key:`` and typed ``name: T =`` forms are not matched
-    mid-line (typed stays statement-leading). Call kwargs, default parameters,
-    and the type token in ``name: T =`` are skipped so phantoms cannot enter
-    salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking and
-    parenthesized walrus after ``,`` / ``(`` still bind (PRRT_kwDOSJAM6s6ZsOT0).
-    Parenthesized / list unpacking ``(a, b) =`` / ``[a, b] =`` bind too,
-    including nested targets (PRRT_kwDOSJAM6s6ZsZ5d, PRRT_kwDOSJAM6s6ZsnYi).
-    Subscript targets recover their spelling from
+    names. Bare YAML ``key:`` is not matched mid-line. Typed ``name: T =`` is
+    recovered via ``_typed_assign_target_before`` when the matcher hits ``T``
+    so nested ``if ready: FEATURE_ENABLED: bool = False`` binds
+    ``FEATURE_ENABLED`` rather than ``bool`` (PRRT_kwDOSJAM6s6Zs0s8). Call
+    kwargs, default parameters, and type tokens are skipped so phantoms cannot
+    enter salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking
+    and parenthesized walrus after ``,`` / ``(`` still bind
+    (PRRT_kwDOSJAM6s6ZsOT0). Parenthesized / list unpacking ``(a, b) =`` /
+    ``[a, b] =`` bind too, including nested targets (PRRT_kwDOSJAM6s6ZsZ5d,
+    PRRT_kwDOSJAM6s6ZsnYi). Subscript targets recover their spelling from
     ``raw_line`` because scan blanking turns ``FLAGS["enabled"]`` into
     ``FLAGS[         ]``.
     """
@@ -480,7 +514,12 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
         name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
         if _inline_assign_is_kwarg_or_default(before=before, matched=match.group(0), name=raw_name):
             continue
-        if _INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE.search(before):
+        typed_target = _typed_assign_target_before(before)
+        if typed_target is not None:
+            # Matched name is the type token ``T`` in ``target: T =``; bind the
+            # annotated target instead (PRRT_kwDOSJAM6s6Zs0s8).
+            if typed_target not in names:
+                names.append(typed_target)
             continue
         # Depth-0 comma before the matched target → bare unpacking; include
         # earlier LHS names so ``FEATURE_ENABLED, other =`` / subscript

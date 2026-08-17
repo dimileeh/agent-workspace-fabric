@@ -351,6 +351,21 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9; FEATURE_ENABLED = False\n"),
     )
+    # Nested typed ``name: T =`` must supersede too; recording the type token
+    # ``bool`` (or skipping it without recovering ``FEATURE_ENABLED``) left
+    # merge-file equality retaining stale FIXED evidence (PRRT_kwDOSJAM6s6Zs0s8).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\nif ready: FEATURE_ENABLED: bool = False\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9; FEATURE_ENABLED: bool = False\n"),
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,
