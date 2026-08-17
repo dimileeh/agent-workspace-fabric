@@ -267,6 +267,34 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_member,
         head_blob=commit_member + "block} / guard.disable()\n",
     )
+    # Postfix ``++`` / ``--`` leave a value, so ``/`` is division — not a
+    # regex opener that would blank ``guard.disable()`` (PRRT_kwDOSJAM6s6ZtHbn).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "retries++ / guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "retries-- / guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "retries++/guard.disable()\n",
+    )
+    # Binary ``+`` / ``-`` still allow a following regex literal.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "x + /guard.disable()/\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "x - /guard.disable()/\n",
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,
         commit_blob=commit_member,

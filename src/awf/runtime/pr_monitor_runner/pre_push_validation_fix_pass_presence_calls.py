@@ -102,9 +102,11 @@ _JS_REGEX_PREFIX_KEYWORDS = frozenset(
 def _js_regex_literal_start(raw_line: str, slash_index: int) -> bool:
     """True when ``raw_line[slash_index]`` looks like a JS ``/…/`` regex opener.
 
-    Distinguishes division (``1 / guard.disable() / 2``) from literals such as
+    Distinguishes division (``1 / guard.disable() / 2``,
+    ``retries++ / guard.disable()``) from literals such as
     ``const matcher = /guard.disable()/;`` so call scanning does not treat
-    regex bodies as executable calls (PRRT_kwDOSJAM6s6Zs-Re).
+    regex bodies as executable calls (PRRT_kwDOSJAM6s6Zs-Re,
+    PRRT_kwDOSJAM6s6ZtHbn).
     """
     j = slash_index - 1
     while j >= 0 and raw_line[j] in " \t":
@@ -113,6 +115,12 @@ def _js_regex_literal_start(raw_line: str, slash_index: int) -> bool:
         return True
     prev = raw_line[j]
     if prev in ")]}" or prev == ".":
+        return False
+    # Postfix ``++`` / ``--`` yield a value, so a following ``/`` is division
+    # (``retries++ / guard.disable()``), not a regex opener that would blank the
+    # call (PRRT_kwDOSJAM6s6ZtHbn). A lone ``+`` / ``-`` still allows regex
+    # (``x + /re/``).
+    if prev in "+-" and j > 0 and raw_line[j - 1] == prev:
         return False
     if prev.isalnum() or prev == "_":
         start = j
