@@ -239,6 +239,16 @@ class TestParseVerdict:
             "AWF-VERDICT: FALSE POSITIVE: <em class='x'>&lt;reason&gt;</em>",
             "AWF-VERDICT: FALSE POSITIVE: <em>`&lt;reason&gt;`</em>",
             "AWF-VERDICT: FALSE POSITIVE: <strong>**<reason>**</strong>",
+            # Inline ``<code>`` HTML wrappers (not Markdown ticks) must peel
+            # when placeholder-shaped (PRRT_kwDOSJAM6s6Zq76j).
+            "AWF-VERDICT: FALSE POSITIVE: <code>&lt;reason&gt;</code>",
+            "AWF-VERDICT: FALSE POSITIVE: <code><reason></code>",
+            "AWF-VERDICT: FALSE POSITIVE: <CODE>&lt;reason&gt;</CODE>",
+            "AWF-VERDICT: FALSE POSITIVE: <code class='x'>&lt;reason&gt;</code>",
+            "AWF-VERDICT: FALSE POSITIVE: <code>`&lt;reason&gt;`</code>",
+            "AWF-VERDICT: FALSE POSITIVE: <em><code>&lt;reason&gt;</code></em>",
+            "AWF-VERDICT: FIXED: <code>&lt;one-sentence summary&gt;</code>",
+            "AWF-VERDICT: DEFER: <code>&lt;what to track&gt;</code>",
             "AWF-VERDICT: FIXED: <em>&lt;one-sentence summary&gt;</em>",
             "AWF-VERDICT: FIXED: <span>&lt;one-sentence summary&gt;</span>",
             "AWF-VERDICT: DEFER: <em>&lt;what to track&gt;</em>",
@@ -261,8 +271,9 @@ class TestParseVerdict:
         # CommonMark backslash escapes (``\<reason\>``) likewise
         # (PRRT_kwDOSJAM6s6ZpA-z). Mixed HTML + backslash layers must decode
         # successively (PRRT_kwDOSJAM6s6ZpHXM). Safe inline HTML wrappers
-        # (``<em>`` / ``<strong>`` / ``<span>``) peel the same way when
-        # placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ).
+        # (``<em>`` / ``<strong>`` / ``<span>`` / ``<code>``) peel the same
+        # way when placeholder-shaped (PRRT_kwDOSJAM6s6ZpdhJ,
+        # PRRT_kwDOSJAM6s6Zq76j).
         result = _parse_verdict_result(stdout)
 
         assert result.verdict == "needs_human"
@@ -340,6 +351,8 @@ class TestParseVerdict:
         assert _peel_all_outer_html_verdict_reason_wrappers("  <em><span>x</span></em>  ") == "x"
         assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</strong>") == "<em>x</strong>"
         assert _peel_all_outer_html_verdict_reason_wrappers("<em>x</em >") == "x"
+        assert _peel_all_outer_html_verdict_reason_wrappers("<code>x</code>") == "x"
+        assert _peel_all_outer_html_verdict_reason_wrappers("<code><em>x</em></code>") == "x"
         assert _peel_all_outer_html_verdict_reason_wrappers("plain") == "plain"
         assert _html_wrapper_close_suffix_start("nope", 0, 4, "em") is None
         assert _html_wrapper_close_suffix_start("<em>", 0, 0, "em") is None
@@ -561,7 +574,8 @@ class TestParseVerdict:
                 "AWF-VERDICT: FALSE POSITIVE: ![stale review boilerplate]",
                 "![stale review boilerplate]",
             ),
-            # Safe inline HTML around real prose is not peeled (PRRT_kwDOSJAM6s6ZpdhJ).
+            # Safe inline HTML around real prose is not peeled (PRRT_kwDOSJAM6s6ZpdhJ,
+            # PRRT_kwDOSJAM6s6Zq76j).
             (
                 "AWF-VERDICT: FALSE POSITIVE: <em>stale review boilerplate</em>",
                 "<em>stale review boilerplate</em>",
@@ -573,6 +587,10 @@ class TestParseVerdict:
             (
                 "AWF-VERDICT: FALSE POSITIVE: <span>stale review boilerplate</span>",
                 "<span>stale review boilerplate</span>",
+            ),
+            (
+                "AWF-VERDICT: FALSE POSITIVE: <code>stale review boilerplate</code>",
+                "<code>stale review boilerplate</code>",
             ),
         ],
     )

@@ -744,8 +744,9 @@ def _peel_all_outer_unconditional_verdict_reason_wrappers(cleaned: str) -> str:
 def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
     """Return the inner text of one outer placeholder-gated wrapper, or None.
 
-    Covers single emphasis, safe inline HTML (em/strong/span), and whole-reason
-    Markdown links/images (inline, full/collapsed reference, or shortcut).
+    Covers single emphasis, safe inline HTML (em/strong/span/code), and
+    whole-reason Markdown links/images (inline, full/collapsed reference, or
+    shortcut).
     """
     emphasis_match = _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER.fullmatch(cleaned)
     if emphasis_match is not None and (
@@ -764,7 +765,7 @@ def _conditional_verdict_reason_wrapper_inner(cleaned: str) -> str | None:
 # Open tag at a cursor for safe whole-reason HTML wrappers. Attributes allowed;
 # trailing whitespace after ``>`` is consumed so layered peels stay tight.
 _VERDICT_REASON_HTML_WRAPPER_OPEN_AT = re.compile(
-    r"<(em|strong|span)(?:\s[^>]*)?\s*>\s*",
+    r"<(em|strong|span|code)(?:\s[^>]*)?\s*>\s*",
     re.IGNORECASE,
 )
 
@@ -796,7 +797,7 @@ def _html_wrapper_close_suffix_start(s: str, start: int, end: int, tag: str) -> 
 
 
 def _peel_all_outer_html_verdict_reason_wrappers(cleaned: str) -> str:
-    """Peel consecutive outer ``em``/``strong``/``span`` wrappers in linear time.
+    """Peel consecutive outer ``em``/``strong``/``span``/``code`` wrappers in linear time.
 
     Same whole-reason semantics as repeated ``_VERDICT_REASON_INLINE_HTML_WRAPPER``
     matches, without per-layer full-string ``fullmatch`` rescans that are
@@ -828,7 +829,7 @@ def _aggressively_peel_verdict_reason_wrappers(reason: str) -> str:
 
     Used only to decide whether a conditional peel would expose a
     placeholder-shaped value. Bound iterations by input length so deeply
-    nested ``<em>``/``<strong>``/``<span>`` chains cannot recurse
+    nested ``<em>``/``<strong>``/``<span>``/``<code>`` chains cannot recurse
     (PRRT_kwDOSJAM6s6Zpg0B). HTML wrapper chains are stripped first in a
     linear pass so speculative peels stay O(n) rather than quadratic
     (PRRT_kwDOSJAM6s6Zpjww). Unconditional tick/quote/strong/strike chains
@@ -859,22 +860,22 @@ def _normalize_verdict_reason_inline_formatting(reason: str) -> str:
     ``__<…>__`` / ``~~<…>~~`` / ``*<…>*`` / ``_<…>_`` /
     ``[<…>](https://example.com)`` / ``![<…>](https://example.com)`` /
     ``[<…>][ref]`` / ``[<…>][]`` / ``[<…>]`` / ``<em>&lt;…&gt;</em>`` /
-    ``<strong>…</strong>`` / ``<span>…</span>``). Those wrappers must not
-    defeat whole-reason placeholder detection
+    ``<strong>…</strong>`` / ``<span>…</span>`` / ``<code>…</code>``).
+    Those wrappers must not defeat whole-reason placeholder detection
     (PRRT_kwDOSJAM6s6Zn-VK, PRRT_kwDOSJAM6s6ZoAz9, PRRT_kwDOSJAM6s6ZoDQU,
     PRRT_kwDOSJAM6s6ZopxG, PRRT_kwDOSJAM6s6Zos6S, PRRT_kwDOSJAM6s6Zo-5M,
     PRRT_kwDOSJAM6s6ZpLqR, PRRT_kwDOSJAM6s6ZpXSL, PRRT_kwDOSJAM6s6Zp8jK,
-    PRRT_kwDOSJAM6s6ZpdhJ).
+    PRRT_kwDOSJAM6s6ZpdhJ, PRRT_kwDOSJAM6s6Zq76j).
 
     Conditional peels (single emphasis / safe HTML / links) stay
     placeholder-gated, but the gate uses bounded iterative peeling rather than
     recursion so ~1k nested wrappers fail closed instead of raising
     ``RecursionError`` before the 500-character reason bound
     (PRRT_kwDOSJAM6s6Zpg0B). Nested HTML chains are speculative-peeled in a
-    linear pass so deep ``<em>``/``<strong>``/``<span>`` nests cannot burn
-    quadratic regex time before that bound (PRRT_kwDOSJAM6s6Zpjww). Nested
-    tick/quote/strong/strike chains use the same linear peel
-    (PRRT_kwDOSJAM6s6ZqS4V).
+    linear pass so deep ``<em>``/``<strong>``/``<span>``/``<code>`` nests
+    cannot burn quadratic regex time before that bound
+    (PRRT_kwDOSJAM6s6Zpjww). Nested tick/quote/strong/strike chains use the
+    same linear peel (PRRT_kwDOSJAM6s6ZqS4V).
     """
     cleaned = _peel_all_outer_unconditional_verdict_reason_wrappers(reason.strip())
     # Each successful gated peel shortens ``cleaned``; ``len(cleaned)`` therefore

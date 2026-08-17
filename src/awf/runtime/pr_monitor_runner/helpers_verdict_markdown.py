@@ -127,13 +127,14 @@ _VERDICT_REASON_INLINE_EMPHASIS_WRAPPER = re.compile(
     r")$"
 )
 # Balanced safe inline HTML wrappers around a reason (``<em>…</em>``,
-# ``<strong>…</strong>``, ``<span>…</span>``, optional attributes, case-
-# insensitive). Peeled only when the enclosed value is placeholder-shaped —
-# same gate as single emphasis / Markdown links — so rich-text echoes of
-# ``<em>&lt;reason&gt;</em>`` fail closed while real HTML-wrapped prose stays
-# usable (PRRT_kwDOSJAM6s6ZpdhJ).
+# ``<strong>…</strong>``, ``<span>…</span>``, ``<code>…</code>``, optional
+# attributes, case-insensitive). Peeled only when the enclosed value is
+# placeholder-shaped — same gate as single emphasis / Markdown links — so
+# rich-text echoes of ``<em>&lt;reason&gt;</em>`` / ``<code>&lt;reason&gt;</code>``
+# fail closed while real HTML-wrapped prose stays usable
+# (PRRT_kwDOSJAM6s6ZpdhJ, PRRT_kwDOSJAM6s6Zq76j).
 _VERDICT_REASON_INLINE_HTML_WRAPPER = re.compile(
-    r"^<(?P<tag>em|strong|span)(?:\s[^>]*)?\s*>\s*(?P<inner>.*?)\s*</(?P=tag)\s*>$",
+    r"^<(?P<tag>em|strong|span|code)(?:\s[^>]*)?\s*>\s*(?P<inner>.*?)\s*</(?P=tag)\s*>$",
     re.IGNORECASE,
 )
 # Whole-reason Markdown links (``[<…>](https://example.com)``) and images
