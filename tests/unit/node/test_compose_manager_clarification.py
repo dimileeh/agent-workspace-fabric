@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -772,3 +775,75 @@ def test_upgrade_persisted_clarification_service_handles_retired_gemini_runtime(
 
     upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     assert "clarification" in upgraded["services"]
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_stages_only_credential_files(
+    tmp_path: Path,
+) -> None:
+    """Legacy migration applies the fresh path's per-target credential allowlist.
+
+    Copying a whole persisted provider home would hand the reason-only
+    clarification container the session history, settings, hooks, and MCP
+    configuration the regular Compose entrypoint deliberately withholds.
+    """
+    claude_home = tmp_path / "claude"
+    (claude_home / "projects").mkdir(parents=True)
+    (claude_home / ".credentials.json").write_text('{"claudeAiOauth": {}}\n', encoding="utf-8")
+    (claude_home / "settings.json").write_text('{"hooks": {}}\n', encoding="utf-8")
+    (claude_home / "projects" / "history.jsonl").write_text("session\n", encoding="utf-8")
+    claude_configuration = tmp_path / "claude.json"
+    claude_configuration.write_text(
+        json.dumps({"primaryApiKey": "sk-test", "mcpServers": {"untrusted": {}}}),
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {"WORKSPACE_ID": "ws_legacy"},
+                        "volumes": [
+                            f"{claude_home}:/home/agent/.claude:rw",
+                            f"{claude_configuration}:/home/agent/.claude.json:rw",
+                        ],
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    clarification_home = tmp_path / "clarification-home" / ".claude"
+    script = clarification["entrypoint"][2]
+    for index, volume in enumerate(clarification["volumes"]):
+        source = volume.split(f":/run/awf/clarification-auth/{index}:")[0]
+        script = script.replace(f"/run/awf/clarification-auth/{index}", source)
+    script = script.replace("/home/agent/.claude", str(clarification_home))
+    environment = os.environ | {
+        name: value.replace("/home/agent/.claude", str(clarification_home))
+        for name, value in clarification["environment"].items()
+        if name.startswith("AWF_CLARIFICATION_AUTH_TARGET_")
+    }
+
+    subprocess.run(["sh", "-ec", script, "--", "true"], check=True, env=environment)
+
+    assert (clarification_home / ".credentials.json").read_text(
+        encoding="utf-8"
+    ) == '{"claudeAiOauth": {}}\n'
+    assert not (clarification_home / "settings.json").exists()
+    assert not (clarification_home / "projects").exists()
+    assert json.loads(
+        (tmp_path / "clarification-home" / ".claude.json").read_text(encoding="utf-8")
+    ) == {"primaryApiKey": "sk-test"}

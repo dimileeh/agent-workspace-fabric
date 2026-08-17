@@ -44,6 +44,16 @@ _CREDENTIAL_PROCESS_ENVIRONMENT_REFERENCE_RE = re.compile(
     r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?::?[-=+?])(?P<fallback>[^}]*))?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
 _MAX_CLARIFICATION_AUTH_CREDENTIAL_BYTES: Final = 1024 * 1024
+_CLARIFICATION_CREDENTIAL_FILE_ALLOWLIST: Final[tuple[tuple[str, str], ...]] = (
+    ("/home/agent/.codex", "auth.json"),
+    ("/home/agent/.claude", ".credentials.json"),
+    ("/home/agent/.config/gcloud", "application_default_credentials.json"),
+    ("/home/agent/.gemini", "oauth_creds.json"),
+    ("/home/agent/.config/opencode", "auth.json"),
+    ("/home/agent/.grok", "auth.json"),
+    ("/home/agent/.ollama", "config.json id_ed25519 id_ed25519.pub"),
+    ("/home/agent/.aws", "credentials config"),
+)
 
 
 def staged_provider_auth_mounts(
@@ -869,6 +879,77 @@ def aws_profile_path_rewrites(
     )
 
 
+def clarification_auth_copy_lines(index: int) -> tuple[str, ...]:
+    """Return the shell lines that stage one clarification auth mount.
+
+    The rendered Compose entrypoint and the legacy persisted-stack migration
+    share these lines so the per-target credential allowlist cannot drift
+    between them: a reason-only clarification container receives the provider
+    credentials, never the surrounding session history, settings, hooks, or MCP
+    configuration that lives in the same provider home.
+    """
+
+    target = f"$AWF_CLARIFICATION_AUTH_TARGET_{index}"
+    source = f"/run/awf/clarification-auth/{index}"
+    return (
+        f'mkdir -p "$(dirname "{target}")"',
+        f"if [ -d {source} ]; then",
+        f'  mkdir -p "{target}"',
+        f'  case "{target}" in',
+        *(
+            f'    {mount_target}) credential_files="{credential_files}" ;;'
+            for mount_target, credential_files in _CLARIFICATION_CREDENTIAL_FILE_ALLOWLIST
+        ),
+        "    *)",
+        f'      cp -a {source}/. "{target}/"',
+        '      credential_files=""',
+        "      ;;",
+        "  esac",
+        "  for credential_file in $credential_files; do",
+        f'    if [ -f "{source}/$credential_file" ] && [ ! -L "{source}/$credential_file" ]; then',
+        f'      cp -a "{source}/$credential_file" "{target}/$credential_file"',
+        "    fi",
+        "  done",
+        "else",
+        f'  case "{target}" in',
+        "    /home/agent/.claude.json)",
+        "      python - <<'PY'",
+        "import json",
+        "import os",
+        "",
+        "# ``~/.claude.json`` mixes Claude's credential fields with MCP server, hook,",
+        "# and project configuration. Provider readiness accepts the file as a Claude",
+        "# auth source, so the clarification re-ask must inherit the credentials or a",
+        "# ``.claude.json``-only host runs it unauthenticated; the untrusted MCP and",
+        "# hook configuration stays out of the container. Nothing is written when no",
+        "# credential field survives, so a configuration-only file is still omitted.",
+        f'source = "{source}"',
+        f'target = os.environ["AWF_CLARIFICATION_AUTH_TARGET_{index}"]',
+        'credential_fields = ("primaryApiKey", "oauthAccount", "customApiKeyResponses")',
+        "try:",
+        '  with open(source, encoding="utf-8") as source_handle:',
+        "    configuration = json.load(source_handle)",
+        "except (OSError, ValueError):",
+        "  # A host file that is unreadable or not JSON carries no usable credential:",
+        '  # degrade to the previous "copy nothing" behavior instead of failing startup.',
+        "  configuration = None",
+        "credentials = (",
+        "  {name: configuration[name] for name in credential_fields if name in configuration}",
+        "  if isinstance(configuration, dict)",
+        "  else {}",
+        ")",
+        "if credentials:",
+        "  descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)",
+        '  with os.fdopen(descriptor, "w", encoding="utf-8") as target_handle:',
+        "    json.dump(credentials, target_handle)",
+        "PY",
+        "      ;;",
+        f'    *) cp -a {source} "{target}" ;;',
+        "  esac",
+        "fi",
+    )
+
+
 def legacy_clarification_entrypoint(
     mount_count: int,
     *,
@@ -879,19 +960,7 @@ def legacy_clarification_entrypoint(
 
     lines: list[str] = []
     for index in range(mount_count):
-        target = f"$AWF_CLARIFICATION_AUTH_TARGET_{index}"
-        source = f"/run/awf/clarification-auth/{index}"
-        lines.extend(
-            (
-                f'mkdir -p "$(dirname "{target}")"',
-                f"if [ -d {source} ]; then",
-                f'  mkdir -p "{target}"',
-                f'  cp -a {source}/. "{target}/"',
-                "else",
-                f'  cp -a {source} "{target}"',
-                "fi",
-            )
-        )
+        lines.extend(clarification_auth_copy_lines(index))
     if rewrite_external_account_subject_token_file:
         lines.extend(
             (
