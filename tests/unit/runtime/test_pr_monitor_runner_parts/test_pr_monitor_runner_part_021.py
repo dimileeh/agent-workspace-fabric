@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 import pytest
 
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -257,6 +259,20 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason in {"verdict_placeholder_echo", "fixed_placeholder_echo"}
+
+    @pytest.mark.unit
+    def test_private_awf_escape_normalization_cap_exhaustion_fail_closed(self) -> None:
+        # Nested HTML entity layers beyond the mixed-unescape pass budget left a
+        # still-encoded remnant (``&lt;reason&gt;``) that was accepted as a
+        # substantive FALSE POSITIVE reason. Cap exhaustion must fail closed
+        # (PRRT_kwDOSJAM6s6Zqip7).
+        nested = "<reason>"
+        for _ in range(17):
+            nested = html.escape(nested)
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: {nested}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "verdict_placeholder_echo"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

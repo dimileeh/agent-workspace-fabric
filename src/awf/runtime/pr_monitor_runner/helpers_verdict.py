@@ -525,22 +525,31 @@ def _commonmark_backslash_unescape_to_stable(text: str) -> str:
     return decoded
 
 
-def _mixed_escape_unescape_to_stable(text: str) -> str:
+def _mixed_escape_unescape_to_stable(text: str) -> tuple[str, bool]:
     """Decode interleaved HTML entities and CommonMark backslash escapes.
 
     Independent HTML-only or backslash-only normalization leaves one layer on
     mixed echoes such as ``\\&lt;reason\\&gt;`` (HTML → ``\\<reason\\>``,
     backslash → ``&lt;reason&gt;``). Alternate both until stable so the
     placeholder matcher sees ``<reason>`` (PRRT_kwDOSJAM6s6ZpHXM).
+
+    Returns ``(decoded, cap_exhausted)``. ``cap_exhausted`` is True when the
+    pass budget is spent and another mixed pass would still change the value
+    — callers must fail closed rather than treating a still-encoded remnant as
+    substantive (PRRT_kwDOSJAM6s6Zqip7).
     """
     decoded = text
     for _ in range(_VERDICT_REASON_MIXED_ESCAPE_MAX_PASSES):
         nxt = _html_unescape_to_stable(decoded)
         nxt = _commonmark_backslash_unescape_to_stable(nxt)
         if nxt == decoded:
-            return decoded
+            return decoded, False
         decoded = nxt
-    return decoded
+    # Budget spent without an in-loop stability hit: probe whether more layers
+    # remain without consuming another peel (exact-budget cases stay usable).
+    probe = _html_unescape_to_stable(decoded)
+    probe = _commonmark_backslash_unescape_to_stable(probe)
+    return decoded, probe != decoded
 
 
 def _text_matches_verdict_reason_template_placeholder(text: str) -> bool:
@@ -552,11 +561,15 @@ def _text_matches_verdict_reason_template_placeholder(text: str) -> bool:
     ``\\<reason\\>``, and mixed ``\\&lt;reason\\&gt;`` whole-reason echoes fail
     closed — without loosening the anchored match for mid-reason prose
     (PRRT_kwDOSJAM6s6Zoyj2, PRRT_kwDOSJAM6s6Zo4bG, PRRT_kwDOSJAM6s6ZpA-z,
-    PRRT_kwDOSJAM6s6ZpHXM).
+    PRRT_kwDOSJAM6s6ZpHXM). When the pass cap is exhausted before stability,
+    treat the text as an unresolved placeholder rather than a substantive
+    reason (PRRT_kwDOSJAM6s6Zqip7).
     """
     if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(text):
         return True
-    decoded = _mixed_escape_unescape_to_stable(text)
+    decoded, cap_exhausted = _mixed_escape_unescape_to_stable(text)
+    if cap_exhausted:
+        return True
     return decoded != text and _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(decoded) is not None
 
 
