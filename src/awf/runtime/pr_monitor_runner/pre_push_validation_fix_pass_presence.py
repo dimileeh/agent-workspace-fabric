@@ -100,6 +100,18 @@ _YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
     r"|'[^'\n]+'"
     r")[ \t]*:[ \t]*(?:#.*)?$"
 )
+# Scalar YAML sequence items (``- name: a``) open an identity scope so sibling
+# items do not collapse shared leaves into ``features.enabled``
+# (PRRT_kwDOSJAM6s6ZqxYE). Requires a non-empty same-line scalar; empty
+# ``- nested:`` openers stay on ``_YAML_MAPPING_SCOPE_OPENER_RE``.
+_YAML_SCALAR_SEQUENCE_ITEM_RE = re.compile(
+    r"^[ \t]*-[ \t]+(?:"
+    r"(?!(?:else|try|except|finally)[ \t]*:)"
+    r"(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r'|(?P<double>"[^"\n]+")'
+    r"|(?P<single>'[^'\n]+')"
+    r")[ \t]*:[ \t]*(?P<value>[^ \t#\n][^#\n]*?)[ \t]*(?:#.*)?$"
+)
 # TOML ``[table]`` / ``[[array.table]]`` headers replace the current table scope
 # so leaves under different tables qualify distinctly (``feature.enabled`` vs
 # ``logging.enabled``; PRRT_kwDOSJAM6s6ZqpBC). Key path reuses assign segments
@@ -548,6 +560,66 @@ def _is_declaration_opener_line(raw_line: str) -> bool:
     return False
 
 
+def _normalize_yaml_sequence_item_scalar(raw: str) -> str:
+    """Strip surrounding quotes from a YAML sequence-item scalar for identity."""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _yaml_scalar_sequence_item_scope(raw_line: str) -> tuple[str, str] | None:
+    """Return ``(scope_segment, item_key)`` for ``- key: scalar`` lines.
+
+    ``scope_segment`` is ``key.scalar`` so sibling items qualify distinct leaves
+    (``features.name.a.enabled`` vs ``features.name.b.enabled``;
+    PRRT_kwDOSJAM6s6ZqxYE). ``item_key`` is the mapping key on the sequence
+    marker so a same-item nested rebind of that key keeps the opener path
+    (``- enabled: true`` then ``enabled: false`` → ``feature.enabled.true``;
+    PRRT_kwDOSJAM6s6ZqeWt).
+    """
+    match = _YAML_SCALAR_SEQUENCE_ITEM_RE.match(raw_line)
+    if match is None:
+        return None
+    raw_key = match.group("bare") or match.group("double") or match.group("single")
+    if raw_key is None:
+        return None
+    value = _normalize_yaml_sequence_item_scalar(match.group("value"))
+    if not value:
+        return None
+    item_key = _normalize_assign_binding_name(raw_key, requote_non_bare=False)
+    return (f"{item_key}.{value}", item_key)
+
+
+def _scoped_binding_key_for_line(
+    scope_stack: list[tuple[int, str, str | None]],
+    *,
+    binding_name: str,
+    raw_line: str,
+    toml_table_path: str | None,
+) -> str:
+    """Return the scoped binding key for ``raw_line`` under ``scope_stack``.
+
+    Scalar sequence-item openers (``- name: a``) use the identity segment as the
+    leaf so siblings do not share ``features.name`` (PRRT_kwDOSJAM6s6ZqxYE). A
+    nested rebind of that item's inline key reuses the opener's identity path
+    (PRRT_kwDOSJAM6s6ZqeWt).
+    """
+    parent_segments = [entry[1] for entry in scope_stack]
+    if toml_table_path is not None:
+        parent_names = [toml_table_path, *parent_segments]
+    else:
+        parent_names = parent_segments
+    seq_scope = _yaml_scalar_sequence_item_scope(raw_line)
+    if seq_scope is not None:
+        return _scoped_binding_key(parent_names, seq_scope[0])
+    if scope_stack and scope_stack[-1][2] == binding_name:
+        # Same-item rebind of the inline sequence-item key: match the opener.
+        ancestor = parent_names[:-1]
+        return _scoped_binding_key(ancestor, scope_stack[-1][1])
+    return _scoped_binding_key(parent_names, binding_name)
+
+
 def _opens_nested_binding_scope(raw_line: str) -> bool:
     """Return True when ``raw_line`` opens a nestable binding scope.
 
@@ -555,7 +627,9 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     (``A.ok``; PRRT_kwDOSJAM6s6ZqKN3). YAML/mapping ``key:`` lines with no
     same-line scalar also push so ``feature.enabled`` and ``logging.enabled``
     stay distinct (PRRT_kwDOSJAM6s6ZqZo2), including block-sequence openers
-    (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Bare ``else:`` / ``try:`` /
+    (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Scalar sequence items
+    (``- name: a``) also push, with key+value identity so sibling items do not
+    share leaf paths (PRRT_kwDOSJAM6s6ZqxYE). Bare ``else:`` / ``try:`` /
     ``except:`` / ``finally:`` do not push (PRRT_kwDOSJAM6s6Zqeen). Assignments
     with values, ``#define``, and ``let``/``const``/``var`` bind a name but do
     not push. TOML ``[table]`` / ``[[array]]`` headers are not nestable indent
@@ -570,6 +644,8 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     for pattern in (_DEF_BINDING_RE, _CLASS_BINDING_RE, _FUNCTION_BINDING_RE):
         if pattern.match(raw_line) is not None:
             return True
+    if _yaml_scalar_sequence_item_scope(raw_line) is not None:
+        return True
     return _YAML_MAPPING_SCOPE_OPENER_RE.match(raw_line) is not None
 
 
@@ -630,17 +706,18 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
     """Map each scoped binding key to the span of its last occurrence in ``text``.
 
     Keys are qualified by enclosing def/class/function scopes (``A.ok``), by
-    YAML/mapping openers with no same-line scalar (``feature.enabled``), and by
-    the current TOML ``[table]`` / ``[[array]]`` path so same-named leaves under
-    different parents do not collide (PRRT_kwDOSJAM6s6ZqKN3,
-    PRRT_kwDOSJAM6s6ZqZo2, PRRT_kwDOSJAM6s6ZqpBC). Lines that start inside ``/*``
-    or a triple-quoted string are ignored so docstring prose does not invent
-    bindings (PRRT_kwDOSJAM6s6ZqPO9).
+    YAML/mapping openers with no same-line scalar (``feature.enabled``), by
+    scalar YAML sequence-item identity (``features.name.a.enabled``;
+    PRRT_kwDOSJAM6s6ZqxYE), and by the current TOML ``[table]`` / ``[[array]]``
+    path so same-named leaves under different parents do not collide
+    (PRRT_kwDOSJAM6s6ZqKN3, PRRT_kwDOSJAM6s6ZqZo2, PRRT_kwDOSJAM6s6ZqpBC). Lines
+    that start inside ``/*`` or a triple-quoted string are ignored so docstring
+    prose does not invent bindings (PRRT_kwDOSJAM6s6ZqPO9).
     """
     lines = text.splitlines()
     last_start: dict[str, int] = {}
-    # (indent, name) stack for nestable declaration openers.
-    scope_stack: list[tuple[int, str]] = []
+    # (indent, segment, sequence_item_key|None) for nestable openers.
+    scope_stack: list[tuple[int, str, str | None]] = []
     # Current TOML table path (replaced by each table/array-table header).
     toml_table_path: str | None = None
     in_block_comment = False
@@ -669,13 +746,18 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
         name = _binding_name_for_line(raw_line)
         if name is None:
             continue
-        scope_names = ([toml_table_path] if toml_table_path is not None else []) + [
-            entry[1] for entry in scope_stack
-        ]
-        key = _scoped_binding_key(scope_names, name)
+        key = _scoped_binding_key_for_line(
+            scope_stack,
+            binding_name=name,
+            raw_line=raw_line,
+            toml_table_path=toml_table_path,
+        )
         last_start[key] = idx
-        if _opens_nested_binding_scope(raw_line):
-            scope_stack.append((indent, name))
+        seq_scope = _yaml_scalar_sequence_item_scope(raw_line)
+        if seq_scope is not None:
+            scope_stack.append((indent, seq_scope[0], seq_scope[1]))
+        elif _opens_nested_binding_scope(raw_line):
+            scope_stack.append((indent, name, None))
     return {key: _binding_span_at(lines, start) for key, start in last_start.items()}
 
 
@@ -711,7 +793,7 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         return set()
     lines = text.splitlines()
     keys: set[str] = set()
-    scope_stack: list[tuple[int, str]] = []
+    scope_stack: list[tuple[int, str, str | None]] = []
     toml_table_path: str | None = None
     in_block_comment = False
     in_triple_double = False
@@ -739,14 +821,19 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         name = _binding_name_for_line(raw_line)
         if name is None:
             continue
-        scope_names = ([toml_table_path] if toml_table_path is not None else []) + [
-            entry[1] for entry in scope_stack
-        ]
-        key = _scoped_binding_key(scope_names, name)
+        key = _scoped_binding_key_for_line(
+            scope_stack,
+            binding_name=name,
+            raw_line=raw_line,
+            toml_table_path=toml_table_path,
+        )
         if idx in line_indices:
             keys.add(key)
-        if _opens_nested_binding_scope(raw_line):
-            scope_stack.append((indent, name))
+        seq_scope = _yaml_scalar_sequence_item_scope(raw_line)
+        if seq_scope is not None:
+            scope_stack.append((indent, seq_scope[0], seq_scope[1]))
+        elif _opens_nested_binding_scope(raw_line):
+            scope_stack.append((indent, name, None))
     return keys
 
 

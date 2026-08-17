@@ -643,13 +643,17 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     # leaves. Without recognizing the sequence-item key, salvage only records
     # the enclosing ``feature`` span while a tip that appends ``enabled: false``
     # on the same item is keyed ``feature.enabled`` — empty intersection would
-    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZqeWt).
+    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZqeWt). Scalar identity
+    # qualifies the inline leaf as ``feature.enabled.<value>`` so same-item
+    # rebinds still intersect while sibling items stay distinct
+    # (PRRT_kwDOSJAM6s6ZqxYE).
     parent_seq_yaml = "feature:\n  - enabled: false\n"
     commit_seq_yaml = "feature:\n  - enabled: true\n"
     seq_yaml_changed = _salvage_changed_binding_names(
         parent_blob=parent_seq_yaml, commit_blob=commit_seq_yaml
     )
-    assert "feature.enabled" in seq_yaml_changed
+    assert "feature.enabled.true" in seq_yaml_changed
+    assert "feature.enabled.false" in seq_yaml_changed
     assert "enabled" not in seq_yaml_changed
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_seq_yaml,
@@ -667,7 +671,8 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     seq_quoted_changed = _salvage_changed_binding_names(
         parent_blob=parent_seq_quoted, commit_blob=commit_seq_quoted
     )
-    assert "feature.enabled" in seq_quoted_changed
+    assert "feature.enabled.true" in seq_quoted_changed
+    assert "feature.enabled.false" in seq_quoted_changed
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_seq_quoted,
         commit_blob=commit_seq_quoted,
@@ -686,6 +691,30 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_seq_nested,
         commit_blob=commit_seq_nested,
         head_blob=("feature:\n  - nested:\n      enabled: true\n      enabled: false\n"),
+    )
+    # Scalar sequence items (``- name: a``) must open an identity scope so a tip
+    # sibling ``- name: b`` with its own ``enabled`` does not collide as
+    # ``features.enabled`` and clear retained salvage (PRRT_kwDOSJAM6s6ZqxYE).
+    parent_seq_sibling = "features:\n  - name: a\n    enabled: false\n"
+    commit_seq_sibling = "features:\n  - name: a\n    enabled: true\n"
+    sibling_changed = _salvage_changed_binding_names(
+        parent_blob=parent_seq_sibling, commit_blob=commit_seq_sibling
+    )
+    assert "features.name.a.enabled" in sibling_changed
+    assert "features.name.a" in sibling_changed
+    assert "features.enabled" not in sibling_changed
+    assert "features.name" not in sibling_changed
+    assert "enabled" not in sibling_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_sibling,
+        commit_blob=commit_seq_sibling,
+        head_blob=("features:\n  - name: a\n    enabled: true\n  - name: b\n    enabled: false\n"),
+    )
+    # Same-identity tip rebind under the salvaged item still supersedes.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_sibling,
+        commit_blob=commit_seq_sibling,
+        head_blob=("features:\n  - name: a\n    enabled: true\n    enabled: false\n"),
     )
     # Bare Python control-flow headers (``else:`` / ``try:`` / ``except:`` /
     # ``finally:``) must not open YAML mapping scopes. Treating them as parents
