@@ -62,9 +62,13 @@ _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
 # indentation scope so nested leaves qualify as ``parent.leaf`` rather than
 # colliding as bare ``leaf`` across unrelated mappings (PRRT_kwDOSJAM6s6ZqZo2).
 # Optional ``- `` covers block-sequence mapping openers (``- nested:``;
-# PRRT_kwDOSJAM6s6ZqeWt).
+# PRRT_kwDOSJAM6s6ZqeWt). Bare Python control-flow headers (``else:`` / ``try:``
+# / ``except:`` / ``finally:``) are excluded so tip rebinds under those blocks
+# stay bare keys and can supersede salvage; quoted ``"else":`` still nests
+# (PRRT_kwDOSJAM6s6Zqeen).
 _YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
     r"^[ \t]*(?:-[ \t]+)?(?:"
+    r"(?!(?:else|try|except|finally)[ \t]*:)"
     r"[A-Za-z_][A-Za-z0-9_]*"
     r'|"[^"\n]+"'
     r"|'[^'\n]+'"
@@ -448,8 +452,10 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     (``A.ok``; PRRT_kwDOSJAM6s6ZqKN3). YAML/mapping ``key:`` lines with no
     same-line scalar also push so ``feature.enabled`` and ``logging.enabled``
     stay distinct (PRRT_kwDOSJAM6s6ZqZo2), including block-sequence openers
-    (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Assignments with values, ``#define``,
-    and ``let``/``const``/``var`` bind a name but do not push.
+    (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Bare ``else:`` / ``try:`` /
+    ``except:`` / ``finally:`` do not push (PRRT_kwDOSJAM6s6Zqeen). Assignments
+    with values, ``#define``, and ``let``/``const``/``var`` bind a name but do
+    not push.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//"):

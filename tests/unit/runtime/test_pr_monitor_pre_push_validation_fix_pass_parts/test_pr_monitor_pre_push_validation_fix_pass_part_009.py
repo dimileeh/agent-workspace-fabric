@@ -502,6 +502,34 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_seq_nested,
         head_blob=("feature:\n  - nested:\n      enabled: true\n      enabled: false\n"),
     )
+    # Bare Python control-flow headers (``else:`` / ``try:`` / ``except:`` /
+    # ``finally:``) must not open YAML mapping scopes. Treating them as parents
+    # qualifies tip rebinds as ``else.FEATURE_ENABLED`` so they miss the
+    # salvage-changed bare key and keep stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zqeen). Quoted ``"else":`` remains a real YAML opener.
+    parent_cf = "FEATURE_ENABLED = False\n"
+    commit_cf = "FEATURE_ENABLED = True\n"
+    for header in ("else:", "try:", "except:", "finally:"):
+        assert _tip_extra_can_supersede_modified_salvage(
+            parent_blob=parent_cf,
+            commit_blob=commit_cf,
+            head_blob=(
+                f"FEATURE_ENABLED = True\nif cond:\n    pass\n{header}\n"
+                "    FEATURE_ENABLED = False\n"
+            ),
+        )
+    parent_quoted_else = '"else":\n  enabled: false\nfeature:\n  level: info\n'
+    commit_quoted_else = '"else":\n  enabled: true\nfeature:\n  level: info\n'
+    quoted_else_changed = _salvage_changed_binding_names(
+        parent_blob=parent_quoted_else, commit_blob=commit_quoted_else
+    )
+    assert "else.enabled" in quoted_else_changed
+    assert "enabled" not in quoted_else_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_quoted_else,
+        commit_blob=commit_quoted_else,
+        head_blob=('"else":\n  enabled: true\nfeature:\n  level: info\n  enabled: false\n'),
+    )
     # Quoted JSON mapping keys must supersede the same way; otherwise a tip that
     # keeps salvage `"feature-enabled": true` and appends a later duplicate
     # false cleanly merge-file-matches HEAD while consumers take the final
