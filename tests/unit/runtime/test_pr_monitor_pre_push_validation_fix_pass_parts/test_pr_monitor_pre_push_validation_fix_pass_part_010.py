@@ -287,6 +287,24 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 3\nFEATURE_ENABLED = False\n"),
     )
+    # Nested / mid-statement rebinds must supersede: line-start assign matching
+    # misses ``if ready: FEATURE_ENABLED = False`` so merge-file equality would
+    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nif ready: FEATURE_ENABLED = False\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9; FEATURE_ENABLED = False\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n# if ready: FEATURE_ENABLED = False\n"),
+    )
     # Shell ``export NAME=value`` rebinds must supersede like bare assignments
     # (PRRT_kwDOSJAM6s6ZqseO).
     parent_export = "x=1\nexport FEATURE_ENABLED=false\ny=2\n"

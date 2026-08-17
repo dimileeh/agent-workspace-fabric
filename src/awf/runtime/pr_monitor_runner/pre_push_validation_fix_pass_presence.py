@@ -23,6 +23,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls i
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _candidate_keys_include_call_name as _candidate_keys_include_call_name,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+    _executable_call_scan_text as _executable_call_scan_text,
+)
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 # Binding targets that an appended tip can rebind to supersede added salvage.
@@ -39,6 +42,10 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # TOML dotted keys join bare or quoted segments with ``.``
 # (``feature.enabled`` / ``site."google.com"``; PRRT_kwDOSJAM6s6Zql88).
 _ASSIGN_KEY_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')'
+# Statement-leading assign forms (line-start). Mid-statement overrides such as
+# ``if ready: FEATURE_ENABLED = False`` are collected separately via
+# ``_INLINE_ASSIGN_BINDING_RE`` so tip-extra nested rebinds still supersede
+# (PRRT_kwDOSJAM6s6ZsD5y).
 _ASSIGN_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+|(?:declare|typeset|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?(?:"
     # Dotted TOML keys (≥1 ``.``): require the full path before ``=`` / ``:``
@@ -75,6 +82,23 @@ _ASSIGN_BINDING_RE = re.compile(
     r'("[^"\n]+")[ \t]*(?::[ \t]*(?!=)|=(?!=))'
     r"|"
     r"('[^'\n]+')[ \t]*(?::[ \t]*(?!=)|=(?!=))"
+    r")"
+)
+# Mid-line / nested ``name =`` / ``name :=`` / dotted ``a.b =`` (and shell
+# ``export`` / ``declare`` / ``typeset`` / ``readonly`` forms). Typed
+# ``name: T =`` is omitted here: the optional type span would treat
+# ``if ready: FEATURE_ENABLED =`` as a typed bind of ``ready``. Statement-leading
+# typed assigns stay on ``_ASSIGN_BINDING_RE``. Bare YAML ``key:`` is also
+# omitted. Dotted paths are captured whole so ``feature.enabled =`` does not
+# also emit a bare ``enabled`` leaf (PRRT_kwDOSJAM6s6ZsD5y).
+_INLINE_ASSIGN_BINDING_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:export[ \t]+|(?:declare|typeset|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+    r"(?:"
+    r"[ \t]*=(?!=)"
+    r"|"
+    r"[ \t]*:="
     r")"
 )
 _ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
@@ -537,14 +561,16 @@ def _normalize_assign_binding_name(name: str, *, requote_non_bare: bool = True) 
 
 
 def _binding_name_for_line(raw_line: str) -> str | None:
-    """Return the binding name on ``raw_line``, or None when it is not a binding.
+    """Return the statement-leading binding name on ``raw_line``, or None.
 
     Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
     count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
     and ``define`` is allowed, matching open-``#if`` scanning;
     PRRT_kwDOSJAM6s6Zp_sv). Callers must also skip lines that start inside an
     open ``/*`` or triple-quoted string so docstring prose is not treated as a
-    YAML-style rebind (PRRT_kwDOSJAM6s6ZqPO9).
+    YAML-style rebind (PRRT_kwDOSJAM6s6ZqPO9). Mid-statement equals-style
+    assignments are collected by ``_binding_names_for_line`` /
+    ``_inline_assign_binding_names`` (PRRT_kwDOSJAM6s6ZsD5y).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//"):
@@ -571,6 +597,41 @@ def _binding_name_for_line(raw_line: str) -> str | None:
                     return _normalize_assign_binding_name(group, requote_non_bare=requote_non_bare)
             return None
     return None
+
+
+def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return equals-style assign names found anywhere on ``raw_line``.
+
+    Covers nested overrides the line-start assign anchor misses
+    (``if ready: FEATURE_ENABLED = False``, ``x = 1; FEATURE_ENABLED = False``;
+    PRRT_kwDOSJAM6s6ZsD5y). Strings and ``#`` / ``//`` / ``/* … */`` regions are
+    blanked via ``_executable_call_scan_text``. Whole-line comments yield no
+    names. Bare YAML ``key:`` and typed ``name: T =`` forms are not matched
+    mid-line (typed stays statement-leading).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    return tuple(match.group(1) for match in _INLINE_ASSIGN_BINDING_RE.finditer(scan))
+
+
+def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
+    """Return all binding names on ``raw_line`` (leading first, then mid-line).
+
+    Statement-leading defs/assigns/YAML keys come from ``_binding_name_for_line``.
+    Additional mid-line equals-style assigns are appended so compound tip-extra
+    lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y).
+    """
+    primary = _binding_name_for_line(raw_line)
+    inline = _inline_assign_binding_names(raw_line)
+    if primary is None:
+        return inline
+    names: list[str] = [primary]
+    for name in inline:
+        if name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _normalize_yaml_sequence_item_scalar(raw: str) -> str:
@@ -756,21 +817,23 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
-        name = _binding_name_for_line(raw_line)
-        if name is None:
+        names = _binding_names_for_line(raw_line)
+        if not names:
             continue
-        key = _scoped_binding_key_for_line(
-            scope_stack,
-            binding_name=name,
-            raw_line=raw_line,
-            toml_table_path=toml_table_path,
-        )
-        last_start[key] = idx
+        for name in names:
+            key = _scoped_binding_key_for_line(
+                scope_stack,
+                binding_name=name,
+                raw_line=raw_line,
+                toml_table_path=toml_table_path,
+            )
+            last_start[key] = idx
+        primary = names[0]
         seq_scope = _yaml_scalar_sequence_item_scope(raw_line)
         if seq_scope is not None:
             scope_stack.append((indent, seq_scope[0], seq_scope[1]))
         elif _opens_nested_binding_scope(raw_line):
-            scope_stack.append((indent, name, None))
+            scope_stack.append((indent, primary, None))
     return {key: _binding_span_at(lines, start) for key, start in last_start.items()}
 
 
@@ -948,22 +1011,24 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
-        name = _binding_name_for_line(raw_line)
-        if name is None:
+        names = _binding_names_for_line(raw_line)
+        if not names:
             continue
-        key = _scoped_binding_key_for_line(
-            scope_stack,
-            binding_name=name,
-            raw_line=raw_line,
-            toml_table_path=toml_table_path,
-        )
-        if idx in line_indices:
-            keys.add(key)
+        for name in names:
+            key = _scoped_binding_key_for_line(
+                scope_stack,
+                binding_name=name,
+                raw_line=raw_line,
+                toml_table_path=toml_table_path,
+            )
+            if idx in line_indices:
+                keys.add(key)
+        primary = names[0]
         seq_scope = _yaml_scalar_sequence_item_scope(raw_line)
         if seq_scope is not None:
             scope_stack.append((indent, seq_scope[0], seq_scope[1]))
         elif _opens_nested_binding_scope(raw_line):
-            scope_stack.append((indent, name, None))
+            scope_stack.append((indent, primary, None))
     return keys
 
 

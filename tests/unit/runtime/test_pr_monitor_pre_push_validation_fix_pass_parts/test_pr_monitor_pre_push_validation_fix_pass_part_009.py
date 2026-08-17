@@ -312,6 +312,25 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = False\n",
     )
+    # Nested / mid-statement assignments must supersede too: the line-start
+    # assign anchor misses ``if ready: FEATURE_ENABLED = False`` and would
+    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nif ready: FEATURE_ENABLED = False\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nx = 1; FEATURE_ENABLED = False\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n# if ready: FEATURE_ENABLED = False\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=('FEATURE_ENABLED = True\nmsg = "if ready: FEATURE_ENABLED = False"\n'),
+    )
     # Duplicate earlier ``False`` in the salvage blob must not hide an appended
     # override via set-membership tip-extra accounting (PRRT_kwDOSJAM6s6ZrFdv).
     assert not _added_salvage_blob_retained(
