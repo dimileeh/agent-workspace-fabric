@@ -1043,6 +1043,17 @@ def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set
     }
 
 
+def _is_arrow_function_binding_opener(opener: str) -> bool:
+    """Return True when a binding opener's RHS uses an arrow function.
+
+    Callers pass binding-start openers from ``_last_binding_start_indices``.
+    ``=>`` distinguishes arrow RHS forms (``const apply = () => {``,
+    ``helper = () => {``) from ordinary leaf assigns so tip-extra control-flow
+    inside those bodies is not skipped (PRRT_kwDOSJAM6s6ZyaxJ).
+    """
+    return "=>" in opener
+
+
 def _unchanged_nested_callable_body_indices(
     *,
     lines: list[str],
@@ -1051,12 +1062,13 @@ def _unchanged_nested_callable_body_indices(
     class_end: int,
     changed_keys: set[str],
 ) -> set[int]:
-    """Return body indices of nested def/function callables salvage did not edit.
+    """Return body indices of nested callables salvage did not edit.
 
     Used so class-level control-flow scanning can fail closed on unrecognized
     method regions (JS shorthand) without dropping leaf-assignment salvage when
-    an unrelated nested ``def``/``function`` gains tip-extra ``return``
-    (PRRT_kwDOSJAM6s6Zvk1G; compare leaf retention in PRRT_kwDOSJAM6s6ZvVZK).
+    an unrelated nested ``def``/``function``/arrow gains tip-extra ``return``
+    (PRRT_kwDOSJAM6s6Zvk1G; compare leaf retention in PRRT_kwDOSJAM6s6ZvVZK;
+    arrow fields PRRT_kwDOSJAM6s6ZyaxJ).
     """
     excluded: set[int] = set()
     for key, start in starts.items():
@@ -1067,7 +1079,11 @@ def _unchanged_nested_callable_body_indices(
         if start >= len(lines):
             continue
         opener = lines[start]
-        if _DEF_BINDING_RE.match(opener) is None and _FUNCTION_BINDING_RE.match(opener) is None:
+        if (
+            _DEF_BINDING_RE.match(opener) is None
+            and _FUNCTION_BINDING_RE.match(opener) is None
+            and not _is_arrow_function_binding_opener(opener)
+        ):
             continue
         nested_end = _binding_span_end_exclusive(lines, start)
         excluded.update(range(start + 1, nested_end))
@@ -1081,17 +1097,21 @@ def _callable_body_line_indices(
     key: str,
     changed_keys: set[str],
 ) -> set[int] | None:
-    """Return body indices for a def/function/class key, or None if not callable.
+    """Return body indices for a def/function/arrow/class key, or None if not callable.
 
-    Class bodies exclude nested ``def``/``function`` spans whose keys are not in
-    ``changed_keys`` (PRRT_kwDOSJAM6s6Zvk1G).
+    Class bodies exclude nested ``def``/``function``/arrow spans whose keys are
+    not in ``changed_keys`` (PRRT_kwDOSJAM6s6Zvk1G, PRRT_kwDOSJAM6s6ZyaxJ).
     """
     start = starts.get(key)
     if start is None or start >= len(lines):
         return None
     opener = lines[start]
     end = _binding_span_end_exclusive(lines, start)
-    if _DEF_BINDING_RE.match(opener) is not None or _FUNCTION_BINDING_RE.match(opener) is not None:
+    if (
+        _DEF_BINDING_RE.match(opener) is not None
+        or _FUNCTION_BINDING_RE.match(opener) is not None
+        or _is_arrow_function_binding_opener(opener)
+    ):
         return set(range(start + 1, end))
     if _CLASS_BINDING_RE.match(opener) is None:
         return None
@@ -1138,16 +1158,16 @@ def _tip_extra_control_flow_in_changed_callables(
     """Return True when tip-extra control-flow sits in a salvage-changed callable.
 
     Early ``return`` / ``raise`` / ``throw`` / ordinary ``if`` headers inside a
-    ``def``/``function`` whose body the salvage edited can leave the salvaged
-    fix unreachable while ``git merge-file`` still equals HEAD. Binding and call
-    scanners miss those tip-extra lines (PRRT_kwDOSJAM6s6ZvVZK). Changed
-    ``class`` spans also count, minus nested ``def``/``function`` bodies whose
-    keys are unchanged, so JS method-shorthand edits fail closed without
-    dropping leaf-assignment salvage when an unrelated helper gains ``return``
-    (PRRT_kwDOSJAM6s6Zvk1G). Tip-extra is computed per callable body so an
-    identical wrapper line elsewhere in the salvage commit cannot steal
-    multiset budget from a new disabling header in the changed callable
-    (PRRT_kwDOSJAM6s6Zvll3).
+    ``def``/``function``/arrow whose body the salvage edited can leave the
+    salvaged fix unreachable while ``git merge-file`` still equals HEAD. Binding
+    and call scanners miss those tip-extra lines (PRRT_kwDOSJAM6s6ZvVZK,
+    PRRT_kwDOSJAM6s6ZyaxJ). Changed ``class`` spans also count, minus nested
+    ``def``/``function``/arrow bodies whose keys are unchanged, so JS
+    method-shorthand edits fail closed without dropping leaf-assignment salvage
+    when an unrelated helper gains ``return`` (PRRT_kwDOSJAM6s6Zvk1G). Tip-extra
+    is computed per callable body so an identical wrapper line elsewhere in the
+    salvage commit cannot steal multiset budget from a new disabling header in
+    the changed callable (PRRT_kwDOSJAM6s6Zvll3).
     """
     if not changed_keys:
         return False
@@ -1233,12 +1253,13 @@ def _tip_extra_can_supersede_modified_salvage(
     only changed bindings ∪ changed call names — not every commit binding — so a
     tip-extra ``helper()`` on an unchanged helper does not drop a still-present
     binding fix (PRRT_kwDOSJAM6s6ZrR2e).     Tip-extra control-flow inside a
-    salvage-modified ``def``/``function`` body (early ``return`` / ``if (false)``)
-    also supersedes when it would leave the salvaged fix unreachable while
-    merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK), including JS class
-    method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G);
-    per-callable body tip-extra avoids identical elsewhere wrappers stealing
-    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3).     Collection mutation helpers (``FLAGS.__setitem__("enabled", False)`` /
+    salvage-modified ``def``/``function``/arrow body (early ``return`` /
+    ``if (false)``) also supersedes when it would leave the salvaged fix
+    unreachable while merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK,
+    PRRT_kwDOSJAM6s6ZyaxJ), including JS class method shorthand under a changed
+    ``class`` span (PRRT_kwDOSJAM6s6Zvk1G); per-callable body tip-extra avoids
+    identical elsewhere wrappers stealing file-level multiset budget
+    (PRRT_kwDOSJAM6s6Zvll3).     Collection mutation helpers (``FLAGS.__setitem__("enabled", False)`` /
     ``FLAGS.update(…)`` / ``FLAGS.clear()``) synthesize subscript keys or fail
     closed when an opaque mutator shares a salvaged subscript receiver
     (PRRT_kwDOSJAM6s6ZwrnH). ``Object.assign(guard, {enabled: false})``

@@ -713,3 +713,113 @@ def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage(
             "}\n"
         ),
     )
+    # Arrow bindings are changed callables too: tip-extra return near the top
+    # must supersede when salvage flipped a later call (PRRT_kwDOSJAM6s6ZyaxJ).
+    parent_arrow = (
+        "const apply = () => {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.disable();\n"
+        "};\n"
+    )
+    commit_arrow = (
+        "const apply = () => {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.enable();\n"
+        "};\n"
+    )
+    assert "apply" in _salvage_changed_binding_names(
+        parent_blob=parent_arrow, commit_blob=commit_arrow
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_arrow,
+        commit_blob=commit_arrow,
+        head_blob=(
+            "const apply = () => {\n"
+            "  return;\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "};\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_arrow,
+        commit_blob=commit_arrow,
+        head_blob=(
+            "const apply = () => {\n"
+            "  if (false) {\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "  }\n"
+            "};\n"
+        ),
+    )
+    parent_async_arrow = (
+        "const apply = async () => {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.disable();\n"
+        "};\n"
+    )
+    commit_async_arrow = (
+        "const apply = async () => {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.enable();\n"
+        "};\n"
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_async_arrow,
+        commit_blob=commit_async_arrow,
+        head_blob=(
+            "const apply = async () => {\n"
+            "  throw new Error('skip');\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "};\n"
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_arrow,
+        commit_blob=commit_arrow,
+        head_blob=commit_arrow + "const other = () => {\n  return;\n};\n",
+    )
+    # Unchanged nested class-field arrows stay out of class-body tip-extra scope
+    # (same leaf retention as nested def/function; PRRT_kwDOSJAM6s6Zvk1G).
+    parent_cls_arrow = (
+        "class C {\n  FEATURE_ENABLED = false;\n  helper = () => {\n    pass;\n  }\n}\n"
+    )
+    commit_cls_arrow = (
+        "class C {\n  FEATURE_ENABLED = true;\n  helper = () => {\n    pass;\n  }\n}\n"
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_cls_arrow,
+        commit_blob=commit_cls_arrow,
+        head_blob=(
+            "class C {\n"
+            "  FEATURE_ENABLED = true;\n"
+            "  helper = () => {\n"
+            "    return;\n"
+            "    pass;\n"
+            "  }\n"
+            "}\n"
+        ),
+    )
