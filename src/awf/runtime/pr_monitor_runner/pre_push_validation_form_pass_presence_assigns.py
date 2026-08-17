@@ -232,6 +232,21 @@ _INLINE_DEL_BINDING_RE = re.compile(
     rf"({_DEL_TARGET_SCAN}(?:[ \t]*,[ \t]*{_DEL_TARGET_SCAN})*)"
     r"[ \t]*\)?"
 )
+# Shell ``unset`` removes a salvage binding without a rebind or call site the
+# same way ``del`` / ``delete`` do; tip ``unset FEATURE_ENABLED`` /
+# ``unset -v FEATURE_ENABLED`` kept a line-aligned salvage prefix / clean
+# merge-file equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6ZuRSm).
+# Optional short options (``-v`` / ``-f`` / ``-n`` / combinations) and ``--``
+# precede one or more bare shell identifiers; ``unsettable`` is not a hit
+# because whitespace (or options) is required after ``unset``.
+_UNSET_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_UNSET_NAME_RE = re.compile(_UNSET_NAME)
+_INLINE_UNSET_BINDING_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))unset"
+    r"(?:[ \t]+(?:-[A-Za-z]+|--))*"
+    r"[ \t]+"
+    rf"({_UNSET_NAME}(?:[ \t]+{_UNSET_NAME})*)"
+)
 # JS/C/C++ ``++`` / ``--`` update expressions mutate a salvage binding without
 # an equals-style rebind or call site, so tip ``retryBudget--`` /
 # ``++retryBudget`` kept a line-aligned salvage prefix / clean merge-file
@@ -601,6 +616,29 @@ def _del_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _unset_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return names removed by shell ``unset`` on ``raw_line``.
+
+    Tip-extra ``unset FEATURE_ENABLED`` / ``unset -v FEATURE_ENABLED`` /
+    ``unset -- FEATURE_ENABLED`` / ``if true; then unset FEATURE_ENABLED; fi``
+    must supersede salvage of those bindings; assign, ``del`` / ``delete``, and
+    call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6ZuRSm).
+    Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
+    ``_executable_call_scan_text``.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for match in _INLINE_UNSET_BINDING_RE.finditer(scan):
+        for part_match in _UNSET_NAME_RE.finditer(scan, match.start(1), match.end(1)):
+            name = raw_line[part_match.start() : part_match.end()]
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
 def _update_expr_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return names mutated by ``++`` / ``--`` on ``raw_line``.
 
@@ -632,20 +670,23 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     Additional mid-line equals-style assigns are appended so compound tip-extra
     lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y). Python
     ``del`` and JS ``delete`` targets are included so deletions supersede
-    without a rebind (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). JS/C/C++
-    ``++`` / ``--`` update targets are included so increment/decrement
-    supersedes without an equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb).
+    without a rebind (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). Shell
+    ``unset`` targets (including ``unset -v NAME``) are included the same way
+    (PRRT_kwDOSJAM6s6ZuRSm). JS/C/C++ ``++`` / ``--`` update targets are
+    included so increment/decrement supersedes without an equals-style rebind
+    (PRRT_kwDOSJAM6s6Zs-Rb).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
     deleted = _del_binding_names(raw_line)
+    unset = _unset_binding_names(raw_line)
     updated = _update_expr_binding_names(raw_line)
-    if primary is None and not inline and not deleted and not updated:
+    if primary is None and not inline and not deleted and not unset and not updated:
         return ()
     names: list[str] = []
     if primary is not None:
         names.append(primary)
-    for name in (*inline, *deleted, *updated):
+    for name in (*inline, *deleted, *unset, *updated):
         if name not in names:
             names.append(name)
     return tuple(names)
