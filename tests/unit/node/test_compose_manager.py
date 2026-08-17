@@ -7,6 +7,7 @@ compose YAML is syntactically valid and contains all the expected wiring.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -328,6 +329,101 @@ class TestRender:
         claude_configuration = tmp_path / "auth" / ".claude.json"
         claude_configuration.parent.mkdir()
         claude_configuration.write_text('{"mcpServers": {"untrusted": {}}}\n', encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert not clarification_configuration.exists()
+
+    @pytest.mark.unit
+    def test_clarification_preserves_claude_configuration_credentials(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification inherits Claude credential fields but no MCP or hook config."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text(
+            json.dumps(
+                {
+                    "primaryApiKey": "sk-ant-test",
+                    "oauthAccount": {"accountUuid": "account-uuid"},
+                    "customApiKeyResponses": {"approved": ["hash"], "rejected": []},
+                    "mcpServers": {"untrusted": {}},
+                    "hooks": {"PreToolUse": [{"command": "untrusted"}]},
+                    "projects": {"/workspace": {"history": ["prompt"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert json.loads(clarification_configuration.read_text(encoding="utf-8")) == {
+            "primaryApiKey": "sk-ant-test",
+            "oauthAccount": {"accountUuid": "account-uuid"},
+            "customApiKeyResponses": {"approved": ["hash"], "rejected": []},
+        }
+        assert clarification_configuration.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.unit
+    def test_clarification_tolerates_unparsable_claude_configuration(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malformed ``~/.claude.json`` degrades to no file instead of failing startup."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text("not json", encoding="utf-8")
 
         parsed = yaml.safe_load(
             manager.render(

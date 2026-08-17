@@ -140,7 +140,38 @@ services:
           done
         else
           case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
-            /home/agent/.claude.json) ;;
+            /home/agent/.claude.json)
+              python - <<'PY'
+        import json
+        import os
+
+        # ``~/.claude.json`` mixes Claude's credential fields with MCP server, hook,
+        # and project configuration. Provider readiness accepts the file as a Claude
+        # auth source, so the clarification re-ask must inherit the credentials or a
+        # ``.claude.json``-only host runs it unauthenticated; the untrusted MCP and
+        # hook configuration stays out of the container. Nothing is written when no
+        # credential field survives, so a configuration-only file is still omitted.
+        source = "/run/awf/clarification-auth/{{ loop.index0 }}"
+        target = os.environ["AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"]
+        credential_fields = ("primaryApiKey", "oauthAccount", "customApiKeyResponses")
+        try:
+          with open(source, encoding="utf-8") as source_handle:
+            configuration = json.load(source_handle)
+        except (OSError, ValueError):
+          # A host file that is unreadable or not JSON carries no usable credential:
+          # degrade to the previous "copy nothing" behavior instead of failing startup.
+          configuration = None
+        credentials = (
+          {name: configuration[name] for name in credential_fields if name in configuration}
+          if isinstance(configuration, dict)
+          else {}
+        )
+        if credentials:
+          descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as target_handle:
+            json.dump(credentials, target_handle)
+        PY
+              ;;
             *) cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" ;;
           esac
         fi
