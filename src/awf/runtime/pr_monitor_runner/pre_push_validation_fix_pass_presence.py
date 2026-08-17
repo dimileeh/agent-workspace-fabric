@@ -705,6 +705,64 @@ def _unchanged_nested_callable_body_indices(
     return excluded
 
 
+def _callable_body_line_indices(
+    *,
+    lines: list[str],
+    starts: dict[str, int],
+    key: str,
+    changed_keys: set[str],
+) -> set[int] | None:
+    """Return body indices for a def/function/class key, or None if not callable.
+
+    Class bodies exclude nested ``def``/``function`` spans whose keys are not in
+    ``changed_keys`` (PRRT_kwDOSJAM6s6Zvk1G).
+    """
+    start = starts.get(key)
+    if start is None or start >= len(lines):
+        return None
+    opener = lines[start]
+    end = _binding_span_end_exclusive(lines, start)
+    if _DEF_BINDING_RE.match(opener) is not None or _FUNCTION_BINDING_RE.match(opener) is not None:
+        return set(range(start + 1, end))
+    if _CLASS_BINDING_RE.match(opener) is None:
+        return None
+    class_body = set(range(start + 1, end))
+    class_body -= _unchanged_nested_callable_body_indices(
+        lines=lines,
+        starts=starts,
+        class_start=start,
+        class_end=end,
+        changed_keys=changed_keys,
+    )
+    return class_body
+
+
+def _tip_extra_indices_within_body(
+    *,
+    commit_lines: list[str],
+    commit_body: set[int] | None,
+    head_lines: list[str],
+    head_body: set[int],
+) -> set[int]:
+    """Tip-extra head body indices vs the same callable's commit body multiset.
+
+    Scoped to one callable so an identical control-flow line elsewhere in the
+    salvage blob cannot greedily consume tip-extra budget for a new wrapper
+    inside the changed callable (PRRT_kwDOSJAM6s6Zvll3).
+    """
+    remaining = Counter(commit_lines[i] for i in sorted(commit_body or ()) if i < len(commit_lines))
+    extra: set[int] = set()
+    for idx in sorted(head_body):
+        if idx >= len(head_lines):
+            continue
+        line = head_lines[idx]
+        if remaining[line] > 0:
+            remaining[line] -= 1
+        else:
+            extra.add(idx)
+    return extra
+
+
 def _tip_extra_control_flow_in_changed_callables(
     *, commit_blob: str, head_blob: str, changed_keys: set[str]
 ) -> bool:
@@ -717,45 +775,45 @@ def _tip_extra_control_flow_in_changed_callables(
     ``class`` spans also count, minus nested ``def``/``function`` bodies whose
     keys are unchanged, so JS method-shorthand edits fail closed without
     dropping leaf-assignment salvage when an unrelated helper gains ``return``
-    (PRRT_kwDOSJAM6s6Zvk1G).
+    (PRRT_kwDOSJAM6s6Zvk1G). Tip-extra is computed per callable body so an
+    identical wrapper line elsewhere in the salvage commit cannot steal
+    multiset budget from a new disabling header in the changed callable
+    (PRRT_kwDOSJAM6s6Zvll3).
     """
     if not changed_keys:
         return False
-    extra_indices = _tip_extra_line_indices(commit_blob=commit_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    starts = _last_binding_start_indices(head_blob)
-    body_indices: set[int] = set()
+    head_lines = head_blob.splitlines()
+    commit_lines = commit_blob.splitlines()
+    head_starts = _last_binding_start_indices(head_blob)
+    commit_starts = _last_binding_start_indices(commit_blob)
+    tip_extra_body: set[int] = set()
     for key in changed_keys:
-        start = starts.get(key)
-        if start is None or start >= len(lines):
-            continue
-        opener = lines[start]
-        end = _binding_span_end_exclusive(lines, start)
-        if (
-            _DEF_BINDING_RE.match(opener) is not None
-            or _FUNCTION_BINDING_RE.match(opener) is not None
-        ):
-            body_indices.update(range(start + 1, end))
-            continue
-        if _CLASS_BINDING_RE.match(opener) is None:
-            continue
-        class_body = set(range(start + 1, end))
-        class_body -= _unchanged_nested_callable_body_indices(
-            lines=lines,
-            starts=starts,
-            class_start=start,
-            class_end=end,
+        head_body = _callable_body_line_indices(
+            lines=head_lines,
+            starts=head_starts,
+            key=key,
             changed_keys=changed_keys,
         )
-        body_indices.update(class_body)
-    if not body_indices:
+        if not head_body:
+            continue
+        commit_body = _callable_body_line_indices(
+            lines=commit_lines,
+            starts=commit_starts,
+            key=key,
+            changed_keys=changed_keys,
+        )
+        tip_extra_body |= _tip_extra_indices_within_body(
+            commit_lines=commit_lines,
+            commit_body=commit_body,
+            head_lines=head_lines,
+            head_body=head_body,
+        )
+    if not tip_extra_body:
         return False
     in_block_comment = False
     in_triple_double = False
     in_triple_single = False
-    for idx, raw_line in enumerate(lines):
+    for idx, raw_line in enumerate(head_lines):
         line_in_non_code = in_block_comment or in_triple_double or in_triple_single
         in_block_comment, in_triple_double, in_triple_single = (
             _advance_string_or_block_comment_state(
@@ -765,7 +823,7 @@ def _tip_extra_control_flow_in_changed_callables(
                 in_triple_single=in_triple_single,
             )
         )
-        if line_in_non_code or idx not in extra_indices or idx not in body_indices:
+        if line_in_non_code or idx not in tip_extra_body:
             continue
         if _line_is_control_flow_change(raw_line):
             return True
@@ -809,7 +867,9 @@ def _tip_extra_can_supersede_modified_salvage(
     salvage-modified ``def``/``function`` body (early ``return`` / ``if (false)``)
     also supersedes when it would leave the salvaged fix unreachable while
     merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK), including JS class
-    method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G).
+    method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G);
+    per-callable body tip-extra avoids identical elsewhere wrappers stealing
+    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(

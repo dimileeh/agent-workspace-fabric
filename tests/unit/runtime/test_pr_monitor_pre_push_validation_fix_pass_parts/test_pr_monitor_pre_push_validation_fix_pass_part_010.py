@@ -661,3 +661,55 @@ def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage(
             "}\n"
         ),
     )
+    # File-level multiset tip-extra can greedily attribute an elsewhere identical
+    # control-flow line onto the new wrapper inside the earlier changed callable,
+    # so per-callable body tip-extra must still supersede (PRRT_kwDOSJAM6s6Zvll3).
+    parent_dup = (
+        "function apply() {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.disable();\n"
+        "}\n"
+        "function other() {\n"
+        "  if (false) {\n"
+        "  helper();\n"
+        "  }\n"
+        "}\n"
+    )
+    commit_dup = (
+        "function apply() {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.enable();\n"
+        "}\n"
+        "function other() {\n"
+        "  if (false) {\n"
+        "  helper();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert "apply" in _salvage_changed_binding_names(parent_blob=parent_dup, commit_blob=commit_dup)
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dup,
+        commit_blob=commit_dup,
+        head_blob=(
+            "function apply() {\n"
+            "  if (false) {\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "  }\n"
+            "}\n"
+            "function other() {\n"
+            "  if (false) {\n"
+            "  helper();\n"
+            "  }\n"
+            "}\n"
+        ),
+    )
