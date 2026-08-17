@@ -312,12 +312,30 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = False\n",
     )
+    # Compound assigns must supersede like plain ``=``; otherwise ``&=`` / ``+=``
+    # / ``-=`` / ``|=`` / ``^=`` appends keep stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZsNCC).
+    for compound_line in (
+        "FEATURE_ENABLED &= False\n",
+        "FEATURE_ENABLED += 1\n",
+        "FEATURE_ENABLED -= 1\n",
+        "FEATURE_ENABLED |= True\n",
+        "FEATURE_ENABLED ^= True\n",
+    ):
+        assert not _added_salvage_blob_retained(
+            commit_blob="FEATURE_ENABLED = True\n",
+            head_blob="FEATURE_ENABLED = True\n" + compound_line,
+        )
     # Nested / mid-statement assignments must supersede too: the line-start
     # assign anchor misses ``if ready: FEATURE_ENABLED = False`` and would
     # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
     assert not _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nif ready: FEATURE_ENABLED = False\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nif ready: FEATURE_ENABLED &= False\n",
     )
     assert not _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",

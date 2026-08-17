@@ -42,6 +42,11 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # TOML dotted keys join bare or quoted segments with ``.``
 # (``feature.enabled`` / ``site."google.com"``; PRRT_kwDOSJAM6s6Zql88).
 _ASSIGN_KEY_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')'
+# Plain ``=`` or compound ``+=`` / ``-=`` / ``*=`` / ``/=`` / ``%=`` / ``**=`` /
+# ``//=`` / ``&=`` / ``|=`` / ``^=`` / ``<<=`` / ``>>=``. Longest ops first so
+# ``**=`` is not split as ``*`` + ``*=``. ``==`` is excluded via ``=(?!=)``
+# (PRRT_kwDOSJAM6s6ZsNCC).
+_EQUALS_STYLE_ASSIGN_OP = r"(?:<<=|>>=|\*\*=|//=|[+\-*/%&|^]=|=(?!=))"
 # Statement-leading assign forms (line-start). Mid-statement overrides such as
 # ``if ready: FEATURE_ENABLED = False`` are collected separately via
 # ``_INLINE_ASSIGN_BINDING_RE`` so tip-extra nested rebinds still supersede
@@ -52,7 +57,7 @@ _ASSIGN_BINDING_RE = re.compile(
     # so ``feature.enabled = true`` binds as ``feature.enabled``, not nothing.
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})+)"
     r"(?:"
-    r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"
+    rf"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*{_EQUALS_STYLE_ASSIGN_OP}"
     r"|"
     r"[ \t]*:="
     r"|"
@@ -61,7 +66,9 @@ _ASSIGN_BINDING_RE = re.compile(
     r"|"
     r"([A-Za-z_][A-Za-z0-9_-]*)"
     r"(?:"
-    r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
+    # `name =` / `name &=` / `name: T =` (typed optional; compound after type
+    # still binds because ``[^=\n]+`` stops before the final ``=``).
+    rf"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*{_EQUALS_STYLE_ASSIGN_OP}"
     r"|"
     r"[ \t]*:="  # `name :=`
     r"|"
@@ -78,25 +85,26 @@ _ASSIGN_BINDING_RE = re.compile(
     # stays one segment and does not collapse with dotted ``a.b``; YAML/JSON
     # ``:`` bindings strip without re-quoting so the same spellings still match
     # (PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6ZqoYV,
-    # PRRT_kwDOSJAM6s6ZqtHj).
-    r'("[^"\n]+")[ \t]*(?::[ \t]*(?!=)|=(?!=))'
+    # PRRT_kwDOSJAM6s6ZqtHj). Compound ``=`` forms match too (PRRT_kwDOSJAM6s6ZsNCC).
+    rf'("[^"\n]+")[ \t]*(?::[ \t]*(?!=)|{_EQUALS_STYLE_ASSIGN_OP})'
     r"|"
-    r"('[^'\n]+')[ \t]*(?::[ \t]*(?!=)|=(?!=))"
+    rf"('[^'\n]+')[ \t]*(?::[ \t]*(?!=)|{_EQUALS_STYLE_ASSIGN_OP})"
     r")"
 )
-# Mid-line / nested ``name =`` / ``name :=`` / dotted ``a.b =`` (and shell
-# ``export`` / ``declare`` / ``typeset`` / ``readonly`` forms). Typed
+# Mid-line / nested ``name =`` / ``name &=`` / ``name :=`` / dotted ``a.b =``
+# (and shell ``export`` / ``declare`` / ``typeset`` / ``readonly`` forms). Typed
 # ``name: T =`` is omitted here: the optional type span would treat
 # ``if ready: FEATURE_ENABLED =`` as a typed bind of ``ready``. Statement-leading
 # typed assigns stay on ``_ASSIGN_BINDING_RE``. Bare YAML ``key:`` is also
 # omitted. Dotted paths are captured whole so ``feature.enabled =`` does not
-# also emit a bare ``enabled`` leaf (PRRT_kwDOSJAM6s6ZsD5y).
+# also emit a bare ``enabled`` leaf (PRRT_kwDOSJAM6s6ZsD5y). Compound ops
+# supersede salvage like plain ``=`` (PRRT_kwDOSJAM6s6ZsNCC).
 _INLINE_ASSIGN_BINDING_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))"
     r"(?:export[ \t]+|(?:declare|typeset|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?"
     r"([A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
     r"(?:"
-    r"[ \t]*=(?!=)"
+    rf"[ \t]*{_EQUALS_STYLE_ASSIGN_OP}"
     r"|"
     r"[ \t]*:="
     r")"
