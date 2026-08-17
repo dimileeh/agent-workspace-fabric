@@ -158,10 +158,37 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "guard.disable();\n",
     )
-    # Commented / unrelated member calls stay retained.
+    # Nested / mid-expression calls must supersede too: statement-leading-only
+    # matching misses ``if ready: guard.disable()`` and ``result = guard.disable()``
+    # and would retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZrYJk).
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "if ready: guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "result = guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "x = await guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "print(guard.disable())\n",
+    )
+    # Commented / string-only / unrelated member calls stay retained.
     assert _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "# guard.disable()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "code  # guard.disable()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'x = "guard.disable()"\n',
     )
     assert _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
@@ -794,10 +821,36 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_member,
         head_blob=commit_member + "await guard.disable()\n",
     )
+    # Nested / mid-expression restores must supersede (PRRT_kwDOSJAM6s6ZrYJk).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "if ready: guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "result = guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "print(guard.disable())\n",
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,
         commit_blob=commit_member,
         head_blob=commit_member + "# guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "code  # guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + 'x = "guard.disable()"\n',
     )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,

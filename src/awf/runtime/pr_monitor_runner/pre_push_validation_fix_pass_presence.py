@@ -135,13 +135,22 @@ _TOML_TABLE_HEADER_RE = re.compile(
     r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
 )
 # Bare / dotted / ``await`` call sites (``disable_guard()`` /
-# ``guard.disable()`` / ``await guard.disable();``). Statement-leading identifier
-# chain then ``(``; ``def``/``function``/``class`` forms do not match because the
-# keyword is not immediately followed by ``(``. Used so tip-extra calls that
-# invoke salvage-bound names fail closed even though calls produce no binding
-# key (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE).
+# ``guard.disable()`` / ``await guard.disable();`` / nested
+# ``if ready: guard.disable()``). Identifier chain then ``(`` anywhere in
+# executable text (not only statement-leading). ``def``/``function``/``class``
+# forms are filtered via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Used so tip-extra
+# calls that invoke salvage-bound names fail closed even though calls produce
+# no binding key (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE,
+# PRRT_kwDOSJAM6s6ZrYJk).
 _CALL_SITE_RE = re.compile(
-    r"(?m)^[ \t]*(?:await[ \t]+)?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)[ \t]*\("
+    r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)[ \t]*\("
+)
+# Prefix ending at a call-site match start that means the name is a definition
+# binding, not an invocation (``def`` / ``async def`` / ``function`` / ``class``).
+_CALL_SITE_DEFINITION_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9_])(?:(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?(?:def|function)"
+    r"|(?:export[ \t]+(?:default[ \t]+)?)?class)[ \t]+$"
 )
 
 
@@ -821,8 +830,76 @@ def _tip_extra_keys_supersede_baseline(
     return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
 
 
+def _executable_call_scan_text(raw_line: str) -> str:
+    """Return ``raw_line`` with strings and line-comment tails replaced by spaces.
+
+    Preserves indices so ``_CALL_SITE_RE.finditer`` aligns with the original line
+    for definition-prefix checks. Nested calls inside ``print(guard.disable())``
+    stay visible; ``"guard.disable()"`` and ``code  # guard.disable()`` do not
+    (PRRT_kwDOSJAM6s6ZrYJk).
+    """
+    chars = list(raw_line)
+    i = 0
+    n = len(raw_line)
+    in_double = False
+    in_single = False
+    while i < n:
+        ch = raw_line[i]
+        if in_double:
+            chars[i] = " "
+            if ch == "\\" and i + 1 < n:
+                chars[i + 1] = " "
+                i += 2
+                continue
+            if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, True):
+                in_double = False
+            i += 1
+            continue
+        if in_single:
+            chars[i] = " "
+            if ch == "\\" and i + 1 < n:
+                chars[i + 1] = " "
+                i += 2
+                continue
+            if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, True):
+                in_single = False
+            i += 1
+            continue
+        if raw_line.startswith('"""', i) or raw_line.startswith("'''", i):
+            quote = raw_line[i : i + 3]
+            for _ in range(3):
+                chars[i] = " "
+                i += 1
+            while i < n:
+                if raw_line.startswith(quote, i):
+                    for _ in range(3):
+                        chars[i] = " "
+                        i += 1
+                    break
+                chars[i] = " "
+                i += 1
+            continue
+        if ch == "#" or (ch == "/" and i + 1 < n and raw_line[i + 1] == "/"):
+            while i < n:
+                chars[i] = " "
+                i += 1
+            break
+        if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
+            chars[i] = " "
+            in_double = True
+            i += 1
+            continue
+        if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, False):
+            chars[i] = " "
+            in_single = True
+            i += 1
+            continue
+        i += 1
+    return "".join(chars)
+
+
 def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
-    """Return receiver/callee names for a statement-leading call, or empty.
+    """Return receiver/callee names for call sites on a line, or empty.
 
     Bare ``disable_guard()`` yields ``{disable_guard}``. Dotted
     ``guard.disable()`` / ``a.b.c()`` yields the receiver and the full dotted
@@ -830,21 +907,29 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     intersect salvage bindings and the same qualified callee — not an unpaired
     method leaf that would collide with ``other.disable()`` or scoped
     ``Guards.disable_guard`` (PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrWwo).
-    ``#`` / ``//`` comments are ignored. Definitions are not call sites:
-    ``def name(`` / ``function name(`` leave the keyword before ``(`` so
-    ``_CALL_SITE_RE`` does not match them.
+    Nested / mid-expression calls (``if ready: guard.disable()``,
+    ``result = guard.disable()``, ``print(guard.disable())``) are included
+    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` comments and string literals are
+    ignored. Definitions are not call sites: ``def name(`` / ``function name(``
+    / ``class Name(`` are skipped via ``_CALL_SITE_DEFINITION_PREFIX_RE``.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
         return frozenset()
-    match = _CALL_SITE_RE.match(raw_line)
-    if match is None:
-        return frozenset()
-    dotted = match.group(1)
-    parts = dotted.split(".")
-    if len(parts) == 1:
-        return frozenset(parts)
-    return frozenset({parts[0], dotted})
+    names: set[str] = set()
+    scan = _executable_call_scan_text(raw_line)
+    for match in _CALL_SITE_RE.finditer(scan):
+        prefix = raw_line[: match.start()]
+        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
+            continue
+        dotted = match.group(1)
+        parts = dotted.split(".")
+        if len(parts) == 1:
+            names.add(parts[0])
+        else:
+            names.add(parts[0])
+            names.add(dotted)
+    return frozenset(names)
 
 
 def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
@@ -856,7 +941,7 @@ def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bo
 
 
 def _call_site_name_counts(text: str) -> Counter[str]:
-    """Count statement-leading call names in executable (non-comment) lines."""
+    """Count executable call names in non-comment lines (including nested calls)."""
     counts: Counter[str] = Counter()
     in_block_comment = False
     in_triple_double = False
