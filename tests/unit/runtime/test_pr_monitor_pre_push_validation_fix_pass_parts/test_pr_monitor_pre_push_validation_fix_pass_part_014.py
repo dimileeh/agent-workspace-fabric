@@ -109,6 +109,24 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_sub,
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS[0] = False\n'),
     )
+    # Surplus identical candidate binding makes exact-key overlap non-empty and
+    # last-span equality false; nonliteral ``FLAGS[key]`` on the salvaged
+    # receiver must still fail closed (PRRT_kwDOSJAM6s6ZwnzM).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=(
+            'FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS["enabled"] = True\nFLAGS[key] = False\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=(
+            'FLAGS = {}\nFLAGS["enabled"] = True\n'
+            'FLAGS["enabled"] = True\nkey = "enabled"\nFLAGS[key] = False\n'
+        ),
+    )
     # Nested / mid-statement rebinds must supersede: line-start assign matching
     # misses ``if ready: FEATURE_ENABLED = False`` so merge-file equality would
     # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
@@ -1368,6 +1386,12 @@ def test_added_salvage_rejects_nonliteral_subscript_on_salvaged_receiver() -> No
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "FLAGS[key] = False\n",
+    )
+    # Surplus identical salvage binding + tip-extra ``FLAGS[key]`` must still
+    # reject retention (PRRT_kwDOSJAM6s6ZwnzM).
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'FLAGS["enabled"] = True\nFLAGS[key] = False\n',
     )
     assert _added_salvage_blob_retained(
         commit_blob=salvage,

@@ -513,7 +513,9 @@ def _tip_extra_keys_supersede_baseline(
     the effective final binding still supersede (PRRT_kwDOSJAM6s6ZrFdv).
     Exact-key intersection cannot relate ``FLAGS[key]`` to salvaged
     ``FLAGS["enabled"]``; tip-extra nonliteral subscripts that share a salvaged
-    receiver fail closed (PRRT_kwDOSJAM6s6Zv4pe).
+    receiver fail closed even when a surplus identical candidate binding made
+    exact-key overlap non-empty (PRRT_kwDOSJAM6s6Zv4pe,
+    PRRT_kwDOSJAM6s6ZwnzM).
     """
     if not candidate_keys:
         return False
@@ -522,17 +524,19 @@ def _tip_extra_keys_supersede_baseline(
         return False
     tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
     overlapping = candidate_keys & tip_extra_keys
-    if not overlapping:
-        # Computed index (``FLAGS[key]``) never equals literal salvage keys; reject
-        # when the tip-extra subscript shares a salvaged receiver
-        # (PRRT_kwDOSJAM6s6Zv4pe).
-        return _nonliteral_subscript_shares_receiver(
-            tip_extra_keys=tip_extra_keys,
-            candidate_keys=candidate_keys,
-        )
-    baseline_spans = _last_binding_spans(baseline_blob)
-    head_spans = _last_binding_spans(head_blob)
-    return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
+    if overlapping:
+        baseline_spans = _last_binding_spans(baseline_blob)
+        head_spans = _last_binding_spans(head_blob)
+        if any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping):
+            return True
+    # Computed index (``FLAGS[key]``) never equals literal salvage keys; reject
+    # when the tip-extra subscript shares a salvaged receiver. Run after the
+    # exact-key path so surplus identical candidate bindings cannot skip this
+    # check (PRRT_kwDOSJAM6s6Zv4pe, PRRT_kwDOSJAM6s6ZwnzM).
+    return _nonliteral_subscript_shares_receiver(
+        tip_extra_keys=tip_extra_keys,
+        candidate_keys=candidate_keys,
+    )
 
 
 def _call_site_name_counts(text: str) -> Counter[str]:
