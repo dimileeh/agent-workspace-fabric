@@ -432,3 +432,189 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_dup_member,
         head_blob=commit_dup_member + "other.disable()\n",
     )
+
+
+@pytest.mark.unit
+def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage() -> None:
+    """Tip-extra control-flow in a salvage-modified callable must supersede.
+
+    Salvage that flips ``guard.disable()`` → ``guard.enable()`` inside a
+    function marks the callable binding changed. A descendant that inserts
+    ``return`` (or other transfer/header control-flow) near the start—with
+    enough unchanged lines that ``git merge-file`` still equals HEAD—is neither
+    a rebind nor a call on the tip-extra line, so binding/call checks retain
+    stale FIXED evidence while the salvaged fix is unreachable
+    (PRRT_kwDOSJAM6s6ZvVZK).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _salvage_changed_binding_names,
+        _tip_extra_can_supersede_modified_salvage,
+    )
+
+    parent = (
+        "def apply():\n"
+        "    setup()\n"
+        "    prepare()\n"
+        "    validate()\n"
+        "    finalize()\n"
+        "    guard.disable()\n"
+    )
+    commit = (
+        "def apply():\n"
+        "    setup()\n"
+        "    prepare()\n"
+        "    validate()\n"
+        "    finalize()\n"
+        "    guard.enable()\n"
+    )
+    assert "apply" in _salvage_changed_binding_names(parent_blob=parent, commit_blob=commit)
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "def apply():\n"
+            "    return\n"
+            "    setup()\n"
+            "    prepare()\n"
+            "    validate()\n"
+            "    finalize()\n"
+            "    guard.enable()\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "def apply():\n"
+            "    raise RuntimeError('skip')\n"
+            "    setup()\n"
+            "    prepare()\n"
+            "    validate()\n"
+            "    finalize()\n"
+            "    guard.enable()\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "def apply():\n"
+            "    if False:\n"
+            "        pass\n"
+            "    setup()\n"
+            "    prepare()\n"
+            "    validate()\n"
+            "    finalize()\n"
+            "    guard.enable()\n"
+        ),
+    )
+    # Commented / unrelated tip-extra inside the callable stays retained.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "def apply():\n"
+            "    # return\n"
+            "    setup()\n"
+            "    prepare()\n"
+            "    validate()\n"
+            "    finalize()\n"
+            "    guard.enable()\n"
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "def apply():\n"
+            "    setup()\n"
+            "    prepare()\n"
+            "    log('x')\n"
+            "    validate()\n"
+            "    finalize()\n"
+            "    guard.enable()\n"
+        ),
+    )
+    # Control-flow in an unrelated function must not drop still-reachable salvage.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=commit + "def other():\n    return\n",
+    )
+    parent_js = (
+        "function apply() {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.disable();\n"
+        "}\n"
+    )
+    commit_js = (
+        "function apply() {\n"
+        "  setup();\n"
+        "  prepare();\n"
+        "  validate();\n"
+        "  finalize();\n"
+        "  guard.enable();\n"
+        "}\n"
+    )
+    assert "apply" in _salvage_changed_binding_names(parent_blob=parent_js, commit_blob=commit_js)
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js,
+        commit_blob=commit_js,
+        head_blob=(
+            "function apply() {\n"
+            "  return;\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "}\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js,
+        commit_blob=commit_js,
+        head_blob=(
+            "function apply() {\n"
+            "  if (false) {\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "  }\n"
+            "}\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js,
+        commit_blob=commit_js,
+        head_blob=(
+            "function apply() {\n"
+            "  throw new Error('skip');\n"
+            "  setup();\n"
+            "  prepare();\n"
+            "  validate();\n"
+            "  finalize();\n"
+            "  guard.enable();\n"
+            "}\n"
+        ),
+    )
+    # Class leaf salvage must not be superseded by tip-extra return inside a
+    # nested method (class openers are not callable-body scopes for this check).
+    parent_cls = "class C:\n    FEATURE_ENABLED = False\n    def helper(self):\n        pass\n"
+    commit_cls = "class C:\n    FEATURE_ENABLED = True\n    def helper(self):\n        pass\n"
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_cls,
+        commit_blob=commit_cls,
+        head_blob=(
+            "class C:\n"
+            "    FEATURE_ENABLED = True\n"
+            "    def helper(self):\n"
+            "        return\n"
+            "        pass\n"
+        ),
+    )

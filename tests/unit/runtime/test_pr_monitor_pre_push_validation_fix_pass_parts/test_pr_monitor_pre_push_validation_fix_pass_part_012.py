@@ -142,6 +142,9 @@ def test_control_flow_prefix_edges_retain_or_reject_added_salvage() -> None:
         _line_code_without_line_comment,
         _prefix_opens_control_flow_over_suffix,
     )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+        _line_is_control_flow_change,
+    )
 
     # Body line after a paren header clears awaiting_body so a later suffix retains.
     assert _prefix_opens_control_flow_over_suffix("if (false)\nsetup();\n") is False
@@ -164,6 +167,17 @@ def test_control_flow_prefix_edges_retain_or_reject_added_salvage() -> None:
     assert _delta_brackets_outside_strings(r'"\{" {', opens="{", closes="}") == 1
     assert _line_code_without_line_comment(r'x = "a#b" # c') == 'x = "a#b" '
     assert _line_code_without_line_comment(r"x = 'a\'b' # c") == r"x = 'a\'b' "
+    # Tip-extra control-flow classifier (PRRT_kwDOSJAM6s6ZvVZK): transfers and
+    # ordinary headers match; nested defs / blank comment-only lines do not.
+    assert _line_is_control_flow_change("    return\n") is True
+    assert _line_is_control_flow_change("    break\n") is True
+    assert _line_is_control_flow_change("    continue\n") is True
+    assert _line_is_control_flow_change("else {\n") is True
+    assert _line_is_control_flow_change("} else\n") is True
+    assert _line_is_control_flow_change("    # return\n") is False
+    assert _line_is_control_flow_change("    \n") is False
+    assert _line_is_control_flow_change("def helper():\n") is False
+    assert _line_is_control_flow_change("    log('x')\n") is False
 
 
 @pytest.mark.unit

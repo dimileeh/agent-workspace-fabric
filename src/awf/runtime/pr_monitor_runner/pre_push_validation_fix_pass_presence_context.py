@@ -35,6 +35,14 @@ _PYTHON_SUITE_HEADER_RE = re.compile(
     r"|^[ \t]*(?:if|elif|else|while|for|try|except|finally|with|match|case)\b"
     r"[^:\n]*:[ \t]*(#.*)?$"
 )
+# Transfer / ordinary suite headers (no ``def``/``class``) so tip-extra early
+# ``return`` / ``if (false) {`` inside salvage-modified callables supersede
+# without treating nested helper defs as control-flow (PRRT_kwDOSJAM6s6ZvVZK).
+_CONTROL_FLOW_TRANSFER_RE = re.compile(r"^[ \t]*(?:return|raise|throw|break|continue)\b")
+_PYTHON_ORDINARY_SUITE_HEADER_RE = re.compile(
+    r"^[ \t]*(?:if|elif|else|while|for|try|except|finally|with|match|case)\b"
+    r"[^:\n]*:[ \t]*(#.*)?$"
+)
 
 
 def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
@@ -387,6 +395,28 @@ def _control_flow_header_effect(header: str) -> tuple[bool, int | None]:
             return (True, None)
         return (False, None)
     return (False, None)
+
+
+def _line_is_control_flow_change(raw_line: str) -> bool:
+    """Return True when ``raw_line`` is transfer or ordinary control-flow syntax.
+
+    Used so tip-extra ``return`` / ``if (false) {`` inside a salvage-modified
+    callable supersedes FIXED evidence (PRRT_kwDOSJAM6s6ZvVZK). ``def`` /
+    ``class`` openers are excluded so nested helpers are not treated as
+    control-flow. Line comments are stripped first.
+    """
+    code = _line_code_without_line_comment(raw_line)
+    if not code.strip():
+        return False
+    if _CONTROL_FLOW_TRANSFER_RE.match(code) is not None:
+        return True
+    if _PYTHON_ORDINARY_SUITE_HEADER_RE.match(code) is not None:
+        return True
+    if _CONTROL_FLOW_BARE_HEADER_RE.match(code) is not None:
+        return True
+    if _CONTROL_FLOW_PAREN_HEADER_START_RE.match(code) is not None:
+        return True
+    return _last_brace_control_flow_continuation(code) is not None
 
 
 def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:

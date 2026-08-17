@@ -60,6 +60,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context
     _line_code_without_line_comment as _line_code_without_line_comment,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+    _line_is_control_flow_change as _line_is_control_flow_change,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
     _merge_file_result_matches_head as _merge_file_result_matches_head,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
@@ -340,14 +343,8 @@ def _scoped_binding_key(scope_names: list[str], name: str) -> str:
     return ".".join((*scope_names, name))
 
 
-def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
-    """Return opener-plus-body lines for the binding starting at ``start``.
-
-    Continues through blank lines and lines indented strictly deeper than the
-    opener so body-only edits (same ``def``/``class``/``function`` line, different
-    body) compare as a changed binding (PRRT_kwDOSJAM6s6ZqHvh). Trailing blanks
-    after the last body line are dropped for stable comparison.
-    """
+def _binding_span_end_exclusive(lines: list[str], start: int) -> int:
+    """Return exclusive end index for the binding span starting at ``start``."""
     opener = lines[start]
     opener_indent = _line_indent(opener)
     end = start + 1
@@ -361,21 +358,22 @@ def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
         end += 1
     while end > start + 1 and lines[end - 1].strip() == "":
         end -= 1
-    return tuple(lines[start:end])
+    return end
 
 
-def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
-    """Map each scoped binding key to the span of its last occurrence in ``text``.
+def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
+    """Return opener-plus-body lines for the binding starting at ``start``.
 
-    Keys are qualified by enclosing def/class/function scopes (``A.ok``), by
-    YAML/mapping openers with no same-line scalar (``feature.enabled``), by
-    scalar YAML sequence-item identity (``features.name.a.enabled``;
-    PRRT_kwDOSJAM6s6ZqxYE), and by the current TOML ``[table]`` / ``[[array]]``
-    path so same-named leaves under different parents do not collide
-    (PRRT_kwDOSJAM6s6ZqKN3, PRRT_kwDOSJAM6s6ZqZo2, PRRT_kwDOSJAM6s6ZqpBC). Lines
-    that start inside ``/*`` or a triple-quoted string are ignored so docstring
-    prose does not invent bindings (PRRT_kwDOSJAM6s6ZqPO9).
+    Continues through blank lines and lines indented strictly deeper than the
+    opener so body-only edits (same ``def``/``class``/``function`` line, different
+    body) compare as a changed binding (PRRT_kwDOSJAM6s6ZqHvh). Trailing blanks
+    after the last body line are dropped for stable comparison.
     """
+    return tuple(lines[start : _binding_span_end_exclusive(lines, start)])
+
+
+def _last_binding_start_indices(text: str) -> dict[str, int]:
+    """Map each scoped binding key to the line index of its last opener in ``text``."""
     lines = text.splitlines()
     last_start: dict[str, int] = {}
     # (indent, segment, sequence_item_key|None) for nestable openers.
@@ -422,7 +420,26 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
             scope_stack.append((indent, seq_scope[0], seq_scope[1]))
         elif _opens_nested_binding_scope(raw_line):
             scope_stack.append((indent, primary, None))
-    return {key: _binding_span_at(lines, start) for key, start in last_start.items()}
+    return last_start
+
+
+def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
+    """Map each scoped binding key to the span of its last occurrence in ``text``.
+
+    Keys are qualified by enclosing def/class/function scopes (``A.ok``), by
+    YAML/mapping openers with no same-line scalar (``feature.enabled``), by
+    scalar YAML sequence-item identity (``features.name.a.enabled``;
+    PRRT_kwDOSJAM6s6ZqxYE), and by the current TOML ``[table]`` / ``[[array]]``
+    path so same-named leaves under different parents do not collide
+    (PRRT_kwDOSJAM6s6ZqKN3, PRRT_kwDOSJAM6s6ZqZo2, PRRT_kwDOSJAM6s6ZqpBC). Lines
+    that start inside ``/*`` or a triple-quoted string are ignored so docstring
+    prose does not invent bindings (PRRT_kwDOSJAM6s6ZqPO9).
+    """
+    lines = text.splitlines()
+    return {
+        key: _binding_span_at(lines, start)
+        for key, start in _last_binding_start_indices(text).items()
+    }
 
 
 def _tip_extra_line_indices(*, commit_blob: str, head_blob: str) -> set[int]:
@@ -657,6 +674,57 @@ def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set
     }
 
 
+def _tip_extra_control_flow_in_changed_callables(
+    *, commit_blob: str, head_blob: str, changed_keys: set[str]
+) -> bool:
+    """Return True when tip-extra control-flow sits in a salvage-changed callable.
+
+    Early ``return`` / ``raise`` / ``throw`` / ordinary ``if`` headers inside a
+    ``def``/``function`` whose body the salvage edited can leave the salvaged
+    fix unreachable while ``git merge-file`` still equals HEAD. Binding and call
+    scanners miss those tip-extra lines (PRRT_kwDOSJAM6s6ZvVZK). Class openers
+    are skipped so a leaf assignment salvage under ``class C`` is not dropped
+    when a nested method gains an unrelated ``return``.
+    """
+    if not changed_keys:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=commit_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    starts = _last_binding_start_indices(head_blob)
+    body_indices: set[int] = set()
+    for key in changed_keys:
+        start = starts.get(key)
+        if start is None or start >= len(lines):
+            continue
+        opener = lines[start]
+        if _DEF_BINDING_RE.match(opener) is None and _FUNCTION_BINDING_RE.match(opener) is None:
+            continue
+        end = _binding_span_end_exclusive(lines, start)
+        body_indices.update(range(start + 1, end))
+    if not body_indices:
+        return False
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or idx not in body_indices:
+            continue
+        if _line_is_control_flow_change(raw_line):
+            return True
+    return False
+
+
 def _tip_extra_can_supersede_modified_salvage(
     *, parent_blob: str, commit_blob: str, head_blob: str
 ) -> bool:
@@ -690,7 +758,10 @@ def _tip_extra_can_supersede_modified_salvage(
     PRRT_kwDOSJAM6s6ZrSYE; compare PRRT_kwDOSJAM6s6ZrJ3a). Call candidates are
     only changed bindings ∪ changed call names — not every commit binding — so a
     tip-extra ``helper()`` on an unchanged helper does not drop a still-present
-    binding fix (PRRT_kwDOSJAM6s6ZrR2e).
+    binding fix (PRRT_kwDOSJAM6s6ZrR2e). Tip-extra control-flow inside a
+    salvage-modified ``def``/``function`` body (early ``return`` / ``if (false)``)
+    also supersedes when it would leave the salvaged fix unreachable while
+    merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -701,13 +772,19 @@ def _tip_extra_can_supersede_modified_salvage(
         return True
     call_names = _salvage_changed_call_names(parent_blob=parent_blob, commit_blob=commit_blob)
     call_candidates = changed | call_names
-    return _tip_extra_calls_candidate_keys(
+    if _tip_extra_calls_candidate_keys(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=call_candidates,
         # Prefix match only call-count keys (``guard.disable``), never scoped
         # binding keys (``feature.enabled``) — PRRT_kwDOSJAM6s6ZrsE0.
         receiver_prefix_keys=call_names,
+    ):
+        return True
+    return _tip_extra_control_flow_in_changed_callables(
+        commit_blob=commit_blob,
+        head_blob=head_blob,
+        changed_keys=changed,
     )
 
 
