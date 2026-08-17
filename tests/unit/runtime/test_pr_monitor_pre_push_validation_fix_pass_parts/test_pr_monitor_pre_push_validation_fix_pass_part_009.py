@@ -1150,6 +1150,46 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="check();\n",
         head_blob="#iffy\ncheck();\n",
     )
+    # Ordinary C/JS control-flow prefixes attach the salvage as the next
+    # statement body while keeping a line-aligned suffix; reject so a later
+    # no-change FIXED retry cannot reuse a disabled call (PRRT_kwDOSJAM6s6ZtJG5).
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="if (false)\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="while (0)\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="for (;0;)\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="else\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="if (false) {\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="if (\nfalse\n)\nenable_guard();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="    enable_guard()\n",
+        head_blob="if False:\n    enable_guard()\n",
+    )
+    # Benign complete statements / closed blocks before the suffix still retain.
+    assert _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="setup();\nenable_guard();\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="enable_guard();\n",
+        head_blob="if (false) {\nsetup();\n}\nenable_guard();\n",
+    )
     # Empty-file addition salvage: only an exact empty tip blob retains it.
     # Vacuous ``"" in head`` / early-True would accept an overwrite and let a
     # later no-change FIXED retry reuse stale evidence (PRRT_kwDOSJAM6s6ZpEZh).

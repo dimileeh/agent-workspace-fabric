@@ -91,6 +91,23 @@ _TOML_TABLE_HEADER_RE = re.compile(
 )
 
 
+# C/JS statement headers and Python suite headers that make the following line
+# their body. Used so suffix retention rejects ``if (false)\n`` / ``if False:\n``
+# prefixes that keep an added salvage call as an exact suffix while disabling it
+# (PRRT_kwDOSJAM6s6ZtJG5).
+_CONTROL_FLOW_PAREN_HEADER_START_RE = re.compile(
+    r"^[ \t]*(?:else\s+if|if|while|for|switch|catch)\b"
+)
+_CONTROL_FLOW_BARE_HEADER_RE = re.compile(
+    r"^[ \t]*(?:else|do|try|finally)[ \t]*(?:\{[ \t]*)?(?://.*)?$"
+)
+_PYTHON_SUITE_HEADER_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?(?:def|class)\b[^:\n]*:[ \t]*(#.*)?$"
+    r"|^[ \t]*(?:if|elif|else|while|for|try|except|finally|with|match|case)\b"
+    r"[^:\n]*:[ \t]*(#.*)?$"
+)
+
+
 def _advance_string_or_block_comment_state(
     chunk: str,
     *,
@@ -424,6 +441,120 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             at_line_start = False
         i += 1
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
+
+
+def _delta_brackets_outside_strings(fragment: str, *, opens: str, closes: str) -> int:
+    """Net bracket delta in ``fragment``, ignoring quotes and escapes."""
+    delta = 0
+    in_double = False
+    in_single = False
+    i = 0
+    n = len(fragment)
+    while i < n:
+        ch = fragment[i]
+        if in_double or in_single:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if (in_double and ch == '"') or (in_single and ch == "'"):
+                in_double = in_single = False
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+        elif ch == "'":
+            in_single = True
+        elif ch == opens:
+            delta += 1
+        elif ch == closes:
+            delta -= 1
+        i += 1
+    return delta
+
+
+def _line_code_without_line_comment(line: str) -> str:
+    """Strip ``//`` / ``#`` line comments outside simple quoted spans."""
+    in_double = False
+    in_single = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_double or in_single:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if (in_double and ch == '"') or (in_single and ch == "'"):
+                in_double = in_single = False
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+        elif ch == "'":
+            in_single = True
+        elif line.startswith("//", i) or ch == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
+    """Return True when ``prefix`` leaves the next line under control-flow.
+
+    ``if (false)`` / open ``{`` / Python ``if False:`` prefixes keep an added
+    salvage call as a line-aligned suffix while preventing execution; suffix
+    retention must fail closed (PRRT_kwDOSJAM6s6ZtJG5).
+    """
+    brace_depth = 0
+    awaiting_body = False
+    header_paren_depth: int | None = None
+
+    for raw_line in prefix.splitlines():
+        code = _line_code_without_line_comment(raw_line)
+        stripped = code.strip()
+        if awaiting_body and stripped:
+            awaiting_body = False
+
+        brace_delta = _delta_brackets_outside_strings(code, opens="{", closes="}")
+        if header_paren_depth is not None:
+            header_paren_depth += _delta_brackets_outside_strings(code, opens="(", closes=")")
+            brace_depth = max(0, brace_depth + brace_delta)
+            if header_paren_depth > 0:
+                continue
+            if "{" not in code.split(")", 1)[-1]:
+                awaiting_body = True
+            header_paren_depth = None
+            continue
+
+        if not stripped:
+            brace_depth = max(0, brace_depth + brace_delta)
+            continue
+
+        if _PYTHON_SUITE_HEADER_RE.match(code):
+            awaiting_body = True
+            brace_depth = max(0, brace_depth + brace_delta)
+            continue
+
+        if _CONTROL_FLOW_BARE_HEADER_RE.match(code):
+            brace_depth = max(0, brace_depth + brace_delta)
+            if "{" not in stripped:
+                awaiting_body = True
+            continue
+
+        paren_match = _CONTROL_FLOW_PAREN_HEADER_START_RE.match(code)
+        if paren_match is not None:
+            rest = code[paren_match.start() :]
+            depth = _delta_brackets_outside_strings(rest, opens="(", closes=")")
+            brace_depth = max(0, brace_depth + brace_delta)
+            if depth > 0:
+                header_paren_depth = depth
+            elif "{" not in rest.split(")", 1)[-1]:
+                awaiting_body = True
+            continue
+
+        brace_depth = max(0, brace_depth + brace_delta)
+
+    return brace_depth > 0 or awaiting_body or header_paren_depth is not None
 
 
 def _normalize_yaml_sequence_item_scalar(raw: str) -> str:
@@ -953,7 +1084,9 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     comment, triple-quoted string, or ``#if`` region (PRRT_kwDOSJAM6s6ZpaIn),
     while ordinary quoted strings and ``//`` line comments stay opaque so a
     quoted ``/*`` token cannot falsely reject a valid salvage
-    (PRRT_kwDOSJAM6s6Zq2m_).
+    (PRRT_kwDOSJAM6s6Zq2m_). It also rejects ordinary control-flow prefixes
+    (``if (false)``, open ``{``, Python suite headers) that keep the salvage as
+    an exact suffix while preventing execution (PRRT_kwDOSJAM6s6ZtJG5).
     Prefix retention with a non-empty append additionally rejects when the
     appended tip-extra lines rebind a **scoped** name bound in the salvage
     (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q) or call a salvage-bound
@@ -987,11 +1120,17 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
             head_blob=head_blob,
         )
     # Prepend: salvage remains a line-aligned suffix (not already covered above),
-    # and the prepended prefix must not leave an open disabling context.
+    # and the prepended prefix must not leave an open disabling context or
+    # attach ordinary control-flow to the salvage statement
+    # (PRRT_kwDOSJAM6s6ZtJG5).
     suffix_idx = len(head_blob) - len(commit_blob)
     if suffix_idx <= 0 or not _line_aligned_at(suffix_idx):
         return False
-    return not _prefix_leaves_open_disabling_context(head_blob[:suffix_idx])
+    prefix = head_blob[:suffix_idx]
+    return not (
+        _prefix_leaves_open_disabling_context(prefix)
+        or _prefix_opens_control_flow_over_suffix(prefix)
+    )
 
 
 async def _commit_changes_present_in_head(
