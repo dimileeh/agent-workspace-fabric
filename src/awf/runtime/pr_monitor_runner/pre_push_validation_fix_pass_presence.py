@@ -1050,7 +1050,12 @@ def _is_arrow_function_binding_opener(opener: str) -> bool:
     ``=>`` distinguishes arrow RHS forms (``const apply = () => {``,
     ``helper = () => {``) from ordinary leaf assigns so tip-extra control-flow
     inside those bodies is not skipped (PRRT_kwDOSJAM6s6ZyaxJ).
+    Class headers can contain ``=>`` only in type positions
+    (``implements Handler<() => void>``); those must stay on the class path so
+    nested-callable exclusion still applies (PRRT_kwDOSJAM6s6Zylhi).
     """
+    if _CLASS_BINDING_RE.match(opener) is not None:
+        return False
     return "=>" in opener
 
 

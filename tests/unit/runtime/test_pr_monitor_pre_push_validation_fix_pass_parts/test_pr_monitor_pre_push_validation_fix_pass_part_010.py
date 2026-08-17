@@ -823,3 +823,35 @@ def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage(
             "}\n"
         ),
     )
+    # Class headers may contain ``=>`` only in type positions; those must not
+    # be treated as arrow callables or nested-helper tip-extra wrongly
+    # supersedes leaf salvage (PRRT_kwDOSJAM6s6Zylhi).
+    parent_cls_type_arrow = (
+        "class C implements Handler<() => void> {\n"
+        "  FEATURE_ENABLED = false;\n"
+        "  helper = () => {\n"
+        "    pass;\n"
+        "  }\n"
+        "}\n"
+    )
+    commit_cls_type_arrow = (
+        "class C implements Handler<() => void> {\n"
+        "  FEATURE_ENABLED = true;\n"
+        "  helper = () => {\n"
+        "    pass;\n"
+        "  }\n"
+        "}\n"
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_cls_type_arrow,
+        commit_blob=commit_cls_type_arrow,
+        head_blob=(
+            "class C implements Handler<() => void> {\n"
+            "  FEATURE_ENABLED = true;\n"
+            "  helper = () => {\n"
+            "    return;\n"
+            "    pass;\n"
+            "  }\n"
+            "}\n"
+        ),
+    )
