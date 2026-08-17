@@ -145,7 +145,9 @@ _TOML_TABLE_HEADER_RE = re.compile(
 # (PRRT_kwDOSJAM6s6ZriaJ). Computed-member forms need a separate pattern: after
 # ``_executable_call_scan_text`` blanks quoted props, ``guard["disable"]()``
 # becomes ``guard[         ]()`` and this regex cannot span brackets
-# (PRRT_kwDOSJAM6s6ZroRa). ``def``/``function``/``class`` forms are filtered via
+# (PRRT_kwDOSJAM6s6ZroRa). Parenthesized receivers (``(guard).disable()``) are
+# handled by ``_PAREN_MEMBER_CALL_SITE_RE`` / ``_PAREN_COMPUTED_CALL_SITE_RE``
+# (PRRT_kwDOSJAM6s6Zrr7R). ``def``/``function``/``class`` forms are filtered via
 # ``_CALL_SITE_DEFINITION_PREFIX_RE``. Used so tip-extra calls that invoke
 # salvage-bound names fail closed even though calls produce no binding key
 # (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrYJk).
@@ -161,6 +163,36 @@ _CALL_SITE_RE = re.compile(
 _COMPUTED_CALL_SITE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
     r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:(?:\?\.)?\[[^\]]*\])+"
+    r"(?:\?\.)?[ \t]*\("
+)
+# Parenthesized receivers (``(guard).disable()`` / ``((guard)).disable()`` /
+# ``(guard)?.disable()`` / ``(a.b).c()``). Without this, matching restarts after
+# the closing ``)`` and reports only the bare method leaf, which misses a
+# salvaged ``guard`` binding and retains stale FIXED evidence; a bare ``disable``
+# leaf can also falsely suffix-match ``guard.disable`` for unrelated
+# ``(other).disable()`` (PRRT_kwDOSJAM6s6Zrr7R).
+_PAREN_MEMBER_CALL_SITE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
+    r"\(+"
+    r"[ \t]*"
+    r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"[ \t]*"
+    r"\)+"
+    r"((?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:\?\.)?[ \t]*\("
+)
+# Parenthesized receiver + computed member (``(guard)["disable"]()`` /
+# ``(guard)?.["disable"]()`` / ``(a.b)[key]()``). Same restart-after-``)`` gap as
+# dotted paren forms; blanked scan text leaves ``(guard)[         ]()``, which
+# neither dotted nor plain computed patterns span (PRRT_kwDOSJAM6s6Zrr7R).
+_PAREN_COMPUTED_CALL_SITE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
+    r"\(+"
+    r"[ \t]*"
+    r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"[ \t]*"
+    r"\)+"
     r"(?:(?:\?\.)?\[[^\]]*\])+"
     r"(?:\?\.)?[ \t]*\("
 )
@@ -954,13 +986,16 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     ``guard['disable']()`` / ``guard[key]()`` / ``guard?.["disable"]()``)
     emit the receiver chain: blanking quoted indices leaves
     ``guard[         ]()``, which dotted matching cannot span
-    (PRRT_kwDOSJAM6s6ZroRa). Nested / mid-expression calls
-    (``if ready: guard.disable()``, ``result = guard.disable()``,
-    ``print(guard.disable())``) are included (PRRT_kwDOSJAM6s6ZrYJk). ``#`` /
-    ``//`` / same-line ``/* … */`` comments and string literals are ignored
-    (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not call sites: ``def name(`` /
-    ``function name(`` / ``class Name(`` are skipped via
-    ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each call match is emitted once per
+    (PRRT_kwDOSJAM6s6ZroRa). Parenthesized receivers (``(guard).disable()`` /
+    ``((guard)).disable()`` / ``(guard)?.disable()`` / ``(guard)["disable"]()``)
+    keep the inner identifier chain; otherwise matching restarts after ``)`` and
+    reports only the bare method leaf (PRRT_kwDOSJAM6s6Zrr7R). Nested /
+    mid-expression calls (``if ready: guard.disable()``,
+    ``result = guard.disable()``, ``print(guard.disable())``) are included
+    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments and
+    string literals are ignored (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not
+    call sites: ``def name(`` / ``function name(`` / ``class Name(`` are skipped
+    via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each call match is emitted once per
     occurrence (not collapsed by name) so same-line multiplicity is preserved
     when deriving salvage call-count diffs (PRRT_kwDOSJAM6s6ZriaK).
     """
@@ -979,6 +1014,27 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
             names.append(parts[0])
             names.append(dotted)
 
+    def _blank_match_span(match: re.Match[str]) -> None:
+        nonlocal scan
+        # Drop the matched paren-call span so later dotted/computed scans do not
+        # re-report a bare trailing callee (``disable`` after ``(guard).``) that
+        # would suffix-collide with ``guard.disable`` (PRRT_kwDOSJAM6s6Zrr7R).
+        scan = scan[: match.start()] + (" " * (match.end() - match.start())) + scan[match.end() :]
+
+    for match in _PAREN_MEMBER_CALL_SITE_RE.finditer(scan):
+        prefix = raw_line[: match.start()]
+        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
+            continue
+        inner = match.group(1)
+        trailing = match.group(2) or ""
+        _emit_receiver_chain(inner + trailing)
+        _blank_match_span(match)
+    for match in _PAREN_COMPUTED_CALL_SITE_RE.finditer(scan):
+        prefix = raw_line[: match.start()]
+        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
+            continue
+        _emit_receiver_chain(match.group(1))
+        _blank_match_span(match)
     for match in _CALL_SITE_RE.finditer(scan):
         prefix = raw_line[: match.start()]
         if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
