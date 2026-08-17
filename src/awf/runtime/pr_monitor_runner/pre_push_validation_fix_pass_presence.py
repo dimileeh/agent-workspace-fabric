@@ -1019,8 +1019,11 @@ def _tip_extra_can_supersede_modified_salvage(
     does not collide with salvaged ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
     Call-only salvage flips (``disable_guard()`` → ``enable_guard()``) leave
     binding diffs empty; tip-extra calls that restore a prior callee or invoke a
-    salvage-bound name supersede the same way the added-file path does
-    (PRRT_kwDOSJAM6s6ZrN5J; compare PRRT_kwDOSJAM6s6ZrJ3a).
+    salvage-changed binding name supersede (PRRT_kwDOSJAM6s6ZrN5J; compare
+    PRRT_kwDOSJAM6s6ZrJ3a). Call candidates are only changed bindings ∪ changed
+    call names — not every commit binding — so a tip-extra ``helper()`` on an
+    unchanged helper does not drop a still-present binding fix
+    (PRRT_kwDOSJAM6s6ZrR2e).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -1029,10 +1032,8 @@ def _tip_extra_can_supersede_modified_salvage(
         candidate_keys=changed,
     ):
         return True
-    call_candidates = (
-        changed
-        | set(_last_binding_spans(commit_blob))
-        | _salvage_changed_call_names(parent_blob=parent_blob, commit_blob=commit_blob)
+    call_candidates = changed | _salvage_changed_call_names(
+        parent_blob=parent_blob, commit_blob=commit_blob
     )
     return _tip_extra_calls_candidate_keys(
         baseline_blob=commit_blob,

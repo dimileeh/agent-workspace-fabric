@@ -725,6 +725,24 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_defs,
         head_blob=commit_defs + "# disable_guard()\n",
     )
+    # Tip-extra call to an *unchanged* salvage helper must not supersede when
+    # only a binding (or call) fix changed — unioning every commit binding as
+    # call candidates would drop valid FIXED evidence (PRRT_kwDOSJAM6s6ZrR2e).
+    parent_helper = "def helper():\n    pass\nFEATURE_ENABLED = False\n"
+    commit_helper = "def helper():\n    pass\nFEATURE_ENABLED = True\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_helper, commit_blob=commit_helper) == {
+        "FEATURE_ENABLED"
+    }
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_helper,
+        commit_blob=commit_helper,
+        head_blob=commit_helper + "helper()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_helper,
+        commit_blob=commit_helper,
+        head_blob=commit_helper + "FEATURE_ENABLED = False\n",
+    )
 
 
 @pytest.mark.unit
