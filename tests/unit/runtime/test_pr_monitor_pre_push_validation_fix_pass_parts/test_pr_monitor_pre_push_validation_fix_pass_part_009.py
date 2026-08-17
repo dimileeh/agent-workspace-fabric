@@ -108,6 +108,35 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "guard.disable()\n",
     )
+    # Multiline member continuations must preserve the receiver: per-line
+    # scanning otherwise sees only a bare ``disable`` leaf and retains stale
+    # FIXED evidence (PRRT_kwDOSJAM6s6ZuG-J).
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard\n  .disable();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard\n  ?.disable();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'guard\n  ["disable"]();\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard\n  .foo\n  .disable();\n",
+    )
+    # Unrelated multiline receiver still retains; unclassified continuation
+    # (no resolvable receiver root) fails closed.
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "other\n  .disable();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "  .disable();\n",
+    )
     # Import-only receivers are not bindings: salvage ``from guards import guard``
     # + ``guard.enable()`` yields empty ``_last_binding_spans``, so call
     # candidates must come from salvage call sites or tip ``guard.disable()``

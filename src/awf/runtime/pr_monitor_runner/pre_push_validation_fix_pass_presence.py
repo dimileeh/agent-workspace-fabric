@@ -41,6 +41,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls i
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _candidate_keys_include_call_name as _candidate_keys_include_call_name,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+    _is_member_call_continuation as _is_member_call_continuation,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+    _join_member_call_continuation_line as _join_member_call_continuation_line,
+)
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 # YAML / mapping ``key:`` (or quoted ``"key":`` / ``'key':``) with no same-line
@@ -950,8 +956,11 @@ def _tip_extra_calls_candidate_keys(
     Binding-key intersection misses executable overrides such as appending
     ``disable_guard()`` after a salvage that defined and invoked
     ``enable_guard()``, or ``guard.disable()`` after ``guard.enable()``
-    (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE). Lines that start inside
-    ``/*`` or a triple-quoted string are ignored, matching binding scanners.
+    (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE). Multiline member calls
+    (``guard`` then ``.disable()`` on the next line) join continuation lines
+    before scanning so the receiver is preserved; unclassified continuations
+    fail closed (PRRT_kwDOSJAM6s6ZuG-J). Lines that start inside ``/*`` or a
+    triple-quoted string are ignored, matching binding scanners.
     ``receiver_prefix_keys`` enables ``name.*`` matching for call-count
     receivers only (PRRT_kwDOSJAM6s6ZroRa; not binding keys —
     PRRT_kwDOSJAM6s6ZrsE0).
@@ -977,13 +986,23 @@ def _tip_extra_calls_candidate_keys(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        for name in _call_site_names_for_line(raw_line):
+        scan_line = raw_line
+        stripped = raw_line.lstrip(" \t")
+        is_continuation = _is_member_call_continuation(stripped)
+        if is_continuation:
+            scan_line = _join_member_call_continuation_line(lines, idx)
+        names = _call_site_names_for_line(scan_line)
+        for name in names:
             if _candidate_keys_include_call_name(
                 candidate_keys,
                 name,
                 receiver_prefix_keys=receiver_prefix_keys,
             ):
                 return True
+        # Continuation with no resolvable dotted receiver cannot be proven
+        # unrelated to salvaged bindings — fail closed (PRRT_kwDOSJAM6s6ZuG-J).
+        if is_continuation and not any("." in name for name in names):
+            return True
     return False
 
 

@@ -603,6 +603,61 @@ def _executable_call_scan_text(raw_line: str) -> str:
     return "".join(chars)
 
 
+def _is_member_call_continuation(stripped_line: str) -> bool:
+    """True when ``stripped_line`` continues a prior receiver (``.m()`` / ``?.m()`` / ``[…]()``).
+
+    Bracket forms require a call after ``]`` so TOML table headers (``[logging]``)
+    are not treated as computed-member continuations.
+    """
+    if stripped_line.startswith((".", "?.")):
+        return True
+    if not stripped_line.startswith("["):
+        return False
+    close = stripped_line.find("]")
+    if close < 0:
+        return False
+    after = stripped_line[close + 1 :].lstrip(" \t")
+    return after.startswith("(") or after.startswith("?.")
+
+
+def _join_member_call_continuation_line(lines: list[str], idx: int) -> str:
+    """Join ``lines[idx]`` with preceding expression lines for multiline member calls.
+
+    Formatters commonly split ``guard.disable()`` across lines as ``guard`` +
+    ``  .disable()``. Per-line scanning then sees no call on the receiver line
+    and only a bare ``disable`` leaf on the continuation, missing salvaged
+    ``guard`` bindings (PRRT_kwDOSJAM6s6ZuG-J). Walk back through blank / line-
+    comment lines, attaching ``.`` / ``?.`` / ``[`` continuations, and stop at
+    the first non-continuation expression root. A prior line that already ends
+    a statement (``;``) is not a receiver root.
+    """
+    raw_line = lines[idx]
+    stripped = raw_line.lstrip(" \t")
+    if not _is_member_call_continuation(stripped):
+        return raw_line
+    parts: list[str] = [stripped]
+    j = idx - 1
+    while j >= 0:
+        prev = lines[j]
+        prev_stripped = prev.strip()
+        if prev_stripped == "" or prev_stripped.startswith("//") or prev_stripped.startswith("#"):
+            j -= 1
+            continue
+        prev_code = prev.lstrip(" \t")
+        if _is_member_call_continuation(prev_code):
+            parts.insert(0, prev_code)
+            j -= 1
+            continue
+        if prev_stripped.endswith(";"):
+            break
+        parts.insert(0, prev.rstrip())
+        break
+    joined = parts[0]
+    for part in parts[1:]:
+        joined = joined.rstrip() + part.lstrip(" \t")
+    return joined
+
+
 def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return receiver/callee names for call sites on a line, or empty.
 

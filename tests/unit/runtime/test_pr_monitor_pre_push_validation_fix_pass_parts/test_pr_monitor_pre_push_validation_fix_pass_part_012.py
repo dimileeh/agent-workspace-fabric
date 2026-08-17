@@ -29,6 +29,34 @@ def test_call_site_names_mask_triple_quotes_and_line_comments() -> None:
 
 
 @pytest.mark.unit
+def test_join_member_call_continuation_preserves_receiver_across_lines() -> None:
+    """Multiline ``guard`` + ``.disable()`` joins before call scanning.
+
+    Per-line scanning would emit only a bare ``disable`` leaf
+    (PRRT_kwDOSJAM6s6ZuG-J). TOML ``[table]`` headers are not continuations.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _call_site_names_for_line,
+        _is_member_call_continuation,
+        _join_member_call_continuation_line,
+    )
+
+    assert _is_member_call_continuation(".disable();")
+    assert _is_member_call_continuation('["disable"]();')
+    assert not _is_member_call_continuation("[logging]")
+    assert not _is_member_call_continuation("guard.disable();")
+
+    lines = ["guard", "  .disable();"]
+    joined = _join_member_call_continuation_line(lines, 1)
+    assert joined == "guard.disable();"
+    assert _call_site_names_for_line(joined) == ("guard", "guard.disable")
+
+    nested = ["guard", "  .foo", "  .disable();"]
+    assert _join_member_call_continuation_line(nested, 2) == "guard.foo.disable();"
+    assert _join_member_call_continuation_line(["  .disable();"], 0) == ".disable();"
+
+
+@pytest.mark.unit
 def test_call_site_names_skip_definition_prefixed_paren_and_computed_forms() -> None:
     """``def`` / ``function`` / ``class`` prefixes skip paren and computed call sites.
 
