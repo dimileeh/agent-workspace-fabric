@@ -1003,6 +1003,62 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
             "guard.enabled = true\nObject.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n"
         ),
     )
+    # Object.defineProperties after salvage ``guard.enabled = true`` leaves no
+    # binding key and only call names ``Object`` / ``Object.defineProperties``;
+    # recognize object-literal property targets or fail closed on opaque ones
+    # sharing the salvaged receiver (PRRT_kwDOSJAM6s6ZzifG).
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\nObject.defineProperties(guard, {enabled: {value: false}})\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            'guard.enabled = true\nObject.defineProperties(guard, {"enabled": {value: false}})\n'
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\n"
+            "globalThis.Object.defineProperties(guard, {enabled: {value: false}})\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.defineProperties(guard, props)\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\n// Object.defineProperties(guard, {enabled: {value: false}})\n"
+        ),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\nObject.defineProperties(other, {enabled: {value: false}})\n"
+        ),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\nObject.defineProperties(guard, {other: {value: false}})\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=(
+            "guard.enabled = true\n"
+            "Object.defineProperties(\n  guard,\n  {enabled: {value: false}}\n);\n"
+        ),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob=("guard.enabled = true\nObject.defineProperties(\n  guard,\n  props\n);\n"),
+    )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;
     # assign/del/delete scanners previously missed it, so tip
     # ``unset FEATURE_ENABLED`` kept a line-aligned salvage prefix and reused
