@@ -42,6 +42,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls i
     _candidate_keys_include_call_name as _candidate_keys_include_call_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+    _executable_call_scan_text as _executable_call_scan_text,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _is_member_call_continuation as _is_member_call_continuation,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
@@ -509,6 +512,83 @@ def _nonliteral_subscript_shares_receiver(
 # handled by binding synthesis instead so ``FLAGS.__setitem__("other", …)``
 # does not drop unrelated salvage.
 _OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
+
+# Tip-extra ``const alias = guard`` / ``alias = guard`` where ``guard`` is a
+# salvaged candidate (or receiver of ``guard.enabled`` / ``FLAGS["enabled"]``).
+# Exact-key intersection only sees ``alias`` / ``alias.enabled``, so fail closed
+# on the aliasing assignment itself (PRRT_kwDOSJAM6s6ZxHGP).
+_TIP_EXTRA_ALIAS_ASSIGN_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:(?:const|let|var)[ \t]+)?"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+    r"[ \t]*=[ \t]*"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?![A-Za-z0-9_.\[\(])"
+)
+
+
+def _salvaged_alias_reference_names(candidate_keys: set[str]) -> set[str]:
+    """Return bare names a tip may alias to reach salvaged bindings.
+
+    Includes bare candidate keys, dotted receivers (``guard`` from
+    ``guard.enabled``), and subscript receivers (``FLAGS`` from
+    ``FLAGS["enabled"]``) so ``const alias = guard`` fails closed
+    (PRRT_kwDOSJAM6s6ZxHGP).
+    """
+    names: set[str] = set()
+    for key in candidate_keys:
+        if not key:
+            continue
+        recv = _subscript_binding_receiver(key)
+        if recv is not None:
+            names.add(recv)
+            continue
+        if "." in key:
+            names.add(key.split(".", 1)[0])
+            continue
+        if "[" not in key:
+            names.add(key)
+    return names
+
+
+def _tip_extra_aliases_salvaged_candidate(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra assigns an alias of a salvaged candidate name.
+
+    After added-file salvage sets ``guard.enabled = true``, a descendant can
+    append ``const alias = guard; alias.enabled = false;``. Tip scanners emit
+    only ``alias`` / ``alias.enabled``, which never intersect salvaged ``guard``
+    keys, and call checks find nothing — fail closed on the aliasing assignment
+    so stale FIXED evidence cannot resolve (PRRT_kwDOSJAM6s6ZxHGP).
+    """
+    refs = _salvaged_alias_reference_names(candidate_keys)
+    if not refs:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        scan = _executable_call_scan_text(raw_line)
+        for match in _TIP_EXTRA_ALIAS_ASSIGN_RE.finditer(scan):
+            if match.group(1) in refs:
+                return True
+    return False
 
 
 def _salvaged_subscript_receivers(candidate_keys: set[str]) -> set[str]:
@@ -992,6 +1072,8 @@ def _tip_extra_can_supersede_modified_salvage(
     helpers (``FLAGS.__setitem__("enabled", False)`` / ``FLAGS.update(…)`` /
     ``FLAGS.clear()``) synthesize subscript keys or fail closed when an opaque
     mutator shares a salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
+    Tip-extra alias assignments of a salvage-changed name fail closed
+    (PRRT_kwDOSJAM6s6ZxHGP).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -1012,6 +1094,12 @@ def _tip_extra_can_supersede_modified_salvage(
     ):
         return True
     if _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=changed,
+    ):
+        return True
+    if _tip_extra_aliases_salvaged_candidate(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=changed,
@@ -1048,7 +1136,9 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     (PRRT_kwDOSJAM6s6Zu8Kn). Collection mutation helpers
     (``FLAGS.__setitem__`` / ``FLAGS.update`` / ``FLAGS.clear``) synthesize
     ``FLAGS["key"]`` or fail closed on opaque mutators sharing a salvaged
-    subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
+    subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). Tip-extra alias assignments
+    (``const alias = guard``) fail closed so ``alias.enabled = false`` cannot
+    keep stale salvage (PRRT_kwDOSJAM6s6ZxHGP).
     """
     if len(head_blob) <= len(salvage):
         return False
@@ -1070,7 +1160,13 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
         receiver_prefix_keys=call_names,
     ):
         return True
-    return _tip_extra_opaque_collection_mutator_shares_receiver(
+    if _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
+    ):
+        return True
+    return _tip_extra_aliases_salvaged_candidate(
         baseline_blob=salvage,
         head_blob=head_blob,
         candidate_keys=salvage_keys,

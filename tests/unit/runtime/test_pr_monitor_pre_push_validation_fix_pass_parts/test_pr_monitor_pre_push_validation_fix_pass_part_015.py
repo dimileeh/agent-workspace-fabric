@@ -415,3 +415,65 @@ def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
         head_blob=salvage + "\n",
         candidate_keys={'FLAGS["enabled"]'},
     )
+
+
+@pytest.mark.unit
+def test_tip_extra_alias_of_salvaged_guard_supersedes() -> None:
+    """Tip-extra ``alias = guard`` then ``alias.enabled = …`` must drop salvage.
+
+    Exact-key intersection sees only ``alias`` / ``alias.enabled``, which do not
+    overlap salvaged ``guard`` / ``guard.enabled``, and call checks find nothing —
+    without alias tracking a no-change FIXED could reuse stale salvage after the
+    effective guard was disabled (PRRT_kwDOSJAM6s6ZxHGP).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _suffix_can_supersede_added_salvage,
+        _tip_extra_aliases_salvaged_candidate,
+        _tip_extra_can_supersede_modified_salvage,
+    )
+
+    salvage = "const guard = {};\nguard.enabled = true;\n"
+    head = salvage + "const alias = guard;\nalias.enabled = false;\n"
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=head,
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert _suffix_can_supersede_added_salvage(salvage=salvage, head_blob=head)
+    assert not _added_salvage_blob_retained(commit_blob=salvage, head_blob=head)
+
+    parent = "const guard = {};\nguard.enabled = false;\n"
+    commit = "const guard = {};\nguard.enabled = true;\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=commit + "const alias = guard;\nalias.enabled = false;\n",
+    )
+
+    salvage_py = "guard = {}\nguard.enabled = True\n"
+    head_py = salvage_py + "alias = guard\nalias.enabled = False\n"
+    assert _suffix_can_supersede_added_salvage(salvage=salvage_py, head_blob=head_py)
+    assert not _added_salvage_blob_retained(commit_blob=salvage_py, head_blob=head_py)
+
+    # Unrelated tip-extra alias must not drop salvage.
+    assert not _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + "const alias = other;\nalias.enabled = false;\n",
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert not _suffix_can_supersede_added_salvage(
+        salvage=salvage,
+        head_blob=salvage + "const alias = other;\nalias.enabled = false;\n",
+    )
+    # Comment / string aliasing must not supersede.
+    assert not _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + "// const alias = guard;\n",
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert not _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + 'msg = "const alias = guard;"\n',
+        candidate_keys={"guard", "guard.enabled"},
+    )
