@@ -198,6 +198,53 @@ def test_member_call_continuation_skips_blanks_comments_and_stops_at_semicolon()
 
 
 @pytest.mark.unit
+def test_decorator_prefix_rejects_added_salvage_suffix() -> None:
+    """Prepended ``@decorator`` must not retain a salvaged def as an exact suffix.
+
+    A descendant can keep the salvage blob byte-identical while wrapping the
+    declaration so the fix never runs (PRRT_kwDOSJAM6s6ZwrnM).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+        _prefix_opens_control_flow_over_suffix,
+    )
+
+    salvage = "def enable_guard():\n    FEATURE_ENABLED = True\n"
+    assert _prefix_opens_control_flow_over_suffix("@no_op\n") is True
+    assert _prefix_opens_control_flow_over_suffix("@a\n@b\n") is True
+    assert _prefix_opens_control_flow_over_suffix("@no_op\n\n") is True
+    assert _prefix_opens_control_flow_over_suffix("@no_op\n# note\n") is True
+    assert _prefix_opens_control_flow_over_suffix("@functools.lru_cache(maxsize=None)\n") is True
+    # Decorator already applied to a declaration in the prefix is not open.
+    assert _prefix_opens_control_flow_over_suffix("@no_op\ndef helper():\n    return 1\n") is False
+
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="@no_op\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="@a\n@b\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="@no_op\n\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="@no_op\n# note\n" + salvage,
+    )
+    # Consumed decorator before an unrelated body does not block suffix retention.
+    call_salvage = "enable_guard()\n"
+    assert _added_salvage_blob_retained(
+        commit_blob=call_salvage,
+        head_blob="@no_op\ndef helper():\n    return 1\n" + call_salvage,
+    )
+
+
+@pytest.mark.unit
 def test_control_flow_header_effect_paren_depth_and_brace_tails() -> None:
     """Paren headers report open depth, awaiting-body, or brace-closed effects."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (

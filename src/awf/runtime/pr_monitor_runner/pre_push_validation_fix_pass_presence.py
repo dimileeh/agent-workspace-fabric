@@ -1096,7 +1096,9 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     quoted ``/*`` token cannot falsely reject a valid salvage
     (PRRT_kwDOSJAM6s6Zq2m_). It also rejects ordinary control-flow prefixes
     (``if (false)``, open ``{``, Python suite headers) that keep the salvage as
-    an exact suffix while preventing execution (PRRT_kwDOSJAM6s6ZtJG5).
+    an exact suffix while preventing execution (PRRT_kwDOSJAM6s6ZtJG5), and
+    Python decorator prefixes (``@no_op``) that attach to a salvaged ``def`` /
+    ``class`` and can replace it (PRRT_kwDOSJAM6s6ZwrnM).
     Prefix retention with a non-empty append additionally rejects when the
     appended tip-extra lines rebind a **scoped** name bound in the salvage
     (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q) or call a salvage-bound

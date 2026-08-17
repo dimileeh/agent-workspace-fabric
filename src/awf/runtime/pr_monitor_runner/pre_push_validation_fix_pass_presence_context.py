@@ -43,6 +43,11 @@ _PYTHON_ORDINARY_SUITE_HEADER_RE = re.compile(
     r"^[ \t]*(?:if|elif|else|while|for|try|except|finally|with|match|case)\b"
     r"[^:\n]*:[ \t]*(#.*)?$"
 )
+# Python / PEP-318 decorator line. A tip can prepend ``@no_op`` while keeping an
+# added salvage ``def`` as an exact suffix; the decorator attaches to that
+# declaration and can replace it, so suffix retention must fail closed
+# (PRRT_kwDOSJAM6s6ZwrnM).
+_PYTHON_DECORATOR_RE = re.compile(r"^[ \t]*@[A-Za-z_]")
 
 
 def _parse_ls_tree_meta(entry: str) -> tuple[str, str, str] | None:
@@ -427,9 +432,13 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
     retention must fail closed (PRRT_kwDOSJAM6s6ZtJG5). Brace-continuation
     headers (``} else`` / ``} catch`` / same-line ``if (...) {} else``) likewise
     attach the following line as their body (PRRT_kwDOSJAM6s6ZtYk1).
+    A trailing Python decorator (``@no_op`` / stacked ``@a``/``@b``) likewise
+    attaches to the following ``def``/``class`` and can replace it, so an open
+    decorator prefix must reject suffix retention (PRRT_kwDOSJAM6s6ZwrnM).
     """
     brace_depth = 0
     awaiting_body = False
+    awaiting_decorator = False
     header_paren_depth: int | None = None
 
     for raw_line in prefix.splitlines():
@@ -437,6 +446,8 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
         stripped = code.strip()
         if awaiting_body and stripped:
             awaiting_body = False
+        if awaiting_decorator and stripped and _PYTHON_DECORATOR_RE.match(code) is None:
+            awaiting_decorator = False
 
         brace_delta = _delta_brackets_outside_strings(code, opens="{", closes="}")
         if header_paren_depth is not None:
@@ -457,6 +468,11 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
             continue
 
         if not stripped:
+            brace_depth = max(0, brace_depth + brace_delta)
+            continue
+
+        if _PYTHON_DECORATOR_RE.match(code) is not None:
+            awaiting_decorator = True
             brace_depth = max(0, brace_depth + brace_delta)
             continue
 
@@ -492,4 +508,4 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
 
         brace_depth = max(0, brace_depth + brace_delta)
 
-    return brace_depth > 0 or awaiting_body or header_paren_depth is not None
+    return brace_depth > 0 or awaiting_body or awaiting_decorator or header_paren_depth is not None
