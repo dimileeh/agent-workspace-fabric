@@ -827,6 +827,54 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="guard.enabled = True\n",
         head_blob='guard.enabled = True\nsetattr(guard, "other", False)\n',
     )
+    # Collection mutation helpers vs subscript salvage: binding scanner emits
+    # nothing; call names ``FLAGS`` / ``FLAGS.__setitem__`` do not match
+    # ``FLAGS["enabled"]``. Without helper recognition / receiver fail-closed,
+    # tip appends retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZwrnH).
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.__setitem__("enabled", False)\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob=('FLAGS["enabled"] = True\ndict.__setitem__(FLAGS, "enabled", False)\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.__delitem__("enabled")\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.update(enabled=False)\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.update({"enabled": False})\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.update(other_flags)\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.clear()\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\n# FLAGS.__setitem__("enabled", False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nOTHER.__setitem__("enabled", False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.__setitem__("other", False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.copy()\n',
+    )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;
     # assign/del/delete scanners previously missed it, so tip
     # ``unset FEATURE_ENABLED`` kept a line-aligned salvage prefix and reused

@@ -293,6 +293,30 @@ _INLINE_SETATTR_METHOD_RE = re.compile(
     rf"({_SETATTR_OBJ})\.(?:__setattr__|__delattr__)"
     rf"[ \t]*\([ \t]*{_SETATTR_ATTR_LIT}"
 )
+# Mapping item mutations (``FLAGS.__setitem__("enabled", False)`` /
+# ``dict.__setitem__(FLAGS, "enabled", False)`` / ``FLAGS.__delitem__("enabled")``)
+# leave no assign binding and only call names ``FLAGS`` / ``FLAGS.__setitem__``,
+# which do not match salvaged ``FLAGS["enabled"]`` (PRRT_kwDOSJAM6s6ZwrnH).
+_SETITEM_HELPER = r"(?:__setitem__|__delitem__)"
+_INLINE_SETITEM_FREE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"(?:[A-Za-z_][A-Za-z0-9_]*\.)*{_SETITEM_HELPER}"
+    rf"[ \t]*\([ \t]*({_SETATTR_OBJ})[ \t]*,[ \t]*{_SETATTR_ATTR_LIT}"
+)
+_INLINE_SETITEM_METHOD_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"({_SETATTR_OBJ})\.(?:__setitem__|__delitem__)"
+    rf"[ \t]*\([ \t]*{_SETATTR_ATTR_LIT}"
+)
+# ``FLAGS.update(enabled=False)`` / ``FLAGS.update({"enabled": False})`` synthesize
+# ``FLAGS["enabled"]``; opaque ``FLAGS.update(other)`` is handled by receiver
+# fail-closed in the tip-extra call path (PRRT_kwDOSJAM6s6ZwrnH).
+_INLINE_UPDATE_CALL_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"({_SETATTR_OBJ})\.update[ \t]*\("
+)
+_UPDATE_KWARG_RE = re.compile(r"(?:^|[,])[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
+_UPDATE_DICT_KEY_RE = re.compile(r"(?:^|[{,])[ \t]*(?:\"([^\"\n]+)\"|'([^'\n]+)')[ \t]*:")
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -725,6 +749,17 @@ def _setattr_helper_executable(*, raw_line: str, scan: str, match_start: int) ->
     )
 
 
+def _helper_keyword_executable(
+    *, raw_line: str, scan: str, match_start: int, tokens: tuple[str, ...]
+) -> bool:
+    """True when any of ``tokens`` remains executable in ``scan`` before ``(``."""
+    open_paren = raw_line.find("(", match_start)
+    if open_paren < 0:
+        return False
+    helper_scan = scan[match_start:open_paren]
+    return any(token in helper_scan for token in tokens)
+
+
 def _setattr_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return ``obj.attr`` keys mutated by setattr/delattr helpers on ``raw_line``.
 
@@ -767,6 +802,108 @@ def _setattr_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _setitem_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return ``obj["key"]`` keys mutated by ``__setitem__`` / ``__delitem__``.
+
+    Tip-extra ``FLAGS.__setitem__("enabled", False)`` /
+    ``dict.__setitem__(FLAGS, "enabled", False)`` /
+    ``FLAGS.__delitem__("enabled")`` must supersede salvage of
+    ``FLAGS["enabled"]``; assign and call scanners alone leave the salvage
+    retained (PRRT_kwDOSJAM6s6ZwrnH).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    tokens = ("__setitem__", "__delitem__")
+
+    def _key_from_groups(match: re.Match[str], double_idx: int, single_idx: int) -> str | None:
+        key = match.group(double_idx) or match.group(single_idx)
+        return key if key else None
+
+    def _append_subscript(receiver: str, key: str) -> None:
+        binding = _normalize_subscript_binding_name(f'{receiver}["{key}"]')
+        if binding not in names:
+            names.append(binding)
+
+    for match in _INLINE_SETITEM_FREE_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line, scan=scan, match_start=match.start(), tokens=tokens
+        ):
+            continue
+        key = _key_from_groups(match, 2, 3)
+        if not key:
+            continue
+        _append_subscript(match.group(1), key)
+    for match in _INLINE_SETITEM_METHOD_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line, scan=scan, match_start=match.start(), tokens=tokens
+        ):
+            continue
+        key = _key_from_groups(match, 2, 3)
+        if not key:
+            continue
+        _append_subscript(match.group(1), key)
+    return tuple(names)
+
+
+def _update_call_argument_span(raw_line: str, open_paren: int) -> str | None:
+    """Return the inside of a balanced ``(…)`` starting at ``open_paren``, or None."""
+    depth = 0
+    for idx in range(open_paren, len(raw_line)):
+        ch = raw_line[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return raw_line[open_paren + 1 : idx]
+    return None
+
+
+def _update_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return ``obj["key"]`` keys from ``obj.update(key=…)`` / dict-literal forms.
+
+    Keyword and simple ``{"key": …}`` arguments synthesize subscript bindings so
+    tip-extra ``FLAGS.update(enabled=False)`` supersedes salvaged
+    ``FLAGS["enabled"]`` (PRRT_kwDOSJAM6s6ZwrnH). Opaque ``update(other)`` yields
+    no keys here; tip-extra call fail-closed covers that case.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for match in _INLINE_UPDATE_CALL_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("update",),
+        ):
+            continue
+        open_paren = raw_line.find("(", match.start())
+        if open_paren < 0:
+            continue
+        args = _update_call_argument_span(raw_line, open_paren)
+        if args is None:
+            continue
+        receiver = match.group(1)
+        for kw_match in _UPDATE_KWARG_RE.finditer(args):
+            binding = _normalize_subscript_binding_name(f'{receiver}["{kw_match.group(1)}"]')
+            if binding not in names:
+                names.append(binding)
+        for dict_match in _UPDATE_DICT_KEY_RE.finditer(args):
+            key = dict_match.group(1) or dict_match.group(2)
+            if not key:
+                continue
+            binding = _normalize_subscript_binding_name(f'{receiver}["{key}"]')
+            if binding not in names:
+                names.append(binding)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
@@ -782,7 +919,8 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb). ``setattr`` / ``delattr`` /
     ``__setattr__`` / ``__delattr__`` targets are included so indirect attribute
     mutations supersede without a rebind or intersecting call name
-    (PRRT_kwDOSJAM6s6Zu8Kn).
+    (PRRT_kwDOSJAM6s6Zu8Kn). ``__setitem__`` / ``__delitem__`` / ``update``
+    targets synthesize ``obj["key"]`` the same way (PRRT_kwDOSJAM6s6ZwrnH).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
@@ -790,12 +928,23 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     unset = _unset_binding_names(raw_line)
     updated = _update_expr_binding_names(raw_line)
     mutated = _setattr_mutation_binding_names(raw_line)
-    if primary is None and not inline and not deleted and not unset and not updated and not mutated:
+    setitem = _setitem_mutation_binding_names(raw_line)
+    update_call = _update_mutation_binding_names(raw_line)
+    if (
+        primary is None
+        and not inline
+        and not deleted
+        and not unset
+        and not updated
+        and not mutated
+        and not setitem
+        and not update_call
+    ):
         return ()
     names: list[str] = []
     if primary is not None:
         names.append(primary)
-    for name in (*inline, *deleted, *unset, *updated, *mutated):
+    for name in (*inline, *deleted, *unset, *updated, *mutated, *setitem, *update_call):
         if name not in names:
             names.append(name)
     return tuple(names)

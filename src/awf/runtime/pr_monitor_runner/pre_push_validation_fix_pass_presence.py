@@ -502,6 +502,72 @@ def _nonliteral_subscript_shares_receiver(
     return False
 
 
+# Tip-extra mapping mutators whose arguments may be opaque (``update(other)``,
+# ``clear()``, ``popitem()``). Call names do not match ``FLAGS["enabled"]``;
+# fail closed when the receiver equals a salvaged subscript receiver
+# (PRRT_kwDOSJAM6s6ZwrnH). Literal-key ``__setitem__`` / kwargs ``update`` are
+# handled by binding synthesis instead so ``FLAGS.__setitem__("other", …)``
+# does not drop unrelated salvage.
+_OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
+
+
+def _salvaged_subscript_receivers(candidate_keys: set[str]) -> set[str]:
+    """Return receivers of subscript (or bare) candidate binding keys."""
+    receivers: set[str] = set()
+    for key in candidate_keys:
+        recv = _subscript_binding_receiver(key)
+        if recv is not None:
+            receivers.add(recv)
+    return receivers
+
+
+def _tip_extra_opaque_collection_mutator_shares_receiver(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra opaque mapping mutators share a salvage receiver.
+
+    ``FLAGS.update(other_flags)`` / ``FLAGS.clear()`` emit call names that never
+    equal ``FLAGS["enabled"]``; fail closed when the call receiver matches a
+    salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
+    """
+    receivers = _salvaged_subscript_receivers(candidate_keys)
+    if not receivers:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        scan_line = raw_line
+        stripped = raw_line.lstrip(" \t")
+        if _is_member_call_continuation(stripped):
+            scan_line = _join_member_call_continuation_line(lines, idx)
+        for name in _call_site_names_for_line(scan_line):
+            if "." not in name:
+                continue
+            method = name.rsplit(".", 1)[-1]
+            if method not in _OPAQUE_COLLECTION_MUTATOR_METHODS:
+                continue
+            receiver = name[: -(len(method) + 1)]
+            if receiver in receivers:
+                return True
+    return False
+
+
 def _tip_extra_keys_supersede_baseline(
     *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
 ) -> bool:
@@ -922,7 +988,10 @@ def _tip_extra_can_supersede_modified_salvage(
     merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK), including JS class
     method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G);
     per-callable body tip-extra avoids identical elsewhere wrappers stealing
-    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3).
+    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3). Collection mutation
+    helpers (``FLAGS.__setitem__("enabled", False)`` / ``FLAGS.update(…)`` /
+    ``FLAGS.clear()``) synthesize subscript keys or fail closed when an opaque
+    mutator shares a salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
@@ -940,6 +1009,12 @@ def _tip_extra_can_supersede_modified_salvage(
         # Prefix match only call-count keys (``guard.disable``), never scoped
         # binding keys (``feature.enabled``) — PRRT_kwDOSJAM6s6ZrsE0.
         receiver_prefix_keys=call_names,
+    ):
+        return True
+    if _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=changed,
     ):
         return True
     return _tip_extra_control_flow_in_changed_callables(
@@ -970,7 +1045,10 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     Indirect attribute mutations (``setattr(guard, "enabled", False)`` /
     ``delattr`` / ``object.__setattr__`` / ``guard.__setattr__``) synthesize
     ``guard.enabled`` binding keys so they supersede like a rebind
-    (PRRT_kwDOSJAM6s6Zu8Kn).
+    (PRRT_kwDOSJAM6s6Zu8Kn). Collection mutation helpers
+    (``FLAGS.__setitem__`` / ``FLAGS.update`` / ``FLAGS.clear``) synthesize
+    ``FLAGS["key"]`` or fail closed on opaque mutators sharing a salvaged
+    subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
     """
     if len(head_blob) <= len(salvage):
         return False
@@ -985,11 +1063,17 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     # candidate (mirrors ``_salvage_changed_call_names`` on the modified path).
     call_names = set(_call_site_name_counts(salvage))
     call_candidates = salvage_keys | call_names
-    return _tip_extra_calls_candidate_keys(
+    if _tip_extra_calls_candidate_keys(
         baseline_blob=salvage,
         head_blob=head_blob,
         candidate_keys=call_candidates,
         receiver_prefix_keys=call_names,
+    ):
+        return True
+    return _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
     )
 
 

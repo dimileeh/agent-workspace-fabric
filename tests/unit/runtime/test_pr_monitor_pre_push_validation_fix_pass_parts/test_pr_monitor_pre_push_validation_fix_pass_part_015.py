@@ -255,8 +255,10 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
         _del_binding_names,
         _setattr_mutation_binding_names,
+        _setitem_mutation_binding_names,
         _unset_binding_names,
         _update_expr_binding_names,
+        _update_mutation_binding_names,
     )
 
     assert _unset_binding_names("# unset FEATURE_ENABLED") == ()
@@ -265,5 +267,104 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     assert _update_expr_binding_names("// retryBudget--") == ()
     assert _setattr_mutation_binding_names('# setattr(guard, "enabled", False)') == ()
     assert _setattr_mutation_binding_names('// setattr(guard, "enabled", False)') == ()
+    assert _setitem_mutation_binding_names('# FLAGS.__setitem__("enabled", False)') == ()
+    assert _setitem_mutation_binding_names('// FLAGS.__setitem__("enabled", False)') == ()
+    assert _update_mutation_binding_names("# FLAGS.update(enabled=False)") == ()
+    assert _update_mutation_binding_names("// FLAGS.update(enabled=False)") == ()
     assert _del_binding_names("# del guard.enabled") == ()
     assert _del_binding_names("// delete guard.enabled") == ()
+
+
+@pytest.mark.unit
+def test_setitem_and_update_mutation_binding_names() -> None:
+    """Collection helpers synthesize ``obj["key"]`` bindings (PRRT_kwDOSJAM6s6ZwrnH)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _helper_keyword_executable,
+        _setitem_mutation_binding_names,
+        _update_call_argument_span,
+        _update_mutation_binding_names,
+    )
+
+    assert _setitem_mutation_binding_names('FLAGS.__setitem__("enabled", False)') == (
+        'FLAGS["enabled"]',
+    )
+    assert _setitem_mutation_binding_names("FLAGS.__delitem__('enabled')") == ('FLAGS["enabled"]',)
+    assert _setitem_mutation_binding_names('dict.__setitem__(FLAGS, "enabled", False)') == (
+        'FLAGS["enabled"]',
+    )
+    assert _setitem_mutation_binding_names(
+        'FLAGS.__setitem__("enabled", False); FLAGS.__setitem__("enabled", True)'
+    ) == ('FLAGS["enabled"]',)
+    assert _setitem_mutation_binding_names('msg = "FLAGS.__setitem__(\\"enabled\\", False)"') == ()
+    assert _update_mutation_binding_names("FLAGS.update(enabled=False, other=True)") == (
+        'FLAGS["enabled"]',
+        'FLAGS["other"]',
+    )
+    assert _update_mutation_binding_names('FLAGS.update({"enabled": False})') == (
+        'FLAGS["enabled"]',
+    )
+    assert _update_mutation_binding_names("FLAGS.update({'enabled': False})") == (
+        'FLAGS["enabled"]',
+    )
+    assert _update_mutation_binding_names('FLAGS.update({"enabled": False, "enabled": True})') == (
+        'FLAGS["enabled"]',
+    )
+    assert _update_mutation_binding_names("FLAGS.update(other_flags)") == ()
+    assert _update_mutation_binding_names("FLAGS.update(enabled=False") == ()
+    assert _update_mutation_binding_names('msg = "FLAGS.update(enabled=False)"') == ()
+    assert _update_call_argument_span("FLAGS.update(enabled=False)", 12) == "enabled=False"
+    assert _update_call_argument_span("FLAGS.update(enabled=False", 12) is None
+    assert (
+        _helper_keyword_executable(
+            raw_line="FLAGS.__setitem__",
+            scan="FLAGS.__setitem__",
+            match_start=0,
+            tokens=("__setitem__",),
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
+    """Opaque ``update`` / ``clear`` fail closed on salvaged receivers."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _tip_extra_opaque_collection_mutator_shares_receiver,
+    )
+
+    salvage = 'FLAGS["enabled"] = True\n'
+    assert _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.clear()\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.update(other_flags)\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.clear()\n",
+        candidate_keys=set(),
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage,
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.copy()\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "OTHER.clear()\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )

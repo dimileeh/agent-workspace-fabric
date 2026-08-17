@@ -127,6 +127,67 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             'FLAGS["enabled"] = True\nkey = "enabled"\nFLAGS[key] = False\n'
         ),
     )
+    # Collection mutation helpers leave no binding key; call scanner emits
+    # ``FLAGS`` / ``FLAGS.__setitem__`` / ``FLAGS.update``, which do not match
+    # changed ``FLAGS["enabled"]``. Recognize helpers or fail closed on mutator
+    # calls that share a salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.__setitem__("enabled", False)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=(
+            'FLAGS = {}\nFLAGS["enabled"] = True\ndict.__setitem__(FLAGS, "enabled", False)\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.__delitem__("enabled")\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.update(enabled=False)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.update({"enabled": False})\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.update(other_flags)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.clear()\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\n# FLAGS.__setitem__("enabled", False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nOTHER.__setitem__("enabled", False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.__setitem__("other", False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.copy()\n'),
+    )
     # Nested / mid-statement rebinds must supersede: line-start assign matching
     # misses ``if ready: FEATURE_ENABLED = False`` so merge-file equality would
     # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
