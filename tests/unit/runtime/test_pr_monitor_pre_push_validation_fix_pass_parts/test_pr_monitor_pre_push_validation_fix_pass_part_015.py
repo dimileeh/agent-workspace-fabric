@@ -316,6 +316,7 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     """``#`` / ``//`` lines must not bind unset / ``++`` / setattr mutations."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
         _del_binding_names,
+        _object_assign_mutation_binding_names,
         _setattr_mutation_binding_names,
         _setitem_mutation_binding_names,
         _unset_binding_names,
@@ -333,8 +334,102 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     assert _setitem_mutation_binding_names('// FLAGS.__setitem__("enabled", False)') == ()
     assert _update_mutation_binding_names("# FLAGS.update(enabled=False)") == ()
     assert _update_mutation_binding_names("// FLAGS.update(enabled=False)") == ()
+    assert _object_assign_mutation_binding_names("// Object.assign(guard, {enabled: false})") == ()
+    assert _object_assign_mutation_binding_names("# Object.assign(guard, {enabled: false})") == ()
     assert _del_binding_names("# del guard.enabled") == ()
     assert _del_binding_names("// delete guard.enabled") == ()
+
+
+@pytest.mark.unit
+def test_object_assign_mutation_binding_names() -> None:
+    """``Object.assign`` synthesizes ``target.key`` bindings (PRRT_kwDOSJAM6s6Zxwhs)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _object_assign_mutation_args_fully_synthesizable,
+        _object_assign_mutation_binding_names,
+    )
+
+    assert _object_assign_mutation_binding_names("Object.assign(guard, {enabled: false})") == (
+        "guard.enabled",
+    )
+    assert _object_assign_mutation_binding_names('Object.assign(guard, {"enabled": false})') == (
+        "guard.enabled",
+    )
+    assert _object_assign_mutation_binding_names("Object.assign(guard, {'enabled': false})") == (
+        "guard.enabled",
+    )
+    assert _object_assign_mutation_binding_names("Object.assign(guard, {enabled})") == (
+        "guard.enabled",
+    )
+    assert _object_assign_mutation_binding_names(
+        "Object.assign(guard, {enabled: false, other: true})"
+    ) == ("guard.enabled", "guard.other")
+    assert _object_assign_mutation_binding_names(
+        "globalThis.Object.assign(guard, {enabled: false})"
+    ) == ("guard.enabled",)
+    assert _object_assign_mutation_binding_names("Object.assign(guard, other)") == ()
+    assert _object_assign_mutation_binding_names("Object.assign(guard, {enabled: false") == ()
+    assert (
+        _object_assign_mutation_binding_names('msg = "Object.assign(guard, {enabled: false})"')
+        == ()
+    )
+    assert _object_assign_mutation_binding_names(
+        "Object.assign(guard, {other: false}, {enabled: true})"
+    ) == ("guard.other", "guard.enabled")
+    assert _object_assign_mutation_args_fully_synthesizable(
+        "Object.assign(guard, {enabled: false})"
+    )
+    assert not _object_assign_mutation_args_fully_synthesizable("Object.assign(guard, other)")
+    assert not _object_assign_mutation_args_fully_synthesizable(
+        "Object.assign(guard, {enabled: false}, extra)"
+    )
+    assert not _object_assign_mutation_args_fully_synthesizable("Object.assign(guard, {...other})")
+    assert not _object_assign_mutation_args_fully_synthesizable(
+        "Object.assign(guard, {[k]: false})"
+    )
+
+
+@pytest.mark.unit
+def test_opaque_object_assign_shares_salvaged_receiver() -> None:
+    """Opaque ``Object.assign`` fail-closed on salvaged attribute receivers."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _tip_extra_opaque_object_assign_shares_receiver,
+    )
+
+    salvage = "guard.enabled = true\n"
+    assert _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.assign(guard, other)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.assign(guard, {other: false}, extra)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.assign(guard, {enabled: false})\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.assign(other, extra)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "// Object.assign(guard, other)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.assign(guard, {other: false})\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.assign(guard, other)\n",
+    )
 
 
 @pytest.mark.unit

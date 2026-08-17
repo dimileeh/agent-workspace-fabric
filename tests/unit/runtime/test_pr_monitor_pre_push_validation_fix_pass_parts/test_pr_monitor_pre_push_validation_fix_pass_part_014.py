@@ -566,6 +566,53 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_py_guard,
         head_blob=('x = 1\nguard.enabled = True\ny = 2\nsetattr(other, "enabled", False)\n'),
     )
+    # Object.assign after salvage ``guard.enabled = true`` leaves no binding key
+    # and only call names ``Object`` / ``Object.assign``; recognize literal-key
+    # mutation or fail closed on opaque sources sharing the salvaged receiver
+    # (PRRT_kwDOSJAM6s6Zxwhs).
+    parent_js_guard = "x = 1\nguard.enabled = false\ny = 2\n"
+    commit_js_guard = "x = 1\nguard.enabled = true\ny = 2\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, {enabled: false})\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            'x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, {"enabled": false})\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, other)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            "x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, {other: false}, extra)\n"
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            "x = 1\nguard.enabled = true\ny = 2\n// Object.assign(guard, {enabled: false})\n"
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(other, {enabled: false})\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, {other: false})\n"),
+    )
     # Shell ``unset`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZuRSm).
     parent_shell = "x=1\nFEATURE_ENABLED=false\ny=2\n"
     commit_shell = "x=1\nFEATURE_ENABLED=true\ny=2\n"

@@ -317,6 +317,28 @@ _INLINE_UPDATE_CALL_RE = re.compile(
 )
 _UPDATE_KWARG_RE = re.compile(r"(?:^|[,])[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
 _UPDATE_DICT_KEY_RE = re.compile(r"(?:^|[{,])[ \t]*(?:\"([^\"\n]+)\"|'([^'\n]+)')[ \t]*:")
+# JS ``Object.assign(guard, {enabled: false})`` mutates attributes without an
+# equals-style binding; call names are only ``Object`` / ``Object.assign``, which
+# never intersect salvaged ``guard.enabled`` (PRRT_kwDOSJAM6s6Zxwhs).
+_INLINE_OBJECT_ASSIGN_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*Object\.assign"
+    r"[ \t]*\("
+)
+_OBJECT_ASSIGN_TARGET_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*Object\.assign"
+    rf"[ \t]*\([ \t]*({_SETATTR_OBJ})"
+    r"(?=[ \t]*[,)])"
+)
+_OBJECT_LITERAL_KEY_ENTRY_RE = re.compile(
+    r"^(?:"
+    r'"([^"\n]+)"'
+    r"|'([^'\n]+)'"
+    r"|([A-Za-z_][A-Za-z0-9_]*)"
+    r")"
+    r"(?:[ \t]*:|[ \t]*$)"
+)
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -1020,6 +1042,149 @@ def _update_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _object_literal_entry_key(entry: str) -> str | None:
+    """Return a synthesizable object-literal key, or None when opaque."""
+    stripped = entry.strip()
+    if not stripped or stripped.startswith("...") or stripped.startswith("["):
+        return None
+    match = _OBJECT_LITERAL_KEY_ENTRY_RE.match(stripped)
+    if match is None:
+        return None
+    return match.group(1) or match.group(2) or match.group(3)
+
+
+def _object_assign_source_fully_synthesizable(arg: str) -> bool:
+    """Return True when one ``Object.assign`` source is a plain object literal."""
+    stripped = arg.strip()
+    dict_match = _UPDATE_DICT_LITERAL_RE.match(stripped)
+    if dict_match is None:
+        return False
+    body = dict_match.group(1)
+    if not body.strip():
+        return True
+    for entry in _split_top_level_call_args(body):
+        if _object_literal_entry_key(entry) is None:
+            return False
+    return True
+
+
+def _object_assign_target_and_args(
+    raw_line: str, *, match_start: int
+) -> tuple[str, list[str] | None] | None:
+    """Return ``(target, source_args)`` for an ``Object.assign`` call.
+
+    ``source_args`` is ``None`` when the argument list is unclosed (fail closed
+    on a shared salvaged receiver). Returns ``None`` when no target can be read.
+    """
+    target_match = _OBJECT_ASSIGN_TARGET_RE.match(raw_line, match_start)
+    if target_match is None:
+        # ``finditer`` may start mid-line; search from match_start within the call.
+        target_match = _OBJECT_ASSIGN_TARGET_RE.search(raw_line, match_start)
+        if target_match is None or target_match.start() != match_start:
+            return None
+    target = target_match.group(1)
+    open_paren = raw_line.find("(", match_start)
+    if open_paren < 0:
+        return None
+    args = _update_call_argument_span(raw_line, open_paren)
+    if args is None:
+        return target, None
+    parts = _split_top_level_call_args(args)
+    if not parts:
+        return target, None
+    return target, parts[1:]
+
+
+def _object_assign_call_targets(
+    raw_line: str,
+) -> tuple[tuple[str, bool], ...]:
+    """Return ``(target, sources_fully_synthesizable)`` for each Object.assign.
+
+    Unclosed or opaque sources report ``sources_fully_synthesizable=False`` so
+    tip-extra fail-closed can drop stale salvage (PRRT_kwDOSJAM6s6Zxwhs).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    out: list[tuple[str, bool]] = []
+    for match in _INLINE_OBJECT_ASSIGN_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("assign",),
+        ):
+            continue
+        parsed = _object_assign_target_and_args(raw_line, match_start=match.start())
+        if parsed is None:
+            continue
+        target, sources = parsed
+        if sources is None:
+            out.append((target, False))
+            continue
+        fully = all(_object_assign_source_fully_synthesizable(src) for src in sources)
+        out.append((target, fully))
+    return tuple(out)
+
+
+def _object_assign_mutation_args_fully_synthesizable(raw_line: str) -> bool:
+    """Return True when every ``Object.assign`` source arg is a plain object literal.
+
+    Mixed forms such as ``Object.assign(guard, {other: false}, extra)`` still
+    synthesize literal keys, but the opaque mapping can overwrite other salvaged
+    attributes — those must fail closed (PRRT_kwDOSJAM6s6Zxwhs).
+    """
+    calls = _object_assign_call_targets(raw_line)
+    if not calls:
+        return False
+    return all(fully for _target, fully in calls)
+
+
+def _object_assign_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return ``target.key`` keys mutated by ``Object.assign`` object literals.
+
+    Tip-extra ``Object.assign(guard, {enabled: false})`` must supersede salvage
+    of ``guard.enabled``; assign and call scanners alone leave the salvage
+    retained (PRRT_kwDOSJAM6s6Zxwhs). Opaque sources synthesize nothing here and
+    are handled by tip-extra receiver fail-closed.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for match in _INLINE_OBJECT_ASSIGN_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("assign",),
+        ):
+            continue
+        parsed = _object_assign_target_and_args(raw_line, match_start=match.start())
+        if parsed is None:
+            continue
+        target, sources = parsed
+        if sources is None:
+            continue
+        for source in sources:
+            dict_match = _UPDATE_DICT_LITERAL_RE.match(source.strip())
+            if dict_match is None:
+                continue
+            body = dict_match.group(1)
+            if not body.strip():
+                continue
+            for entry in _split_top_level_call_args(body):
+                key = _object_literal_entry_key(entry)
+                if not key:
+                    continue
+                binding = f"{target}.{key}"
+                if binding not in names:
+                    names.append(binding)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
@@ -1037,6 +1202,8 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     mutations supersede without a rebind or intersecting call name
     (PRRT_kwDOSJAM6s6Zu8Kn). ``__setitem__`` / ``__delitem__`` / ``update``
     targets synthesize ``obj["key"]`` the same way (PRRT_kwDOSJAM6s6ZwrnH).
+    ``Object.assign`` object-literal keys synthesize ``target.key``
+    (PRRT_kwDOSJAM6s6Zxwhs).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
@@ -1046,6 +1213,7 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     mutated = _setattr_mutation_binding_names(raw_line)
     setitem = _setitem_mutation_binding_names(raw_line)
     update_call = _update_mutation_binding_names(raw_line)
+    object_assign = _object_assign_mutation_binding_names(raw_line)
     if (
         primary is None
         and not inline
@@ -1055,12 +1223,22 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
         and not mutated
         and not setitem
         and not update_call
+        and not object_assign
     ):
         return ()
     names: list[str] = []
     if primary is not None:
         names.append(primary)
-    for name in (*inline, *deleted, *unset, *updated, *mutated, *setitem, *update_call):
+    for name in (
+        *inline,
+        *deleted,
+        *unset,
+        *updated,
+        *mutated,
+        *setitem,
+        *update_call,
+        *object_assign,
+    ):
         if name not in names:
             names.append(name)
     return tuple(names)

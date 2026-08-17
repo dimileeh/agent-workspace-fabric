@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _object_assign_call_targets as _object_assign_call_targets,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _update_mutation_args_fully_synthesizable as _update_mutation_args_fully_synthesizable,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
@@ -533,6 +536,9 @@ _TIP_EXTRA_ALIAS_ASSIGN_RE = re.compile(
     r"[ \t]*=[ \t]*"
     r"([A-Za-z_][A-Za-z0-9_]*)"
     r"(?![A-Za-z0-9_.\[\(])"
+    # JS ``const fn = FEATURE_ENABLED =>`` is an arrow param, not an alias RHS
+    # (PRRT_kwDOSJAM6s6ZtZ_2 vs alias retain PRRT_kwDOSJAM6s6ZxHGP).
+    r"(?![ \t]*=>)"
 )
 
 # Assignment whose RHS was split to a following line (``const alias =`` alone).
@@ -761,6 +767,49 @@ def _tip_extra_opaque_collection_mutator_shares_receiver(
                 continue
             receiver = name[: -(len(method) + 1)]
             if receiver in receivers:
+                return True
+    return False
+
+
+def _tip_extra_opaque_object_assign_shares_receiver(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra opaque ``Object.assign`` shares a salvage receiver.
+
+    ``Object.assign(guard, other)`` emits only ``Object`` / ``Object.assign`` call
+    names, which never equal salvaged ``guard.enabled``. Fail closed when the
+    target argument matches a salvaged receiver (dotted / subscript / bare) and
+    sources are not fully synthesizable object literals
+    (PRRT_kwDOSJAM6s6Zxwhs). Literal-key forms synthesize ``guard.enabled`` via
+    binding names instead, so unrelated keys keep salvage like
+    ``Object.assign(guard, {other: false})``.
+    """
+    receivers = _salvaged_alias_reference_names(candidate_keys)
+    if not receivers:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        for target, fully_synthesizable in _object_assign_call_targets(raw_line):
+            if fully_synthesizable:
+                continue
+            if target in receivers:
                 return True
     return False
 
@@ -1185,11 +1234,13 @@ def _tip_extra_can_supersede_modified_salvage(
     merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK), including JS class
     method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G);
     per-callable body tip-extra avoids identical elsewhere wrappers stealing
-    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3). Collection mutation
-    helpers (``FLAGS.__setitem__("enabled", False)`` / ``FLAGS.update(…)`` /
-    ``FLAGS.clear()``) synthesize subscript keys or fail closed when an opaque
-    mutator shares a salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
-    Tip-extra alias assignments of a salvage-changed name fail closed
+    file-level multiset budget (PRRT_kwDOSJAM6s6Zvll3).     Collection mutation helpers (``FLAGS.__setitem__("enabled", False)`` /
+    ``FLAGS.update(…)`` / ``FLAGS.clear()``) synthesize subscript keys or fail
+    closed when an opaque mutator shares a salvaged subscript receiver
+    (PRRT_kwDOSJAM6s6ZwrnH). ``Object.assign(guard, {enabled: false})``
+    synthesizes ``guard.enabled``; opaque ``Object.assign(guard, other)`` fails
+    closed on a shared salvaged receiver (PRRT_kwDOSJAM6s6Zxwhs). Tip-extra
+    alias assignments of a salvage-changed name fail closed
     (PRRT_kwDOSJAM6s6ZxHGP).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
@@ -1211,6 +1262,12 @@ def _tip_extra_can_supersede_modified_salvage(
     ):
         return True
     if _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=changed,
+    ):
+        return True
+    if _tip_extra_opaque_object_assign_shares_receiver(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=changed,
@@ -1253,7 +1310,9 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     (PRRT_kwDOSJAM6s6Zu8Kn). Collection mutation helpers
     (``FLAGS.__setitem__`` / ``FLAGS.update`` / ``FLAGS.clear``) synthesize
     ``FLAGS["key"]`` or fail closed on opaque mutators sharing a salvaged
-    subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). Tip-extra alias assignments
+    subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). ``Object.assign`` object-literal
+    keys synthesize ``target.key``; opaque sources fail closed on a shared
+    salvaged receiver (PRRT_kwDOSJAM6s6Zxwhs). Tip-extra alias assignments
     (``const alias = guard``) fail closed so ``alias.enabled = false`` cannot
     keep stale salvage (PRRT_kwDOSJAM6s6ZxHGP).
     """
@@ -1278,6 +1337,12 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     ):
         return True
     if _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
+    ):
+        return True
+    if _tip_extra_opaque_object_assign_shares_receiver(
         baseline_blob=salvage,
         head_blob=head_blob,
         candidate_keys=salvage_keys,

@@ -883,6 +883,46 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob='FLAGS["enabled"] = True\n',
         head_blob='FLAGS["enabled"] = True\nFLAGS.copy()\n',
     )
+    # Object.assign mutates a salvage receiver without a binding key; call names
+    # are only ``Object`` / ``Object.assign``, and opaque mutator fail-closed is
+    # limited to subscript receivers — recognize the target or fail closed so a
+    # descendant cannot keep stale FIXED evidence (PRRT_kwDOSJAM6s6Zxwhs).
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(guard, {enabled: false})\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob='guard.enabled = true\nObject.assign(guard, {"enabled": false})\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(guard, {enabled})\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nglobalThis.Object.assign(guard, {enabled: false})\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(guard, other)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(guard, {other: false}, extra)\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\n// Object.assign(guard, {enabled: false})\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(other, {enabled: false})\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(guard, {other: false})\n",
+    )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;
     # assign/del/delete scanners previously missed it, so tip
     # ``unset FEATURE_ENABLED`` kept a line-aligned salvage prefix and reused
