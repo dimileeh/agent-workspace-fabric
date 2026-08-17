@@ -842,6 +842,46 @@ def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bo
     return any(key.endswith(suffix) for key in candidate_keys)
 
 
+def _call_site_name_counts(text: str) -> Counter[str]:
+    """Count statement-leading call names in executable (non-comment) lines."""
+    counts: Counter[str] = Counter()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for raw_line in text.splitlines():
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or raw_line.strip() == "":
+            continue
+        name = _call_site_name_for_line(raw_line)
+        if name is not None:
+            counts[name] += 1
+    return counts
+
+
+def _salvage_changed_call_names(*, parent_blob: str, commit_blob: str) -> set[str]:
+    """Return call names whose occurrence counts differ between parent and salvage.
+
+    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``) leave
+    ``_salvage_changed_binding_names`` empty; tip-extra calls that restore the
+    prior callee must still supersede (PRRT_kwDOSJAM6s6ZrN5J).
+    """
+    parent_counts = _call_site_name_counts(parent_blob)
+    commit_counts = _call_site_name_counts(commit_blob)
+    return {
+        name
+        for name in parent_counts.keys() | commit_counts.keys()
+        if parent_counts.get(name, 0) != commit_counts.get(name, 0)
+    }
+
+
 def _tip_extra_calls_candidate_keys(
     *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
 ) -> bool:
@@ -977,12 +1017,27 @@ def _tip_extra_can_supersede_modified_salvage(
     nested YAML ``logging.enabled`` does not collide with salvaged
     ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2), and TOML ``[logging] enabled``
     does not collide with salvaged ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
+    Call-only salvage flips (``disable_guard()`` → ``enable_guard()``) leave
+    binding diffs empty; tip-extra calls that restore a prior callee or invoke a
+    salvage-bound name supersede the same way the added-file path does
+    (PRRT_kwDOSJAM6s6ZrN5J; compare PRRT_kwDOSJAM6s6ZrJ3a).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
-    return _tip_extra_keys_supersede_baseline(
+    if _tip_extra_keys_supersede_baseline(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=changed,
+    ):
+        return True
+    call_candidates = (
+        changed
+        | set(_last_binding_spans(commit_blob))
+        | _salvage_changed_call_names(parent_blob=parent_blob, commit_blob=commit_blob)
+    )
+    return _tip_extra_calls_candidate_keys(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=call_candidates,
     )
 
 

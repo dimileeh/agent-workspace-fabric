@@ -672,6 +672,62 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
 
 
 @pytest.mark.unit
+def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
+    """Tip-extra calls must supersede call-only modified salvage flips.
+
+    Salvage that only rewrites ``disable_guard()`` → ``enable_guard()`` changes
+    no bindings, so a binding-only check retains stale FIXED evidence when a
+    descendant appends ``disable_guard()`` and ``git merge-file`` still equals
+    HEAD (PRRT_kwDOSJAM6s6ZrN5J). Mirrors added-file call-site fail-closed
+    behavior (PRRT_kwDOSJAM6s6ZrJ3a).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _salvage_changed_binding_names,
+        _tip_extra_can_supersede_modified_salvage,
+    )
+
+    parent = "x = 1\ndisable_guard()\ny = 2\n"
+    commit = "x = 1\nenable_guard()\ny = 2\n"
+    assert _salvage_changed_binding_names(parent_blob=parent, commit_blob=commit) == set()
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nenable_guard()\ny = 2\ndisable_guard()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nenable_guard()\ny = 2\nawait disable_guard()\n",
+    )
+    # Commented / unrelated tip-extra calls stay retained.
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nenable_guard()\ny = 2\n# disable_guard()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob="x = 1\nenable_guard()\ny = 2\nextra()\n",
+    )
+    # Same flip with helper defs present: bindings unchanged, tip restore
+    # of disable_guard() must still supersede.
+    parent_defs = "def enable_guard():\n    pass\ndef disable_guard():\n    pass\ndisable_guard()\n"
+    commit_defs = "def enable_guard():\n    pass\ndef disable_guard():\n    pass\nenable_guard()\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_defs, commit_blob=commit_defs) == set()
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_defs,
+        commit_blob=commit_defs,
+        head_blob=commit_defs + "disable_guard()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_defs,
+        commit_blob=commit_defs,
+        head_blob=commit_defs + "# disable_guard()\n",
+    )
+
+
+@pytest.mark.unit
 def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     """Baseline tips that append a rebinding of a salvage-changed name fail closed.
 
