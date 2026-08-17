@@ -604,7 +604,7 @@ def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage(
         ),
     )
     # Class leaf salvage must not be superseded by tip-extra return inside a
-    # nested method (class openers are not callable-body scopes for this check).
+    # nested method (unchanged nested def/function bodies stay out of scope).
     parent_cls = "class C:\n    FEATURE_ENABLED = False\n    def helper(self):\n        pass\n"
     commit_cls = "class C:\n    FEATURE_ENABLED = True\n    def helper(self):\n        pass\n"
     assert not _tip_extra_can_supersede_modified_salvage(
@@ -616,5 +616,48 @@ def test_tip_extra_control_flow_in_changed_callable_supersedes_modified_salvage(
             "    def helper(self):\n"
             "        return\n"
             "        pass\n"
+        ),
+    )
+    # JS class method shorthand is not a separate binding — only ``C`` changes —
+    # so tip-extra return in that method must still supersede (PRRT_kwDOSJAM6s6Zvk1G).
+    parent_js_cls = (
+        "class C {\n"
+        "  apply() {\n"
+        "    setup();\n"
+        "    prepare();\n"
+        "    validate();\n"
+        "    finalize();\n"
+        "    guard.disable();\n"
+        "  }\n"
+        "}\n"
+    )
+    commit_js_cls = (
+        "class C {\n"
+        "  apply() {\n"
+        "    setup();\n"
+        "    prepare();\n"
+        "    validate();\n"
+        "    finalize();\n"
+        "    guard.enable();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert _salvage_changed_binding_names(parent_blob=parent_js_cls, commit_blob=commit_js_cls) == {
+        "C"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_cls,
+        commit_blob=commit_js_cls,
+        head_blob=(
+            "class C {\n"
+            "  apply() {\n"
+            "    return;\n"
+            "    setup();\n"
+            "    prepare();\n"
+            "    validate();\n"
+            "    finalize();\n"
+            "    guard.enable();\n"
+            "  }\n"
+            "}\n"
         ),
     )

@@ -674,6 +674,37 @@ def _salvage_changed_binding_names(*, parent_blob: str, commit_blob: str) -> set
     }
 
 
+def _unchanged_nested_callable_body_indices(
+    *,
+    lines: list[str],
+    starts: dict[str, int],
+    class_start: int,
+    class_end: int,
+    changed_keys: set[str],
+) -> set[int]:
+    """Return body indices of nested def/function callables salvage did not edit.
+
+    Used so class-level control-flow scanning can fail closed on unrecognized
+    method regions (JS shorthand) without dropping leaf-assignment salvage when
+    an unrelated nested ``def``/``function`` gains tip-extra ``return``
+    (PRRT_kwDOSJAM6s6Zvk1G; compare leaf retention in PRRT_kwDOSJAM6s6ZvVZK).
+    """
+    excluded: set[int] = set()
+    for key, start in starts.items():
+        if key in changed_keys:
+            continue
+        if not (class_start < start < class_end):
+            continue
+        if start >= len(lines):
+            continue
+        opener = lines[start]
+        if _DEF_BINDING_RE.match(opener) is None and _FUNCTION_BINDING_RE.match(opener) is None:
+            continue
+        nested_end = _binding_span_end_exclusive(lines, start)
+        excluded.update(range(start + 1, nested_end))
+    return excluded
+
+
 def _tip_extra_control_flow_in_changed_callables(
     *, commit_blob: str, head_blob: str, changed_keys: set[str]
 ) -> bool:
@@ -682,9 +713,11 @@ def _tip_extra_control_flow_in_changed_callables(
     Early ``return`` / ``raise`` / ``throw`` / ordinary ``if`` headers inside a
     ``def``/``function`` whose body the salvage edited can leave the salvaged
     fix unreachable while ``git merge-file`` still equals HEAD. Binding and call
-    scanners miss those tip-extra lines (PRRT_kwDOSJAM6s6ZvVZK). Class openers
-    are skipped so a leaf assignment salvage under ``class C`` is not dropped
-    when a nested method gains an unrelated ``return``.
+    scanners miss those tip-extra lines (PRRT_kwDOSJAM6s6ZvVZK). Changed
+    ``class`` spans also count, minus nested ``def``/``function`` bodies whose
+    keys are unchanged, so JS method-shorthand edits fail closed without
+    dropping leaf-assignment salvage when an unrelated helper gains ``return``
+    (PRRT_kwDOSJAM6s6Zvk1G).
     """
     if not changed_keys:
         return False
@@ -699,10 +732,24 @@ def _tip_extra_control_flow_in_changed_callables(
         if start is None or start >= len(lines):
             continue
         opener = lines[start]
-        if _DEF_BINDING_RE.match(opener) is None and _FUNCTION_BINDING_RE.match(opener) is None:
-            continue
         end = _binding_span_end_exclusive(lines, start)
-        body_indices.update(range(start + 1, end))
+        if (
+            _DEF_BINDING_RE.match(opener) is not None
+            or _FUNCTION_BINDING_RE.match(opener) is not None
+        ):
+            body_indices.update(range(start + 1, end))
+            continue
+        if _CLASS_BINDING_RE.match(opener) is None:
+            continue
+        class_body = set(range(start + 1, end))
+        class_body -= _unchanged_nested_callable_body_indices(
+            lines=lines,
+            starts=starts,
+            class_start=start,
+            class_end=end,
+            changed_keys=changed_keys,
+        )
+        body_indices.update(class_body)
     if not body_indices:
         return False
     in_block_comment = False
@@ -758,10 +805,11 @@ def _tip_extra_can_supersede_modified_salvage(
     PRRT_kwDOSJAM6s6ZrSYE; compare PRRT_kwDOSJAM6s6ZrJ3a). Call candidates are
     only changed bindings ∪ changed call names — not every commit binding — so a
     tip-extra ``helper()`` on an unchanged helper does not drop a still-present
-    binding fix (PRRT_kwDOSJAM6s6ZrR2e). Tip-extra control-flow inside a
+    binding fix (PRRT_kwDOSJAM6s6ZrR2e).     Tip-extra control-flow inside a
     salvage-modified ``def``/``function`` body (early ``return`` / ``if (false)``)
     also supersedes when it would leave the salvaged fix unreachable while
-    merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK).
+    merge-file still equals HEAD (PRRT_kwDOSJAM6s6ZvVZK), including JS class
+    method shorthand under a changed ``class`` span (PRRT_kwDOSJAM6s6Zvk1G).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if _tip_extra_keys_supersede_baseline(
