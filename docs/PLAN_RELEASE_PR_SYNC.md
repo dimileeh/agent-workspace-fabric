@@ -76,9 +76,9 @@ which selects `build_release_pr_monitor`.
 
 ```python
 class TaskKind(StrEnum):
-    feature_branch_pr = "feature_branch_pr"   # everyday coding-agent PR
-    sync_release_pr = "sync_release_pr"        # open/reuse source→target release PR
-    sync_feature_pr = "sync_feature_pr"        # adopt an existing feature PR
+    feature_branch_pr = "feature_branch_pr"  # everyday coding-agent PR
+    sync_release_pr = "sync_release_pr"  # open/reuse source→target release PR
+    sync_feature_pr = "sync_feature_pr"  # adopt an existing feature PR
 ```
 
 A `sync_release_pr` workspace is short-lived and semantically distinct
