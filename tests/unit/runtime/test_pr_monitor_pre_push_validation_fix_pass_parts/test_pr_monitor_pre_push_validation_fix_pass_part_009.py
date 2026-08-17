@@ -406,6 +406,25 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="declare FEATURE_ENABLED=true\n",
         head_blob="declare FEATURE_ENABLED=true\ndeclare FEATURE_ENABLED=false\n",
     )
+    # ``readonly NAME=value`` (and flagged forms) must bind like declare/typeset;
+    # otherwise an appended readonly rebind keeps a line-aligned prefix and
+    # reuses stale FIXED evidence (PRRT_kwDOSJAM6s6ZrBJF).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob="FEATURE_ENABLED=true\nreadonly FEATURE_ENABLED=false\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="readonly FEATURE_ENABLED=true\n",
+        head_blob=("readonly FEATURE_ENABLED=true\nreadonly FEATURE_ENABLED=false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="readonly -x FEATURE_ENABLED=true\n",
+        head_blob=("readonly -x FEATURE_ENABLED=true\nreadonly -x FEATURE_ENABLED=false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="export FEATURE_ENABLED=true\n",
+        head_blob=("export FEATURE_ENABLED=true\nreadonly FEATURE_ENABLED=false\n"),
+    )
     # Comment-only / unrelated appends cannot supersede the salvage binding.
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
@@ -666,6 +685,33 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_declare,
         commit_blob=commit_declare,
         head_blob=("x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\nexport FEATURE_ENABLED=false\n"),
+    )
+    # ``readonly`` rebinds must supersede like declare/export
+    # (PRRT_kwDOSJAM6s6ZrBJF).
+    parent_readonly = "x=1\nFEATURE_ENABLED=false\ny=2\n"
+    commit_readonly = "x=1\nFEATURE_ENABLED=true\ny=2\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_readonly, commit_blob=commit_readonly
+    ) == {"FEATURE_ENABLED"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_readonly,
+        commit_blob=commit_readonly,
+        head_blob=("x=1\nFEATURE_ENABLED=true\ny=2\nreadonly FEATURE_ENABLED=false\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_declare,
+        commit_blob=commit_declare,
+        head_blob=("x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\nreadonly FEATURE_ENABLED=false\n"),
+    )
+    parent_readonly_decl = "x=1\nreadonly FEATURE_ENABLED=false\ny=2\n"
+    commit_readonly_decl = "x=1\nreadonly FEATURE_ENABLED=true\ny=2\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_readonly_decl, commit_blob=commit_readonly_decl
+    ) == {"FEATURE_ENABLED"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_readonly_decl,
+        commit_blob=commit_readonly_decl,
+        head_blob=("x=1\nreadonly FEATURE_ENABLED=true\ny=2\nreadonly FEATURE_ENABLED=false\n"),
     )
     # YAML-style key rebinds must supersede like equals-style assignments
     # (PRRT_kwDOSJAM6s6ZqNAk).

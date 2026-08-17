@@ -22,10 +22,11 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # Binding targets that an appended tip can rebind to supersede added salvage.
 # Optional YAML block-sequence marker (``- ``) before the key so list-item
 # mappings bind like nested leaves (PRRT_kwDOSJAM6s6ZqeWt).
-# Optional shell ``export `` / ``declare … `` / ``typeset … `` before the key so
-# ``export FEATURE_ENABLED=true`` and ``declare -x FEATURE_ENABLED=true`` bind
-# like bare ``FEATURE_ENABLED=true`` (PRRT_kwDOSJAM6s6ZqseO,
-# PRRT_kwDOSJAM6s6ZqxX4). Declaration forms (``export class`` / ``export const``)
+# Optional shell ``export `` / ``declare … `` / ``typeset … `` / ``readonly … ``
+# before the key so ``export FEATURE_ENABLED=true``, ``declare -x
+# FEATURE_ENABLED=true``, and ``readonly FEATURE_ENABLED=true`` bind like bare
+# ``FEATURE_ENABLED=true`` (PRRT_kwDOSJAM6s6ZqseO, PRRT_kwDOSJAM6s6ZqxX4,
+# PRRT_kwDOSJAM6s6ZrBJF). Declaration forms (``export class`` / ``export const``)
 # still match earlier patterns.
 # Bare keys allow ``-`` so TOML / YAML hyphenated names bind
 # (``feature-enabled = true``; PRRT_kwDOSJAM6s6Zqip3).
@@ -33,7 +34,7 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # (``feature.enabled`` / ``site."google.com"``; PRRT_kwDOSJAM6s6Zql88).
 _ASSIGN_KEY_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')'
 _ASSIGN_BINDING_RE = re.compile(
-    r"(?m)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?(?:"
+    r"(?m)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+|(?:declare|typeset|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?(?:"
     # Dotted TOML keys (≥1 ``.``): require the full path before ``=`` / ``:``
     # so ``feature.enabled = true`` binds as ``feature.enabled``, not nothing.
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})+)"
@@ -895,12 +896,13 @@ def _tip_extra_can_supersede_modified_salvage(
     Baseline-backed retention uses clean ``git merge-file`` equality with HEAD.
     A tip can keep the salvage hunk and append a later rebinding of the same
     name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, or shell
-    ``export`` / ``declare -x`` / ``typeset`` forms of the same name); with
-    surrounding context merge-file reproduces that tip cleanly, so equality
-    alone would retain stale FIXED evidence. Only scoped keys whose last binding
-    span (opener plus indented body) changed vs parent count — unrelated appends
-    and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j, PRRT_kwDOSJAM6s6ZqseO,
-    PRRT_kwDOSJAM6s6ZqxX4). Tip-extra lines use
+    ``export`` / ``declare -x`` / ``typeset`` / ``readonly`` forms of the same
+    name); with surrounding context merge-file reproduces that tip cleanly, so
+    equality alone would retain stale FIXED evidence. Only scoped keys whose last
+    binding span (opener plus indented body) changed vs parent count — unrelated
+    appends and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j,
+    PRRT_kwDOSJAM6s6ZqseO, PRRT_kwDOSJAM6s6ZqxX4, PRRT_kwDOSJAM6s6ZrBJF). Tip-extra
+    lines use
     set difference except for declaration openers, which need multiset counting
     so same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
     full-line multiset would over-reject surplus salvage assignment copies
