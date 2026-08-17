@@ -626,3 +626,109 @@ def test_object_mutation_lookback_skips_blank_lines_before_shared_opener() -> No
     ]
     reflect_covered = _join_incomplete_object_mutation_line_covering(reflect_lines, 3)
     assert _reflect_set_mutation_binding_names(reflect_covered) == ("guard.enabled",)
+
+
+@pytest.mark.unit
+def test_object_mutation_binding_scan_and_lookback_edge_closes() -> None:
+    """Binding scanners and look-back must skip non-executable / nested misses.
+
+    Tip-extra salvage depends on these fail-closed paths: string-embedded calls
+    are not executable mutations, unclosed / opaque sources synthesize nothing,
+    multi-key literals stay synthesizable, and nested incomplete openers that
+    close before the tip must not steal the outer covering join.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_object_mut import (
+        _join_incomplete_object_mutation_line_covering,
+        _object_assign_mutation_binding_names,
+        _object_assign_source_fully_synthesizable,
+        _object_define_properties_mutation_binding_names,
+        _object_define_property_mutation_args_fully_synthesizable,
+        _object_define_property_mutation_binding_names,
+        _reflect_set_mutation_args_fully_synthesizable,
+        _reflect_set_mutation_binding_names,
+    )
+
+    # Multi-key object literals remain fully synthesizable (loop back-edge).
+    assert _object_assign_source_fully_synthesizable("{a: 1, b: 2}")
+
+    # String-embedded / unclosed / opaque sources never synthesize bindings.
+    assert (
+        _object_assign_mutation_binding_names('msg = "Object.assign(guard, {enabled: false})"')
+        == ()
+    )
+    assert _object_assign_mutation_binding_names("Object.assign(guard, {enabled: false") == ()
+    assert _object_assign_mutation_binding_names("Object.assign(guard, other)") == ()
+    assert (
+        _object_define_properties_mutation_binding_names(
+            'msg = "Object.defineProperties(guard, {enabled: {value: false}})"'
+        )
+        == ()
+    )
+    assert (
+        _object_define_properties_mutation_binding_names(
+            "Object.defineProperties(guard, {enabled: {value: false}"
+        )
+        == ()
+    )
+    assert (
+        _object_define_properties_mutation_binding_names("Object.defineProperties(guard, other)")
+        == ()
+    )
+    assert (
+        _object_define_property_mutation_binding_names(
+            'msg = "Object.defineProperty(guard, \\"enabled\\", {value: false})"'
+        )
+        == ()
+    )
+    assert (
+        _object_define_property_mutation_binding_names(
+            'Object.defineProperty(guard, "enabled", {value: false'
+        )
+        == ()
+    )
+    assert (
+        _reflect_set_mutation_binding_names('msg = "Reflect.set(guard, \\"enabled\\", false)"')
+        == ()
+    )
+    assert _reflect_set_mutation_binding_names('Reflect.set(guard, "enabled", false') == ()
+
+    # Fully-synthesizable checks must evaluate existing calls, not only empties.
+    assert _object_define_property_mutation_args_fully_synthesizable(
+        'Object.defineProperty(guard, "enabled", {value: false})'
+    )
+    assert not _object_define_property_mutation_args_fully_synthesizable(
+        "Object.defineProperty(guard, key, {value: false})"
+    )
+    assert _reflect_set_mutation_args_fully_synthesizable('Reflect.set(guard, "enabled", false)')
+    assert not _reflect_set_mutation_args_fully_synthesizable("Reflect.set(guard, key, false)")
+
+    # Covering join on an already-complete tip returns that tip unchanged.
+    complete = ["Object.assign(guard, {enabled: false});"]
+    assert _join_incomplete_object_mutation_line_covering(complete, 0) == complete[0]
+
+    # Nested incomplete opener that closes before the tip must be skipped so the
+    # outer Object.assign still covers the tip attribute line.
+    nested = [
+        "Object.assign(outer, {",
+        "  a: Object.assign(inner,",
+        "  {b: 1}),",
+        "  enabled: false",
+        "});",
+    ]
+    nested_covered = _join_incomplete_object_mutation_line_covering(nested, 3)
+    assert "outer" in nested_covered
+    assert _object_assign_mutation_binding_names(nested_covered) == (
+        "outer.a",
+        "outer.enabled",
+        "inner.b",
+    )
+
+    # When the only incomplete opener closes before the tip and no outer cover
+    # remains, look-back must fall through to the forward (uncovered) tip line.
+    nested_only = [
+        "const x = 1;",
+        "  a: Object.assign(inner,",
+        "  {b: 1}),",
+        "  enabled: false",
+    ]
+    assert _join_incomplete_object_mutation_line_covering(nested_only, 3) == (nested_only[3])
