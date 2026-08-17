@@ -1133,7 +1133,7 @@ async def test_run_fix_cycle_resolves_task_tag_once_for_multiple_items(
     cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
     adapter = FakeAdapter()
     for _ in range(4):  # 2 threads + 2 review comments
-        adapter.queue(stdout="Committed fix locally.")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
     threads = tuple(
         ReviewThread(
             thread_id=f"PRRT_{n}",
@@ -1157,6 +1157,25 @@ async def test_run_fix_cycle_resolves_task_tag_once_for_multiple_items(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
+    # No worktree directory: per-item HEAD probing falls back to the cycle-start
+    # SHA (already established by ``_repair_operation_start_head_result``). That
+    # keeps this regression focused on task-tag threading rather than the
+    # fail-closed probe path covered elsewhere (PRRT_kwDOSJAM6s6ZoHvG).
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        # Item-scoped FIXED evidence for this task-tag regression (no real git).
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    runner._protected_scope_push_block = _protected_scope_push_block  # type: ignore[method-assign]
+    runner._validated_git_push_result = _validated_git_push_result  # type: ignore[method-assign]
     # Spy the instance-bound resolver so every cycle-level + per-item lookup counts.
     original_resolve = runner._resolve_task_tag
     resolve_calls: list[str] = []

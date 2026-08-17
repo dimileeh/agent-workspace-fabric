@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comments
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
@@ -15,6 +16,62 @@ from tests.unit.runtime.test_pr_monitor_needs_human_reason import (
     _init_awf_linked_worktree,
     _LocalCommandRunner,
 )
+
+
+@pytest.mark.unit
+async def test_needs_human_reason_reask_omits_salvage_evidence_ids(
+    tmp_path: Path,
+) -> None:
+    """Clarification reasks must not enable dirty-salvage retention (PRRT_kwDOSJAM6s6ZmikP)."""
+    workspace_id = "ws_reask_no_salvage_ids"
+    worktree = _init_awf_linked_worktree(tmp_path, workspace_id)
+    reask_kwargs: dict[str, object] = {}
+
+    async def _invoke_cli_for_verdict_result(**kwargs: object) -> VerdictResult:
+        reask_kwargs.update(kwargs)
+        return VerdictResult(
+            verdict="needs_human",
+            reason="select the deployment region",
+        )
+
+    async def _rev_parse_head(_worktree_path: Path, *, timeout_seconds: float | None = None) -> str:
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(runner=_LocalCommandRunner()),
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=VerdictResult(verdict="needs_human"),
+        original_prompt="original review task",
+        workspace_id=workspace_id,
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        item_body_hash="thread-body-hash",
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=MonitorState(),
+        task_tag=None,
+        operation_start_head=None,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == VerdictResult(verdict="needs_human", reason="select the deployment region")
+    assert "evidence_item_id" not in reask_kwargs
+    assert "evidence_body_hash" not in reask_kwargs
 
 
 @pytest.mark.unit

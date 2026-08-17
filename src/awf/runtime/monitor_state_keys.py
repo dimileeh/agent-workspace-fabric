@@ -69,6 +69,47 @@ def _outdated_resolve_requeued_key(thread_id: str) -> str:
     return f"__awf_outdated_resolve_requeued__:{thread_id}"
 
 
+def _salvaged_fix_head_state_key(item_id: str) -> str:
+    """Persisted SHA of a dirty-salvage commit after a nonzero CLI exit.
+
+    When the comment agent crashes after leaving a valid dirty fix,
+    ``_commit_dirty_worktree`` still commits it and the invocation returns
+    ``agent_failed``. The settle loop retries the same item; a successful FIXED
+    without another tree change must be able to confirm the prior salvage when
+    HEAD still equals or descends from that SHA — without accepting the failed
+    run's verdict. Descent matters in multi-item bursts where a later thread
+    advances HEAD past the salvage tip while leaving it in history.
+
+    Pair with ``_salvaged_fix_body_hash_state_key`` so a later no-change FIXED
+    cannot reuse salvage created for a prior feedback body after the reviewer
+    edits the thread while ``agent_failed`` skips stale-body cleanup. Pair with
+    ``_salvaged_fix_start_state_key`` so descendant reuse verifies the full
+    failed-run ``start..salvage`` delta, not only the tip's first-parent changes.
+    """
+    return f"__salvaged_fix_head__:{item_id}"
+
+
+def _salvaged_fix_start_state_key(item_id: str) -> str:
+    """Persisted invocation-start SHA bound to a retained salvage tip.
+
+    A failed run may create multiple commits (H1 review fix, H2 unrelated) and
+    retain only the tip. Descendant reuse must diff against this start SHA so a
+    later tip that reverts an earlier salvage commit while preserving the tip's
+    first-parent change cannot confirm FIXED (PRRT_kwDOSJAM6s6ZmG-B).
+    """
+    return f"__salvaged_fix_start__:{item_id}"
+
+
+def _salvaged_fix_body_hash_state_key(item_id: str) -> str:
+    """Feedback body hash bound to a retained salvage SHA for the same item.
+
+    Stale-body sweeps skip ``agent_failed`` items, so salvage retention must
+    carry its own body-hash sidecar and refuse confirmation when the hash
+    diverges from the feedback presented on retry.
+    """
+    return f"__salvaged_fix_body_hash__:{item_id}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 

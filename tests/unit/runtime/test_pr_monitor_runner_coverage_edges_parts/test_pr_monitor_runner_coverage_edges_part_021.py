@@ -291,6 +291,7 @@ async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_thread(
 async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Bitbucket reviewer task whose resolution PUT is forbidden (403) must
     downgrade to ``needs_human`` rather than clear the addressed marker (#445).
@@ -305,7 +306,7 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -326,6 +327,11 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     task_thread = ReviewThread(
         thread_id=task_thread_id,
         path=None,
@@ -383,6 +389,7 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
 async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When a still-open comment thread's resolve keeps hitting a transient forge
     fault until the bounded retry budget is exhausted, the fix cycle must escalate
@@ -399,7 +406,7 @@ async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -411,6 +418,11 @@ async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     # A budget of 0 retries exhausts on the first transient resolve fault — no
     # backoff sleep, straight to the exhausted path within this single fix cycle.
     object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
@@ -472,6 +484,7 @@ async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
 async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bitbucket symmetry: an exhausted transient resolve budget on a still-open
     comment thread escalates to ``needs_human`` with the Bitbucket exhausted reason
@@ -480,7 +493,7 @@ async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_huma
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed fix locally")
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -500,6 +513,11 @@ async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_huma
             ),
         ),
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
     thread = ReviewThread(
         thread_id="T_resolve",

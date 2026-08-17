@@ -124,7 +124,7 @@ async def test_permanent_resolve_fault_on_outdated_thread_preserves_verdict(
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
     thread = ReviewThread(
         thread_id="PRRT_outdated",
         path="src/foo.py",
@@ -150,6 +150,12 @@ async def test_permanent_resolve_fault_on_outdated_thread_preserves_verdict(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        # No worktree: dirty-commit stub is the item-scoped FIXED evidence.
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
     state = MonitorState()
 
     await runner._run_fix_cycle(
@@ -197,7 +203,7 @@ async def test_transient_resolve_fault_on_outdated_thread_preserves_verdict(
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
     thread = ReviewThread(
         thread_id="PRRT_outdated",
         path="src/foo.py",
@@ -223,6 +229,11 @@ async def test_transient_resolve_fault_on_outdated_thread_preserves_verdict(
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
     state = MonitorState()
 
     await runner._run_fix_cycle(
@@ -267,7 +278,7 @@ async def test_permanent_resolve_fault_on_non_outdated_thread_still_clears_verdi
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
     adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed locally")
     thread = ReviewThread(
         thread_id="PRRT_active",
         path="src/foo.py",
@@ -305,6 +316,11 @@ async def test_permanent_resolve_fault_on_non_outdated_thread_still_clears_verdi
         worktrees_root=tmp_path / "worktrees",
         gh=gh,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
     state = MonitorState()
 
     await runner._run_fix_cycle(

@@ -1,0 +1,1320 @@
+"""Fail-closed FIXED evidence gate regressions (part 003)."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.adapters.base import AgentRunResult
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.github_client import RepoRef
+from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewThread,
+)
+from awf.runtime.pr_monitor_runner import comments
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    seed_monitoring_workspace,
+)
+from tests.unit.runtime.test_pr_monitor_task_tag_threading import (
+    _MonitorAgentServiceRecoveryRunner,
+)
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+def _evidence_runner(
+    *,
+    stdout: str,
+    dirty: bool,
+    heads: list[str | None] | None = None,
+    returncode: int = 0,
+    head_descends: bool | None = None,
+    commit_trees_differ: bool | None = None,
+    commit_changes_present: bool | None = None,
+    provider_recovery_raise: BaseException | None = None,
+    commit_dirty_raises: BaseException | None = None,
+) -> SimpleNamespace:
+    """Stub runner for ``_invoke_cli_for_verdict_result`` evidence checks."""
+    head_iter = iter(heads or [])
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        if returncode != 0:
+            from awf.adapters.base import AgentRunError
+            from awf.db.enums import AgentRuntime
+
+            raise AgentRunError(
+                agent=AgentRuntime.claude_code,
+                result=CommandResult(returncode=returncode, stdout=stdout, stderr="fail"),
+                reason_code="AGENT_CLI_FAILED",
+            )
+        return AgentRunResult(returncode=0, stdout=stdout, stderr="")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        if commit_dirty_raises is not None:
+            raise commit_dirty_raises
+        return dirty
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        try:
+            return next(head_iter)
+        except StopIteration:
+            return heads[-1] if heads else None
+
+    async def _head_descends_from(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        if head_descends is not None:
+            return head_descends
+        return ancestor.lower() != descendant.lower()
+
+    async def _commit_trees_differ(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+    ) -> bool:
+        del worktree_path
+        if commit_trees_differ is not None:
+            return commit_trees_differ
+        # Default: distinct SHAs imply a contentful advance for legacy stubs.
+        return left.lower() != right.lower()
+
+    async def _commit_changes_present_in_head(
+        *,
+        worktree_path: Path,
+        commit: str,
+        head: str,
+        baseline: str | None = None,
+    ) -> bool:
+        del worktree_path, commit, head, baseline
+        if commit_changes_present is not None:
+            return commit_changes_present
+        # Default: descendant tips preserve salvage content for legacy stubs.
+        return True
+
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: object,
+        *,
+        state: object | None = None,
+    ) -> None:
+        del state
+        if provider_recovery_raise is not None:
+            raise provider_recovery_raise
+
+    return _MonitorAgentServiceRecoveryRunner(
+        _worktrees_root=Path("/tmp"),
+        _provider_recovery_suppresses_cli=_suppress,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _rev_parse_head=_rev_parse_head,
+        _head_descends_from=_head_descends_from,
+        _commit_trees_differ=_commit_trees_differ,
+        _commit_changes_present_in_head=_commit_changes_present_in_head,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_survives_later_head_advance(
+    tmp_path: Path,
+) -> None:
+    """Retained salvage must count when a later burst tip descends from it."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_later_head"
+    body_hash = "feedback_body_hash_later"
+    workspace_id = "ws_salvage_later_head"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Another item moved HEAD past the salvage tip; this retry starts/ends there.
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: confirmed salvaged fix after burst",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "fix_committed"
+    assert retry.reason == "confirmed salvaged fix after burst"
+    # Tip evidence retained until push/resolve succeed (PRRT_kwDOSJAM6s6ZnvBN).
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_descendant_that_reverts_salvage(
+    tmp_path: Path,
+) -> None:
+    """Ancestry alone must not accept a tip that undoes the salvaged change.
+
+    Item A salvages at H1; item B creates descendant H2 that reverts H1's
+    content. A no-change retry of A at H2 must not resolve FIXED, and the
+    undone salvage tip must be invalidated.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    reverted = "c" * 40
+    item_id = "PRRT_salvage_reverted_descendant"
+    body_hash = "feedback_body_hash_reverted"
+    workspace_id = "ws_salvage_reverted_descendant"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Later tip descends from salvage but undoes its content; no-change retry.
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse reverted salvage descendant",
+        dirty=False,
+        heads=[reverted],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_changes_present=False,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=reverted,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_fail_closed_without_content_helper(
+    tmp_path: Path,
+) -> None:
+    """Descendant salvage reuse must not accept ancestry when content helper is absent."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_no_content_helper"
+    body_hash = "feedback_body_hash_no_helper"
+    workspace_id = "ws_salvage_no_content_helper"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: ancestry without content proof",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+    del retry_runner._commit_changes_present_in_head
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_fail_closed_without_retained_start(
+    tmp_path: Path,
+) -> None:
+    """Descendant salvage reuse must not confirm when the start SHA is missing.
+
+    Legacy retained tip+body without the failed-run start cannot prove the full
+    multi-commit delta (PRRT_kwDOSJAM6s6ZmG-B).
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_no_start"
+    body_hash = "feedback_body_hash_no_start"
+    workspace_id = "ws_salvage_no_start"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    state.mark_addressed(_salvaged_fix_head_state_key(item_id), salvaged)
+    state.mark_addressed(_salvaged_fix_body_hash_state_key(item_id), body_hash)
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse without start baseline",
+        dirty=False,
+        heads=[later],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_changes_present=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_backward_reset_to_retained_tip(
+    tmp_path: Path,
+) -> None:
+    """Equality salvage must not accept a retry that resets HEAD behind start.
+
+    Salvage H1 plus a later item tip H2 must not resolve when the retried agent
+    checks out H1 again — that discards H2 while the start→end ancestry gate
+    already rejected the backward move.
+    """
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    item_id = "PRRT_salvage_backward_reset"
+    body_hash = "feedback_body_hash_backward"
+    workspace_id = "ws_salvage_backward_reset"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Another item advanced to later; retry starts there then resets to salvage.
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: reuse salvage after resetting past tip",
+        dirty=False,
+        heads=[salvaged],
+        head_descends=False,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_end_not_descending_from_retry_start(
+    tmp_path: Path,
+) -> None:
+    """Non-equal salvage reuse must keep end as a descendant of retry start."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    later = "c" * 40
+    orphan = "d" * 40
+    item_id = "PRRT_salvage_orphan_from_retained"
+    body_hash = "feedback_body_hash_orphan"
+    workspace_id = "ws_salvage_orphan_from_retained"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+
+    # Graph: start→salvaged→later; orphan descends from salvaged but not later.
+    ancestry = {
+        (start.lower(), salvaged.lower()),
+        (start.lower(), later.lower()),
+        (start.lower(), orphan.lower()),
+        (salvaged.lower(), later.lower()),
+        (salvaged.lower(), orphan.lower()),
+    }
+
+    head_iter = iter([orphan])
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(returncode=0, stdout="AWF-VERDICT: FIXED: orphan tip", stderr="")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        try:
+            return next(head_iter)
+        except StopIteration:
+            return orphan
+
+    async def _head_descends_from(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        a = ancestor.lower()
+        d = descendant.lower()
+        return a == d or (a, d) in ancestry
+
+    async def _commit_trees_differ(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+    ) -> bool:
+        del worktree_path
+        return left.lower() != right.lower()
+
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: object,
+        *,
+        state: object | None = None,
+    ) -> None:
+        del state
+
+    retry_runner = _MonitorAgentServiceRecoveryRunner(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _rev_parse_head=_rev_parse_head,
+        _head_descends_from=_head_descends_from,
+        _commit_trees_differ=_commit_trees_differ,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=later,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_rejects_non_descendant_head(
+    tmp_path: Path,
+) -> None:
+    """Retained salvage must not count when HEAD left the salvage ancestry."""
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+    )
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    unrelated = "d" * 40
+    item_id = "PRRT_salvage_non_descendant"
+    body_hash = "feedback_body_hash_non_desc"
+    workspace_id = "ws_salvage_non_descendant"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+    retry_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed without salvage ancestry",
+        dirty=False,
+        heads=[unrelated],
+        head_descends=False,
+        commit_trees_differ=True,
+    )
+    retry_runner._worktrees_root = tmp_path
+
+    retry = await comments._invoke_cli_for_verdict_result(
+        retry_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=unrelated,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert retry.verdict == "needs_human"
+    assert retry.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == salvaged
+    assert state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id)) == body_hash
+
+
+@pytest.mark.unit
+async def test_salvaged_fix_evidence_does_not_leak_to_other_item(
+    tmp_path: Path,
+) -> None:
+    """Another item must not inherit a prior item's retained salvage head."""
+    from awf.runtime.monitor_state_keys import _salvaged_fix_head_state_key
+
+    start = "a" * 40
+    salvaged = "b" * 40
+    workspace_id = "ws_salvage_leak"
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+
+    failed_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: claimed during crash",
+        dirty=True,
+        heads=[salvaged],
+        head_descends=True,
+        commit_trees_differ=True,
+        returncode=1,
+    )
+    failed_runner._worktrees_root = tmp_path
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        failed_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        evidence_item_id="item_one",
+        evidence_body_hash="body_one",
+    )
+    assert failed.verdict == "agent_failed"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key("item_one")) == salvaged
+
+    other_runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: unrelated item no change",
+        dirty=False,
+        heads=[salvaged],
+    )
+    other_runner._worktrees_root = tmp_path
+
+    other = await comments._invoke_cli_for_verdict_result(
+        other_runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=salvaged,
+        evidence_item_id="item_two",
+        evidence_body_hash="body_two",
+    )
+    assert other.verdict == "needs_human"
+    assert other.reason == "fixed_without_head_advance"
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key("item_one")) == salvaged
+
+
+@pytest.mark.unit
+async def test_isolated_clarification_worktree_does_not_plant_salvage_keys(
+    tmp_path: Path,
+) -> None:
+    """Reason-only isolated checkouts must not retain __salvaged_fix_* keys.
+
+    Clarification reasks run in a disposable worktree whose commits are discarded
+    on cleanup. Binding evidence ids would plant orphan salvage SHAs that later
+    primary-worktree FIXED retries could mis-attribute (PRRT_kwDOSJAM6s6ZmikP).
+    """
+    from awf.adapters.base import AgentRunError
+    from awf.db.enums import AgentRuntime
+    from awf.runtime.monitor_state_keys import (
+        _salvaged_fix_body_hash_state_key,
+        _salvaged_fix_head_state_key,
+        _salvaged_fix_start_state_key,
+    )
+
+    start = "a" * 40
+    isolated_tip = "b" * 40
+    item_id = "PRRT_isolated_reask_salvage"
+    body_hash = "feedback_body_hash_isolated_reask"
+    workspace_id = "ws_isolated_reask_salvage"
+    isolated = tmp_path / ".awf-needs-human-reask-test"
+    isolated.mkdir()
+    (tmp_path / workspace_id).mkdir()
+    state = MonitorState()
+    stdout = "AWF-VERDICT: FIXED: claimed during isolated crash"
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> AgentRunResult:
+        raise AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(returncode=1, stdout=stdout, stderr="fail"),
+            reason_code="AGENT_CLI_FAILED",
+        )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        return False
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return isolated_tip
+
+    async def _head_descends_from(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        return ancestor.lower() != descendant.lower()
+
+    async def _commit_trees_differ(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+    ) -> bool:
+        del worktree_path
+        return left.lower() != right.lower()
+
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: object,
+        *,
+        state: object | None = None,
+    ) -> None:
+        del state
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _rev_parse_head=_rev_parse_head,
+        _head_descends_from=_head_descends_from,
+        _commit_trees_differ=_commit_trees_differ,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+    )
+
+    failed = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="state the reason",
+        commit_message="fix: address thread",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+        commit_dirty_changes=False,
+        isolated_worktree_host_path=isolated,
+        isolated_worktree_ref=start,
+        evidence_item_id=item_id,
+        evidence_body_hash=body_hash,
+    )
+    assert failed.verdict == "agent_failed"
+    assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+    assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "expected_verdict", "expected_reason"),
+    [
+        (
+            "AWF-VERDICT: FALSE POSITIVE: reviewer misread the guard",
+            "false_positive",
+            "reviewer misread the guard",
+        ),
+        (
+            "AWF-VERDICT: DEFER: track follow-up outside this PR",
+            "defer",
+            "track follow-up outside this PR",
+        ),
+        (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose the policy",
+            "needs_human",
+            "maintainer must choose the policy",
+        ),
+    ],
+)
+async def test_explicit_non_fix_verdicts_survive_dirty_or_hosted_advance(
+    stdout: str,
+    expected_verdict: str,
+    expected_reason: str,
+) -> None:
+    start = "a" * 40
+    runner = _evidence_runner(stdout=stdout, dirty=True, heads=["b" * 40])
+    state = MonitorState()
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_retain_explicit",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == expected_verdict
+    assert result.reason == expected_reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "AWF-VERDICT: FALSE POSITIVE: printed before crash",
+        "AWF-VERDICT: DEFER: printed before crash",
+    ],
+)
+async def test_explicit_false_positive_or_defer_ignored_on_cli_failure(
+    stdout: str,
+) -> None:
+    """Nonzero CLI exit must not resolve via a pre-crash FALSE POSITIVE/DEFER."""
+    start = "a" * 40
+    runner = _evidence_runner(stdout=stdout, dirty=False, heads=[start], returncode=1)
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_cli_fail_explicit_non_fix",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "agent_failed"
+
+
+@pytest.mark.unit
+async def test_hosted_fixed_requires_terminal_head_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_fixed"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: hosted repair committed",
+        dirty=False,
+        heads=[start],
+        head_descends=True,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_with_hosted_advance(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        state_arg.last_push_sha = synced
+        state_arg.hosted_terminal_head_advanced = True
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted repair committed",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_with_hosted_advance
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "fix_committed"
+    assert result.reason == "hosted repair committed"
+
+
+@pytest.mark.unit
+async def test_hosted_fixed_ignored_on_cli_failure_even_with_head_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failed hosted run must not resolve FIXED even after terminal SHA sync."""
+    from awf.adapters.base import AgentRunError
+    from awf.db.enums import AgentRuntime
+
+    start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_cli_fail_advance"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: printed before hosted failure",
+        dirty=False,
+        heads=[synced],
+        head_descends=True,
+        returncode=1,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_fail_after_hosted_sync(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        # Mirrors _run_monitor_agent_with_service_recovery: sync terminal SHA /
+        # set advance evidence, then re-raise AgentRunError.
+        state_arg.last_push_sha = synced
+        state_arg.hosted_terminal_head_advanced = True
+        raise AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="AWF-VERDICT: FIXED: printed before hosted failure",
+                stderr="hosted adapter failed",
+            ),
+            reason_code="AGENT_CLI_FAILED",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_fail_after_hosted_sync
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "agent_failed"
+
+
+@pytest.mark.unit
+async def test_hosted_fixed_without_head_advance_stays_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    workspace_id = "ws_hosted_no_advance"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: hosted no advance",
+        dirty=False,
+        heads=[start],
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_without_advance(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        state_arg.hosted_terminal_head_advanced = False
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted no advance",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _run_without_advance)
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_hosted_lateral_rewrite_does_not_count_as_fix_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-forward hosted tip rewrite must not satisfy FIXED via the advance flag."""
+    start = "a" * 40
+    lateral = "c" * 40
+    workspace_id = "ws_hosted_lateral"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: hosted force-push dropped the fix",
+        dirty=False,
+        heads=[lateral],
+        head_descends=False,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_with_lateral_hosted_rewrite(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        # Simulate _record_hosted_terminal_head_sync wrongly trusting SHA inequality
+        # alone (pre-fix), or a stale True flag after a non-descendant sync tip.
+        state_arg.last_push_sha = lateral
+        state_arg.hosted_terminal_head_advanced = True
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: hosted force-push dropped the fix",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_with_lateral_hosted_rewrite
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_hosted_advance_does_not_accept_markerless_parse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    synced = "b" * 40
+    workspace_id = "ws_hosted_markerless"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="plain hosted reply with no marker",
+        dirty=False,
+        heads=[synced],
+        head_descends=True,
+    )
+    runner._worktrees_root = tmp_path
+    state = MonitorState(last_push_sha=start)
+
+    async def _run_markerless_with_advance(**kwargs: object) -> AgentRunResult:
+        state_arg = kwargs.get("state")
+        assert isinstance(state_arg, MonitorState)
+        state_arg.last_push_sha = synced
+        state_arg.hosted_terminal_head_advanced = True
+        return AgentRunResult(
+            returncode=0,
+            stdout="plain hosted reply with no marker",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        runner, "_run_monitor_agent_with_service_recovery", _run_markerless_with_advance
+    )
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        state=state,
+        operation_start_head=start,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "unrecognized_or_markerless_verdict"
+
+
+@pytest.mark.unit
+async def test_another_thread_commit_does_not_leak_into_later_item_evidence() -> None:
+    """Item 2 start head is post-item-1; no-op FIXED must not inherit item-1 evidence."""
+    item1_start = "a" * 40
+    item1_end = "b" * 40
+    item2_start = item1_end
+
+    first = await comments._invoke_cli_for_verdict_result(
+        _evidence_runner(
+            stdout="AWF-VERDICT: FIXED: first thread",
+            dirty=True,
+            heads=[item1_end],
+        ),
+        workspace_id="ws_leak_1",
+        prompt="p",
+        commit_message="fix: 1",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item1_start,
+    )
+    assert first.verdict == "fix_committed"
+
+    second = await comments._invoke_cli_for_verdict_result(
+        _evidence_runner(
+            stdout="AWF-VERDICT: FIXED: second thread no change",
+            dirty=False,
+            heads=[item2_start],
+        ),
+        workspace_id="ws_leak_2",
+        prompt="p",
+        commit_message="fix: 2",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item2_start,
+    )
+    assert second.verdict == "needs_human"
+    assert second.reason == "fixed_without_head_advance"
+
+
+class _ResolveCaptureClient:
+    def __init__(self, runner: FakeCommandRunner) -> None:
+        self._runner = runner
+        self.resolved: list[str] = []
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+        retry: bool = True,
+    ) -> PRStatus:
+        del repo, pr_number, base_behind_count, retry
+        return PRStatus(
+            number=42,
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.SUCCESS,
+            unresolved_inline_threads=(),
+            unresolved_review_comments=(),
+            base_behind_count=0,
+            merge_state_status=MergeStateStatus.CLEAN,
+        )
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        self.resolved.append(thread_id)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_two_item_burst_only_evidenced_fixed_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First item FIXED+evidence resolves; second markerless stays unresolved."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD after push
+    gh = _ResolveCaptureClient(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # No worktree: per-item HEAD probing falls back to the cycle-start SHA so
+    # this burst regression stays focused on resolve gating (PRRT_kwDOSJAM6s6ZoHvG).
+
+    async def _address_thread(**kwargs: object) -> str:
+        thread = kwargs["thread"]
+        assert isinstance(thread, ReviewThread)
+        if thread.thread_id == "T_first":
+            return "fix_committed"
+        return "needs_human"
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_push_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_git_push_result)
+
+    state = MonitorState()
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(
+            ReviewThread(
+                thread_id="T_first",
+                path="src/a.py",
+                line=1,
+                body_excerpt="fix first",
+                author="reviewer",
+            ),
+            ReviewThread(
+                thread_id="T_second",
+                path="src/b.py",
+                line=2,
+                body_excerpt="fix second",
+                author="reviewer",
+            ),
+        ),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids.get("T_first") == "fix_committed"
+    assert state.threads_addressed_ids.get("T_second") == "needs_human"
+    assert gh.resolved == ["T_first"]

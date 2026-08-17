@@ -588,6 +588,71 @@ async def test_hosted_monitor_git_preparation_base_ref_mismatch_fails_closed(
 
 
 @pytest.mark.unit
+async def test_record_hosted_terminal_head_sync_requires_forward_descent(
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    synced = "b" * 40
+    lateral = "c" * 40
+    worktree_path = tmp_path / "ws_hosted"
+    worktree_path.mkdir()
+
+    async def _descends_forward(
+        *,
+        worktree_path: Path,
+        ancestor: str,
+        descendant: str,
+    ) -> bool:
+        del worktree_path
+        return descendant.lower() == synced.lower() and ancestor.lower() == start.lower()
+
+    runner = SimpleNamespace(_head_descends_from=_descends_forward)
+    forward_state = MonitorState(last_push_sha=start)
+    await agent_service_recovery._record_hosted_terminal_head_sync(
+        runner,
+        forward_state,
+        synced_head_sha=synced,
+        operation_start_head=start,
+        worktree_path=worktree_path,
+    )
+    assert forward_state.last_push_sha == synced
+    assert forward_state.hosted_terminal_head_advanced is True
+
+    lateral_state = MonitorState(last_push_sha=start)
+    await agent_service_recovery._record_hosted_terminal_head_sync(
+        runner,
+        lateral_state,
+        synced_head_sha=lateral,
+        operation_start_head=start,
+        worktree_path=worktree_path,
+    )
+    assert lateral_state.last_push_sha == lateral
+    assert lateral_state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
+async def test_record_hosted_terminal_head_sync_fails_closed_without_ancestry_helper(
+    tmp_path: Path,
+) -> None:
+    start = "a" * 40
+    synced = "b" * 40
+    worktree_path = tmp_path / "ws_hosted"
+    worktree_path.mkdir()
+    state = MonitorState(last_push_sha=start)
+
+    await agent_service_recovery._record_hosted_terminal_head_sync(
+        SimpleNamespace(),
+        state,
+        synced_head_sha=synced,
+        operation_start_head=start,
+        worktree_path=worktree_path,
+    )
+
+    assert state.last_push_sha == synced
+    assert state.hosted_terminal_head_advanced is False
+
+
+@pytest.mark.unit
 async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
     tmp_path: Path,
 ) -> None:

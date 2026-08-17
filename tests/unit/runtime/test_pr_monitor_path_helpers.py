@@ -38,6 +38,26 @@ def test_name_only_z_parser_rejects_non_nul_and_truncated_output() -> None:
         _changed_paths_from_name_only_z("src/a.py\0\0")
 
 
+def test_name_only_z_parser_preserves_invalid_utf8_pathname_bytes() -> None:
+    """Byte records must surrogate-escape invalid UTF-8 for argv round-trips."""
+    assert _changed_paths_from_name_only_z(b"") == ()
+    assert _changed_paths_from_name_only_z(b"src/a.py\0src/b.py\0src/a.py\0") == (
+        "src/a.py",
+        "src/b.py",
+    )
+    weird = b"bad-\xff-name.txt\0"
+    paths = _changed_paths_from_name_only_z(weird)
+    assert paths == (weird[:-1].decode("utf-8", errors="surrogateescape"),)
+    assert paths[0].encode("utf-8", errors="surrogateescape") == b"bad-\xff-name.txt"
+
+    with pytest.raises(ProtectedScopeDiffError, match="expected NUL-delimited"):
+        _changed_paths_from_name_only_z(b"src/a.py\nsrc/b.py\n")
+    with pytest.raises(ProtectedScopeDiffError, match="missing terminating NUL"):
+        _changed_paths_from_name_only_z(b"src/a.py\0src/b.py")
+    with pytest.raises(ProtectedScopeDiffError, match="empty path"):
+        _changed_paths_from_name_only_z(b"src/a.py\0\0")
+
+
 def test_policy_path_helpers_deduplicate_and_format_messages() -> None:
     violations = [
         QualityGateViolation(path="pyproject.toml", protected_pattern="pyproject.toml"),
