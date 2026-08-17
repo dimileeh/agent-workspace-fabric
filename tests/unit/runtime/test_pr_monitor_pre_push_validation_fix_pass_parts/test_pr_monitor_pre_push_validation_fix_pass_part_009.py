@@ -364,6 +364,25 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="export FEATURE_ENABLED=true\n",
         head_blob="export FEATURE_ENABLED=true\nexport FEATURE_ENABLED=false\n",
     )
+    # ``declare -x`` / ``typeset`` assignment forms must bind like ``export``;
+    # otherwise a descendant rebind keeps a line-aligned prefix and reuses
+    # stale FIXED evidence (PRRT_kwDOSJAM6s6ZqxX4).
+    assert not _added_salvage_blob_retained(
+        commit_blob="declare -x FEATURE_ENABLED=true\n",
+        head_blob=("declare -x FEATURE_ENABLED=true\ndeclare -x FEATURE_ENABLED=false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="typeset -x FEATURE_ENABLED=true\n",
+        head_blob=("typeset -x FEATURE_ENABLED=true\ntypeset -x FEATURE_ENABLED=false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="declare -rx FEATURE_ENABLED=true\n",
+        head_blob=("declare -rx FEATURE_ENABLED=true\ndeclare -rx FEATURE_ENABLED=false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="declare FEATURE_ENABLED=true\n",
+        head_blob="declare FEATURE_ENABLED=true\ndeclare FEATURE_ENABLED=false\n",
+    )
     # Comment-only / unrelated appends cannot supersede the salvage binding.
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
@@ -528,6 +547,39 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_export,
         commit_blob=commit_export,
         head_blob="x=1\nexport FEATURE_ENABLED=true\ny=2\nother=1\n",
+    )
+    # ``declare -x`` / ``typeset`` rebinds must supersede like ``export``
+    # (PRRT_kwDOSJAM6s6ZqxX4).
+    parent_declare = "x=1\ndeclare -x FEATURE_ENABLED=false\ny=2\n"
+    commit_declare = "x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_declare, commit_blob=commit_declare
+    ) == {"FEATURE_ENABLED"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_declare,
+        commit_blob=commit_declare,
+        head_blob=("x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\ndeclare -x FEATURE_ENABLED=false\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_declare,
+        commit_blob=commit_declare,
+        head_blob="x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\nother=1\n",
+    )
+    parent_typeset = "x=1\ntypeset -x FEATURE_ENABLED=false\ny=2\n"
+    commit_typeset = "x=1\ntypeset -x FEATURE_ENABLED=true\ny=2\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_typeset, commit_blob=commit_typeset
+    ) == {"FEATURE_ENABLED"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_typeset,
+        commit_blob=commit_typeset,
+        head_blob=("x=1\ntypeset -x FEATURE_ENABLED=true\ny=2\ntypeset -x FEATURE_ENABLED=false\n"),
+    )
+    # Mixed declare/export spellings of the same name still intersect.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_declare,
+        commit_blob=commit_declare,
+        head_blob=("x=1\ndeclare -x FEATURE_ENABLED=true\ny=2\nexport FEATURE_ENABLED=false\n"),
     )
     # YAML-style key rebinds must supersede like equals-style assignments
     # (PRRT_kwDOSJAM6s6ZqNAk).
