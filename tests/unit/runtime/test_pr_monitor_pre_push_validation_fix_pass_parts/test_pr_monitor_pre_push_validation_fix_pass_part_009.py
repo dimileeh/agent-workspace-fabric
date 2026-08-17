@@ -391,6 +391,27 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob=("FEATURE_ENABLED = True\nx = 1; FEATURE_ENABLED: bool = False\n"),
     )
+    # One-line ``class`` / ``def … -> T`` suite headers must not be typed-assign
+    # recovery: binding ``C`` / ``T`` skipped the real target and reused FIXED
+    # salvage (PRRT_kwDOSJAM6s6Zs-so).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nclass C: FEATURE_ENABLED = False\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\ndef f() -> T: FEATURE_ENABLED = False\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\nasync def f() -> T: FEATURE_ENABLED = False\n"),
+    )
+    # Nested typed assign after a class/def suite header still recovers the
+    # annotated target (same nested-``:`` rule as ``if ready: name: T =``).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob=("FEATURE_ENABLED = True\nclass C: FEATURE_ENABLED: bool = False\n"),
+    )
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n# if ready: FEATURE_ENABLED = False\n",

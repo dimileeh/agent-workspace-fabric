@@ -428,6 +428,33 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nx = 9; FEATURE_ENABLED: bool = False\n"),
     )
+    # One-line ``class`` / ``def … -> T`` suite headers must supersede too;
+    # treating them as typed assigns bound ``C`` / ``T`` and kept FIXED
+    # evidence (PRRT_kwDOSJAM6s6Zs-so).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nclass C: FEATURE_ENABLED = False\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\ndef f() -> T: FEATURE_ENABLED = False\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\nasync def f() -> T: FEATURE_ENABLED = False\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=(
+            "x = 1\nFEATURE_ENABLED = True\ny = 2\nclass C: FEATURE_ENABLED: bool = False\n"
+        ),
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,

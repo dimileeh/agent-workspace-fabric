@@ -168,19 +168,24 @@ _BRACKET_CLOSE_FOR_OPEN = {"(": ")", "[": "]"}
 # Trailing ``target: `` before a matched type token in ``target: T =``. The
 # target is recovered so mid-line / nested typed assigns bind ``target`` rather
 # than ``T`` (PRRT_kwDOSJAM6s6Zs0s8). Suite headers are excluded via
-# ``_SUITE_HEADER_BEFORE_RE`` so ``if ready: name =`` still binds ``name``
-# (PRRT_kwDOSJAM6s6ZsJyZ, PRRT_kwDOSJAM6s6ZsD5y).
+# ``_SUITE_HEADER_BEFORE_RE`` so ``if ready: name =`` / ``class C: name =`` /
+# ``def f() -> T: name =`` still bind ``name`` (PRRT_kwDOSJAM6s6ZsJyZ,
+# PRRT_kwDOSJAM6s6ZsD5y, PRRT_kwDOSJAM6s6Zs-so).
 _TYPED_ASSIGN_TARGET_BEFORE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*$"
 )
-# Full ``before`` span is a control-flow suite header (``if ready:`` /
-# ``for x in y:`` / ``else:``) when the keyword reaches the closing colon with
-# no nested ``:``. Nested ``if ready: FEATURE_ENABLED:`` has an extra ``:`` so
-# it is not a suite header and the trailing name is a typed-assign target.
+# Full ``before`` span is a suite header (``if ready:`` / ``for x in y:`` /
+# ``else:`` / ``class C:`` / ``def f() -> T:`` / ``async def f():``) when the
+# keyword reaches the closing colon with no nested ``:``. Nested
+# ``if ready: FEATURE_ENABLED:`` / ``class C: FEATURE_ENABLED:`` has an extra
+# ``:`` so it is not a suite header and the trailing name is a typed-assign
+# target. Omitting ``class`` / ``def`` treated ``class C: name =`` /
+# ``def f() -> T: name =`` as typed binds of ``C`` / ``T`` and skipped the
+# real target (PRRT_kwDOSJAM6s6Zs-so).
 _SUITE_HEADER_BEFORE_RE = re.compile(
     r"(?:^|[;])[ \t]*(?:"
-    r"(?:async[ \t]+)?(?:if|elif|while|for|with|match|case)\b[^:]*"
-    r"|(?:try|else|finally|except)\b[^:]*"
+    r"(?:async[ \t]+)?(?:if|elif|while|for|with|match|case|def)\b[^:]*"
+    r"|(?:try|else|finally|except|class)\b[^:]*"
     r"):[ \t]*$"
 )
 _ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
@@ -382,10 +387,11 @@ def _typed_assign_target_before(before: str) -> str | None:
 
     Distinguishes typed ``FEATURE_ENABLED: bool =`` (and nested
     ``if ready: FEATURE_ENABLED: bool =``) from suite headers
-    ``if ready: FEATURE_ENABLED =`` / ``for x in y: name =``, where the
-    trailing ``ident:`` closes the suite and must not mark the following
-    assign as a type token (PRRT_kwDOSJAM6s6Zs0s8, PRRT_kwDOSJAM6s6ZsD5y,
-    PRRT_kwDOSJAM6s6ZsJyZ).
+    ``if ready: FEATURE_ENABLED =`` / ``for x in y: name =`` /
+    ``class C: name =`` / ``def f() -> T: name =``, where the trailing
+    ``ident:`` closes the suite and must not mark the following assign as a
+    type token (PRRT_kwDOSJAM6s6Zs0s8, PRRT_kwDOSJAM6s6ZsD5y,
+    PRRT_kwDOSJAM6s6ZsJyZ, PRRT_kwDOSJAM6s6Zs-so).
     """
     if _SUITE_HEADER_BEFORE_RE.search(before):
         return None
