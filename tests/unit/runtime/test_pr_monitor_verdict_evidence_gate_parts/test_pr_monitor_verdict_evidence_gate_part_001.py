@@ -37,6 +37,7 @@ def _evidence_runner(
     head_descends: bool | None = None,
     commit_trees_differ: bool | None = None,
     commit_changes_present: bool | None = None,
+    commit_range_touches_path: bool | None = None,
     provider_recovery_raise: BaseException | None = None,
     commit_dirty_raises: BaseException | None = None,
 ) -> SimpleNamespace:
@@ -105,6 +106,19 @@ def _evidence_runner(
         # Default: descendant tips preserve salvage content for legacy stubs.
         return True
 
+    async def _commit_range_touches_path(
+        *,
+        worktree_path: Path,
+        left: str,
+        right: str,
+        path: str,
+    ) -> bool:
+        del worktree_path, left, right, path
+        if commit_range_touches_path is not None:
+            return commit_range_touches_path
+        # Default: path-gated advances succeed for legacy stubs that omit path.
+        return True
+
     async def _handle_provider_agent_run_error(
         _workspace_id: str,
         _exc: object,
@@ -123,6 +137,7 @@ def _evidence_runner(
         _head_descends_from=_head_descends_from,
         _commit_trees_differ=_commit_trees_differ,
         _commit_changes_present_in_head=_commit_changes_present_in_head,
+        _commit_range_touches_path=_commit_range_touches_path,
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -251,6 +266,78 @@ async def test_fixed_claim_with_forward_head_advance_is_fix_committed(
 
     assert result.verdict == "fix_committed"
     assert result.reason == "agent committed locally"
+
+
+@pytest.mark.unit
+async def test_fixed_claim_with_unrelated_path_advance_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Contentful advance on a different path must not satisfy FIXED for this item.
+
+    PRRT_kwDOSJAM6s6Zzwl0: a README-only descendant plus FIXED must not resolve
+    a thread anchored on another file.
+    """
+    start = "a" * 40
+    end = "b" * 40
+    workspace_id = "ws_fixed_unrelated_path"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: touched README only",
+        dirty=False,
+        heads=[end],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_range_touches_path=False,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: address thread",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+        evidence_item_path="src/awf/runtime/pr_monitor_runner/comment_verdict.py",
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason == "fixed_without_head_advance"
+
+
+@pytest.mark.unit
+async def test_fixed_claim_with_item_path_advance_is_fix_committed(
+    tmp_path: Path,
+) -> None:
+    """Contentful advance that touches the review path remains valid FIXED evidence."""
+    start = "a" * 40
+    end = "b" * 40
+    workspace_id = "ws_fixed_item_path"
+    (tmp_path / workspace_id).mkdir()
+    runner = _evidence_runner(
+        stdout="AWF-VERDICT: FIXED: patched the reviewed file",
+        dirty=False,
+        heads=[end],
+        head_descends=True,
+        commit_trees_differ=True,
+        commit_range_touches_path=True,
+    )
+    runner._worktrees_root = tmp_path
+
+    result = await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: address thread",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        operation_start_head=start,
+        evidence_item_path="src/awf/runtime/pr_monitor_runner/comment_verdict.py",
+    )
+
+    assert result.verdict == "fix_committed"
+    assert result.reason == "patched the reviewed file"
 
 
 @pytest.mark.unit

@@ -392,6 +392,7 @@ async def _invoke_cli_for_verdict_result(
     require_fix_evidence: bool = True,
     evidence_item_id: str | None = None,
     evidence_body_hash: str | None = None,
+    evidence_item_path: str | None = None,
 ) -> VerdictResult:
     """Run the monitor agent and parse its verdict without losing reason details.
 
@@ -412,8 +413,15 @@ async def _invoke_cli_for_verdict_result(
     succeeds (PRRT_kwDOSJAM6s6ZnvBN). Evidence is never retained for
     ``isolated_worktree_host_path`` runs: those tips are discarded with the
     clarification checkout.
+
+    ``evidence_item_path`` (inline review path) further requires that a
+    contentful advance change that path — an unrelated README-only commit must
+    not satisfy FIXED for a different file's thread (PRRT_kwDOSJAM6s6Zzwl0).
     """
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _normalize_evidence_item_path,
+    )
 
     result_stdout = ""
     cli_failed = False
@@ -422,6 +430,7 @@ async def _invoke_cli_for_verdict_result(
         state.hosted_terminal_head_advanced = False
     salvage_item_id = (evidence_item_id or "").strip() or None
     salvage_body_hash = (evidence_body_hash or "").strip() or None
+    salvage_item_path = _normalize_evidence_item_path(evidence_item_path or "") or None
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
     mirror_path: Path | None = None
@@ -770,6 +779,37 @@ async def _invoke_cli_for_verdict_result(
                         right=synced_head,
                     )
                 )
+        # When the review item has a known path, a contentful advance is item
+        # evidence only if that path appears in the start..end delta — otherwise
+        # an unrelated README edit plus FIXED would resolve the wrong thread
+        # (PRRT_kwDOSJAM6s6Zzwl0). Fail closed when the path gate cannot be probed.
+        touches_path = getattr(runner, "_commit_range_touches_path", None)
+
+        async def _advance_touches_item_path(*, left: str, right: str) -> bool:
+            if salvage_item_path is None:
+                return True
+            if not (callable(touches_path) and worktree_path.exists() and left and right):
+                return False
+            return bool(
+                await touches_path(
+                    worktree_path=worktree_path,
+                    left=left,
+                    right=right,
+                    path=salvage_item_path,
+                )
+            )
+
+        if local_head_advanced and item_start_head is not None and item_end_head is not None:
+            local_head_advanced = await _advance_touches_item_path(
+                left=item_start_head,
+                right=item_end_head,
+            )
+        if hosted_head_advanced and item_start_head is not None:
+            synced_for_path = (state.last_push_sha or "").strip() if state is not None else ""
+            hosted_head_advanced = bool(synced_for_path) and await _advance_touches_item_path(
+                left=item_start_head,
+                right=synced_for_path,
+            )
         # Dirty commit is item-scoped evidence only for stub / missing-worktree
         # environments where ancestry cannot be evaluated. A present worktree
         # whose post-commit HEAD probe fails must fail closed — accepting
@@ -922,6 +962,28 @@ async def _invoke_cli_for_verdict_result(
                     # Later commits undid the salvage; drop so it cannot linger.
                     _clear_retained_salvage()
                 retained_salvage_evidence = content_ok
+            # Salvage tip must itself have touched the review path when known —
+            # otherwise a failed README-only advance stays reusable as FIXED
+            # evidence (PRRT_kwDOSJAM6s6Zzwl0).
+            if retained_salvage_evidence and salvage_item_path is not None:
+                touches_path = getattr(runner, "_commit_range_touches_path", None)
+                salvage_baseline = retained_start or (
+                    item_start_head if end_matches_retained else ""
+                )
+                if not (
+                    salvage_baseline
+                    and callable(touches_path)
+                    and worktree_path.exists()
+                    and await touches_path(
+                        worktree_path=worktree_path,
+                        left=salvage_baseline,
+                        right=retained_head,
+                        path=salvage_item_path,
+                    )
+                ):
+                    retained_salvage_evidence = False
+                    if not salvage_baseline:
+                        _clear_retained_salvage()
         elif retained_head or retained_body or retained_start:
             # Feedback moved on or legacy unbound salvage — drop so it cannot linger.
             _clear_retained_salvage()

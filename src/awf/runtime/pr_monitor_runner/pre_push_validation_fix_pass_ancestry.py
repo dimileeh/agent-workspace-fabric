@@ -93,3 +93,56 @@ async def _commit_trees_differ(
     if not right_tree:
         return False
     return left_tree.lower() != right_tree.lower()
+
+
+def _normalize_evidence_item_path(path: str) -> str:
+    """Normalize a review-item path for FIXED evidence path matching."""
+    return path.strip().lstrip("./")
+
+
+async def _commit_range_touches_path(
+    self: Any,
+    *,
+    worktree_path: Path,
+    left: str,
+    right: str,
+    path: str,
+) -> bool:
+    """Return True when ``path`` appears in the ``left``..``right`` changed-path set.
+
+    FIXED claims with a known review-item path must not treat an unrelated
+    contentful advance (for example a README-only edit) as item evidence
+    (PRRT_kwDOSJAM6s6Zzwl0). Rename/copy records count when either the old or
+    new path matches. Fail closed on diff or parse errors.
+    """
+    from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    normalized = _normalize_evidence_item_path(path)
+    if not normalized:
+        return False
+    git_env = _git_env_for_merge_safety_object_lookup()
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "diff",
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ),
+        env=git_env,
+    )
+    if not result.ok:
+        return False
+    raw = result.stdout_bytes
+    if raw is not None:
+        diff_text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        diff_text = result.stdout or ""
+    try:
+        paths = _changed_paths_from_name_status_z(diff_text)
+    except ProtectedScopeDiffError:
+        return False
+    return any(_normalize_evidence_item_path(changed) == normalized for changed in paths)
