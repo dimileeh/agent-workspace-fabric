@@ -134,17 +134,21 @@ _TOML_TABLE_HEADER_RE = re.compile(
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})*)"
     r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
 )
-# Bare / dotted / ``await`` call sites (``disable_guard()`` /
-# ``guard.disable()`` / ``await guard.disable();`` / nested
-# ``if ready: guard.disable()``). Identifier chain then ``(`` anywhere in
-# executable text (not only statement-leading). ``def``/``function``/``class``
-# forms are filtered via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Used so tip-extra
-# calls that invoke salvage-bound names fail closed even though calls produce
-# no binding key (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE,
-# PRRT_kwDOSJAM6s6ZrYJk).
+# Bare / dotted / optional-chain / ``await`` call sites (``disable_guard()`` /
+# ``guard.disable()`` / ``guard?.disable()`` / ``guard?.()`` /
+# ``await guard.disable();`` / nested ``if ready: guard.disable()``). Identifier
+# chain (``.`` or ``?.`` separators) then optional trailing ``?.`` and ``(``
+# anywhere in executable text (not only statement-leading). Without ``?.`` as a
+# separator the match restarts after ``?.`` and yields a bare method leaf, so
+# tip ``guard?.disable()`` never intersects a salvaged ``guard`` binding
+# (PRRT_kwDOSJAM6s6ZriaJ). ``def``/``function``/``class`` forms are filtered via
+# ``_CALL_SITE_DEFINITION_PREFIX_RE``. Used so tip-extra calls that invoke
+# salvage-bound names fail closed even though calls produce no binding key
+# (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrYJk).
 _CALL_SITE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)[ \t]*\("
+    r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:\?\.)?[ \t]*\("
 )
 # Prefix ending at a call-site match start that means the name is a definition
 # binding, not an invocation (``def`` / ``async def`` / ``function`` / ``class``).
@@ -929,12 +933,16 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     intersect salvage bindings and the same qualified callee — not an unpaired
     method leaf that would collide with ``other.disable()`` or scoped
     ``Guards.disable_guard`` (PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrWwo).
-    Nested / mid-expression calls (``if ready: guard.disable()``,
-    ``result = guard.disable()``, ``print(guard.disable())``) are included
-    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments and
-    string literals are ignored (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not
-    call sites: ``def name(`` / ``function name(`` / ``class Name(`` are skipped
-    via ``_CALL_SITE_DEFINITION_PREFIX_RE``.
+    Optional-chain forms (``guard?.disable()`` / ``guard?.()``) normalize
+    ``?.`` to ``.`` so the same receiver identity is preserved; otherwise the
+    match restarts after ``?.`` and only the bare method leaf is seen
+    (PRRT_kwDOSJAM6s6ZriaJ). Nested / mid-expression calls
+    (``if ready: guard.disable()``, ``result = guard.disable()``,
+    ``print(guard.disable())``) are included (PRRT_kwDOSJAM6s6ZrYJk). ``#`` /
+    ``//`` / same-line ``/* … */`` comments and string literals are ignored
+    (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not call sites: ``def name(`` /
+    ``function name(`` / ``class Name(`` are skipped via
+    ``_CALL_SITE_DEFINITION_PREFIX_RE``.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
@@ -945,7 +953,8 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
         prefix = raw_line[: match.start()]
         if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
             continue
-        dotted = match.group(1)
+        # Normalize JS/TS optional chaining so identity matches dotted form.
+        dotted = match.group(1).replace("?.", ".")
         parts = dotted.split(".")
         if len(parts) == 1:
             names.add(parts[0])
