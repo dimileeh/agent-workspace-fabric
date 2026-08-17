@@ -189,6 +189,15 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "/* note */ guard.disable()\n",
     )
+    # JS regex literals must not count as tip-extra calls (PRRT_kwDOSJAM6s6Zs-Re).
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "const matcher = /guard.disable()/;\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "x = 1 / guard.disable() / 2\n",
+    )
     assert _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "other.disable()\n",

@@ -210,6 +210,68 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_member,
         head_blob=commit_member + "/* note */ guard.disable()\n",
     )
+    # JS regex literals are non-executable call text (PRRT_kwDOSJAM6s6Zs-Re).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /guard.disable()/;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /guard.disable()/gi;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /[guard.disable()]/;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "return /guard.disable()/;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "/guard.disable()/;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /guard\\.disable\\(\\)/;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /guard.disable()\n",
+    )
+    # Division keeps real call sites executable.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "x = 1 / guard.disable() / 2\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "vals[i] / guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "a.b / guard.disable()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "block} / guard.disable()\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const matcher = /\n",
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,
         commit_blob=commit_member,

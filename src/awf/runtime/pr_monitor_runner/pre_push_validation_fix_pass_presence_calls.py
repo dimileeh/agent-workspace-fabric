@@ -77,6 +77,81 @@ _CALL_SITE_DEFINITION_PREFIX_RE = re.compile(
     r"(?:^|[^A-Za-z0-9_])(?:(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?(?:def|function)"
     r"|(?:export[ \t]+(?:default[ \t]+)?)?class)[ \t]+$"
 )
+# Keywords that introduce an expression so a following ``/`` is a regex literal
+# rather than division (``return /x/``, ``case /x/:``, ``typeof /x/``).
+_JS_REGEX_PREFIX_KEYWORDS = frozenset(
+    {
+        "return",
+        "case",
+        "throw",
+        "delete",
+        "void",
+        "typeof",
+        "new",
+        "await",
+        "yield",
+        "in",
+        "of",
+        "instanceof",
+        "else",
+        "do",
+    }
+)
+
+
+def _js_regex_literal_start(raw_line: str, slash_index: int) -> bool:
+    """True when ``raw_line[slash_index]`` looks like a JS ``/…/`` regex opener.
+
+    Distinguishes division (``1 / guard.disable() / 2``) from literals such as
+    ``const matcher = /guard.disable()/;`` so call scanning does not treat
+    regex bodies as executable calls (PRRT_kwDOSJAM6s6Zs-Re).
+    """
+    j = slash_index - 1
+    while j >= 0 and raw_line[j] in " \t":
+        j -= 1
+    if j < 0:
+        return True
+    prev = raw_line[j]
+    if prev in ")]}" or prev == ".":
+        return False
+    if prev.isalnum() or prev == "_":
+        start = j
+        while start >= 0 and (raw_line[start].isalnum() or raw_line[start] == "_"):
+            start -= 1
+        word = raw_line[start + 1 : j + 1]
+        return word in _JS_REGEX_PREFIX_KEYWORDS
+    return True
+
+
+def _blank_js_regex_literal(chars: list[str], raw_line: str, start: int) -> int:
+    """Blank a JS regex literal starting at ``start``; return index past it."""
+    n = len(raw_line)
+    chars[start] = " "
+    i = start + 1
+    in_class = False
+    while i < n:
+        ch = raw_line[i]
+        chars[i] = " "
+        if ch == "\\" and i + 1 < n:
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if ch == "[" and not in_class:
+            in_class = True
+            i += 1
+            continue
+        if ch == "]" and in_class:
+            in_class = False
+            i += 1
+            continue
+        if ch == "/" and not in_class:
+            i += 1
+            while i < n and raw_line[i].isalpha():
+                chars[i] = " "
+                i += 1
+            return i
+        i += 1
+    return i
 
 
 def _executable_call_scan_text(raw_line: str) -> str:
@@ -86,8 +161,10 @@ def _executable_call_scan_text(raw_line: str) -> str:
     for definition-prefix checks. Nested calls inside ``print(guard.disable())``
     stay visible; ``"guard.disable()"``, ``code  # guard.disable()``, and
     same-line ``/* guard.disable() */`` / ``code; /* guard.disable() */`` do not
-    (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). Unclosed ``/*`` blanks
-    through end of line (multi-line ``/*`` state is handled by callers).
+    (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). JS regex literals such as
+    ``/guard.disable()/`` are blanked so they are not mistaken for calls
+    (PRRT_kwDOSJAM6s6Zs-Re); division keeps real calls visible. Unclosed ``/*``
+    blanks through end of line (multi-line ``/*`` state is handled by callers).
     """
     chars = list(raw_line)
     i = 0
@@ -135,14 +212,13 @@ def _executable_call_scan_text(raw_line: str) -> str:
                 chars[i] = " "
                 i += 1
             break
-        if ch == "/" and i + 1 < n:
-            nxt = raw_line[i + 1]
-            if nxt == "/":
+        if ch == "/":
+            if i + 1 < n and raw_line[i + 1] == "/":
                 while i < n:
                     chars[i] = " "
                     i += 1
                 break
-            if nxt == "*":
+            if i + 1 < n and raw_line[i + 1] == "*":
                 chars[i] = " "
                 chars[i + 1] = " "
                 i += 2
@@ -154,6 +230,12 @@ def _executable_call_scan_text(raw_line: str) -> str:
                         break
                     chars[i] = " "
                     i += 1
+                continue
+            # ``/=`` is assignment, not a regex. Other ``/`` openers blank the
+            # literal so bodies like ``/guard.disable()/`` are not call sites
+            # (PRRT_kwDOSJAM6s6Zs-Re); division context leaves ``/`` visible.
+            if (i + 1 >= n or raw_line[i + 1] != "=") and _js_regex_literal_start(raw_line, i):
+                i = _blank_js_regex_literal(chars, raw_line, i)
                 continue
         if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
             chars[i] = " "
@@ -191,8 +273,9 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     reports only the bare method leaf (PRRT_kwDOSJAM6s6Zrr7R). Nested /
     mid-expression calls (``if ready: guard.disable()``,
     ``result = guard.disable()``, ``print(guard.disable())``) are included
-    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments and
-    string literals are ignored (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not
+    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments,
+    string literals, and JS ``/…/`` regex literals are ignored
+    (PRRT_kwDOSJAM6s6Zrhbs, PRRT_kwDOSJAM6s6Zs-Re). Definitions are not
     call sites: ``def name(`` / ``function name(`` / ``class Name(`` are skipped
     via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each call match is emitted once per
     occurrence (not collapsed by name) so same-line multiplicity is preserved
