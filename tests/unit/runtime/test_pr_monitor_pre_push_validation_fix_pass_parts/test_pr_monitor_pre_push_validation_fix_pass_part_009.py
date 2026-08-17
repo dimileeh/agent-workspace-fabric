@@ -174,6 +174,24 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + 'x = "guard.disable()"\n',
     )
+    # JS template literals: static content is non-executable; ``${...}`` stays
+    # scannable so real interpolations still supersede (PRRT_kwDOSJAM6s6ZtJG8).
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "const marker = `guard.disable()`;\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "const marker = `${guard.disable()}`;\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'const marker = `${"guard.disable()"}`;\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "const marker = `${`x${guard.disable()}`}`;\n",
+    )
     # Same-line block comments must not count as tip-extra calls
     # (PRRT_kwDOSJAM6s6Zrhbs).
     assert _added_salvage_blob_retained(
@@ -1195,3 +1213,50 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
     # later no-change FIXED retry reuse stale evidence (PRRT_kwDOSJAM6s6ZpEZh).
     assert _added_salvage_blob_retained(commit_blob="", head_blob="")
     assert not _added_salvage_blob_retained(commit_blob="", head_blob="anything\n")
+
+
+@pytest.mark.unit
+def test_call_site_names_mask_js_template_literal_edges() -> None:
+    """JS template static text is masked; ``${...}`` edges stay scannable.
+
+    Covers escapes, nested braces/strings/templates, and unclosed forms so
+    salvage retention does not treat static template text as tip-extra calls
+    (PRRT_kwDOSJAM6s6ZtJG8).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _call_site_names_for_line,
+    )
+
+    assert _call_site_names_for_line("const marker = `guard.disable()`;") == ()
+    assert _call_site_names_for_line("const marker = `guard.disable()`") == ()
+    assert _call_site_names_for_line(r"const marker = `a\`guard.disable()`;") == ()
+    assert _call_site_names_for_line("const marker = `${guard.disable()}`;") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("const marker = `${foo({a: 1}) + guard.disable()}`;") == (
+        "foo",
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('const marker = `${obj["}"] + guard.disable()}`;') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line(r'const marker = `${obj["\""] + 1}`;') == ()
+    assert _call_site_names_for_line("const marker = `${obj['}'] + 1}`;") == ()
+    assert _call_site_names_for_line(r"const marker = `${obj['\''] + 1}`;") == ()
+    assert _call_site_names_for_line("const marker = `${`x${guard.disable()}`}`;") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line(r"const marker = `${`a\`b`}`;") == ()
+    assert _call_site_names_for_line("const marker = `${`a${b`;") == ()
+    assert _call_site_names_for_line("const marker = `${guard.disable()`") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("const marker = `${`x${guard.disable()}`") == (
+        "guard",
+        "guard.disable",
+    )

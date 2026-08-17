@@ -162,6 +162,120 @@ def _blank_js_regex_literal(chars: list[str], raw_line: str, start: int) -> int:
     return i
 
 
+def _skip_js_template_literal(raw_line: str, start: int) -> int:
+    """Return index past a JS template literal starting at ``start`` (no blanking)."""
+    i = start + 1
+    n = len(raw_line)
+    while i < n:
+        ch = raw_line[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "`":
+            return i + 1
+        if ch == "$" and i + 1 < n and raw_line[i + 1] == "{":
+            i = _find_js_template_interpolation_end(raw_line, i + 2)
+            if i < n and raw_line[i] == "}":
+                i += 1
+            continue
+        i += 1
+    return i
+
+
+def _find_js_template_interpolation_end(raw_line: str, start: int) -> int:
+    """Return index of the ``}`` that closes a ``${`` body starting at ``start``.
+
+    Tracks brace depth while skipping strings and nested templates so braces
+    inside those regions do not end the interpolation early.
+    """
+    i = start
+    n = len(raw_line)
+    depth = 1
+    in_double = False
+    in_single = False
+    while i < n:
+        ch = raw_line[i]
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, True):
+                in_double = False
+            i += 1
+            continue
+        if in_single:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, True):
+                in_single = False
+            i += 1
+            continue
+        if ch == "`":
+            i = _skip_js_template_literal(raw_line, i)
+            continue
+        if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
+            in_double = True
+            i += 1
+            continue
+        if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, False):
+            in_single = True
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return i
+
+
+def _blank_js_template_literal(chars: list[str], raw_line: str, start: int) -> int:
+    """Blank a JS template literal; keep ``${...}`` expressions scannable.
+
+    Static segments (and escapes) become spaces so `` `guard.disable()` `` is
+    not a call site. Interpolation bodies are re-scanned with the same
+    executable-blanking rules so `` `${guard.disable()}` `` still matches
+    (PRRT_kwDOSJAM6s6ZtJG8).
+    """
+    n = len(raw_line)
+    chars[start] = " "
+    i = start + 1
+    while i < n:
+        ch = raw_line[i]
+        if ch == "\\" and i + 1 < n:
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if ch == "`":
+            chars[i] = " "
+            return i + 1
+        if ch == "$" and i + 1 < n and raw_line[i + 1] == "{":
+            chars[i] = " "
+            chars[i + 1] = " "
+            expr_start = i + 2
+            expr_end = _find_js_template_interpolation_end(raw_line, expr_start)
+            blanked = _executable_call_scan_text(raw_line[expr_start:expr_end])
+            for offset, blank_ch in enumerate(blanked):
+                chars[expr_start + offset] = blank_ch
+            if expr_end < n and raw_line[expr_end] == "}":
+                chars[expr_end] = " "
+                i = expr_end + 1
+            else:
+                i = expr_end
+            continue
+        chars[i] = " "
+        i += 1
+    return i
+
+
 def _executable_call_scan_text(raw_line: str) -> str:
     """Return ``raw_line`` with strings and comment regions replaced by spaces.
 
@@ -169,10 +283,12 @@ def _executable_call_scan_text(raw_line: str) -> str:
     for definition-prefix checks. Nested calls inside ``print(guard.disable())``
     stay visible; ``"guard.disable()"``, ``code  # guard.disable()``, and
     same-line ``/* guard.disable() */`` / ``code; /* guard.disable() */`` do not
-    (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). JS regex literals such as
-    ``/guard.disable()/`` are blanked so they are not mistaken for calls
-    (PRRT_kwDOSJAM6s6Zs-Re); division keeps real calls visible. Unclosed ``/*``
-    blanks through end of line (multi-line ``/*`` state is handled by callers).
+    (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). JS template literals blank
+    static text but keep ``${...}`` expressions scannable
+    (PRRT_kwDOSJAM6s6ZtJG8). JS regex literals such as ``/guard.disable()/`` are
+    blanked so they are not mistaken for calls (PRRT_kwDOSJAM6s6Zs-Re); division
+    keeps real calls visible. Unclosed ``/*`` blanks through end of line
+    (multi-line ``/*`` state is handled by callers).
     """
     chars = list(raw_line)
     i = 0
@@ -245,6 +361,9 @@ def _executable_call_scan_text(raw_line: str) -> str:
             if (i + 1 >= n or raw_line[i + 1] != "=") and _js_regex_literal_start(raw_line, i):
                 i = _blank_js_regex_literal(chars, raw_line, i)
                 continue
+        if ch == "`":
+            i = _blank_js_template_literal(chars, raw_line, i)
+            continue
         if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
             chars[i] = " "
             in_double = True
@@ -282,12 +401,14 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     mid-expression calls (``if ready: guard.disable()``,
     ``result = guard.disable()``, ``print(guard.disable())``) are included
     (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments,
-    string literals, and JS ``/…/`` regex literals are ignored
-    (PRRT_kwDOSJAM6s6Zrhbs, PRRT_kwDOSJAM6s6Zs-Re). Definitions are not
-    call sites: ``def name(`` / ``function name(`` / ``class Name(`` are skipped
-    via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each call match is emitted once per
-    occurrence (not collapsed by name) so same-line multiplicity is preserved
-    when deriving salvage call-count diffs (PRRT_kwDOSJAM6s6ZriaK).
+    string literals, JS template-literal static text, and JS ``/…/`` regex
+    literals are ignored (PRRT_kwDOSJAM6s6Zrhbs, PRRT_kwDOSJAM6s6Zs-Re,
+    PRRT_kwDOSJAM6s6ZtJG8); ``${...}`` interpolations remain scannable.
+    Definitions are not call sites: ``def name(`` / ``function name(`` /
+    ``class Name(`` are skipped via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each
+    call match is emitted once per occurrence (not collapsed by name) so
+    same-line multiplicity is preserved when deriving salvage call-count diffs
+    (PRRT_kwDOSJAM6s6ZriaK).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):

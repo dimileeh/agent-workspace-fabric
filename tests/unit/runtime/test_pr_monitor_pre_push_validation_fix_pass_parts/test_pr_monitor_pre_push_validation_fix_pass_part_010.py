@@ -194,6 +194,23 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         commit_blob=commit_member,
         head_blob=commit_member + 'x = "guard.disable()"\n',
     )
+    # JS template literals: static text is non-executable; ``${...}`` remains
+    # scannable (PRRT_kwDOSJAM6s6ZtJG8).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const marker = `guard.disable()`;\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "const marker = `${guard.disable()}`;\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + 'const marker = `${"guard.disable()"}`;\n',
+    )
     # Same-line ``/* … */`` tip extras are non-executable (PRRT_kwDOSJAM6s6Zrhbs).
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,
