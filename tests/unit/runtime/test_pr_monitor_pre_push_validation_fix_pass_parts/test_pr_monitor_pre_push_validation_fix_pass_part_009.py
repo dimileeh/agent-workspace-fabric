@@ -242,6 +242,46 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "other?.disable()\n",
     )
+    # Computed-member calls must preserve the receiver: blanking the quoted
+    # property leaves ``guard[         ]()``, which dotted/_CALL_SITE_RE cannot
+    # span, so salvage would retain stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZroRa).
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'guard["disable"]()\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard['disable']()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'await guard["disable"]()\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'if ready: guard["disable"]()\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'guard?.["disable"]()\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "guard[key]()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'other["disable"]()\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + '# guard["disable"]()\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "x = 'guard[\"disable\"]()'\n",
+    )
     # Appended rebinding of a salvage assignment must fail closed: the original
     # addition remains a line-aligned prefix, but the later assignment supersedes
     # it (PRRT_kwDOSJAM6s6Zp8jM).
@@ -898,6 +938,28 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         parent_blob=parent_member,
         commit_blob=commit_member,
         head_blob=commit_member + "await guard?.disable()\n",
+    )
+    # Computed-member restores must intersect the salvaged ``guard`` receiver
+    # (PRRT_kwDOSJAM6s6ZroRa).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + 'guard["disable"]()\n',
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "guard['disable']()\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + 'guard?.["disable"]()\n',
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + 'other["disable"]()\n',
     )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,

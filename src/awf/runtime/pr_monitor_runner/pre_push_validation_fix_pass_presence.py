@@ -134,20 +134,34 @@ _TOML_TABLE_HEADER_RE = re.compile(
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})*)"
     r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
 )
-# Bare / dotted / optional-chain / ``await`` call sites (``disable_guard()`` /
-# ``guard.disable()`` / ``guard?.disable()`` / ``guard?.()`` /
+# Bare / dotted / optional-chain / computed-member / ``await`` call sites
+# (``disable_guard()`` / ``guard.disable()`` / ``guard?.disable()`` /
+# ``guard?.()`` / ``guard["disable"]()`` / ``guard[key]()`` /
 # ``await guard.disable();`` / nested ``if ready: guard.disable()``). Identifier
 # chain (``.`` or ``?.`` separators) then optional trailing ``?.`` and ``(``
 # anywhere in executable text (not only statement-leading). Without ``?.`` as a
 # separator the match restarts after ``?.`` and yields a bare method leaf, so
 # tip ``guard?.disable()`` never intersects a salvaged ``guard`` binding
-# (PRRT_kwDOSJAM6s6ZriaJ). ``def``/``function``/``class`` forms are filtered via
+# (PRRT_kwDOSJAM6s6ZriaJ). Computed-member forms need a separate pattern: after
+# ``_executable_call_scan_text`` blanks quoted props, ``guard["disable"]()``
+# becomes ``guard[         ]()`` and this regex cannot span brackets
+# (PRRT_kwDOSJAM6s6ZroRa). ``def``/``function``/``class`` forms are filtered via
 # ``_CALL_SITE_DEFINITION_PREFIX_RE``. Used so tip-extra calls that invoke
 # salvage-bound names fail closed even though calls produce no binding key
 # (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrYJk).
 _CALL_SITE_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
     r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:\?\.)?[ \t]*\("
+)
+# Computed-member invocations on an identifier chain (``guard["disable"]()`` /
+# ``guard['disable']()`` / ``guard[key]()`` / ``guard?.["disable"]()`` /
+# ``a.b["c"]()`` / ``obj["a"]["b"]()``). Matched on executable scan text where
+# quoted indices are spaces; bracket bodies may therefore be whitespace-only.
+_COMPUTED_CALL_SITE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))(?:await[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*(?:(?:\?\.|\.)[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:(?:\?\.)?\[[^\]]*\])+"
     r"(?:\?\.)?[ \t]*\("
 )
 # Prefix ending at a call-site match start that means the name is a definition
@@ -936,7 +950,11 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     Optional-chain forms (``guard?.disable()`` / ``guard?.()``) normalize
     ``?.`` to ``.`` so the same receiver identity is preserved; otherwise the
     match restarts after ``?.`` and only the bare method leaf is seen
-    (PRRT_kwDOSJAM6s6ZriaJ). Nested / mid-expression calls
+    (PRRT_kwDOSJAM6s6ZriaJ). Computed-member forms (``guard["disable"]()`` /
+    ``guard['disable']()`` / ``guard[key]()`` / ``guard?.["disable"]()``)
+    emit the receiver chain: blanking quoted indices leaves
+    ``guard[         ]()``, which dotted matching cannot span
+    (PRRT_kwDOSJAM6s6ZroRa). Nested / mid-expression calls
     (``if ready: guard.disable()``, ``result = guard.disable()``,
     ``print(guard.disable())``) are included (PRRT_kwDOSJAM6s6ZrYJk). ``#`` /
     ``//`` / same-line ``/* … */`` comments and string literals are ignored
@@ -951,27 +969,46 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
         return ()
     names: list[str] = []
     scan = _executable_call_scan_text(raw_line)
-    for match in _CALL_SITE_RE.finditer(scan):
-        prefix = raw_line[: match.start()]
-        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
-            continue
-        # Normalize JS/TS optional chaining so identity matches dotted form.
-        dotted = match.group(1).replace("?.", ".")
+
+    def _emit_receiver_chain(raw_chain: str) -> None:
+        dotted = raw_chain.replace("?.", ".")
         parts = dotted.split(".")
         if len(parts) == 1:
             names.append(parts[0])
         else:
             names.append(parts[0])
             names.append(dotted)
+
+    for match in _CALL_SITE_RE.finditer(scan):
+        prefix = raw_line[: match.start()]
+        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
+            continue
+        # Normalize JS/TS optional chaining so identity matches dotted form.
+        _emit_receiver_chain(match.group(1))
+    for match in _COMPUTED_CALL_SITE_RE.finditer(scan):
+        prefix = raw_line[: match.start()]
+        if _CALL_SITE_DEFINITION_PREFIX_RE.search(prefix):
+            continue
+        _emit_receiver_chain(match.group(1))
     return tuple(names)
 
 
 def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
-    """True when ``name`` matches a candidate key or a scoped key's leaf."""
+    """True when ``name`` matches a candidate key, scoped leaf, or dotted root.
+
+    Exact and ``*.{name}`` leaf matches cover bare and scoped callees. A
+    computed-member tip (``guard["disable"]()``) emits only the receiver
+    ``guard`` while salvage call-count diffs may list ``guard.disable`` /
+    ``guard.enable``; treat ``name`` as matching any ``name.*`` candidate so
+    those restores still supersede (PRRT_kwDOSJAM6s6ZroRa).
+    """
     if name in candidate_keys:
         return True
     suffix = f".{name}"
-    return any(key.endswith(suffix) for key in candidate_keys)
+    if any(key.endswith(suffix) for key in candidate_keys):
+        return True
+    prefix = f"{name}."
+    return any(key.startswith(prefix) for key in candidate_keys)
 
 
 def _call_site_name_counts(text: str) -> Counter[str]:
