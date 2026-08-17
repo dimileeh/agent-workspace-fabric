@@ -382,6 +382,26 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED, other = get_flags()\n"),
     )
+    # Parenthesized / list unpacking must supersede too — no ident sits before
+    # ``=``, so bare unpacking recovery alone keeps FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZsZ5d).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n(FEATURE_ENABLED, other) = (False, 1)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n[FEATURE_ENABLED, other] = [False, 1]\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=(
+            'FLAGS = {}\nFLAGS["enabled"] = True\n(FLAGS["enabled"], other) = get_flags()\n'
+        ),
+    )
     # Subscript unpacking priors must supersede too (PRRT_kwDOSJAM6s6ZsYZx).
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_sub,

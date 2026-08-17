@@ -146,6 +146,19 @@ _INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
     rf"(?:[ \t]*,[ \t]*{_UNPACK_LHS_TARGET})*)"
     r"[ \t]*,[ \t]*$"
 )
+# Flat parenthesized / list unpacking LHS before equals-style assign
+# (``(a, b) =`` / ``[a, b] =``). No identifier sits immediately before ``=``,
+# so bare comma-before recovery misses every target (PRRT_kwDOSJAM6s6ZsZ5d).
+_PAREN_LIST_UNPACK_BODY = rf"(?:{_UNPACK_LHS_TARGET})(?:[ \t]*,[ \t]*{_UNPACK_LHS_TARGET})*"
+_PAREN_LIST_UNPACK_ASSIGN_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:"
+    rf"\((?P<paren_body>{_PAREN_LIST_UNPACK_BODY})\)"
+    r"|"
+    rf"\[(?P<list_body>{_PAREN_LIST_UNPACK_BODY})\]"
+    r")"
+    rf"[ \t]*{_EQUALS_STYLE_ASSIGN_OP}"
+)
 # Type token in statement-leading ``name: T =``: bare ``T =`` after ``ident:``
 # must not invent a second binding key (PRRT_kwDOSJAM6s6ZsJyZ). Requires a
 # bare identifier immediately before ``:`` so ``if ready: name =`` still binds.
@@ -339,6 +352,28 @@ def _unpacking_lhs_names_before(before: str, *, raw_before: str) -> tuple[str, .
     return tuple(names)
 
 
+def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, ...]:
+    """Return targets from flat ``(a, b) =`` / ``[a, b] =`` forms on the line.
+
+    Parenthesized and list unpacking place ``)`` / ``]`` immediately before
+    ``=``, so identifier-before-assign patterns find nothing and would keep
+    stale FIXED salvage (PRRT_kwDOSJAM6s6ZsZ5d). Subscript spellings are
+    recovered from ``raw_line`` because scan blanks quoted indices.
+    """
+    names: list[str] = []
+    for match in _PAREN_LIST_UNPACK_ASSIGN_RE.finditer(scan):
+        if match.group("paren_body") is not None:
+            body_start, body_end = match.start("paren_body"), match.end("paren_body")
+        else:
+            body_start, body_end = match.start("list_body"), match.end("list_body")
+        for part_match in _UNPACK_LHS_TARGET_RE.finditer(scan, body_start, body_end):
+            raw_name = raw_line[part_match.start() : part_match.end()]
+            name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
 def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return equals-style assign names found anywhere on ``raw_line``.
 
@@ -352,14 +387,16 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     and the type token in ``name: T =`` are skipped so phantoms cannot enter
     salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking and
     parenthesized walrus after ``,`` / ``(`` still bind (PRRT_kwDOSJAM6s6ZsOT0).
-    Subscript targets recover their spelling from ``raw_line`` because scan
-    blanking turns ``FLAGS["enabled"]`` into ``FLAGS[         ]``.
+    Flat parenthesized / list unpacking ``(a, b) =`` / ``[a, b] =`` bind too
+    (PRRT_kwDOSJAM6s6ZsZ5d). Subscript targets recover their spelling from
+    ``raw_line`` because scan blanking turns ``FLAGS["enabled"]`` into
+    ``FLAGS[         ]``.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
         return ()
     scan = _executable_call_scan_text(raw_line)
-    names: list[str] = []
+    names: list[str] = list(_paren_list_unpack_binding_names(raw_line, scan=scan))
     for match in _INLINE_ASSIGN_BINDING_RE.finditer(scan):
         before = scan[: match.start()]
         # Recover from ``raw_line``: scan blanks quoted subscript indices to

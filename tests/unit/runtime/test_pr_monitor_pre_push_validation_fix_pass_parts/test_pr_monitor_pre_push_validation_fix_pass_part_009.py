@@ -406,6 +406,23 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED, other = get_flags()\n",
     )
+    # Parenthesized / list unpacking: no ident immediately before ``=``, so the
+    # bare comma-before path misses every target and would reuse FIXED salvage
+    # (PRRT_kwDOSJAM6s6ZsZ5d).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED, other) = (False, 1)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n[FEATURE_ENABLED, other] = [False, 1]\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=(
+            'FLAGS = {}\nFLAGS["enabled"] = True\n(FLAGS["enabled"], other) = get_flags()\n'
+        ),
+    )
     # Subscript priors in unpacking must bind too; bare/dotted-only prior
     # recovery misses ``FLAGS["enabled"], other =`` and keeps FIXED evidence
     # (PRRT_kwDOSJAM6s6ZsYZx).
