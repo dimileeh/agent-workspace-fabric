@@ -85,6 +85,7 @@ services:
     {% endif %}
 
   {# awf-j2-tojson-allow: loop.index0 -- Jinja-generated numeric identifier used in shell variable names and mount paths. #}
+  {# awf-j2-tojson-allow: snippet | indent(8) -- AWF-generated shell program from clarification_auth_copy_lines(), emitted into a YAML block scalar; tojson would render it as one quoted JSON string instead of script lines. #}
   {% if clarification_enabled %}
   clarification:
     image: {{ agent_runtime_image | tojson }}
