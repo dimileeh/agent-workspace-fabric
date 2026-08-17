@@ -171,6 +171,43 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="feature-enabled = true\n",
         head_blob="feature-enabled = true\nother-key = 1\n",
     )
+    # TOML dotted keys (`feature.enabled = true`) must bind the full path.
+    # Identifier-only matching required `=` immediately after the first segment,
+    # so neither salvage nor an appended `feature.enabled = false` bound and the
+    # tip kept a line-aligned prefix / reused stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zql88). Quoted dotted segments normalize to the same key.
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob="feature.enabled = true\nfeature.enabled = false\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob=("feature.enabled = true\nother = 1\nfeature.enabled = false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob='feature.enabled = true\nfeature."enabled" = false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='"feature".enabled = true\n',
+        head_blob='"feature".enabled = true\nfeature.enabled = false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='site."google.com" = true\n',
+        head_blob='site."google.com" = true\nsite."google.com" = false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="a.b.c = 1\n",
+        head_blob="a.b.c = 1\na.b.c = 2\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob="feature.enabled = true\n# feature.enabled = false\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="feature.enabled = true\n",
+        head_blob="feature.enabled = true\nother.key = 1\n",
+    )
     # Docstring / block-comment prose that reuses a salvage assignment name
     # (Google-style ``Args:`` / ``timeout: Seconds…``) must not count as a
     # YAML-style rebind; otherwise benign documentation drops FIXED evidence
@@ -621,6 +658,28 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_toml_q,
         commit_blob=commit_toml_q,
         head_blob='"feature-enabled" = true\n"feature-enabled" = false\n',
+    )
+    # TOML dotted keys (incl. quoted segments) must supersede on the modified
+    # salvage path the same way as added salvage (PRRT_kwDOSJAM6s6Zql88).
+    parent_toml_dot = "feature.enabled = false\n"
+    commit_toml_dot = "feature.enabled = true\n"
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_toml_dot, commit_blob=commit_toml_dot
+    ) == {"feature.enabled"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob="feature.enabled = true\nfeature.enabled = false\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob='feature.enabled = true\nfeature."enabled" = false\n',
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_dot,
+        commit_blob=commit_toml_dot,
+        head_blob="feature.enabled = true\nother.key = 1\n",
     )
     parent_json_sq = "{\n  'feature-enabled': false\n}\n"
     commit_json_sq = "{\n  'feature-enabled': true\n}\n"

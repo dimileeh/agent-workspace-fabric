@@ -20,8 +20,22 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # mappings bind like nested leaves (PRRT_kwDOSJAM6s6ZqeWt).
 # Bare keys allow ``-`` so TOML / YAML hyphenated names bind
 # (``feature-enabled = true``; PRRT_kwDOSJAM6s6Zqip3).
+# TOML dotted keys join bare or quoted segments with ``.``
+# (``feature.enabled`` / ``site."google.com"``; PRRT_kwDOSJAM6s6Zql88).
+_ASSIGN_KEY_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')'
 _ASSIGN_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:-[ \t]+)?(?:"
+    # Dotted TOML keys (≥1 ``.``): require the full path before ``=`` / ``:``
+    # so ``feature.enabled = true`` binds as ``feature.enabled``, not nothing.
+    rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})+)"
+    r"(?:"
+    r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"
+    r"|"
+    r"[ \t]*:="
+    r"|"
+    r"[ \t]*:[ \t]*(?!=)"
+    r")"
+    r"|"
     r"([A-Za-z_][A-Za-z0-9_-]*)"
     r"(?:"
     r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
@@ -45,6 +59,7 @@ _ASSIGN_BINDING_RE = re.compile(
     r"'([^'\n]+)'[ \t]*(?::[ \t]*(?!=)|=(?!=))"
     r")"
 )
+_ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
 _CLASS_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?class[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
@@ -358,6 +373,35 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
 
 
+def _normalize_assign_binding_name(name: str) -> str:
+    """Strip quotes from dotted TOML key segments for stable comparison.
+
+    ``feature.enabled``, ``feature."enabled"``, and ``"feature".enabled`` all
+    normalize to ``feature.enabled`` so mixed spellings supersede each other
+    (PRRT_kwDOSJAM6s6Zql88). Non-dotted names are returned unchanged.
+    """
+    if "." not in name:
+        return name
+    segments: list[str] = []
+    pos = 0
+    length = len(name)
+    while pos < length:
+        if segments:
+            if name[pos] != ".":
+                return name
+            pos += 1
+        match = _ASSIGN_KEY_SEGMENT_RE.match(name, pos)
+        if match is None:
+            return name
+        raw = match.group(1)
+        if raw.startswith('"') or raw.startswith("'"):
+            segments.append(raw[1:-1])
+        else:
+            segments.append(raw)
+        pos = match.end()
+    return ".".join(segments) if pos == length and segments else name
+
+
 def _binding_name_for_line(raw_line: str) -> str | None:
     """Return the binding name on ``raw_line``, or None when it is not a binding.
 
@@ -385,7 +429,7 @@ def _binding_name_for_line(raw_line: str) -> str | None:
         if match is not None:
             for group in match.groups():
                 if group:
-                    return group
+                    return _normalize_assign_binding_name(group)
             return None
     return None
 
@@ -396,12 +440,14 @@ def _binding_names(text: str) -> set[str]:
     Used to detect when appended tip content rebinds a name from an added salvage
     blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, YAML
     ``feature_enabled: true`` then ``feature_enabled: false``, quoted JSON
-    ``"feature-enabled": true`` then ``"feature-enabled": false``, or TOML
-    ``feature-enabled = true`` / ``"feature-enabled" = true``), which keeps a
+    ``"feature-enabled": true`` then ``"feature-enabled": false``, TOML
+    ``feature-enabled = true`` / ``"feature-enabled" = true``, or TOML dotted
+    ``feature.enabled = true`` / ``feature."enabled" = true``), which keeps a
     line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3). Lines
-    that start inside ``/*`` or a triple-quoted string are skipped so Google-style
-    docstring Args prose cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
+    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3,
+    PRRT_kwDOSJAM6s6Zql88). Lines that start inside ``/*`` or a triple-quoted
+    string are skipped so Google-style docstring Args prose cannot falsely
+    supersede (PRRT_kwDOSJAM6s6ZqPO9).
     """
     names: set[str] = set()
     in_block_comment = False
