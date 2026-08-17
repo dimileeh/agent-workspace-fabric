@@ -1373,6 +1373,23 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob="x = 1\n#define GUARD 1\n",
         head_blob="x = 1\n#define GUARD 1\n#define GUARD 0\n",
     )
+    # ``#undef`` supersedes modified ``#define`` salvage the same way
+    # (PRRT_kwDOSJAM6s6ZyImI).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\n#define GUARD 1\n",
+        head_blob="x = 1\n#define GUARD 1\n#undef GUARD\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\n#define GUARD 1\n",
+        head_blob="x = 1\n#define GUARD 1\n# undef GUARD\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob="x = 1\n",
+        commit_blob="x = 1\n#define GUARD 1\n",
+        head_blob="x = 1\n#define GUARD 1\n#undef OTHER\n",
+    )
     # Body-only salvage of an existing declaration keeps the same opener line.
     # Comparing opener text alone would omit the name from ``changed``, so a tip
     # that appends a same-signature redefinition would retain stale FIXED

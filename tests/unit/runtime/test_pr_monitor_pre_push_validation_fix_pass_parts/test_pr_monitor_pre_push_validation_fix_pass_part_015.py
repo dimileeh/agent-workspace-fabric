@@ -315,6 +315,8 @@ def test_binding_span_keeps_interior_blanks_and_drops_trailing_blanks() -> None:
 def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     """``#`` / ``//`` lines must not bind unset / ``++`` / setattr mutations."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _binding_name_for_line,
+        _binding_names_for_line,
         _del_binding_names,
         _object_assign_mutation_binding_names,
         _setattr_mutation_binding_names,
@@ -338,6 +340,13 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     assert _object_assign_mutation_binding_names("# Object.assign(guard, {enabled: false})") == ()
     assert _del_binding_names("# del guard.enabled") == ()
     assert _del_binding_names("// delete guard.enabled") == ()
+    # ``#undef`` is a preprocessor binding (like ``#define``), not a comment
+    # (PRRT_kwDOSJAM6s6ZyImI). Other ``#`` directives stay unbound.
+    assert _binding_name_for_line("#undef FEATURE_ENABLED") == "FEATURE_ENABLED"
+    assert _binding_name_for_line("# undef FEATURE_ENABLED") == "FEATURE_ENABLED"
+    assert _binding_names_for_line("#undef FEATURE_ENABLED") == ("FEATURE_ENABLED",)
+    assert _binding_name_for_line("#ifdef FEATURE_ENABLED") is None
+    assert _binding_name_for_line("# not-a-define") is None
 
 
 @pytest.mark.unit

@@ -1027,6 +1027,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="#define FEATURE_ENABLED 1\n",
         head_blob="#define FEATURE_ENABLED 1\n#define FEATURE_ENABLED 0\n",
     )
+    # ``#undef`` removes a salvage macro without a re-``#define``; discarding it
+    # as a non-define ``#`` line kept a line-aligned prefix and reused stale
+    # FIXED evidence (PRRT_kwDOSJAM6s6ZyImI).
+    assert not _added_salvage_blob_retained(
+        commit_blob="#define FEATURE_ENABLED 1\n",
+        head_blob="#define FEATURE_ENABLED 1\n#undef FEATURE_ENABLED\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="#define FEATURE_ENABLED 1\n",
+        head_blob="#define FEATURE_ENABLED 1\n# undef FEATURE_ENABLED\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="#define FEATURE_ENABLED 1\n",
+        head_blob="#define FEATURE_ENABLED 1\n#undef OTHER\n",
+    )
     # YAML-style ``key: value`` rebinds must fail closed the same way equals-
     # style assignments do; the matcher previously only handled ``=`` / ``:=``
     # and declarations, so an appended override kept a line-aligned prefix and
@@ -1284,6 +1299,10 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
     assert not _added_salvage_blob_retained(
         commit_blob="#define FEATURE_ENABLED 1\n",
         head_blob="#define FEATURE_ENABLED 1\n# define FEATURE_ENABLED 0\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="# define FEATURE_ENABLED 1\n",
+        head_blob="# define FEATURE_ENABLED 1\n# undef FEATURE_ENABLED\n",
     )
     assert not _added_salvage_blob_retained(
         commit_blob="def guard():\n    return True\n",

@@ -206,10 +206,14 @@ _LET_CONST_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _DEFINE_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
-# ``#`` lines that are not ``#define`` / ``# define`` are comments / other
-# directives; spaced form must match the same whitespace rule as open-``#if``
-# scanning (PRRT_kwDOSJAM6s6Zp_sv).
-_DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
+# ``#undef`` removes a macro the same way ``del`` / ``unset`` remove bindings;
+# tip ``#undef FEATURE_ENABLED`` after salvage ``#define FEATURE_ENABLED 1``
+# must supersede (PRRT_kwDOSJAM6s6ZyImI).
+_UNDEF_BINDING_RE = re.compile(r"(?m)^[ \t]*#[ \t]*undef[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+# ``#`` lines that are not ``#define`` / ``#undef`` (or spaced forms) are
+# comments / other directives; spaced form must match the same whitespace rule
+# as open-``#if`` scanning (PRRT_kwDOSJAM6s6Zp_sv, PRRT_kwDOSJAM6s6ZyImI).
+_DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*(?:define|undef)\b")
 # Python ``del`` / JS ``delete`` targets supersede salvage bindings like
 # rebinds: neither assign nor call scanners previously recorded the deletion,
 # so tip ``del FEATURE_ENABLED`` / ``delete guard.enabled`` kept a
@@ -428,9 +432,10 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     """Return the statement-leading binding name on ``raw_line``, or None.
 
     Pure ``#`` / ``//`` comment lines are skipped so commented rebinds do not
-    count; ``#define`` / ``# define`` remain bindings (whitespace between ``#``
-    and ``define`` is allowed, matching open-``#if`` scanning;
-    PRRT_kwDOSJAM6s6Zp_sv). Callers must also skip lines that start inside an
+    count; ``#define`` / ``#undef`` (and spaced ``# define`` / ``# undef``)
+    remain bindings (whitespace between ``#`` and the keyword is allowed,
+    matching open-``#if`` scanning; PRRT_kwDOSJAM6s6Zp_sv,
+    PRRT_kwDOSJAM6s6ZyImI). Callers must also skip lines that start inside an
     open ``/*`` or triple-quoted string so docstring prose is not treated as a
     YAML-style rebind (PRRT_kwDOSJAM6s6ZqPO9). Mid-statement equals-style
     assignments are collected by ``_binding_names_for_line`` /
@@ -443,6 +448,7 @@ def _binding_name_for_line(raw_line: str) -> str | None:
         return None
     for pattern in (
         _DEFINE_BINDING_RE,
+        _UNDEF_BINDING_RE,
         _DEF_BINDING_RE,
         _CLASS_BINDING_RE,
         _FUNCTION_BINDING_RE,
@@ -1197,7 +1203,9 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     without a rebind (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). Shell
     ``unset`` targets (including ``unset -v NAME`` and quoted
     ``unset 'NAME'`` / ``unset "NAME"``) are included the same way
-    (PRRT_kwDOSJAM6s6ZuRSm, PRRT_kwDOSJAM6s6Zu20N). JS/C/C++ ``++`` / ``--``
+    (PRRT_kwDOSJAM6s6ZuRSm, PRRT_kwDOSJAM6s6Zu20N). Preprocessor ``#undef``
+    targets supersede salvage ``#define`` bindings the same way
+    (PRRT_kwDOSJAM6s6ZyImI). JS/C/C++ ``++`` / ``--``
     update targets are included so increment/decrement supersedes without an
     equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb). ``setattr`` / ``delattr`` /
     ``__setattr__`` / ``__delattr__`` targets are included so indirect attribute
