@@ -300,6 +300,39 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             commit_blob=commit,
             head_blob="x = 1\nFEATURE_ENABLED = True\ny = 2\n" + compound_line,
         )
+    # Subscript assign overrides must supersede: bare/dotted-only binding
+    # patterns miss ``FLAGS["enabled"] =`` so clean merge-file equality would
+    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsQFs).
+    parent_sub = 'FLAGS = {}\nFLAGS["enabled"] = False\n'
+    commit_sub = 'FLAGS = {}\nFLAGS["enabled"] = True\n'
+    assert _salvage_changed_binding_names(parent_blob=parent_sub, commit_blob=commit_sub) == {
+        'FLAGS["enabled"]'
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob='FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS["enabled"] = False\n',
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=("FLAGS = {}\nFLAGS[\"enabled\"] = True\nFLAGS['enabled'] = False\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nif ready: FLAGS["enabled"] = False\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob='FLAGS = {}\nFLAGS["enabled"] = True\nother = 1\n',
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nOTHER["enabled"] = False\n'),
+    )
     # Nested / mid-statement rebinds must supersede: line-start assign matching
     # misses ``if ready: FEATURE_ENABLED = False`` so merge-file equality would
     # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).

@@ -312,6 +312,34 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED = False\n",
     )
+    # Subscript assign targets must bind like bare/dotted names; otherwise
+    # ``FLAGS["enabled"] = False`` after salvage ``FLAGS["enabled"] = True``
+    # produces no key and prefix retention reuses stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZsQFs).
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS["enabled"] = False\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=("FLAGS = {}\nFLAGS[\"enabled\"] = True\nFLAGS['enabled'] = False\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nif ready: FLAGS["enabled"] = False\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS["enabled"] &= False\n'),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob='FLAGS = {}\nFLAGS["enabled"] = True\nother = 1\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nOTHER["enabled"] = False\n'),
+    )
     # Compound assigns must supersede like plain ``=``; otherwise ``&=`` / ``+=``
     # / ``-=`` / ``|=`` / ``^=`` appends keep stale FIXED evidence
     # (PRRT_kwDOSJAM6s6ZsNCC).
