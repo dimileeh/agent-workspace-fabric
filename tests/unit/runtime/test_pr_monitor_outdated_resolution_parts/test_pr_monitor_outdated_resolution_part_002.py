@@ -22,6 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_body_hash_state_key,
+    _salvaged_fix_head_state_key,
+    _salvaged_fix_start_state_key,
+)
 from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
@@ -631,3 +636,68 @@ async def test_comment_keyed_edited_addressed_comment_blocks_resolve(
     # ``decide`` holds the merge-ready PR at NotifyHuman so a human sees the edit.
     action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
+
+
+def _plant_salvage(state: MonitorState, item_id: str) -> None:
+    tip = "b" * 40
+    start = "a" * 40
+    body_hash = "feedback_body_hash_outdated_comment_keyed_clear"
+    state.mark_addressed(_salvaged_fix_head_state_key(item_id), tip)
+    state.mark_addressed(_salvaged_fix_body_hash_state_key(item_id), body_hash)
+    state.mark_addressed(_salvaged_fix_start_state_key(item_id), start)
+
+
+@pytest.mark.unit
+async def test_outdated_resolve_clears_comment_keyed_salvage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6Z0Hb3) Successful outdated resolve must clear salvage for
+    every reconciled identifier, not only ``thread_id``.
+
+    A comment-path fix retains ``__salvaged_fix_*`` under the numeric
+    ``comment_id``. Reconcile promotes the verdict onto ``thread_id`` and resolve
+    succeeds, but clearing only ``tid`` would leave the comment-keyed tip keys
+    forever in ``monitor_threads_addressed``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    tid = "PRRT_salvage_comment_keyed"
+    comment_id = "4688598838"
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment(tid, comment_id=comment_id)
+    state.mark_addressed(comment_id, "fix_committed")
+    _plant_salvage(state, comment_id)
+    _plant_salvage(state, tid)
+    persisted: list[str] = []
+
+    async def _persist_salvage(
+        _workspace_id: str, _state: MonitorState, *, salvage_item_id: str
+    ) -> None:
+        persisted.append(salvage_item_id)
+
+    runner._persist_failed_run_salvage_durably = _persist_salvage  # type: ignore[method-assign]
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == [tid]
+    assert state.threads_addressed_ids.get(tid) == "fix_committed"
+    for item_id in (tid, comment_id):
+        assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
+        assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+        assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+    assert sorted(persisted) == sorted([tid, comment_id])

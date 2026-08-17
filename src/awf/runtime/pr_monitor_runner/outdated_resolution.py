@@ -659,13 +659,17 @@ async def _resolve_addressed_outdated_threads(
             context="resolve_outdated_thread",
         )
         # Publication + resolve done — drop obsolete tip evidence
-        # (PRRT_kwDOSJAM6s6Zzwl4).
-        await _clear_published_salvage_durably(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            item_id=tid,
-        )
+        # (PRRT_kwDOSJAM6s6Zzwl4). Clear every reconciled identifier: a
+        # comment-path fix stores salvage under ``comment_id``, while resolve
+        # keys on ``thread_id`` — clearing only ``tid`` would leave
+        # ``__salvaged_fix_*:<comment_id>`` forever (PRRT_kwDOSJAM6s6Z0Hb3).
+        for salvage_id in sorted(_thread_identifier_set(thread)):
+            await _clear_published_salvage_durably(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=salvage_id,
+            )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
