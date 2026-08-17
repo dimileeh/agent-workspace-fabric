@@ -192,6 +192,42 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "const marker = `${`x${guard.disable()}`}`;\n",
     )
+    # Python f-strings: static text is non-executable; ``{...}`` replacement
+    # fields stay scannable (PRRT_kwDOSJAM6s6Zt7Go). Without this, quote blanking
+    # (or triple-quote blanking) swallows ``guard.disable()`` and retains stale
+    # salvage; the alphanumeric quote heuristic must not be relied on.
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'marker = f"guard.disable()"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'marker = f"{guard.disable()}"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "marker = f'{guard.disable()}'\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'marker = rf"{guard.disable()}"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'marker = f"""{guard.disable()}"""\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + 'marker = f"""guard.disable()"""\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "marker = f\"{'guard.disable()'}\"\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "marker = f\"{f'{guard.disable()}'}\"\n",
+    )
     # Same-line block comments must not count as tip-extra calls
     # (PRRT_kwDOSJAM6s6Zrhbs).
     assert _added_salvage_blob_retained(
@@ -1333,3 +1369,74 @@ def test_call_site_names_mask_js_template_literal_edges() -> None:
     )
     assert _call_site_names_for_line("const marker = `${/guard.disable()/}`;") == ()
     assert _call_site_names_for_line("const marker = `${/* guard.disable() */}`;") == ()
+
+
+@pytest.mark.unit
+def test_call_site_names_mask_python_fstring_edges() -> None:
+    """Python f-string static text is masked; ``{...}`` edges stay scannable.
+
+    Mirrors JS template interpolation handling so tip-extra call detection does
+    not miss ``f\"{guard.disable()}\"`` / triple-quoted forms, and does not
+    treat static ``f\"guard.disable()\"`` as a call (PRRT_kwDOSJAM6s6Zt7Go).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _call_site_names_for_line,
+    )
+
+    assert _call_site_names_for_line('marker = f"guard.disable()"') == ()
+    assert _call_site_names_for_line("marker = f'guard.disable()'") == ()
+    assert _call_site_names_for_line('marker = f"{guard.disable()}"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("marker = f'{guard.disable()}'") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = rf"{guard.disable()}"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = Fr"{guard.disable()}"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = f"""{guard.disable()}"""') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("marker = f'''{guard.disable()}'''") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = f"""guard.disable()"""') == ()
+    assert _call_site_names_for_line(r'marker = f"a\"guard.disable()"') == ()
+    assert _call_site_names_for_line('marker = f"{{guard.disable()}"') == ()
+    assert _call_site_names_for_line('marker = f"{foo({a: 1}) + guard.disable()}"') == (
+        "foo",
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("marker = f\"{obj[']'] + guard.disable()}\"") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("marker = f\"{'guard.disable()'}\"") == ()
+    assert _call_site_names_for_line("marker = f\"{f'{guard.disable()}'}\"") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = f"{guard.disable()"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = f"{guard.disable()!r}"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('marker = f"{guard.disable():.2f}"') == (
+        "guard",
+        "guard.disable",
+    )
+    # Non-f strings still blank fully (including literal braces).
+    assert _call_site_names_for_line('marker = "{guard.disable()}"') == ()

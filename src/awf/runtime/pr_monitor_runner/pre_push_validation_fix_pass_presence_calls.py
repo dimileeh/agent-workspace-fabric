@@ -298,6 +298,201 @@ def _blank_js_template_literal(chars: list[str], raw_line: str, start: int) -> i
     return i
 
 
+def _py_fstring_prefix_len(raw_line: str, quote_index: int) -> int:
+    """Return length of an ``f``/``F`` string prefix before ``quote_index``, or 0.
+
+    Accepts ``f``/``F`` alone and ``rf``/``fr`` (any case). Rejects prefixes that
+    continue an identifier (``xf\"...\"``) so ordinary tokens are not treated as
+    f-strings (PRRT_kwDOSJAM6s6Zt7Go).
+    """
+    if quote_index <= 0:
+        return 0
+    j = quote_index - 1
+    while j >= 0 and raw_line[j] in "rRuUfF":
+        j -= 1
+    prefix = raw_line[j + 1 : quote_index]
+    if not prefix or "f" not in prefix.lower():
+        return 0
+    if j >= 0 and (raw_line[j].isalnum() or raw_line[j] == "_"):
+        return 0
+    return len(prefix)
+
+
+def _skip_py_triple_quoted_string(raw_line: str, start: int) -> int:
+    """Return index past a ``'''`` / ``\"\"\"`` string starting at ``start``."""
+    quote = raw_line[start : start + 3]
+    i = start + 3
+    n = len(raw_line)
+    while i < n:
+        if raw_line.startswith(quote, i):
+            return i + 3
+        if raw_line[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        i += 1
+    return i
+
+
+def _skip_py_fstring(raw_line: str, prefix_start: int) -> int:
+    """Return index past a Python f-string starting at ``prefix_start``."""
+    i = prefix_start
+    n = len(raw_line)
+    while i < n and raw_line[i] in "rRuUfF":
+        i += 1
+    if i >= n or raw_line[i] not in "\"'":
+        return prefix_start + 1
+    quote_len = 3 if raw_line.startswith(('"""', "'''"), i) else 1
+    quote = raw_line[i : i + quote_len]
+    i += quote_len
+    while i < n:
+        ch = raw_line[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if raw_line.startswith(quote, i):
+            return i + quote_len
+        if ch == "{" and i + 1 < n and raw_line[i + 1] == "{":
+            i += 2
+            continue
+        if ch == "}":
+            if i + 1 < n and raw_line[i + 1] == "}":
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "{":
+            i = _find_py_fstring_expr_end(raw_line, i + 1)
+            if i < n and raw_line[i] == "}":
+                i += 1
+            continue
+        i += 1
+    return i
+
+
+def _find_py_fstring_expr_end(raw_line: str, start: int) -> int:
+    """Return index of the ``}`` that closes an f-string field body at ``start``.
+
+    Tracks brace depth while skipping nested strings (including nested
+    f-strings) and ``#`` comments so braces inside those regions do not end the
+    field early (PRRT_kwDOSJAM6s6Zt7Go).
+    """
+    i = start
+    n = len(raw_line)
+    depth = 1
+    in_double = False
+    in_single = False
+    while i < n:
+        ch = raw_line[i]
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, True):
+                in_double = False
+            i += 1
+            continue
+        if in_single:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, True):
+                in_single = False
+            i += 1
+            continue
+        if ch == "#":
+            while i < n and raw_line[i] != "\n":
+                i += 1
+            continue
+        if ch in "\"'":
+            prefix_len = _py_fstring_prefix_len(raw_line, i)
+            if prefix_len:
+                i = _skip_py_fstring(raw_line, i - prefix_len)
+                continue
+            if raw_line.startswith('"""', i) or raw_line.startswith("'''", i):
+                i = _skip_py_triple_quoted_string(raw_line, i)
+                continue
+            if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
+                in_double = True
+                i += 1
+                continue
+            if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, False):
+                in_single = True
+                i += 1
+                continue
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return i
+
+
+def _blank_py_fstring(chars: list[str], raw_line: str, quote_index: int) -> int:
+    """Blank a Python f-string; keep ``{...}`` replacement expressions scannable.
+
+    Static segments (and ``{{`` / ``}}`` escapes) become spaces so
+    ``f\"guard.disable()\"`` is not a call site. Replacement bodies are
+    re-scanned with the same executable-blanking rules so
+    ``f\"{guard.disable()}\"`` still matches (PRRT_kwDOSJAM6s6Zt7Go).
+    """
+    prefix_len = _py_fstring_prefix_len(raw_line, quote_index)
+    for j in range(quote_index - prefix_len, quote_index):
+        chars[j] = " "
+    quote_len = 3 if raw_line.startswith(('"""', "'''"), quote_index) else 1
+    quote = raw_line[quote_index : quote_index + quote_len]
+    for j in range(quote_len):
+        chars[quote_index + j] = " "
+    i = quote_index + quote_len
+    n = len(raw_line)
+    while i < n:
+        ch = raw_line[i]
+        if ch == "\\" and i + 1 < n:
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if raw_line.startswith(quote, i):
+            for j in range(quote_len):
+                chars[i + j] = " "
+            return i + quote_len
+        if ch == "{" and i + 1 < n and raw_line[i + 1] == "{":
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if ch == "}":
+            if i + 1 < n and raw_line[i + 1] == "}":
+                chars[i] = " "
+                chars[i + 1] = " "
+                i += 2
+                continue
+            chars[i] = " "
+            i += 1
+            continue
+        if ch == "{":
+            chars[i] = " "
+            expr_start = i + 1
+            expr_end = _find_py_fstring_expr_end(raw_line, expr_start)
+            blanked = _executable_call_scan_text(raw_line[expr_start:expr_end])
+            for offset, blank_ch in enumerate(blanked):
+                chars[expr_start + offset] = blank_ch
+            if expr_end < n and raw_line[expr_end] == "}":
+                chars[expr_end] = " "
+                i = expr_end + 1
+            else:
+                i = expr_end
+            continue
+        chars[i] = " "
+        i += 1
+    return i
+
+
 def _executable_call_scan_text(raw_line: str) -> str:
     """Return ``raw_line`` with strings and comment regions replaced by spaces.
 
@@ -307,10 +502,12 @@ def _executable_call_scan_text(raw_line: str) -> str:
     same-line ``/* guard.disable() */`` / ``code; /* guard.disable() */`` do not
     (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). JS template literals blank
     static text but keep ``${...}`` expressions scannable
-    (PRRT_kwDOSJAM6s6ZtJG8). JS regex literals such as ``/guard.disable()/`` are
-    blanked so they are not mistaken for calls (PRRT_kwDOSJAM6s6Zs-Re); division
-    keeps real calls visible. Unclosed ``/*`` blanks through end of line
-    (multi-line ``/*`` state is handled by callers).
+    (PRRT_kwDOSJAM6s6ZtJG8). Python f-strings blank static text but keep
+    ``{...}`` replacement expressions scannable (PRRT_kwDOSJAM6s6Zt7Go). JS
+    regex literals such as ``/guard.disable()/`` are blanked so they are not
+    mistaken for calls (PRRT_kwDOSJAM6s6Zs-Re); division keeps real calls
+    visible. Unclosed ``/*`` blanks through end of line (multi-line ``/*``
+    state is handled by callers).
     """
     chars = list(raw_line)
     i = 0
@@ -338,6 +535,12 @@ def _executable_call_scan_text(raw_line: str) -> str:
             if ch == "'" and _ascii_single_quote_is_delimiter(raw_line, i, True):
                 in_single = False
             i += 1
+            continue
+        # Detect f-strings before ordinary / triple-quote blanking so
+        # ``f\"{guard.disable()}\"`` / ``f\"\"\"{...}\"\"\"`` keep replacement
+        # fields scannable (PRRT_kwDOSJAM6s6Zt7Go).
+        if ch in "\"'" and _py_fstring_prefix_len(raw_line, i):
+            i = _blank_py_fstring(chars, raw_line, i)
             continue
         if raw_line.startswith('"""', i) or raw_line.startswith("'''", i):
             quote = raw_line[i : i + 3]
@@ -422,10 +625,11 @@ def _call_site_names_for_line(raw_line: str) -> tuple[str, ...]:
     reports only the bare method leaf (PRRT_kwDOSJAM6s6Zrr7R). Nested /
     mid-expression calls (``if ready: guard.disable()``,
     ``result = guard.disable()``, ``print(guard.disable())``) are included
-    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments,
-    string literals, JS template-literal static text, and JS ``/…/`` regex
-    literals are ignored (PRRT_kwDOSJAM6s6Zrhbs, PRRT_kwDOSJAM6s6Zs-Re,
-    PRRT_kwDOSJAM6s6ZtJG8); ``${...}`` interpolations remain scannable.
+    (PRRT_kwDOSJAM6s6ZrYJk).     ``#`` / ``//`` / same-line ``/* … */`` comments,
+    string literals, JS template-literal static text, Python f-string static
+    text, and JS ``/…/`` regex literals are ignored (PRRT_kwDOSJAM6s6Zrhbs,
+    PRRT_kwDOSJAM6s6Zs-Re, PRRT_kwDOSJAM6s6ZtJG8, PRRT_kwDOSJAM6s6Zt7Go);
+    ``${...}`` interpolations and f-string ``{...}`` fields remain scannable.
     Definitions are not call sites: ``def name(`` / ``function name(`` /
     ``class Name(`` are skipped via ``_CALL_SITE_DEFINITION_PREFIX_RE``. Each
     call match is emitted once per occurrence (not collapsed by name) so
