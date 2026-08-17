@@ -245,6 +245,82 @@ async def test_commit_trees_differ_compares_resolved_trees(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (".github/workflows/ci.yml", ".github/workflows/ci.yml"),
+        ("./.github/workflows/ci.yml", ".github/workflows/ci.yml"),
+        ("./src/target.py", "src/target.py"),
+        ("src/target.py", "src/target.py"),
+        ("  ./.env  ", ".env"),
+        (".coveragerc", ".coveragerc"),
+        ("github/workflows/ci.yml", "github/workflows/ci.yml"),
+    ],
+)
+def test_normalize_evidence_item_path_preserves_dotfiles(raw: str, expected: str) -> None:
+    """Strip only exact ``./`` prefixes; keep leading dots on real dotfile paths.
+
+    PRRT_kwDOSJAM6s6Z0nDa: ``lstrip("./")`` collapses ``.github/...`` into
+    ``github/...``, letting an unrelated non-dot path satisfy the FIXED gate.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _normalize_evidence_item_path,
+    )
+
+    assert _normalize_evidence_item_path(raw) == expected
+
+
+@pytest.mark.unit
+async def test_commit_range_touches_path_does_not_confuse_dotfile_with_non_dot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A non-dot path change must not satisfy a ``.github/...`` review item path."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "awf@example.com")
+    _git(repo, "config", "user.name", "AWF Test")
+    (repo / "github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / "github" / "workflows" / "ci.yml").write_text("non-dot\n", encoding="utf-8")
+    (repo / ".github" / "workflows" / "ci.yml").write_text("dotfile\n", encoding="utf-8")
+    _git(repo, "add", "github/workflows/ci.yml", ".github/workflows/ci.yml")
+    _git(repo, "commit", "-qm", "base")
+    start = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "github" / "workflows" / "ci.yml").write_text("non-dot changed\n", encoding="utf-8")
+    _git(repo, "add", "github/workflows/ci.yml")
+    _git(repo, "commit", "-qm", "non-dot only")
+    non_dot_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=AsyncioSubprocessRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=non_dot_tip,
+        path=".github/workflows/ci.yml",
+    )
+    assert await pre_push_validation._commit_range_touches_path(
+        runner,
+        worktree_path=repo,
+        left=start,
+        right=non_dot_tip,
+        path="github/workflows/ci.yml",
+    )
+
+
+@pytest.mark.unit
 async def test_commit_range_touches_path_requires_item_path_in_delta(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

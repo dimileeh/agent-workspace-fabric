@@ -96,8 +96,16 @@ async def _commit_trees_differ(
 
 
 def _normalize_evidence_item_path(path: str) -> str:
-    """Normalize a review-item path for FIXED evidence path matching."""
-    return path.strip().lstrip("./")
+    """Normalize a review-item path for FIXED evidence path matching.
+
+    Strip only exact leading ``./`` prefixes. ``str.lstrip("./")`` treats the
+    argument as a character set and would collapse ``.github/...`` into
+    ``github/...``, letting a distinct non-dot path satisfy a dotfile gate.
+    """
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 async def _commit_range_touches_path(
