@@ -16,8 +16,10 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 # Binding targets that an appended tip can rebind to supersede added salvage.
+# Optional YAML block-sequence marker (``- ``) before the key so list-item
+# mappings bind like nested leaves (PRRT_kwDOSJAM6s6ZqeWt).
 _ASSIGN_BINDING_RE = re.compile(
-    r"(?m)^[ \t]*(?:"
+    r"(?m)^[ \t]*(?:-[ \t]+)?(?:"
     r"([A-Za-z_][A-Za-z0-9_]*)"
     r"(?:"
     r"(?:[ \t]*:[ \t]*[^=\n]+)?[ \t]*=(?!=)"  # `name =` / `name: T =`
@@ -59,8 +61,10 @@ _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
 # scalar — only optional whitespace and a ``#`` comment. These open an
 # indentation scope so nested leaves qualify as ``parent.leaf`` rather than
 # colliding as bare ``leaf`` across unrelated mappings (PRRT_kwDOSJAM6s6ZqZo2).
+# Optional ``- `` covers block-sequence mapping openers (``- nested:``;
+# PRRT_kwDOSJAM6s6ZqeWt).
 _YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
-    r"^[ \t]*(?:"
+    r"^[ \t]*(?:-[ \t]+)?(?:"
     r"[A-Za-z_][A-Za-z0-9_]*"
     r'|"[^"\n]+"'
     r"|'[^'\n]+'"
@@ -443,7 +447,8 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     Def/class/function openers push scopes for qualified keys
     (``A.ok``; PRRT_kwDOSJAM6s6ZqKN3). YAML/mapping ``key:`` lines with no
     same-line scalar also push so ``feature.enabled`` and ``logging.enabled``
-    stay distinct (PRRT_kwDOSJAM6s6ZqZo2). Assignments with values, ``#define``,
+    stay distinct (PRRT_kwDOSJAM6s6ZqZo2), including block-sequence openers
+    (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Assignments with values, ``#define``,
     and ``let``/``const``/``var`` bind a name but do not push.
     """
     stripped = raw_line.lstrip(" \t")

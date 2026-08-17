@@ -454,6 +454,54 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_quoted_nested,
         head_blob=('"feature":\n  enabled: true\n"logging":\n  level: info\n  enabled: false\n'),
     )
+    # Block-sequence mapping entries (``- enabled:``) must bind like nested
+    # leaves. Without recognizing the sequence-item key, salvage only records
+    # the enclosing ``feature`` span while a tip that appends ``enabled: false``
+    # on the same item is keyed ``feature.enabled`` — empty intersection would
+    # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZqeWt).
+    parent_seq_yaml = "feature:\n  - enabled: false\n"
+    commit_seq_yaml = "feature:\n  - enabled: true\n"
+    seq_yaml_changed = _salvage_changed_binding_names(
+        parent_blob=parent_seq_yaml, commit_blob=commit_seq_yaml
+    )
+    assert "feature.enabled" in seq_yaml_changed
+    assert "enabled" not in seq_yaml_changed
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_yaml,
+        commit_blob=commit_seq_yaml,
+        head_blob="feature:\n  - enabled: true\n    enabled: false\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_yaml,
+        commit_blob=commit_seq_yaml,
+        head_blob="feature:\n  - enabled: true\n    other: 1\n",
+    )
+    # Quoted keys after a sequence marker nest/rebind the same way.
+    parent_seq_quoted = 'feature:\n  - "enabled": false\n'
+    commit_seq_quoted = 'feature:\n  - "enabled": true\n'
+    seq_quoted_changed = _salvage_changed_binding_names(
+        parent_blob=parent_seq_quoted, commit_blob=commit_seq_quoted
+    )
+    assert "feature.enabled" in seq_quoted_changed
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_quoted,
+        commit_blob=commit_seq_quoted,
+        head_blob='feature:\n  - "enabled": true\n    enabled: false\n',
+    )
+    # Sequence-item mapping openers (no same-line scalar) still qualify nested
+    # leaves under the item key.
+    parent_seq_nested = "feature:\n  - nested:\n      enabled: false\n"
+    commit_seq_nested = "feature:\n  - nested:\n      enabled: true\n"
+    seq_nested_changed = _salvage_changed_binding_names(
+        parent_blob=parent_seq_nested, commit_blob=commit_seq_nested
+    )
+    assert "feature.nested.enabled" in seq_nested_changed
+    assert "enabled" not in seq_nested_changed
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_seq_nested,
+        commit_blob=commit_seq_nested,
+        head_blob=("feature:\n  - nested:\n      enabled: true\n      enabled: false\n"),
+    )
     # Quoted JSON mapping keys must supersede the same way; otherwise a tip that
     # keeps salvage `"feature-enabled": true` and appends a later duplicate
     # false cleanly merge-file-matches HEAD while consumers take the final
