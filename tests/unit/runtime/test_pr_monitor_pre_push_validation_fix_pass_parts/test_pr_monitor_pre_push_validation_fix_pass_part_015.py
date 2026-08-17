@@ -320,6 +320,7 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
         _del_binding_names,
         _object_assign_mutation_binding_names,
         _object_define_property_mutation_binding_names,
+        _reflect_set_mutation_binding_names,
         _setattr_mutation_binding_names,
         _setitem_mutation_binding_names,
         _unset_binding_names,
@@ -351,6 +352,8 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
         )
         == ()
     )
+    assert _reflect_set_mutation_binding_names('// Reflect.set(guard, "enabled", false)') == ()
+    assert _reflect_set_mutation_binding_names('# Reflect.set(guard, "enabled", false)') == ()
     assert _del_binding_names("# del guard.enabled") == ()
     assert _del_binding_names("// delete guard.enabled") == ()
     # ``#undef`` is a preprocessor binding (like ``#define``), not a comment
@@ -699,6 +702,116 @@ def test_opaque_object_define_property_shares_salvaged_receiver() -> None:
     assert _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "Object.defineProperty(\n  other,\n  key,\n  {value: false}\n);\n",
+    )
+
+
+@pytest.mark.unit
+def test_reflect_set_mutation_binding_names() -> None:
+    """``Reflect.set`` synthesizes ``target.key`` (PRRT_kwDOSJAM6s6ZzN-l)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _join_incomplete_reflect_set_line,
+        _reflect_set_call_unclosed,
+        _reflect_set_mutation_args_fully_synthesizable,
+        _reflect_set_mutation_binding_names,
+    )
+
+    assert _reflect_set_mutation_binding_names('Reflect.set(guard, "enabled", false)') == (
+        "guard.enabled",
+    )
+    assert _reflect_set_mutation_binding_names("Reflect.set(guard, 'enabled', false)") == (
+        "guard.enabled",
+    )
+    assert _reflect_set_mutation_binding_names(
+        'globalThis.Reflect.set(guard, "enabled", false)'
+    ) == ("guard.enabled",)
+    assert _reflect_set_mutation_binding_names("Reflect.set(guard, key, false)") == ()
+    assert _reflect_set_mutation_binding_names('Reflect.set(guard, "enabled", false') == ()
+    assert (
+        _reflect_set_mutation_binding_names('msg = "Reflect.set(guard, \\"enabled\\", false)"')
+        == ()
+    )
+    assert _reflect_set_mutation_args_fully_synthesizable('Reflect.set(guard, "enabled", false)')
+    assert not _reflect_set_mutation_args_fully_synthesizable("Reflect.set(guard, key, false)")
+    multi = [
+        "Reflect.set(",
+        "  guard,",
+        '  "enabled",',
+        "  false",
+        ");",
+    ]
+    assert _reflect_set_call_unclosed(multi[0])
+    joined = _join_incomplete_reflect_set_line(multi, 0)
+    assert not _reflect_set_call_unclosed(joined)
+    assert _reflect_set_mutation_binding_names(joined) == ("guard.enabled",)
+
+
+@pytest.mark.unit
+def test_opaque_reflect_set_shares_salvaged_receiver() -> None:
+    """Opaque ``Reflect.set`` fail-closed on salvaged receivers (PRRT_kwDOSJAM6s6ZzN-l)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _tip_extra_opaque_reflect_set_shares_receiver,
+    )
+
+    salvage = "guard.enabled = true\n"
+    assert _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Reflect.set(guard, key, false)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'Reflect.set(guard, "enabled", false)\n',
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Reflect.set(other, key, false)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "// Reflect.set(guard, key, false)\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Reflect.set(guard, key, false)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'Reflect.set(guard, "enabled", false)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'Reflect.set(guard, "other", false)\n',
+    )
+    nested = "config.guard.enabled = true\n"
+    assert _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=nested,
+        head_blob=nested + "Reflect.set(config.guard, key, false)\n",
+        candidate_keys={"config.guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=nested,
+        head_blob=nested + "Reflect.set(config.guard, key, false)\n",
+    )
+    assert _tip_extra_opaque_reflect_set_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Reflect.set(\n  guard,\n  key,\n  false\n);\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Reflect.set(\n  guard,\n  key,\n  false\n);\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'Reflect.set(\n  guard,\n  "enabled",\n  false\n);\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Reflect.set(\n  other,\n  key,\n  false\n);\n",
     )
 
 

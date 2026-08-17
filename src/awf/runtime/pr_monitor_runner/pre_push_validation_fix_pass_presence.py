@@ -54,6 +54,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
     _object_define_property_call_unclosed as _object_define_property_call_unclosed,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _reflect_set_call_targets as _reflect_set_call_targets,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _reflect_set_call_unclosed as _reflect_set_call_unclosed,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _update_mutation_args_fully_synthesizable as _update_mutation_args_fully_synthesizable,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
@@ -896,6 +902,56 @@ def _tip_extra_opaque_object_define_property_shares_receiver(
     return False
 
 
+def _tip_extra_opaque_reflect_set_shares_receiver(
+    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra opaque ``Reflect.set`` shares a salvage receiver.
+
+    ``Reflect.set(guard, key, …)`` emits only ``Reflect`` / ``Reflect.set`` call
+    names, which never equal salvaged ``guard.enabled``. Fail closed when the
+    target argument matches a salvaged receiver and the property name is not a
+    string literal (PRRT_kwDOSJAM6s6ZzN-l). Literal property forms synthesize
+    ``guard.enabled`` via binding names instead, so unrelated keys keep salvage
+    like ``Reflect.set(guard, "other", …)``. Multiline
+    ``Reflect.set(\\n  guard,\\n  …)`` joins continued argument lists before
+    scanning, looking back from tip-extra argument lines when the shared opener
+    is not tip-extra; an opener that remains unclosed with no parseable target
+    after look-ahead also fails closed.
+    """
+    receivers = _salvaged_alias_reference_names(candidate_keys)
+    if not receivers:
+        return False
+    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    lines = head_blob.splitlines()
+    in_block_comment = False
+    in_triple_double = False
+    in_triple_single = False
+    for idx, raw_line in enumerate(lines):
+        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
+        in_block_comment, in_triple_double, in_triple_single = (
+            _advance_string_or_block_comment_state(
+                raw_line + "\n",
+                in_block_comment=in_block_comment,
+                in_triple_double=in_triple_double,
+                in_triple_single=in_triple_single,
+            )
+        )
+        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
+            continue
+        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
+        targets = _reflect_set_call_targets(scan_line)
+        if not targets and _reflect_set_call_unclosed(scan_line):
+            return True
+        for target, fully_synthesizable in targets:
+            if fully_synthesizable:
+                continue
+            if target in receivers:
+                return True
+    return False
+
+
 def _tip_extra_keys_supersede_baseline(
     *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
 ) -> bool:
@@ -1052,9 +1108,9 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
 
     Lines that start inside ``/*`` or a triple-quoted string are ignored so
     tip-extra docstring prose cannot look like a rebind (PRRT_kwDOSJAM6s6ZqPO9).
-    Tip-extra argument lines of a shared ``Object.assign`` / ``defineProperty``
-    opener look back so synthesizable ``target.key`` bindings still count
-    (PRRT_kwDOSJAM6s6Zy5DN).
+    Tip-extra argument lines of a shared ``Object.assign`` / ``defineProperty`` /
+    ``Reflect.set`` opener look back so synthesizable ``target.key`` bindings
+    still count (PRRT_kwDOSJAM6s6Zy5DN).
     """
     if not line_indices:
         return set()
@@ -1357,7 +1413,9 @@ def _tip_extra_can_supersede_modified_salvage(
     closed on a shared salvaged receiver (PRRT_kwDOSJAM6s6Zxwhs).
     ``Object.defineProperty(guard, "enabled", …)`` synthesizes ``guard.enabled``;
     opaque ``Object.defineProperty(guard, key, …)`` fails closed the same way
-    (PRRT_kwDOSJAM6s6Zy4pR). Tip-extra alias assignments of a salvage-changed
+    (PRRT_kwDOSJAM6s6Zy4pR). ``Reflect.set(guard, "enabled", …)`` synthesizes
+    ``guard.enabled``; opaque ``Reflect.set(guard, key, …)`` fails closed the
+    same way (PRRT_kwDOSJAM6s6ZzN-l). Tip-extra alias assignments of a salvage-changed
     name fail closed (PRRT_kwDOSJAM6s6ZxHGP).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
@@ -1391,6 +1449,12 @@ def _tip_extra_can_supersede_modified_salvage(
     ):
         return True
     if _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=commit_blob,
+        head_blob=head_blob,
+        candidate_keys=changed,
+    ):
+        return True
+    if _tip_extra_opaque_reflect_set_shares_receiver(
         baseline_blob=commit_blob,
         head_blob=head_blob,
         candidate_keys=changed,
@@ -1435,9 +1499,11 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     ``FLAGS["key"]`` or fail closed on opaque mutators sharing a salvaged
     subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). ``Object.assign`` object-literal
     keys synthesize ``target.key``; opaque sources fail closed on a shared
-    salvaged receiver (PRRT_kwDOSJAM6s6Zxwhs). ``Object.defineProperty`` string
+    salvaged receiver (PRRT_kwDOSJAM6s6Zxwhs).     ``Object.defineProperty`` string
     property names synthesize ``target.key``; opaque property names fail closed
-    on a shared salvaged receiver (PRRT_kwDOSJAM6s6Zy4pR). Tip-extra alias
+    on a shared salvaged receiver (PRRT_kwDOSJAM6s6Zy4pR). ``Reflect.set`` string
+    property names synthesize ``target.key``; opaque property names fail closed
+    on a shared salvaged receiver (PRRT_kwDOSJAM6s6ZzN-l). Tip-extra alias
     assignments (``const alias = guard``) fail closed so ``alias.enabled = false``
     cannot keep stale salvage (PRRT_kwDOSJAM6s6ZxHGP).
     """
@@ -1474,6 +1540,12 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     ):
         return True
     if _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=head_blob,
+        candidate_keys=salvage_keys,
+    ):
+        return True
+    if _tip_extra_opaque_reflect_set_shares_receiver(
         baseline_blob=salvage,
         head_blob=head_blob,
         candidate_keys=salvage_keys,

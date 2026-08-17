@@ -740,6 +740,59 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_shared_define,
         head_blob=("Object.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n"),
     )
+    # Reflect.set after salvage ``guard.enabled = true`` (PRRT_kwDOSJAM6s6ZzN-l).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=('x = 1\nguard.enabled = true\ny = 2\nReflect.set(guard, "enabled", false)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nReflect.set(guard, key, false)\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=('x = 1\nguard.enabled = true\ny = 2\n// Reflect.set(guard, "enabled", false)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=('x = 1\nguard.enabled = true\ny = 2\nReflect.set(other, "enabled", false)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=('x = 1\nguard.enabled = true\ny = 2\nReflect.set(guard, "other", false)\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            "x = 1\nguard.enabled = true\ny = 2\n"
+            'Reflect.set(\n  guard,\n  "enabled",\n  false\n);\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            "x = 1\nguard.enabled = true\ny = 2\nReflect.set(\n  guard,\n  key,\n  false\n);\n"
+        ),
+    )
+    parent_shared_reflect = 'Reflect.set(\n  guard,\n  "enabled",\n  false\n);\n'
+    commit_shared_reflect = 'Reflect.set(\n  guard,\n  "enabled",\n  true\n);\n'
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_reflect,
+        commit_blob=commit_shared_reflect,
+        head_blob='Reflect.set(\n  guard,\n  "enabled",\n  false\n);\n',
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shared_reflect,
+        commit_blob=commit_shared_reflect,
+        head_blob="Reflect.set(\n  guard,\n  key,\n  false\n);\n",
+    )
     # Shell ``unset`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZuRSm).
     parent_shell = "x=1\nFEATURE_ENABLED=false\ny=2\n"
     commit_shell = "x=1\nFEATURE_ENABLED=true\ny=2\n"
