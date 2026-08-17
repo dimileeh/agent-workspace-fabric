@@ -3,19 +3,11 @@
 from __future__ import annotations
 
 import re
-import tempfile
 from collections import Counter
-from pathlib import Path
-from typing import Any
 
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _ascii_double_quote_is_delimiter,
     _ascii_single_quote_is_delimiter,
-)
-from awf.runtime.pr_monitor_runner.path_helpers import _changed_paths_from_name_only_z
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-    _git_env_for_merge_safety_object_lookup,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _ASSIGN_KEY_SEGMENT as _ASSIGN_KEY_SEGMENT,
@@ -41,36 +33,6 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_assign_call_targets as _object_assign_call_targets,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_assign_call_unclosed as _object_assign_call_unclosed,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_define_properties_call_targets as _object_define_properties_call_targets,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_define_properties_call_unclosed as _object_define_properties_call_unclosed,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_define_property_call_targets as _object_define_property_call_targets,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _object_define_property_call_unclosed as _object_define_property_call_unclosed,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _reflect_set_call_targets as _reflect_set_call_targets,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _reflect_set_call_unclosed as _reflect_set_call_unclosed,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _update_mutation_args_fully_synthesizable as _update_mutation_args_fully_synthesizable,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
-    _update_mutation_binding_names as _update_mutation_binding_names,
-)
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _call_site_names_for_line as _call_site_names_for_line,
 )
@@ -78,33 +40,30 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls i
     _candidate_keys_include_call_name as _candidate_keys_include_call_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
-    _executable_call_scan_text as _executable_call_scan_text,
-)
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _is_member_call_continuation as _is_member_call_continuation,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _join_member_call_continuation_line as _join_member_call_continuation_line,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _bytes_unsafe_for_text_merge as _bytes_unsafe_for_text_merge,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _delta_brackets_outside_strings as _delta_brackets_outside_strings,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _git_mode_file_kind as _git_mode_file_kind,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _line_code_without_line_comment as _line_code_without_line_comment,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
     _line_is_control_flow_change as _line_is_control_flow_change,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _merge_file_result_matches_head as _merge_file_result_matches_head,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _parse_ls_tree_meta as _parse_ls_tree_meta,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
@@ -113,10 +72,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
     _prefix_opens_control_flow_over_suffix as _prefix_opens_control_flow_over_suffix,
 )
-from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (  # noqa: F401
     _raw_blob_from_cat_file_result as _raw_blob_from_cat_file_result,
 )
-from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 
 # YAML / mapping ``key:`` (or quoted ``"key":`` / ``'key':``) with no same-line
 # scalar — only optional whitespace and a ``#`` comment. These open an
@@ -539,473 +497,6 @@ def _nonliteral_subscript_shares_receiver(
         recv = _subscript_binding_receiver(key)
         if recv is not None and recv in salvaged_receivers:
             return True
-    return False
-
-
-# Tip-extra mapping mutators whose arguments may be opaque (``update(other)``,
-# ``clear()``, ``popitem()``). Call names do not match ``FLAGS["enabled"]``;
-# fail closed when the receiver equals a salvaged subscript receiver
-# (PRRT_kwDOSJAM6s6ZwrnH). Literal-key ``__setitem__`` / kwargs ``update`` /
-# dict-literal ``update`` are handled by binding synthesis instead so
-# ``FLAGS.__setitem__("other", …)`` / ``FLAGS.update(other=False)`` do not
-# drop unrelated salvage (PRRT_kwDOSJAM6s6ZxeRb); only non-synthesizable
-# ``update`` forms stay opaque, including mixed opaque+kwargs
-# (``FLAGS.update(other_flags, other=False)``; PRRT_kwDOSJAM6s6Zxt0p).
-_OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
-
-# Tip-extra ``const alias = guard`` / ``alias = guard`` where ``guard`` is a
-# salvaged candidate (or receiver of ``guard.enabled`` / ``FLAGS["enabled"]``).
-# Exact-key intersection only sees ``alias`` / ``alias.enabled``, so fail closed
-# on the aliasing assignment itself (PRRT_kwDOSJAM6s6ZxHGP).
-_TIP_EXTRA_ALIAS_ASSIGN_RE = re.compile(
-    r"(?:^|(?<=[^A-Za-z0-9_]))"
-    r"(?:(?:const|let|var)[ \t]+)?"
-    r"[A-Za-z_][A-Za-z0-9_]*"
-    r"[ \t]*=[ \t]*"
-    r"([A-Za-z_][A-Za-z0-9_]*)"
-    r"(?![A-Za-z0-9_.\[\(])"
-    # JS ``const fn = FEATURE_ENABLED =>`` is an arrow param, not an alias RHS
-    # (PRRT_kwDOSJAM6s6ZtZ_2 vs alias retain PRRT_kwDOSJAM6s6ZxHGP).
-    r"(?![ \t]*=>)"
-)
-
-# Assignment whose RHS was split to a following line (``const alias =`` alone).
-# Same-line ``_TIP_EXTRA_ALIAS_ASSIGN_RE`` cannot see the salvaged receiver
-# (PRRT_kwDOSJAM6s6ZxhFW).
-_INCOMPLETE_ALIAS_ASSIGN_LHS_RE = re.compile(
-    r"(?:^|(?<=[^A-Za-z0-9_]))"
-    r"(?:(?:const|let|var)[ \t]+)?"
-    r"[A-Za-z_][A-Za-z0-9_]*"
-    r"[ \t]*=[ \t]*$"
-)
-
-
-def _alias_assign_rhs_incomplete(raw_line: str) -> bool:
-    """Return True when ``raw_line`` is an assign whose RHS is still pending.
-
-    Uses comment-stripped text (strings kept) so ``msg = "…"`` is not treated
-    as incomplete after string blanking would leave a trailing ``=``.
-    """
-    code = _line_code_without_line_comment(raw_line).rstrip()
-    return bool(_INCOMPLETE_ALIAS_ASSIGN_LHS_RE.search(code))
-
-
-def _alias_assign_gap_line_is_skippable(stripped: str) -> bool:
-    """Return True when ``stripped`` is only a blank / comment gap before an RHS.
-
-    Whole-line ``/* … */`` must be skipped like ``//`` / ``#``; otherwise look-ahead
-    joins the comment as the RHS and tip-extra alias matching misses the salvaged
-    receiver (PRRT_kwDOSJAM6s6Zxt0u).
-    """
-    if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
-        return True
-    if stripped.startswith("/*") and "*/" in stripped:
-        after = stripped.split("*/", 1)[1].strip()
-        return after == ""
-    return False
-
-
-def _join_incomplete_alias_assign_line(lines: list[str], idx: int) -> str:
-    """Join ``lines[idx]`` with the next executable RHS when assign ends at ``=``.
-
-    Formatters commonly split ``const alias = guard`` across lines. Per-line
-    scanning then never matches ``_TIP_EXTRA_ALIAS_ASSIGN_RE``, so tip-extra
-    ``alias.enabled = false`` after salvage would keep stale FIXED evidence
-    (PRRT_kwDOSJAM6s6ZxhFW). Skip blank / line-comment / whole-line ``/* … */``
-    gaps between ``=`` and the RHS (including multi-line block comments;
-    PRRT_kwDOSJAM6s6Zxt0u); stop at the first non-skipped line.
-    """
-    raw_line = lines[idx]
-    if not _alias_assign_rhs_incomplete(raw_line):
-        return raw_line
-    parts: list[str] = [raw_line.rstrip()]
-    j = idx + 1
-    while j < len(lines):
-        nxt = lines[j]
-        nxt_stripped = nxt.strip()
-        if _alias_assign_gap_line_is_skippable(nxt_stripped):
-            j += 1
-            continue
-        # Multi-line block comment opened on this gap line — skip through ``*/``.
-        if nxt_stripped.startswith("/*") and "*/" not in nxt_stripped:
-            j += 1
-            while j < len(lines):
-                close_line = lines[j]
-                j += 1
-                if "*/" not in close_line:
-                    continue
-                after = close_line.split("*/", 1)[1].strip()
-                if after == "":
-                    break
-                parts.append(after)
-                break
-            else:
-                break
-            if len(parts) > 1:
-                break
-            continue
-        parts.append(nxt.lstrip(" \t"))
-        break
-    if len(parts) == 1:
-        return raw_line
-    joined = parts[0]
-    for part in parts[1:]:
-        joined = joined.rstrip() + " " + part.lstrip(" \t")
-    return joined
-
-
-def _salvaged_alias_reference_names(candidate_keys: set[str]) -> set[str]:
-    """Return names a tip may alias or mutate to reach salvaged bindings.
-
-    Includes bare candidate keys, every dotted path prefix through the full key
-    (``config`` and ``config.guard`` from ``config.guard.enabled`` — not only
-    the root, so opaque ``Object.assign(config.guard, …)`` fails closed;
-    PRRT_kwDOSJAM6s6ZyGqh), and subscript receivers (``FLAGS`` from
-    ``FLAGS["enabled"]``) so ``const alias = guard`` fails closed
-    (PRRT_kwDOSJAM6s6ZxHGP).
-    """
-    names: set[str] = set()
-    for key in candidate_keys:
-        if not key:
-            continue
-        recv = _subscript_binding_receiver(key)
-        if recv is not None:
-            names.add(recv)
-            continue
-        if "." in key:
-            parts = key.split(".")
-            for i in range(1, len(parts) + 1):
-                names.add(".".join(parts[:i]))
-            continue
-        if "[" not in key:
-            names.add(key)
-    return names
-
-
-def _tip_extra_aliases_salvaged_candidate(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra assigns an alias of a salvaged candidate name.
-
-    After added-file salvage sets ``guard.enabled = true``, a descendant can
-    append ``const alias = guard; alias.enabled = false;``. Tip scanners emit
-    only ``alias`` / ``alias.enabled``, which never intersect salvaged ``guard``
-    keys, and call checks find nothing — fail closed on the aliasing assignment
-    so stale FIXED evidence cannot resolve (PRRT_kwDOSJAM6s6ZxHGP). Multiline
-    ``const alias =\\n  guard`` is joined before matching so formatters cannot
-    bypass the same check (PRRT_kwDOSJAM6s6ZxhFW); an assign whose RHS remains
-    incomplete after look-ahead also fails closed.
-    """
-    refs = _salvaged_alias_reference_names(candidate_keys)
-    if not refs:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = _join_incomplete_alias_assign_line(lines, idx)
-        # RHS still missing after continuation look-ahead — cannot prove the
-        # tip does not alias a salvaged receiver; fail closed.
-        if _alias_assign_rhs_incomplete(scan_line):
-            return True
-        scan = _executable_call_scan_text(scan_line)
-        for match in _TIP_EXTRA_ALIAS_ASSIGN_RE.finditer(scan):
-            if match.group(1) in refs:
-                return True
-    return False
-
-
-def _salvaged_subscript_receivers(candidate_keys: set[str]) -> set[str]:
-    """Return receivers of subscript (or bare) candidate binding keys."""
-    receivers: set[str] = set()
-    for key in candidate_keys:
-        recv = _subscript_binding_receiver(key)
-        if recv is not None:
-            receivers.add(recv)
-    return receivers
-
-
-def _tip_extra_opaque_collection_mutator_shares_receiver(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra opaque mapping mutators share a salvage receiver.
-
-    ``FLAGS.update(other_flags)`` / ``FLAGS.clear()`` emit call names that never
-    equal ``FLAGS["enabled"]``; fail closed when the call receiver matches a
-    salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). Kwargs and dict-literal
-    ``update`` forms synthesize subscript keys instead, so they are not opaque
-    and unrelated keys keep salvage like ``__setitem__("other", …)``
-    (PRRT_kwDOSJAM6s6ZxeRb). Mixed opaque+synthesizable forms
-    (``FLAGS.update(other_flags, other=False)``) still fail closed
-    (PRRT_kwDOSJAM6s6Zxt0p).
-    """
-    receivers = _salvaged_subscript_receivers(candidate_keys)
-    if not receivers:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = raw_line
-        stripped = raw_line.lstrip(" \t")
-        if _is_member_call_continuation(stripped):
-            scan_line = _join_member_call_continuation_line(lines, idx)
-        for name in _call_site_names_for_line(scan_line):
-            if "." not in name:
-                continue
-            method = name.rsplit(".", 1)[-1]
-            if method not in _OPAQUE_COLLECTION_MUTATOR_METHODS:
-                continue
-            # Binding synthesis already understands kwargs / dict-literal
-            # ``update``; do not fail closed and drop unrelated salvage.
-            # Require fully synthesizable args so mixed opaque+kwargs forms
-            # like ``FLAGS.update(other_flags, other=False)`` still fail closed
-            # (PRRT_kwDOSJAM6s6Zxt0p).
-            if (
-                method == "update"
-                and _update_mutation_binding_names(scan_line)
-                and _update_mutation_args_fully_synthesizable(scan_line)
-            ):
-                continue
-            receiver = name[: -(len(method) + 1)]
-            if receiver in receivers:
-                return True
-    return False
-
-
-def _tip_extra_opaque_object_assign_shares_receiver(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra opaque ``Object.assign`` shares a salvage receiver.
-
-    ``Object.assign(guard, other)`` emits only ``Object`` / ``Object.assign`` call
-    names, which never equal salvaged ``guard.enabled``. Fail closed when the
-    target argument matches a salvaged receiver (dotted / subscript / bare) and
-    sources are not fully synthesizable object literals
-    (PRRT_kwDOSJAM6s6Zxwhs). Literal-key forms synthesize ``guard.enabled`` via
-    binding names instead, so unrelated keys keep salvage like
-    ``Object.assign(guard, {other: false})``. Multiline
-    ``Object.assign(\\n  guard,\\n  …)`` joins continued argument lists before
-    scanning, looking back from tip-extra argument lines when the shared opener
-    is not tip-extra (PRRT_kwDOSJAM6s6Zy5DN); an opener that remains unclosed
-    with no parseable target after look-ahead also fails closed
-    (PRRT_kwDOSJAM6s6Zyo4_).
-    """
-    receivers = _salvaged_alias_reference_names(candidate_keys)
-    if not receivers:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
-        targets = _object_assign_call_targets(scan_line)
-        # Opener with no parseable target after join (still unclosed) — cannot
-        # prove the tip does not mutate a salvaged receiver.
-        if not targets and _object_assign_call_unclosed(scan_line):
-            return True
-        for target, fully_synthesizable in targets:
-            if fully_synthesizable:
-                continue
-            if target in receivers:
-                return True
-    return False
-
-
-def _tip_extra_opaque_object_define_property_shares_receiver(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra opaque ``defineProperty`` shares a salvage receiver.
-
-    ``Object.defineProperty(guard, key, …)`` emits only ``Object`` /
-    ``Object.defineProperty`` call names, which never equal salvaged
-    ``guard.enabled``. Fail closed when the target argument matches a salvaged
-    receiver and the property name is not a string literal
-    (PRRT_kwDOSJAM6s6Zy4pR). Literal property forms synthesize ``guard.enabled``
-    via binding names instead, so unrelated keys keep salvage like
-    ``Object.defineProperty(guard, "other", …)``. Multiline
-    ``Object.defineProperty(\\n  guard,\\n  …)`` joins continued argument lists
-    before scanning, looking back from tip-extra argument lines when the shared
-    opener is not tip-extra (PRRT_kwDOSJAM6s6Zy5DN); an opener that remains
-    unclosed with no parseable target after look-ahead also fails closed.
-    """
-    receivers = _salvaged_alias_reference_names(candidate_keys)
-    if not receivers:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
-        targets = _object_define_property_call_targets(scan_line)
-        if not targets and _object_define_property_call_unclosed(scan_line):
-            return True
-        for target, fully_synthesizable in targets:
-            if fully_synthesizable:
-                continue
-            if target in receivers:
-                return True
-    return False
-
-
-def _tip_extra_opaque_object_define_properties_shares_receiver(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra opaque ``defineProperties`` shares a salvage receiver.
-
-    ``Object.defineProperties(guard, props)`` emits only ``Object`` /
-    ``Object.defineProperties`` call names, which never equal salvaged
-    ``guard.enabled``. Fail closed when the target argument matches a salvaged
-    receiver and the descriptors map is not a plain object literal
-    (PRRT_kwDOSJAM6s6ZzifG). Literal property forms synthesize ``guard.enabled``
-    via binding names instead, so unrelated keys keep salvage like
-    ``Object.defineProperties(guard, {other: {…}})``. Multiline
-    ``Object.defineProperties(\\n  guard,\\n  …)`` joins continued argument lists
-    before scanning, looking back from tip-extra argument lines when the shared
-    opener is not tip-extra; an opener that remains unclosed with no parseable
-    target after look-ahead also fails closed.
-    """
-    receivers = _salvaged_alias_reference_names(candidate_keys)
-    if not receivers:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
-        targets = _object_define_properties_call_targets(scan_line)
-        if not targets and _object_define_properties_call_unclosed(scan_line):
-            return True
-        for target, fully_synthesizable in targets:
-            if fully_synthesizable:
-                continue
-            if target in receivers:
-                return True
-    return False
-
-
-def _tip_extra_opaque_reflect_set_shares_receiver(
-    *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
-) -> bool:
-    """Return True when tip-extra opaque ``Reflect.set`` shares a salvage receiver.
-
-    ``Reflect.set(guard, key, …)`` emits only ``Reflect`` / ``Reflect.set`` call
-    names, which never equal salvaged ``guard.enabled``. Fail closed when the
-    target argument matches a salvaged receiver and the property name is not a
-    string literal (PRRT_kwDOSJAM6s6ZzN-l). Literal property forms synthesize
-    ``guard.enabled`` via binding names instead, so unrelated keys keep salvage
-    like ``Reflect.set(guard, "other", …)``. Multiline
-    ``Reflect.set(\\n  guard,\\n  …)`` joins continued argument lists before
-    scanning, looking back from tip-extra argument lines when the shared opener
-    is not tip-extra; an opener that remains unclosed with no parseable target
-    after look-ahead also fails closed.
-    """
-    receivers = _salvaged_alias_reference_names(candidate_keys)
-    if not receivers:
-        return False
-    extra_indices = _tip_extra_line_indices(commit_blob=baseline_blob, head_blob=head_blob)
-    if not extra_indices:
-        return False
-    lines = head_blob.splitlines()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for idx, raw_line in enumerate(lines):
-        line_in_non_code = in_block_comment or in_triple_double or in_triple_single
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-        if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
-            continue
-        scan_line = _join_incomplete_object_mutation_line_covering(lines, idx)
-        targets = _reflect_set_call_targets(scan_line)
-        if not targets and _reflect_set_call_unclosed(scan_line):
-            return True
-        for target, fully_synthesizable in targets:
-            if fully_synthesizable:
-                continue
-            if target in receivers:
-                return True
     return False
 
 
@@ -1699,317 +1190,32 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     )
 
 
-async def _commit_changes_present_in_head(
-    self: Any,
-    *,
-    worktree_path: Path,
-    commit: str,
-    head: str,
-    baseline: str | None = None,
-) -> bool:
-    """Return True when ``commit``'s changes vs ``baseline`` still appear in ``head``.
-
-    Ancestry alone accepts a descendant that reverts ``commit``'s content. Salvage
-    reuse therefore requires either an identical tree at ``head``, or that
-    **every** path changed by ``commit`` vs ``baseline`` still retains the
-    salvaged patch at ``head`` — not necessarily a byte-identical tree entry
-    (mode+type+OID). A later tip may edit a different hunk of the same file
-    (OID differs) while the salvage hunk remains applied; that must still count
-    as present (PRRT_kwDOSJAM6s6ZmWRh). Retention for blobs with a baseline is
-    checked via a clean 3-way ``git merge-file`` of parent/head/commit whose
-    result equals head, then rejecting tip-only lines that rebind a name the
-    salvage changed vs parent (appended ``FEATURE_ENABLED = False`` after a
-    False→True salvage; PRRT_kwDOSJAM6s6Zp_3j). A no-baseline addition (new path)
-    cannot use that
-    3-way model; retain when the salvage blob remains a line-boundary-aligned
-    prefix or suffix of the tip blob so append/prepend keep evidence while
-    mid-line modifications, mid-file disabling wrappers (``#if 0`` / comments /
-    strings), prepended unterminated wrappers that leave salvage as a suffix
-    (PRRT_kwDOSJAM6s6ZpaIn), appended rebinding of salvage names
-    (PRRT_kwDOSJAM6s6Zp8jM), and overwrites fail closed (PRRT_kwDOSJAM6s6Zm0PC,
-    PRRT_kwDOSJAM6s6Zm6F1, PRRT_kwDOSJAM6s6ZpQKt). ``baseline``
-    defaults to the tip's
-    first parent; callers that retain a failed-run tip must pass the invocation
-    start SHA so a multi-commit salvage (H1 fix + H2 unrelated) is checked as
-    the full ``start..tip`` delta — otherwise a later tip that reverts H1 while
-    preserving H2 falsely retains evidence (PRRT_kwDOSJAM6s6ZmG-B). A deleted
-    path is an empty entry: it counts as present only when the baseline still
-    had the path and ``head`` remains absent (both-missing bogus lookups fail
-    closed). A third-content overwrite (A→B salvage, later tip to C) must fail
-    closed even though C≠A — otherwise a no-change FIXED retry can reuse stale
-    salvage after B is gone. Mode-only salvage (e.g. chmod +x) that a later tip
-    reverts must likewise fail closed, because Git stores mode separately from
-    the object id. Partial or full reverts and revert-then-unrelated tips fail
-    closed. Root commits and unresolved objects also fail closed.
-    """
-    git_env = _git_env_for_merge_safety_object_lookup()
-
-    async def _rev_parse(ref: str) -> str:
-        result = await self._deps.runner.run(
-            git_worktree_command(worktree_path, "rev-parse", ref),
-            env=git_env,
-        )
-        return result.stdout.strip() if result.ok else ""
-
-    async def _tree_entry_at(ref: str, path: str) -> str | None:
-        # Compare mode + type + object id. Missing path → empty token so absence
-        # compares equal across refs. Lookup failure → ``None`` so callers fail
-        # closed instead of treating errors as absence (PRRT_kwDOSJAM6s6ZoduB).
-        # ``ls-tree`` lines are ``<mode> SP <type> SP <object> TAB <file>``; keep
-        # metadata only. Diff-derived paths are literal filenames; without
-        # ``--literal-pathspecs`` a name like ``:(literal)foo`` is pathspec magic
-        # and resolves to ``foo``, so a tip that reverts the magic path while
-        # leaving ``foo`` unchanged falsely retains salvage (PRRT_kwDOSJAM6s6ZmirW).
-        result = await self._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "--literal-pathspecs",
-                "ls-tree",
-                "-z",
-                ref,
-                "--",
-                path,
-            ),
-            env=git_env,
-        )
-        if not result.ok:
-            return None
-        entry = result.stdout.strip()
-        if not entry:
-            return ""
-        raw = entry.split("\0", 1)[0].strip()
-        if not raw:
-            return ""
-        meta_token: str = raw.partition("\t")[0]
-        return meta_token
-
-    async def _blob_raw(oid: str) -> bytes | None:
-        result = await self._deps.runner.run(
-            git_worktree_command(worktree_path, "cat-file", "blob", oid),
-            env=git_env,
-        )
-        return _raw_blob_from_cat_file_result(
-            ok=result.ok,
-            stdout=result.stdout,
-            stdout_bytes=result.stdout_bytes,
-        )
-
-    async def _salvage_entry_retained(
-        *,
-        parent_entry: str,
-        commit_entry: str,
-        head_entry: str,
-    ) -> bool:
-        # Fast path: identical tree entry (mode+type+OID) is definitely retained.
-        if head_entry == commit_entry:
-            return True
-        if not head_entry:
-            return False
-        commit_meta = _parse_ls_tree_meta(commit_entry)
-        head_meta = _parse_ls_tree_meta(head_entry)
-        if commit_meta is None or head_meta is None:
-            return False
-        commit_mode, commit_type, commit_oid = commit_meta
-        head_mode, head_type, head_oid = head_meta
-        if commit_type != head_type:
-            return False
-        # Non-blob types have no merge-file patch model; require exact equality.
-        if commit_type != "blob":
-            return False
-
-        parent_meta = _parse_ls_tree_meta(parent_entry) if parent_entry else None
-        # Mode retention: when salvage changed mode (or added the path), HEAD must
-        # still carry the salvage mode. Content-only salvage may tolerate later
-        # same-kind mode bits (e.g. chmod ±x) without forcing full mode equality.
-        if (parent_meta is None or parent_meta[0] != commit_mode) and head_mode != commit_mode:
-            return False
-        # File kind must still match even for content-only salvage. Git stores
-        # symlink targets as blobs, so a tip can replace a regular file whose
-        # content is a pathname with a same-OID symlink and falsely pass the
-        # OID fast path below (PRRT_kwDOSJAM6s6Znm-O).
-        if _git_mode_file_kind(head_mode) != _git_mode_file_kind(commit_mode):
-            return False
-
-        if commit_oid == head_oid:
-            return True
-
-        if parent_meta is None:
-            # Addition without a baseline blob: later tips may append/prepend
-            # while leaving the added bytes intact (OID changes). Exact OID is
-            # sufficient but not required — require line-boundary-aligned
-            # prefix or suffix retention of the salvage blob; suffix also
-            # rejects open disabling wrappers, and prefix+append rejects
-            # rebinding of salvage names
-            # (PRRT_kwDOSJAM6s6Zm0PC, PRRT_kwDOSJAM6s6Zm6F1,
-            # PRRT_kwDOSJAM6s6ZpQKt, PRRT_kwDOSJAM6s6ZpaIn,
-            # PRRT_kwDOSJAM6s6Zp8jM).
-            head_raw = await _blob_raw(head_oid)
-            commit_raw = await _blob_raw(commit_oid)
-            if head_raw is None or commit_raw is None:
-                return False
-            # Same unsafe-text gate as the baseline path: containment is not
-            # trustworthy once decode(replace) may have collapsed distinct
-            # invalid bytes (exact OID already failed above).
-            if _bytes_unsafe_for_text_merge(head_raw) or _bytes_unsafe_for_text_merge(commit_raw):
-                return False
-            return _added_salvage_blob_retained(
-                commit_blob=commit_raw.decode("utf-8"),
-                head_blob=head_raw.decode("utf-8"),
-            )
-
-        _, parent_type, parent_oid = parent_meta
-        # Mode-only salvage (same blob as baseline): content is retained once mode
-        # checks passed.
-        if commit_oid == parent_oid:
-            return True
-        if parent_type != "blob":
-            return False
-
-        parent_raw = await _blob_raw(parent_oid)
-        head_raw = await _blob_raw(head_oid)
-        commit_raw = await _blob_raw(commit_oid)
-        if parent_raw is None or head_raw is None or commit_raw is None:
-            return False
-        # CommandResult decodes as UTF-8 with replace. NUL and *invalid* UTF-8
-        # cannot be round-tripped safely through merge-file — require exact OID
-        # equality. Distinct invalid-byte blobs all collapse to the same U+FFFD
-        # text, so merge-file would falsely prove retention. Intentional U+FFFD
-        # in valid UTF-8 is retained; detect lossy decode via strict UTF-8 on
-        # raw bytes (PRRT_kwDOSJAM6s6ZnK_D).
-        if any(_bytes_unsafe_for_text_merge(raw) for raw in (parent_raw, head_raw, commit_raw)):
-            return False
-
-        # Honor TMPDIR (do not hardcode /tmp). Creation/write I/O must fail
-        # closed as False so FIXED evidence checking cannot crash the fix cycle
-        # (PRRT_kwDOSJAM6s6ZoX2i). ignore_cleanup_errors keeps a successful
-        # retention result from being rewritten by cleanup-only OSError.
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="awf-salvage-merge-",
-                ignore_cleanup_errors=True,
-            ) as tmp:
-                tmp_dir = Path(tmp)
-                base_path = tmp_dir / "base"
-                ours_path = tmp_dir / "ours"
-                theirs_path = tmp_dir / "theirs"
-                base_path.write_bytes(parent_raw)
-                ours_path.write_bytes(head_raw)
-                theirs_path.write_bytes(commit_raw)
-                merge_result = await self._deps.runner.run(
-                    git_worktree_command(
-                        worktree_path,
-                        "merge-file",
-                        "-p",
-                        str(ours_path),
-                        str(base_path),
-                        str(theirs_path),
-                    ),
-                    env=git_env,
-                )
-                # Exit 0 ⇒ clean merge; result must equal HEAD (salvage ⊆ head).
-                if not merge_result.ok:
-                    return False
-                if not _merge_file_result_matches_head(
-                    head_raw=head_raw,
-                    stdout=merge_result.stdout,
-                    stdout_bytes=merge_result.stdout_bytes,
-                ):
-                    return False
-                # Clean merge can still keep the salvage hunk while a later tip
-                # appends a rebinding of a salvage-changed name; reject that
-                # supersession (added-file path already does via
-                # ``_suffix_can_supersede_added_salvage``; PRRT_kwDOSJAM6s6Zp_3j).
-                return not _tip_extra_can_supersede_modified_salvage(
-                    parent_blob=parent_raw.decode("utf-8"),
-                    commit_blob=commit_raw.decode("utf-8"),
-                    head_blob=head_raw.decode("utf-8"),
-                )
-        except OSError:
-            return False
-
-    commit_sha = commit.strip()
-    head_sha = head.strip()
-    if not commit_sha or not head_sha:
-        return False
-    if commit_sha.lower() == head_sha.lower():
-        return True
-
-    commit_tree = await _rev_parse(f"{commit_sha}^{{tree}}")
-    head_tree = await _rev_parse(f"{head_sha}^{{tree}}")
-    if not commit_tree or not head_tree:
-        return False
-    if commit_tree.lower() == head_tree.lower():
-        return True
-
-    baseline_sha = (baseline or "").strip()
-    if baseline_sha:
-        # Resolve through rev-parse so abbreviated / symbolic baselines compare
-        # as full object ids against commit/head trees.
-        parent = await _rev_parse(baseline_sha)
-    else:
-        parent = await _rev_parse(f"{commit_sha}^")
-    if not parent:
-        return False
-    if parent.lower() == commit_sha.lower():
-        return False
-    parent_tree = await _rev_parse(f"{parent}^{{tree}}")
-    if not parent_tree:
-        return False
-    if parent_tree.lower() == head_tree.lower():
-        return False
-
-    paths_result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "diff-tree",
-            "--no-commit-id",
-            "--name-only",
-            "-z",
-            "-r",
-            parent,
-            commit_sha,
-        ),
-        env=git_env,
-    )
-    if not paths_result.ok:
-        return False
-    # ``-z`` preserves pathname bytes (including newlines). Without it, Git
-    # C-quotes such names; ``splitlines()`` then feeds the quoted spelling to
-    # ``ls-tree``, both lookups miss, and empty==empty falsely retains salvage
-    # (PRRT_kwDOSJAM6s6ZmCZz). Prefer raw ``stdout_bytes``: the runner's
-    # ``stdout`` string is UTF-8-decoded with ``errors="replace"``, which
-    # rewrites invalid-UTF-8 pathnames to U+FFFD and makes ``ls-tree`` miss
-    # (PRRT_kwDOSJAM6s6ZmviP).
-    try:
-        if paths_result.stdout_bytes is not None:
-            paths = _changed_paths_from_name_only_z(paths_result.stdout_bytes)
-        else:
-            paths = _changed_paths_from_name_only_z(paths_result.stdout or "")
-    except ProtectedScopeDiffError:
-        return False
-    if not paths:
-        return False
-
-    for path in paths:
-        # Distinguish deletions with full baseline/commit/head entries. Empty
-        # commit+head is retained salvage only when the baseline still had a
-        # concrete entry; bogus/C-quoted paths miss baseline and commit alike;
-        # any re-add at head fails closed (PRRT_kwDOSJAM6s6ZmEAd / ZmEG6).
-        # Lookup errors (``None``) also fail closed — never treat a failed
-        # ``ls-tree`` as genuine absence (PRRT_kwDOSJAM6s6ZoduB).
-        parent_entry = await _tree_entry_at(parent, path)
-        commit_entry = await _tree_entry_at(commit_sha, path)
-        head_entry = await _tree_entry_at(head_sha, path)
-        if parent_entry is None or commit_entry is None or head_entry is None:
-            return False
-        if not commit_entry:
-            if not parent_entry or head_entry:
-                return False
-            continue
-        if not await _salvage_entry_retained(
-            parent_entry=parent_entry,
-            commit_entry=commit_entry,
-            head_entry=head_entry,
-        ):
-            return False
-    return True
+# Tip-extra opaque / alias supersession helpers (line-limit decomposition).
+# Imported after early helpers above so circular imports resolve.
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_head import (  # noqa: E402, F401
+    _commit_changes_present_in_head as _commit_changes_present_in_head,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402, F401
+    _alias_assign_gap_line_is_skippable as _alias_assign_gap_line_is_skippable,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402, F401
+    _join_incomplete_alias_assign_line as _join_incomplete_alias_assign_line,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_aliases_salvaged_candidate as _tip_extra_aliases_salvaged_candidate,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_collection_mutator_shares_receiver as _tip_extra_opaque_collection_mutator_shares_receiver,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_object_assign_shares_receiver as _tip_extra_opaque_object_assign_shares_receiver,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_object_define_properties_shares_receiver as _tip_extra_opaque_object_define_properties_shares_receiver,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_object_define_property_shares_receiver as _tip_extra_opaque_object_define_property_shares_receiver,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_opaque import (  # noqa: E402
+    _tip_extra_opaque_reflect_set_shares_receiver as _tip_extra_opaque_reflect_set_shares_receiver,
+)
