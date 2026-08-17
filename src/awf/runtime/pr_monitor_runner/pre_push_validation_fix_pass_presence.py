@@ -103,9 +103,13 @@ _CONTROL_FLOW_BARE_HEADER_RE = re.compile(
 )
 # Idiomatic ``} else`` / ``} catch`` / ``} finally`` / ``} else if`` place the
 # header after a closing brace rather than at column zero
-# (PRRT_kwDOSJAM6s6ZtYk1). ``} while`` is excluded — do-while terminators do not
-# open a body for the following line.
-_CONTROL_FLOW_AFTER_BRACE_RE = re.compile(r"\}[ \t]*(?:else\s+if|else|catch|finally)\b")
+# (PRRT_kwDOSJAM6s6ZtYk1). Same-line ``/* … */`` between ``}`` and the keyword is
+# still a continuation (PRRT_kwDOSJAM6s6Zt56f). ``} while`` is excluded —
+# do-while terminators do not open a body for the following line. Group 1 is the
+# keyword so callers can slice the header without re-skipping comments.
+_CONTROL_FLOW_AFTER_BRACE_RE = re.compile(
+    r"\}(?:[ \t]|/\*.*?\*/)*((?:else\s+if|else|catch|finally)\b)"
+)
 _CONTROL_FLOW_PAREN_KEYWORD_RE = re.compile(r"^(?:else\s+if|if|while|for|switch|catch)\b")
 _CONTROL_FLOW_BARE_KEYWORD_RE = re.compile(r"^(?:else|do|try|finally)[ \t]*(?:\{[ \t]*)?(?://.*)?$")
 _PYTHON_SUITE_HEADER_RE = re.compile(
@@ -507,18 +511,15 @@ def _line_code_without_line_comment(line: str) -> str:
 
 def _keyword_start_after_brace_match(match: re.Match[str]) -> int:
     """Return the index of the control-flow keyword inside an after-brace match."""
-    # match spans ``}`` + whitespace + keyword; skip the closing brace.
-    i = match.start() + 1
-    while i < match.end() and match.string[i] in " \t":
-        i += 1
-    return i
+    return match.start(1)
 
 
 def _last_brace_control_flow_continuation(code: str) -> re.Match[str] | None:
     """Return the last ``} else`` / ``} catch`` / ``} finally`` / ``} else if`` match.
 
-    Scans outside simple quoted spans so braces inside strings do not fake a
-    continuation (PRRT_kwDOSJAM6s6ZtYk1).
+    Allows optional same-line ``/* … */`` between ``}`` and the keyword
+    (PRRT_kwDOSJAM6s6Zt56f). Scans outside simple quoted spans so braces inside
+    strings do not fake a continuation (PRRT_kwDOSJAM6s6ZtYk1).
     """
     last: re.Match[str] | None = None
     in_double = False

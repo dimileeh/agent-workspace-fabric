@@ -144,7 +144,8 @@ def test_brace_continuation_control_flow_prefix_rejects_disabled_salvage() -> No
 
     Column-zero-only header matching missed idiomatic brace continuations, so a
     prepend could park added salvage under a disabled branch while retention
-    still succeeded (PRRT_kwDOSJAM6s6ZtYk1).
+    still succeeded (PRRT_kwDOSJAM6s6ZtYk1). Inter-token ``/* … */`` between
+    ``}`` and the keyword must not reopen that gap (PRRT_kwDOSJAM6s6Zt56f).
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
         _added_salvage_blob_retained,
@@ -158,6 +159,12 @@ def test_brace_continuation_control_flow_prefix_rejects_disabled_salvage() -> No
     assert _prefix_opens_control_flow_over_suffix("try {\n} finally\n") is True
     assert _prefix_opens_control_flow_over_suffix("if (a) {\n} else if (false)\n") is True
     assert _prefix_opens_control_flow_over_suffix("if (\nfalse\n) {} else\n") is True
+    # Inter-token block comments are still brace continuations (PRRT_kwDOSJAM6s6Zt56f).
+    assert _prefix_opens_control_flow_over_suffix("if (false) {\n} /* */ else\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (false) {}/*x*/else\n") is True
+    assert _prefix_opens_control_flow_over_suffix("try {\n} /* a */ /* b */ catch (e)\n") is True
+    assert _prefix_opens_control_flow_over_suffix("try {\n} /* */ finally\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (a) {\n} /* */ else if (false)\n") is True
     # do-while terminator must not treat the following line as its body.
     assert _prefix_opens_control_flow_over_suffix("do {\n  x();\n} while (false)\n") is False
     # Open brace on the continuation still counts via brace depth.
@@ -171,6 +178,10 @@ def test_brace_continuation_control_flow_prefix_rejects_disabled_salvage() -> No
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob="if (false) {} else\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="if (false) {\n} /* */ else\n" + salvage,
     )
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
