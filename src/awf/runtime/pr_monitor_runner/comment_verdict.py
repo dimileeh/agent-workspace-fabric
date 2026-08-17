@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -130,6 +130,42 @@ async def _evaluate_local_head_advance(
     return item_end_head, local_head_advanced, descends, trees_differ
 
 
+async def _await_shield_preserving_cancellation(task: asyncio.Task[Any]) -> None:
+    """Await ``task`` under shield; never let task failure replace CancelledError.
+
+    Shield loops used to call ``task.result()`` once the salvage/persist work
+    finished under cancel. A failed task re-raised from ``result()`` and dropped
+    the saved cancel — on Python 3.11+ that consumes cancellation so a worker
+    reload/shutdown can continue after salvage persistence errors
+    (PRRT_kwDOSJAM6s6Zs01j). The same drop happens when cancel is saved while
+    the task is still pending and a later ``shield`` await surfaces the task
+    failure: catch that failure only after cancel was observed, retrieve it via
+    ``exception()``, and chain it under CancelledError.
+    """
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            if task.done():
+                break
+        except Exception:
+            # Task finished failing after cancel was already observed. Prefer
+            # re-raising cancel below rather than consuming it.
+            if cancellation is not None:
+                break
+            raise
+    if cancellation is None:
+        return
+    if task.done() and not task.cancelled():
+        failure = task.exception()
+        if failure is not None:
+            raise cancellation from failure
+    raise cancellation
+
+
 async def _retain_failed_run_salvage_despite_cancellation(
     runner: PullRequestMonitorRunner,
     *,
@@ -195,18 +231,7 @@ async def _retain_failed_run_salvage_despite_cancellation(
                 await persist(workspace_id, state, salvage_item_id=salvage_item_id)
 
     retain_task = asyncio.create_task(_capture_retain_and_persist())
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            await asyncio.shield(retain_task)
-            break
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-            if retain_task.done():
-                retain_task.result()
-                break
-    if cancellation is not None:
-        raise cancellation
+    await _await_shield_preserving_cancellation(retain_task)
 
 
 async def _await_failed_run_salvage_persist_shielded(
@@ -230,18 +255,7 @@ async def _await_failed_run_salvage_persist_shielded(
     persist_task = asyncio.create_task(
         persist(workspace_id, state, salvage_item_id=salvage_item_id)
     )
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            await asyncio.shield(persist_task)
-            break
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-            if persist_task.done():
-                persist_task.result()
-                break
-    if cancellation is not None:
-        raise cancellation
+    await _await_shield_preserving_cancellation(persist_task)
 
 
 def _retain_or_clear_failed_run_salvage(
@@ -710,18 +724,7 @@ async def _invoke_cli_for_verdict_result(
                 persist_task = asyncio.create_task(
                     persist(workspace_id, state, salvage_item_id=salvage_item_id)
                 )
-                cancellation: asyncio.CancelledError | None = None
-                while True:
-                    try:
-                        await asyncio.shield(persist_task)
-                        break
-                    except asyncio.CancelledError as exc:
-                        cancellation = exc
-                        if persist_task.done():
-                            persist_task.result()
-                            break
-                if cancellation is not None:
-                    raise cancellation
+                await _await_shield_preserving_cancellation(persist_task)
 
     try:
         (
@@ -999,18 +1002,7 @@ async def _invoke_cli_for_verdict_result(
                     persist_task = asyncio.create_task(
                         persist(workspace_id, state, salvage_item_id=salvage_item_id)
                     )
-                    cancellation: asyncio.CancelledError | None = None
-                    while True:
-                        try:
-                            await asyncio.shield(persist_task)
-                            break
-                        except asyncio.CancelledError as exc:
-                            cancellation = exc
-                            if persist_task.done():
-                                persist_task.result()
-                                break
-                    if cancellation is not None:
-                        raise cancellation
+                    await _await_shield_preserving_cancellation(persist_task)
             return parsed
         if not require_fix_evidence:
             # Operator hints may finish with only GitHub-side work; the prompt

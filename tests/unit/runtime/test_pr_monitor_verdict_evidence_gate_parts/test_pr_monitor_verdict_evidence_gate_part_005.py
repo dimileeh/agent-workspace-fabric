@@ -802,3 +802,93 @@ async def test_salvaged_fix_evidence_rejects_feedback_body_change(
     assert retry.reason == "fixed_without_head_advance"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_cancel_propagates_when_salvage_persist_fails_under_shield() -> None:
+    """Salvage/persist failure must not consume an observed CancelledError.
+
+    Shield loops that called ``task.result()`` after cancel re-raised the
+    persist failure and dropped the saved cancel (PRRT_kwDOSJAM6s6Zs01j).
+    """
+    import asyncio
+
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _failing_persist() -> None:
+        entered.set()
+        await release.wait()
+        raise RuntimeError("salvage persist failed")
+
+    persist_task = asyncio.create_task(_failing_persist())
+    waiter = asyncio.create_task(
+        comment_verdict._await_shield_preserving_cancellation(persist_task)
+    )
+    await entered.wait()
+    waiter.cancel()
+    # Deliver CancelledError into the shield await before the persist task
+    # finishes failing (same settle as worker prompt-release cancel tests).
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await waiter
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "salvage persist failed" in str(raised.value.__cause__)
+
+
+@pytest.mark.unit
+async def test_cancel_after_failed_salvage_persist_does_not_raise_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel observed once a failed persist task is done must still re-raise cancel.
+
+    The pre-fix loop called ``task.result()`` when ``task.done()`` under cancel,
+    which re-raised the persist failure and never reached ``raise cancellation``
+    (PRRT_kwDOSJAM6s6Zs01j).
+    """
+    import asyncio
+
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    async def _failing_persist() -> None:
+        raise RuntimeError("salvage persist already failed")
+
+    original_shield = comment_verdict.asyncio.shield
+    shield_calls = 0
+
+    async def _cancel_once_task_done(awaitable: object) -> object:
+        nonlocal shield_calls
+        shield_calls += 1
+        try:
+            return await original_shield(awaitable)
+        except Exception:
+            if shield_calls == 1:
+                raise asyncio.CancelledError from None
+            raise
+
+    monkeypatch.setattr(comment_verdict.asyncio, "shield", _cancel_once_task_done)
+
+    persist_task = asyncio.create_task(_failing_persist())
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await comment_verdict._await_shield_preserving_cancellation(persist_task)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "already failed" in str(raised.value.__cause__)
+    assert shield_calls == 1
+
+
+@pytest.mark.unit
+async def test_salvage_persist_failure_propagates_without_cancellation() -> None:
+    """Without cancel, shielded salvage persist failures still surface."""
+    import asyncio
+
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    async def _failing_persist() -> None:
+        raise RuntimeError("salvage persist failed without cancel")
+
+    persist_task = asyncio.create_task(_failing_persist())
+    with pytest.raises(RuntimeError, match="without cancel"):
+        await comment_verdict._await_shield_preserving_cancellation(persist_task)
