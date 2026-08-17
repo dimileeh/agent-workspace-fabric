@@ -678,6 +678,24 @@ class TestWorkspaceDirectRoutes:
         }
 
     @pytest.mark.unit
+    async def test_overview_and_workspace_list_accept_unknown_agent_filter(
+        self, client: AsyncClient
+    ) -> None:
+        overview_resp = await client.get(
+            "/v1/workspaces/overview",
+            params={"agent": "future_cli"},
+        )
+        assert overview_resp.status_code == 200
+        assert overview_resp.json()["items"] == []
+
+        list_resp = await client.get(
+            "/v1/workspaces",
+            params={"agent": "future_cli"},
+        )
+        assert list_resp.status_code == 200
+        assert list_resp.json() == []
+
+    @pytest.mark.unit
     async def test_overview_route_maps_workspace_without_events_or_operations(
         self,
         client: AsyncClient,
@@ -997,30 +1015,47 @@ class TestListWorkspaces:
     @pytest.mark.unit
     async def test_combines_filters(self, client: AsyncClient, engine: AsyncEngine) -> None:
         repo_url = "git@github.com:example/combined.git"
-        matching_id = await _create_workspace(
-            client,
-            task_title="matching",
-            repo_url=repo_url,
-            agent="gemini",
-        )
-        wrong_status_id = await _create_workspace(
-            client,
-            task_title="wrong status",
-            repo_url=repo_url,
-            agent="gemini",
-        )
-        wrong_agent_id = await _create_workspace(
-            client,
-            task_title="wrong agent",
-            repo_url=repo_url,
-            agent="codex",
-        )
-        wrong_repo_id = await _create_workspace(
-            client,
-            task_title="wrong repo",
-            repo_url="git@github.com:example/other.git",
-            agent="gemini",
-        )
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws_matching = await repo.create(
+                repo_url=repo_url,
+                branch_base="development",
+                task_title="matching",
+                task_prompt="prompt",
+                agent="gemini",
+                test_commands=[],
+            )
+            ws_wrong_status = await repo.create(
+                repo_url=repo_url,
+                branch_base="development",
+                task_title="wrong status",
+                task_prompt="prompt",
+                agent="gemini",
+                test_commands=[],
+            )
+            ws_wrong_agent = await repo.create(
+                repo_url=repo_url,
+                branch_base="development",
+                task_title="wrong agent",
+                task_prompt="prompt",
+                agent="codex",
+                test_commands=[],
+            )
+            ws_wrong_repo = await repo.create(
+                repo_url="git@github.com:example/other.git",
+                branch_base="development",
+                task_title="wrong repo",
+                task_prompt="prompt",
+                agent="gemini",
+                test_commands=[],
+            )
+            await session.commit()
+            matching_id = ws_matching.id
+            wrong_status_id = ws_wrong_status.id
+            wrong_agent_id = ws_wrong_agent.id
+            wrong_repo_id = ws_wrong_repo.id
+
         for workspace_id in [matching_id, wrong_agent_id, wrong_repo_id]:
             await _transition_workspace(
                 engine,
@@ -1096,7 +1131,7 @@ class TestListWorkspaces:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("param", "value"),
-        [("status", "not-a-status"), ("agent", "not-an-agent")],
+        [("status", "not-a-status")],
     )
     async def test_rejects_unknown_filter_enums(
         self, client: AsyncClient, param: str, value: str

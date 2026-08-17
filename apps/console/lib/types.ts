@@ -190,7 +190,7 @@ export interface WorkspaceOverview {
   repo_url: string;
   base_branch: string;
   branch_name: string | null;
-  agent: AgentRuntime;
+  agent: AgentRuntime | string;
   agent_model: string | null;
   agent_effort: string | null;
   agent_model_source: AgentIdentitySource;
@@ -519,7 +519,7 @@ export interface Workspace {
   // explicit intent, before provisioning materializes the profile).
   auto_merge: boolean | null;
   initial_review_grace_period_seconds: number | null;
-  agent: AgentRuntime;
+  agent: AgentRuntime | string;
   agent_model: string | null;
   agent_effort: string | null;
   agent_model_source: AgentIdentitySource;

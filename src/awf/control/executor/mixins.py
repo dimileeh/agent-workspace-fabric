@@ -62,6 +62,7 @@ class ExecutorDelegatesMixin:
         _monitor_handoff._record_runtime_toolchain_findings_safe
     )
     _reject_unsupported_task_kind = _monitor_handoff._reject_unsupported_task_kind
+    _reject_unsupported_agent_runtime = _monitor_handoff._reject_unsupported_agent_runtime
     _dispatch_non_feature_task_kind = _monitor_handoff._dispatch_non_feature_task_kind
     _run_monitor_handoff_profile_setup = _monitor_handoff_setup._run_monitor_handoff_profile_setup
     _build_handoff_pr_monitor = _monitor_handoff._build_handoff_pr_monitor

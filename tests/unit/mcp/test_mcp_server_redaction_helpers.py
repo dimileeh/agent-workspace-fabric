@@ -144,3 +144,179 @@ def test_redact_exact_secret_bytes_delegates_to_common_byte_helper(
         service_github_token,
         extra_secret,
     }
+
+
+@pytest.mark.unit
+def test_validation_error_message_strips_dynamic_toolchain_keys_and_values() -> None:
+    """Ensure custom validator error messages for toolchains strip dynamic keys and secrets."""
+    from pydantic import ValidationError
+
+    from awf.profiles.models import ProfileRuntime
+
+    raw_secret_key = "plainsecret48729"
+    raw_secret_val = "arbitrary_custom_secret_value_123"
+
+    # Test invalid version value
+    with pytest.raises(ValidationError) as exc_info:
+        ProfileRuntime.model_validate({"toolchains": {raw_secret_key: [raw_secret_val]}})
+
+    msg = mcp_server_mod._validation_error_message(exc_info.value)  # noqa: SLF001
+    assert raw_secret_key not in msg
+    assert raw_secret_val not in msg
+    assert msg == "toolchains: Value error"
+
+    # Test wrong value type
+    with pytest.raises(ValidationError) as exc_info2:
+        ProfileRuntime.model_validate({"toolchains": {raw_secret_key: "bad"}})
+
+    msg2 = mcp_server_mod._validation_error_message(exc_info2.value)  # noqa: SLF001
+    assert raw_secret_key not in msg2
+    assert "bad" not in msg2
+    assert msg2 == "toolchains: Value error"
+
+
+@pytest.mark.unit
+def test_validation_error_message_replaces_unallowlisted_custom_msg_with_generic() -> None:
+    """Ensure non-allowlisted custom validator msg is replaced with generic Value error."""
+
+    class FakeError(Exception):
+        pass
+
+    class DummyValidationError:
+        def errors(
+            self, *, include_input: bool = True, include_url: bool = True
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "type": "value_error",
+                    "loc": ("secret_field",),
+                    "msg": "Value error, custom message containing sensitive_data_xyz",
+                }
+            ]
+
+    msg = mcp_server_mod._validation_error_message(DummyValidationError())  # type: ignore[arg-type] # noqa: SLF001
+    assert "sensitive_data_xyz" not in msg
+    assert msg == "<key>: Value error"
+
+
+@pytest.mark.unit
+def test_validation_error_message_sanitizes_dynamic_mapping_key_locations() -> None:
+    """Ensure dynamic dict key names in runtime.environment are sanitized in validation locations."""
+    from pydantic import ValidationError
+
+    from awf.profiles.models import ProfileRuntime
+
+    raw_secret_key = "plainsecret48729"
+
+    with pytest.raises(ValidationError) as exc_info:
+        ProfileRuntime.model_validate({"environment": {raw_secret_key: 123}})
+
+    msg = mcp_server_mod._validation_error_message(exc_info.value)  # noqa: SLF001
+    assert raw_secret_key not in msg
+    assert "123" not in msg
+    assert msg == "environment.<key>: Input should be a valid string"
+
+
+@pytest.mark.unit
+def test_validation_error_message_handles_empty_errors_list() -> None:
+    """Return 'Validation error' when ValidationError errors() returns an empty list."""
+
+    class DummyEmptyValidationError:
+        def errors(
+            self, *, include_input: bool = True, include_url: bool = True
+        ) -> list[dict[str, object]]:
+            return []
+
+    msg = mcp_server_mod._validation_error_message(DummyEmptyValidationError())  # type: ignore[arg-type] # noqa: SLF001
+    assert msg == "Validation error"
+
+
+@pytest.mark.unit
+def test_validation_error_message_handles_empty_location() -> None:
+    """Format message without location prefix when loc is empty."""
+
+    class DummyNoLocValidationError:
+        def errors(
+            self, *, include_input: bool = True, include_url: bool = True
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "type": "value_error",
+                    "loc": (),
+                    "msg": "Input should be a valid string",
+                }
+            ]
+
+    msg = mcp_server_mod._validation_error_message(DummyNoLocValidationError())  # type: ignore[arg-type] # noqa: SLF001
+    assert msg == "Value error"
+
+
+@pytest.mark.unit
+def test_resolve_mcp_compose_env_secret_file_none() -> None:
+    """Return None when compose_env_file is None."""
+    assert mcp_server_mod._resolve_mcp_compose_env_secret_file(None) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_contains_secret_bytes_env_and_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detect known secret env keys and regex token patterns in content."""
+    settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=None)
+    service_settings = service_config.resolve_service_settings(settings, environ={})
+
+    monkeypatch.setenv("GITHUB_TOKEN", "my_secret_github_token_123")
+    content_env = b"data my_secret_github_token_123 data"
+    assert mcp_server_mod._contains_secret_bytes(  # noqa: SLF001
+        content_env,
+        settings,
+        service_settings=service_settings,
+        extra_secrets=(),
+    )
+
+    token_content = b"token_prefix_ghp_123456789012345678901234567890123456_suffix"
+    assert mcp_server_mod._contains_secret_bytes(  # noqa: SLF001
+        token_content,
+        settings,
+        service_settings=service_settings,
+        extra_secrets=(),
+    )
+
+
+@pytest.mark.unit
+def test_resolve_settings_default_fallback() -> None:
+    """Resolve default settings when None is passed to _resolve_settings."""
+    from awf.mcp.control_tools import _resolve_settings
+
+    resolved = _resolve_settings(None)
+    assert resolved is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_control_tools_workspace_control_error_handling() -> None:
+    """Handle WorkspaceControlError in cancel_workspace gracefully."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from mcp.types import CallToolResult
+
+    from awf.mcp.server import build_mcp_server
+    from awf.service.controls import WorkspaceControlError
+
+    service = MagicMock()
+    service.cancel_workspace = AsyncMock(
+        side_effect=WorkspaceControlError(
+            error_code="INVALID_STATE",
+            message="Control action failed",
+        )
+    )
+
+    mcp = build_mcp_server(service=service)
+
+    res = await mcp.call_tool(
+        "awf_cancel_workspace",
+        {"workspace_id": "ws-123", "reason": "testing", "idempotency_key": "ik-123"},
+    )
+    assert isinstance(res, CallToolResult)
+    assert res.isError is True

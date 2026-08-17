@@ -825,3 +825,89 @@ def test_workspace_reason_compatibility_request_keeps_normal_reason_body() -> No
     )
 
     assert request.reason == "operator requested"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "agent",
+    ["codex", "claude_code", "cursor", "antigravity", "opencode", "grok"],
+)
+def test_workspace_provider_fallback_target_accepts_launchable_agents(agent: str) -> None:
+    target = api_schemas.WorkspaceProviderFallbackTarget.model_validate(
+        {"agent": agent, "model": "gpt-5.5"}
+    )
+    assert target.agent == agent
+
+
+@pytest.mark.unit
+def test_workspace_provider_fallback_target_parses_retired_gemini_agent_for_idempotency_replay() -> (
+    None
+):
+    target = api_schemas.WorkspaceProviderFallbackTarget.model_validate(
+        {"agent": "gemini", "model": "gemini-2.5-pro"}
+    )
+    assert target.agent == api_schemas.AgentRuntime.gemini
+
+
+@pytest.mark.unit
+def test_workspace_create_request_parses_retired_fallback_agent_for_idempotency_replay() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:o/r.git", "base_branch": "main"},
+            "task": _task(
+                provider_recovery={"fallbacks": [{"agent": "gemini", "model": "gemini-2.5-pro"}]}
+            ),
+        }
+    )
+    assert request.task.provider_recovery is not None
+    assert request.task.provider_recovery.fallbacks[0].agent == api_schemas.AgentRuntime.gemini
+
+
+@pytest.mark.unit
+def test_workspace_provider_fallback_target_json_schema_includes_agent_runtime_enum() -> None:
+    schema = api_schemas.WorkspaceProviderFallbackTarget.model_json_schema()
+    defs = schema.get("$defs", {})
+    agent_def = defs.get("AgentRuntime", {})
+    enum_values = agent_def.get("enum", [])
+    assert "gemini" in enum_values
+    assert {"codex", "claude_code", "gemini", "antigravity", "cursor", "opencode", "grok"} <= set(
+        enum_values
+    )
+
+
+@pytest.mark.unit
+def test_pr_monitor_adoption_request_parses_retired_gemini_agent_for_idempotency_replay() -> None:
+    req = api_schemas.PullRequestMonitorAdoptionRequest.model_validate(
+        {"repo_slug": "foo/bar", "pr_number": 1, "agent": "gemini"}
+    )
+    assert req.agent == api_schemas.AgentRuntime.gemini
+
+
+@pytest.mark.unit
+def test_pr_monitor_adoption_request_json_schema_includes_agent_runtime_enum() -> None:
+    schema = api_schemas.PullRequestMonitorAdoptionRequest.model_json_schema()
+    defs = schema.get("$defs", {})
+    agent_def = defs.get("AgentRuntime", {})
+    enum_values = agent_def.get("enum", [])
+    assert "gemini" in enum_values
+    assert {"codex", "claude_code", "gemini", "antigravity", "cursor", "opencode", "grok"} <= set(
+        enum_values
+    )
+
+
+@pytest.mark.unit
+def test_workspace_task_parses_retired_gemini_agent_for_idempotency_replay() -> None:
+    task = api_schemas.WorkspaceTask.model_validate(_task(agent="gemini"))
+    assert task.agent == api_schemas.AgentRuntime.gemini
+
+
+@pytest.mark.unit
+def test_workspace_task_json_schema_includes_agent_runtime_enum() -> None:
+    schema = api_schemas.WorkspaceTask.model_json_schema()
+    defs = schema.get("$defs", {})
+    agent_def = defs.get("AgentRuntime", {})
+    enum_values = agent_def.get("enum", [])
+    assert "gemini" in enum_values
+    assert {"codex", "claude_code", "gemini", "antigravity", "cursor", "opencode", "grok"} <= set(
+        enum_values
+    )

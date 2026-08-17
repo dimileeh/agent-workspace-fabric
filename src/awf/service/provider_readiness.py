@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +21,6 @@ ProviderName = Literal[
     "claude_code",
     "cursor",
     "antigravity",
-    "gemini",
     "opencode",
     "grok",
     "docker",
@@ -33,7 +32,6 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "claude_code",
     "cursor",
     "antigravity",
-    "gemini",
     "opencode",
     "grok",
     "docker",
@@ -65,15 +63,15 @@ _CLAUDE_ENV_KEYS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
 _CURSOR_ENV_KEYS = ("CURSOR_API_KEY",)
-_ANTIGRAVITY_ENV_KEYS = ("ANTIGRAVITY_API_KEY",)
-_GEMINI_ENV_KEYS = (
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_CLOUD_ACCESS_TOKEN",
-)
+_ANTIGRAVITY_ENV_KEYS = ("GEMINI_API_KEY",)
 _OPENCODE_ENV_KEYS = ("OLLAMA_API_KEY",)
 _XAI_ENV_KEYS = ("XAI_API_KEY",)
 _DOCKER_AUTH_ENV_KEYS = ("DOCKER_AUTH_CONFIG",)
+_LEGACY_SECRET_ENV_KEYS = (
+    "ANTIGRAVITY_API_KEY",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "GOOGLE_API_KEY",
+)
 KNOWN_SECRET_ENV_KEYS = frozenset(
     (
         *_GITHUB_TOKEN_ENV_KEYS,
@@ -81,10 +79,10 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_CLAUDE_ENV_KEYS,
         *_CURSOR_ENV_KEYS,
         *_ANTIGRAVITY_ENV_KEYS,
-        *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
         *_XAI_ENV_KEYS,
         *_DOCKER_AUTH_ENV_KEYS,
+        *_LEGACY_SECRET_ENV_KEYS,
         "GOOGLE_APPLICATION_CREDENTIALS_JSON",
     )
 )
@@ -130,10 +128,29 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.claude_code: "claude_code",
     AgentRuntime.cursor: "cursor",
     AgentRuntime.antigravity: "antigravity",
-    AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
     AgentRuntime.grok: "grok",
 }
+
+
+def is_launchable_agent(agent: str | AgentRuntime | None) -> bool:
+    """Return whether an agent name or runtime enum is a supported launchable agent."""
+    if agent is None:
+        return False
+    if isinstance(agent, AgentRuntime):
+        return agent in _LAUNCH_PROVIDER_BY_AGENT
+    try:
+        runtime = AgentRuntime(agent)
+    except ValueError:
+        return False
+    return runtime in _LAUNCH_PROVIDER_BY_AGENT
+
+
+def supported_launchable_agents() -> tuple[str, ...]:
+    """Return the supported launchable agent runtime names."""
+    return tuple(a.value for a in _LAUNCH_PROVIDER_BY_AGENT)
+
+
 _RedactionSegment = tuple[Literal["literal", "redaction"], str]
 _log = logging.getLogger(__name__)
 
@@ -338,13 +355,39 @@ def selected_provider_readiness_preflight(
             probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
             reason_code="UNSUPPORTED_AGENT_RUNTIME",
             message=f"Agent runtime {agent!s} is not supported for launch preflight.",
-            override=override,
+            override=False,
             override_reason=override_reason,
             checked_at=checked,
             secrets=secrets,
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    recovery = task_policy.get("provider_recovery") if isinstance(task_policy, Mapping) else None
+    if isinstance(recovery, Mapping):
+        raw_fallbacks = recovery.get("fallbacks")
+        if isinstance(raw_fallbacks, Sequence) and not isinstance(raw_fallbacks, str):
+            for item in raw_fallbacks:
+                if isinstance(item, Mapping):
+                    fb_agent = item.get("agent")
+                    fb_runtime = _coerce_launch_agent(fb_agent) if fb_agent is not None else None
+                    if fb_runtime is None or fb_runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+                        supported = ", ".join(sorted(a.value for a in _LAUNCH_PROVIDER_BY_AGENT))
+                        raw_fb = getattr(fb_agent, "value", str(fb_agent))
+                        return _launch_preflight_payload(
+                            agent=runtime.value,
+                            provider=provider,
+                            model=identity.model,
+                            model_source=identity.model_source,
+                            provider_result=None,
+                            probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
+                            reason_code="UNSUPPORTED_AGENT_RUNTIME",
+                            message=f"fallback agent runtime {raw_fb!r} is retired or not launchable; supported fallback agents are: {supported}.",
+                            override=False,
+                            override_reason=override_reason,
+                            checked_at=checked,
+                            secrets=secrets,
+                        )
+
     if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
         # A provider-qualified non-Ollama model is served by an OpenCode cloud
         # provider, which needs an OpenCode/provider credential. With none visible
@@ -785,13 +828,6 @@ def _check_provider_readiness(
             strict=strict,
             secrets=secrets,
         )
-    if provider == "gemini":
-        return _check_gemini(
-            environ=environ,
-            host_home=host_home,
-            strict=strict,
-            secrets=secrets,
-        )
     if provider == "opencode":
         return _check_opencode(
             environ=environ,
@@ -846,7 +882,7 @@ def _selected_launch_probe(
         )
         if runtime_probe.get("status") != "ok":
             return runtime_probe
-        if provider in {"codex", "claude_code", "cursor", "antigravity", "gemini", "grok"}:
+        if provider in {"codex", "claude_code", "cursor", "antigravity", "grok"}:
             return runtime_probe
     if provider == "opencode":
         # Create-time admission must never block on (or perform) a pull: a
@@ -870,7 +906,6 @@ def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
         "claude_code": "CLAUDE",
         "cursor": "CURSOR",
         "antigravity": "ANTIGRAVITY",
-        "gemini": "GEMINI",
         "opencode": "OPENCODE",
         "grok": "GROK",
     }.get(provider, "PROVIDER")
@@ -882,7 +917,6 @@ def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
         "claude_code": "claude",
         "cursor": "cursor-agent",
         "antigravity": "agy",
-        "gemini": "gemini",
         "opencode": "opencode",
         "grok": "grok",
     }.get(provider)
@@ -1103,7 +1137,6 @@ from awf.service.provider_readiness_provider_checks import (  # noqa: E402
     _check_codex,
     _check_cursor,
     _check_cursor_readiness,
-    _check_gemini,
     _check_github,
 )
 from awf.service.provider_readiness_redaction import (  # noqa: E402

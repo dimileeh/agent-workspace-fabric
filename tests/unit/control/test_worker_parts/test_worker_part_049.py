@@ -10,6 +10,7 @@ actually drives a real reclaim when the capability probe is trustworthy.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,6 +141,37 @@ async def test_fatal_error_logged_swallowed_and_reschedules(
     assert [event for event, _ in logged] == ["worker.claude_base_reap_failed"]
     assert logged[0][1]["reason_code"] == "CLAUDE_BASE_REAP_SWEEP_FAILED"
     assert worker._next_claude_base_reap_scan_at == current_time + 60.0  # noqa: SLF001
+
+
+async def test_cancellation_propagates_without_swallow_or_reschedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cooperative shutdown cancellation re-raises instead of being swallowed.
+
+    ``CancelledError`` must not be treated as a fatal sweep failure: it is
+    neither logged via ``_log.exception`` nor rescheduled — the cursor stays
+    eligible so the next worker start retries immediately.
+    """
+    current_time = 4_000.0
+    monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "awf.control.worker.cleanup._log.exception",
+        lambda event, **_fields: logged.append(event),
+    )
+
+    async def _reap() -> dict[str, object]:
+        """Simulate shutdown cancelling the in-flight reaper sweep."""
+        raise asyncio.CancelledError
+
+    worker = _make_worker(_reap, claude_base_gc_enabled=True, interval=60.0)
+    worker._next_claude_base_reap_scan_at = 0.0  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._maybe_reap_superseded_claude_bases()  # noqa: SLF001
+
+    assert logged == []
+    assert worker._next_claude_base_reap_scan_at == 0.0  # noqa: SLF001
 
 
 async def test_partial_report_is_warned(

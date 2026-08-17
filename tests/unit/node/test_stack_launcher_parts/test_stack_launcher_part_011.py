@@ -24,7 +24,7 @@ def test_clarification_does_not_expand_unavailable_external_account_adc_mount() 
         mode="ro",
     )
     environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
     )
 
@@ -32,7 +32,7 @@ def test_clarification_does_not_expand_unavailable_external_account_adc_mount() 
         (adc_mount, subject_token_mount),
         agent_environment=environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     )
 
     assert clarification_mounts == (

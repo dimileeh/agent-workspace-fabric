@@ -113,8 +113,8 @@ def test_agent_runtime_cli_probe_failure_modes_are_structured_and_redacted(
     )
     unexpected = provider_readiness._probe_agent_runtime_cli(
         settings,
-        executable="gemini",
-        provider="gemini",
+        executable="agy",
+        provider="antigravity",
         environ={},
         run_subprocess=_unexpected,
         secrets=frozenset({"sk-proj-runtime-secret"}),
@@ -122,7 +122,7 @@ def test_agent_runtime_cli_probe_failure_modes_are_structured_and_redacted(
 
     assert missing["reason_code"] == "DOCKER_CLI_NOT_FOUND"
     assert timeout["reason_code"] == "CLAUDE_RUNTIME_CLI_PROBE_TIMEOUT"
-    assert unexpected["reason_code"] == "GEMINI_RUNTIME_CLI_PROBE_ERROR"
+    assert unexpected["reason_code"] == "ANTIGRAVITY_RUNTIME_CLI_PROBE_ERROR"
     assert "sk-proj-runtime-secret" not in json.dumps(unexpected, sort_keys=True)
     assert "<redacted>" in unexpected["detail"]
     assert "provider_readiness.agent_runtime_cli_probe_exception" in caplog.text

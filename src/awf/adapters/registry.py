@@ -14,7 +14,6 @@ from awf.adapters import (  # noqa: F401
     claude_code,
     codex,
     cursor,
-    gemini,
     grok,
     opencode,
 )

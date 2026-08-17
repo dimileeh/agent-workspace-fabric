@@ -60,7 +60,6 @@ async def test_isolated_capture_has_no_agent_writable_usage_mount(tmp_path: Path
     [
         (AgentRuntime.claude_code, "claude"),
         (AgentRuntime.codex, "codex"),
-        (AgentRuntime.gemini, "gemini"),
         (AgentRuntime.opencode, "opencode"),
     ],
 )

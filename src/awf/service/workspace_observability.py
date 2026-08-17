@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol, TypedDict, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.api.schemas import (
     StaleReasonListResponse,
@@ -27,7 +27,7 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
 )
 from awf.common.logging import get_logger
-from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_agent_runtime
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
@@ -263,7 +263,7 @@ async def list_workspace_overview_response(
     session: AsyncSession,
     *,
     workspace_status: WorkspaceStatus | None = None,
-    agent: AgentRuntime | None = None,
+    agent: AgentRuntime | str | None = None,
     repo_url: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
@@ -407,7 +407,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         branch_name=ws.branch_name,
         task_class=ws.task_class,
         owned_paths=list(ws.owned_paths),
-        agent=AgentRuntime(ws.agent),
+        agent=parse_agent_runtime(ws.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
@@ -512,7 +512,7 @@ def effective_agent_identity(
     task_policy: Mapping[str, object] | None,
 ) -> AgentIdentity:
     runtime = _coerce_agent_runtime(agent)
-    defaults = DEFAULT_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
+    defaults = HISTORICAL_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
     explicit_model = _nonblank_policy_string(task_policy, "agent_model")
     explicit_effort = _nonblank_policy_string(task_policy, "agent_effort")
 
@@ -1063,6 +1063,9 @@ def recovery_payload(
                 "source_model": summary.provider_recovery.source_model,
                 "retry_attempt_number": summary.provider_recovery.retry_attempt_number,
                 "fallback_attempt_number": summary.provider_recovery.fallback_attempt_number,
+                "launched_fallback_attempts": getattr(
+                    summary.provider_recovery, "launched_fallback_attempts", None
+                ),
                 "fallback_target": (
                     {
                         "agent": summary.provider_recovery.fallback_target.agent,
