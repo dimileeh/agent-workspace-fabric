@@ -35,6 +35,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _update_mutation_binding_names as _update_mutation_binding_names,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
     _call_site_names_for_line as _call_site_names_for_line,
 )
@@ -508,9 +511,11 @@ def _nonliteral_subscript_shares_receiver(
 # Tip-extra mapping mutators whose arguments may be opaque (``update(other)``,
 # ``clear()``, ``popitem()``). Call names do not match ``FLAGS["enabled"]``;
 # fail closed when the receiver equals a salvaged subscript receiver
-# (PRRT_kwDOSJAM6s6ZwrnH). Literal-key ``__setitem__`` / kwargs ``update`` are
-# handled by binding synthesis instead so ``FLAGS.__setitem__("other", …)``
-# does not drop unrelated salvage.
+# (PRRT_kwDOSJAM6s6ZwrnH). Literal-key ``__setitem__`` / kwargs ``update`` /
+# dict-literal ``update`` are handled by binding synthesis instead so
+# ``FLAGS.__setitem__("other", …)`` / ``FLAGS.update(other=False)`` do not
+# drop unrelated salvage (PRRT_kwDOSJAM6s6ZxeRb); only non-synthesizable
+# ``update`` forms stay opaque.
 _OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
 
 # Tip-extra ``const alias = guard`` / ``alias = guard`` where ``guard`` is a
@@ -608,7 +613,10 @@ def _tip_extra_opaque_collection_mutator_shares_receiver(
 
     ``FLAGS.update(other_flags)`` / ``FLAGS.clear()`` emit call names that never
     equal ``FLAGS["enabled"]``; fail closed when the call receiver matches a
-    salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH).
+    salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). Kwargs and dict-literal
+    ``update`` forms synthesize subscript keys instead, so they are not opaque
+    and unrelated keys keep salvage like ``__setitem__("other", …)``
+    (PRRT_kwDOSJAM6s6ZxeRb).
     """
     receivers = _salvaged_subscript_receivers(candidate_keys)
     if not receivers:
@@ -641,6 +649,10 @@ def _tip_extra_opaque_collection_mutator_shares_receiver(
                 continue
             method = name.rsplit(".", 1)[-1]
             if method not in _OPAQUE_COLLECTION_MUTATOR_METHODS:
+                continue
+            # Binding synthesis already understands kwargs / dict-literal
+            # ``update``; do not fail closed and drop unrelated salvage.
+            if method == "update" and _update_mutation_binding_names(scan_line):
                 continue
             receiver = name[: -(len(method) + 1)]
             if receiver in receivers:

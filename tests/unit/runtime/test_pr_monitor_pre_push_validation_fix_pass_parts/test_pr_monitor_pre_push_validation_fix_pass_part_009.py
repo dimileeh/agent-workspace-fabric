@@ -873,6 +873,14 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
     )
     assert _added_salvage_blob_retained(
         commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.update(other=False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
+        head_blob='FLAGS["enabled"] = True\nFLAGS.update({"other": False})\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='FLAGS["enabled"] = True\n',
         head_blob='FLAGS["enabled"] = True\nFLAGS.copy()\n',
     )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;

@@ -391,6 +391,7 @@ def test_setitem_and_update_mutation_binding_names() -> None:
 def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
     """Opaque ``update`` / ``clear`` fail closed on salvaged receivers."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
         _tip_extra_opaque_collection_mutator_shares_receiver,
     )
 
@@ -404,6 +405,31 @@ def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
         baseline_blob=salvage,
         head_blob=salvage + "FLAGS.update(other_flags)\n",
         candidate_keys={'FLAGS["enabled"]'},
+    )
+    # Kwargs / dict-literal ``update`` synthesize keys; do not treat as opaque
+    # so unrelated keys keep salvage like ``__setitem__("other", …)``
+    # (PRRT_kwDOSJAM6s6ZxeRb).
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.update(other=False)\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'FLAGS.update({"other": False})\n',
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "FLAGS.update(other=False)\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'FLAGS.update({"other": False})\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "FLAGS.update(enabled=False)\n",
     )
     assert not _tip_extra_opaque_collection_mutator_shares_receiver(
         baseline_blob=salvage,

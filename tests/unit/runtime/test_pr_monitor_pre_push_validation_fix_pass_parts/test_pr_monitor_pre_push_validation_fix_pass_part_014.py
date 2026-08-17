@@ -186,6 +186,16 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_sub,
         commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.update(other=False)\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.update({"other": False})\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS.copy()\n'),
     )
     # Nested / mid-statement rebinds must supersede: line-start assign matching
