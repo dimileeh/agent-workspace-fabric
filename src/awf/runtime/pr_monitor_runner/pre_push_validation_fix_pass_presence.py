@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _update_mutation_args_fully_synthesizable as _update_mutation_args_fully_synthesizable,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _update_mutation_binding_names as _update_mutation_binding_names,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
@@ -515,7 +518,8 @@ def _nonliteral_subscript_shares_receiver(
 # dict-literal ``update`` are handled by binding synthesis instead so
 # ``FLAGS.__setitem__("other", …)`` / ``FLAGS.update(other=False)`` do not
 # drop unrelated salvage (PRRT_kwDOSJAM6s6ZxeRb); only non-synthesizable
-# ``update`` forms stay opaque.
+# ``update`` forms stay opaque, including mixed opaque+kwargs
+# (``FLAGS.update(other_flags, other=False)``; PRRT_kwDOSJAM6s6Zxt0p).
 _OPAQUE_COLLECTION_MUTATOR_METHODS = frozenset({"update", "clear", "popitem"})
 
 # Tip-extra ``const alias = guard`` / ``alias = guard`` where ``guard`` is a
@@ -674,7 +678,9 @@ def _tip_extra_opaque_collection_mutator_shares_receiver(
     salvaged subscript receiver (PRRT_kwDOSJAM6s6ZwrnH). Kwargs and dict-literal
     ``update`` forms synthesize subscript keys instead, so they are not opaque
     and unrelated keys keep salvage like ``__setitem__("other", …)``
-    (PRRT_kwDOSJAM6s6ZxeRb).
+    (PRRT_kwDOSJAM6s6ZxeRb). Mixed opaque+synthesizable forms
+    (``FLAGS.update(other_flags, other=False)``) still fail closed
+    (PRRT_kwDOSJAM6s6Zxt0p).
     """
     receivers = _salvaged_subscript_receivers(candidate_keys)
     if not receivers:
@@ -710,7 +716,14 @@ def _tip_extra_opaque_collection_mutator_shares_receiver(
                 continue
             # Binding synthesis already understands kwargs / dict-literal
             # ``update``; do not fail closed and drop unrelated salvage.
-            if method == "update" and _update_mutation_binding_names(scan_line):
+            # Require fully synthesizable args so mixed opaque+kwargs forms
+            # like ``FLAGS.update(other_flags, other=False)`` still fail closed
+            # (PRRT_kwDOSJAM6s6Zxt0p).
+            if (
+                method == "update"
+                and _update_mutation_binding_names(scan_line)
+                and _update_mutation_args_fully_synthesizable(scan_line)
+            ):
                 continue
             receiver = name[: -(len(method) + 1)]
             if receiver in receivers:

@@ -343,7 +343,10 @@ def test_setitem_and_update_mutation_binding_names() -> None:
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
         _helper_keyword_executable,
         _setitem_mutation_binding_names,
+        _split_top_level_call_args,
+        _update_arg_fully_synthesizable,
         _update_call_argument_span,
+        _update_mutation_args_fully_synthesizable,
         _update_mutation_binding_names,
     )
 
@@ -374,6 +377,39 @@ def test_setitem_and_update_mutation_binding_names() -> None:
     assert _update_mutation_binding_names("FLAGS.update(other_flags)") == ()
     assert _update_mutation_binding_names("FLAGS.update(enabled=False") == ()
     assert _update_mutation_binding_names('msg = "FLAGS.update(enabled=False)"') == ()
+    # Mixed opaque+kwargs still synthesize the kwarg key; opacity is checked
+    # separately so salvage cannot fail open (PRRT_kwDOSJAM6s6Zxt0p).
+    assert _update_mutation_binding_names("FLAGS.update(other_flags, other=False)") == (
+        'FLAGS["other"]',
+    )
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update(other=False)")
+    assert _update_mutation_args_fully_synthesizable('FLAGS.update({"other": False})')
+    assert _update_mutation_args_fully_synthesizable('FLAGS.update({"other": False}, x=1)')
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update({})")
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update(other=False,)")
+    assert _update_mutation_args_fully_synthesizable('FLAGS.update({"a": "x,y", "b": 1})')
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update(other=f(1, 2))")
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update(other=xs[0, 1])")
+    assert _update_mutation_args_fully_synthesizable('FLAGS.update(other="a\\"b,c")')
+    assert _update_mutation_args_fully_synthesizable("FLAGS.update(other='a\\'b,c')")
+    assert _split_top_level_call_args("a=1,,b=2") == ["a=1", "b=2"]
+    assert _split_top_level_call_args("") == []
+    assert _update_arg_fully_synthesizable("")
+    assert _update_arg_fully_synthesizable("   ")
+    assert not _update_mutation_args_fully_synthesizable("FLAGS.update(other_flags)")
+    assert not _update_mutation_args_fully_synthesizable("FLAGS.update(other_flags, other=False)")
+    assert not _update_mutation_args_fully_synthesizable(
+        'FLAGS.update(other_flags | {"other": False})'
+    )
+    assert not _update_mutation_args_fully_synthesizable(
+        'FLAGS.update({**other_flags, "other": False})'
+    )
+    assert not _update_mutation_args_fully_synthesizable("FLAGS.update(**other_flags)")
+    assert not _update_mutation_args_fully_synthesizable("FLAGS.update({enabled: False})")
+    assert not _update_mutation_args_fully_synthesizable("# FLAGS.update(other=False)")
+    assert not _update_mutation_args_fully_synthesizable("// FLAGS.update(other=False)")
+    assert not _update_mutation_args_fully_synthesizable("FLAGS.update(other=False")
+    assert not _update_mutation_args_fully_synthesizable('msg = "FLAGS.update(other=False)"')
     assert _update_call_argument_span("FLAGS.update(enabled=False)", 12) == "enabled=False"
     assert _update_call_argument_span("FLAGS.update(enabled=False", 12) is None
     assert (
@@ -419,6 +455,28 @@ def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
         head_blob=salvage + 'FLAGS.update({"other": False})\n',
         candidate_keys={'FLAGS["enabled"]'},
     )
+    assert not _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'FLAGS.update({"other": False}, x=1)\n',
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    # Partially opaque ``update`` must still fail closed even when a kwarg or
+    # nested dict key synthesizes an unrelated binding (PRRT_kwDOSJAM6s6Zxt0p).
+    assert _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "FLAGS.update(other_flags, other=False)\n",
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'FLAGS.update(other_flags | {"other": False})\n',
+        candidate_keys={'FLAGS["enabled"]'},
+    )
+    assert _tip_extra_opaque_collection_mutator_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'FLAGS.update({**other_flags, "other": False})\n',
+        candidate_keys={'FLAGS["enabled"]'},
+    )
     assert _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "FLAGS.update(other=False)\n",
@@ -430,6 +488,14 @@ def test_opaque_collection_mutator_shares_salvaged_subscript_receiver() -> None:
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "FLAGS.update(enabled=False)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "FLAGS.update(other_flags, other=False)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'FLAGS.update({**other_flags, "other": False})\n',
     )
     assert not _tip_extra_opaque_collection_mutator_shares_receiver(
         baseline_blob=salvage,

@@ -862,13 +862,129 @@ def _update_call_argument_span(raw_line: str, open_paren: int) -> str | None:
     return None
 
 
+def _split_top_level_call_args(args: str) -> list[str]:
+    """Split ``args`` on commas outside nested ``()`` / ``[]`` / ``{}`` / strings."""
+    parts: list[str] = []
+    start = 0
+    depth_paren = 0
+    depth_bracket = 0
+    depth_brace = 0
+    in_single = False
+    in_double = False
+    escape = False
+    for idx, ch in enumerate(args):
+        if escape:
+            escape = False
+            continue
+        if in_single or in_double:
+            if ch == "\\":
+                escape = True
+            elif (in_single and ch == "'") or (in_double and ch == '"'):
+                in_single = False
+                in_double = False
+            continue
+        if ch == "'":
+            in_single = True
+            continue
+        if ch == '"':
+            in_double = True
+            continue
+        if ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == "[":
+            depth_bracket += 1
+        elif ch == "]":
+            depth_bracket = max(0, depth_bracket - 1)
+        elif ch == "{":
+            depth_brace += 1
+        elif ch == "}":
+            depth_brace = max(0, depth_brace - 1)
+        elif ch == "," and depth_paren == depth_bracket == depth_brace == 0:
+            part = args[start:idx].strip()
+            if part:
+                parts.append(part)
+            start = idx + 1
+    tail = args[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+_UPDATE_TOP_LEVEL_KWARG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*[ \t]*=")
+_UPDATE_DICT_LITERAL_RE = re.compile(r"^\{(.*)\}$", re.DOTALL)
+_UPDATE_DICT_STRING_KEY_ENTRY_RE = re.compile(r"""^(?:"[^"\n]+"|'[^'\n]+')[ \t]*:""")
+
+
+def _update_dict_literal_fully_synthesizable(body: str) -> bool:
+    """Return True when a dict-literal body has only string-literal keys (no ``**``)."""
+    if "**" in body:
+        return False
+    for entry in _split_top_level_call_args(body):
+        if not _UPDATE_DICT_STRING_KEY_ENTRY_RE.match(entry):
+            return False
+    return True
+
+
+def _update_arg_fully_synthesizable(arg: str) -> bool:
+    """Return True when one ``update`` argument is kwargs or a string-key dict literal."""
+    stripped = arg.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("**"):
+        return False
+    if _UPDATE_TOP_LEVEL_KWARG_RE.match(stripped):
+        return True
+    dict_match = _UPDATE_DICT_LITERAL_RE.match(stripped)
+    if dict_match is not None:
+        return _update_dict_literal_fully_synthesizable(dict_match.group(1))
+    return False
+
+
+def _update_mutation_args_fully_synthesizable(raw_line: str) -> bool:
+    """Return True when every ``.update(…)`` on the line is kwargs / string-key dicts.
+
+    Mixed forms such as ``FLAGS.update(other_flags, other=False)`` still synthesize
+    the kwarg key, but the opaque mapping can overwrite other salvaged entries —
+    those must fail closed (PRRT_kwDOSJAM6s6Zxt0p).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return False
+    scan = _executable_call_scan_text(raw_line)
+    found = False
+    for match in _INLINE_UPDATE_CALL_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("update",),
+        ):
+            continue
+        open_paren = raw_line.find("(", match.start())
+        if open_paren < 0:  # pragma: no cover - update-call regex requires "("
+            return False
+        args = _update_call_argument_span(raw_line, open_paren)
+        if args is None:
+            return False
+        found = True
+        for arg in _split_top_level_call_args(args):
+            if not _update_arg_fully_synthesizable(arg):
+                return False
+    return found
+
+
 def _update_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return ``obj["key"]`` keys from ``obj.update(key=…)`` / dict-literal forms.
 
     Keyword and simple ``{"key": …}`` arguments synthesize subscript bindings so
     tip-extra ``FLAGS.update(enabled=False)`` supersedes salvaged
     ``FLAGS["enabled"]`` (PRRT_kwDOSJAM6s6ZwrnH). Opaque ``update(other)`` yields
-    no keys here; tip-extra call fail-closed covers that case.
+    no keys here; tip-extra call fail-closed covers that case. Mixed
+    opaque+synthesizable forms may still yield keys; callers must also check
+    ``_update_mutation_args_fully_synthesizable`` before skipping opaque
+    fail-closed (PRRT_kwDOSJAM6s6Zxt0p).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
