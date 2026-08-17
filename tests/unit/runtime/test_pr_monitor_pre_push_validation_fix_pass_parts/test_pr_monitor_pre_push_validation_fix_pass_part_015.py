@@ -518,3 +518,74 @@ def test_tip_extra_alias_of_salvaged_guard_supersedes() -> None:
         head_blob=salvage + 'msg = "const alias = guard;"\n',
         candidate_keys={"guard", "guard.enabled"},
     )
+
+
+@pytest.mark.unit
+def test_tip_extra_multiline_alias_of_salvaged_guard_supersedes() -> None:
+    """Tip-extra ``const alias =\\n  guard`` must drop salvage like same-line alias.
+
+    Formatters split the alias assign across lines; same-line-only matching would
+    miss the salvaged RHS and retain stale FIXED evidence after
+    ``alias.enabled = false`` (PRRT_kwDOSJAM6s6ZxhFW).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _suffix_can_supersede_added_salvage,
+        _tip_extra_aliases_salvaged_candidate,
+        _tip_extra_can_supersede_modified_salvage,
+    )
+
+    salvage = "const guard = {};\nguard.enabled = true;\n"
+    head = salvage + "const alias =\n  guard;\nalias.enabled = false;\n"
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=head,
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert _suffix_can_supersede_added_salvage(salvage=salvage, head_blob=head)
+    assert not _added_salvage_blob_retained(commit_blob=salvage, head_blob=head)
+
+    # Blank / line-comment between ``=`` and RHS still aliases.
+    head_gap = salvage + "const alias =\n  // note\n  guard;\nalias.enabled = false;\n"
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=head_gap,
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert _suffix_can_supersede_added_salvage(salvage=salvage, head_blob=head_gap)
+
+    parent = "const guard = {};\nguard.enabled = false;\n"
+    commit = "const guard = {};\nguard.enabled = true;\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=commit + "const alias =\n  guard;\nalias.enabled = false;\n",
+    )
+
+    salvage_py = "guard = {}\nguard.enabled = True\n"
+    head_py = salvage_py + "alias =\n  guard\nalias.enabled = False\n"
+    assert _suffix_can_supersede_added_salvage(salvage=salvage_py, head_blob=head_py)
+    assert not _added_salvage_blob_retained(commit_blob=salvage_py, head_blob=head_py)
+
+    # Unrelated multiline alias must not drop salvage.
+    assert not _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + "const alias =\n  other;\nalias.enabled = false;\n",
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    assert not _suffix_can_supersede_added_salvage(
+        salvage=salvage,
+        head_blob=salvage + "const alias =\n  other;\nalias.enabled = false;\n",
+    )
+    # Incomplete RHS after look-ahead fails closed (cannot prove non-alias).
+    assert _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + "const alias =\n",
+        candidate_keys={"guard", "guard.enabled"},
+    )
+    # String / same-line complete assign must not look incomplete.
+    assert not _tip_extra_aliases_salvaged_candidate(
+        baseline_blob=salvage,
+        head_blob=salvage + 'msg = "const alias = guard;"\n',
+        candidate_keys={"guard", "guard.enabled"},
+    )

@@ -531,6 +531,56 @@ _TIP_EXTRA_ALIAS_ASSIGN_RE = re.compile(
     r"(?![A-Za-z0-9_.\[\(])"
 )
 
+# Assignment whose RHS was split to a following line (``const alias =`` alone).
+# Same-line ``_TIP_EXTRA_ALIAS_ASSIGN_RE`` cannot see the salvaged receiver
+# (PRRT_kwDOSJAM6s6ZxhFW).
+_INCOMPLETE_ALIAS_ASSIGN_LHS_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:(?:const|let|var)[ \t]+)?"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+    r"[ \t]*=[ \t]*$"
+)
+
+
+def _alias_assign_rhs_incomplete(raw_line: str) -> bool:
+    """Return True when ``raw_line`` is an assign whose RHS is still pending.
+
+    Uses comment-stripped text (strings kept) so ``msg = "…"`` is not treated
+    as incomplete after string blanking would leave a trailing ``=``.
+    """
+    code = _line_code_without_line_comment(raw_line).rstrip()
+    return bool(_INCOMPLETE_ALIAS_ASSIGN_LHS_RE.search(code))
+
+
+def _join_incomplete_alias_assign_line(lines: list[str], idx: int) -> str:
+    """Join ``lines[idx]`` with the next executable RHS when assign ends at ``=``.
+
+    Formatters commonly split ``const alias = guard`` across lines. Per-line
+    scanning then never matches ``_TIP_EXTRA_ALIAS_ASSIGN_RE``, so tip-extra
+    ``alias.enabled = false`` after salvage would keep stale FIXED evidence
+    (PRRT_kwDOSJAM6s6ZxhFW). Skip blank / line-comment gaps between ``=`` and
+    the RHS; stop at the first non-skipped line.
+    """
+    raw_line = lines[idx]
+    if not _alias_assign_rhs_incomplete(raw_line):
+        return raw_line
+    parts: list[str] = [raw_line.rstrip()]
+    j = idx + 1
+    while j < len(lines):
+        nxt = lines[j]
+        nxt_stripped = nxt.strip()
+        if nxt_stripped == "" or nxt_stripped.startswith("//") or nxt_stripped.startswith("#"):
+            j += 1
+            continue
+        parts.append(nxt.lstrip(" \t"))
+        break
+    if len(parts) == 1:
+        return raw_line
+    joined = parts[0]
+    for part in parts[1:]:
+        joined = joined.rstrip() + " " + part.lstrip(" \t")
+    return joined
+
 
 def _salvaged_alias_reference_names(candidate_keys: set[str]) -> set[str]:
     """Return bare names a tip may alias to reach salvaged bindings.
@@ -565,7 +615,10 @@ def _tip_extra_aliases_salvaged_candidate(
     append ``const alias = guard; alias.enabled = false;``. Tip scanners emit
     only ``alias`` / ``alias.enabled``, which never intersect salvaged ``guard``
     keys, and call checks find nothing — fail closed on the aliasing assignment
-    so stale FIXED evidence cannot resolve (PRRT_kwDOSJAM6s6ZxHGP).
+    so stale FIXED evidence cannot resolve (PRRT_kwDOSJAM6s6ZxHGP). Multiline
+    ``const alias =\\n  guard`` is joined before matching so formatters cannot
+    bypass the same check (PRRT_kwDOSJAM6s6ZxhFW); an assign whose RHS remains
+    incomplete after look-ahead also fails closed.
     """
     refs = _salvaged_alias_reference_names(candidate_keys)
     if not refs:
@@ -589,7 +642,12 @@ def _tip_extra_aliases_salvaged_candidate(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        scan = _executable_call_scan_text(raw_line)
+        scan_line = _join_incomplete_alias_assign_line(lines, idx)
+        # RHS still missing after continuation look-ahead — cannot prove the
+        # tip does not alias a salvaged receiver; fail closed.
+        if _alias_assign_rhs_incomplete(scan_line):
+            return True
+        scan = _executable_call_scan_text(scan_line)
         for match in _TIP_EXTRA_ALIAS_ASSIGN_RE.finditer(scan):
             if match.group(1) in refs:
                 return True
