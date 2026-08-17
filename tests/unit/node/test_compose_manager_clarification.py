@@ -11,15 +11,15 @@ import pytest
 import yaml
 
 from awf.db.enums import AgentRuntime
-from awf.node import compose_manager
-from awf.node.compose_manager import (
-    _legacy_bind_mount,
-    mark_persisted_clarification_model_network_reconciled,
-    upgrade_persisted_clarification_service,
-)
+from awf.node import compose_manager_clarification_upgrade as clarification_upgrade
 from awf.node.compose_manager_clarification import (
     _attach_persisted_clarification_model_network,
     _clarification_model_service_names,
+)
+from awf.node.compose_manager_clarification_upgrade import (
+    _legacy_bind_mount,
+    mark_persisted_clarification_model_network_reconciled,
+    upgrade_persisted_clarification_service,
 )
 
 
@@ -281,7 +281,7 @@ def test_upgrade_persisted_clarification_service_removes_partial_render_on_write
     def _raise_serialization_error(*_args: object, **_kwargs: object) -> str:
         raise yaml.YAMLError("serialization failed")
 
-    monkeypatch.setattr(compose_manager.yaml, "safe_dump", _raise_serialization_error)
+    monkeypatch.setattr(clarification_upgrade.yaml, "safe_dump", _raise_serialization_error)
 
     with pytest.raises(ValueError, match="could not upgrade persisted Compose file"):
         upgrade_persisted_clarification_service(
@@ -319,7 +319,7 @@ def test_mark_persisted_clarification_model_network_reconciled_cleans_partial_wr
     def _raise_serialization_error(*_args: object, **_kwargs: object) -> str:
         raise yaml.YAMLError("serialization failed")
 
-    monkeypatch.setattr(compose_manager.yaml, "safe_dump", _raise_serialization_error)
+    monkeypatch.setattr(clarification_upgrade.yaml, "safe_dump", _raise_serialization_error)
 
     with pytest.raises(
         ValueError, match="could not mark persisted Compose model network reconciled"
