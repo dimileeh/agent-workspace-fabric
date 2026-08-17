@@ -1219,9 +1219,10 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
 def test_call_site_names_mask_js_template_literal_edges() -> None:
     """JS template static text is masked; ``${...}`` edges stay scannable.
 
-    Covers escapes, nested braces/strings/templates, and unclosed forms so
-    salvage retention does not treat static template text as tip-extra calls
-    (PRRT_kwDOSJAM6s6ZtJG8).
+    Covers escapes, nested braces/strings/templates, regex/block-comment braces
+    inside interpolations, and unclosed forms so salvage retention does not
+    treat static template text as tip-extra calls (PRRT_kwDOSJAM6s6ZtJG8,
+    PRRT_kwDOSJAM6s6ZtYk3).
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
         _call_site_names_for_line,
@@ -1260,3 +1261,16 @@ def test_call_site_names_mask_js_template_literal_edges() -> None:
         "guard",
         "guard.disable",
     )
+    # ``}`` inside regex / block-comment bodies must not close ``${...}`` early
+    # or a following real call is blanked as static template text
+    # (PRRT_kwDOSJAM6s6ZtYk3).
+    assert _call_site_names_for_line("const marker = `${/}/; guard.disable()}`;") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("const marker = `${/* } */ guard.disable()}`;") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("const marker = `${/guard.disable()/}`;") == ()
+    assert _call_site_names_for_line("const marker = `${/* guard.disable() */}`;") == ()

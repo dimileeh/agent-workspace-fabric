@@ -131,17 +131,14 @@ def _js_regex_literal_start(raw_line: str, slash_index: int) -> bool:
     return True
 
 
-def _blank_js_regex_literal(chars: list[str], raw_line: str, start: int) -> int:
-    """Blank a JS regex literal starting at ``start``; return index past it."""
+def _skip_js_regex_literal(raw_line: str, start: int) -> int:
+    """Return index past a JS regex literal starting at ``start``."""
     n = len(raw_line)
-    chars[start] = " "
     i = start + 1
     in_class = False
     while i < n:
         ch = raw_line[i]
-        chars[i] = " "
         if ch == "\\" and i + 1 < n:
-            chars[i + 1] = " "
             i += 2
             continue
         if ch == "[" and not in_class:
@@ -155,11 +152,18 @@ def _blank_js_regex_literal(chars: list[str], raw_line: str, start: int) -> int:
         if ch == "/" and not in_class:
             i += 1
             while i < n and raw_line[i].isalpha():
-                chars[i] = " "
                 i += 1
             return i
         i += 1
     return i
+
+
+def _blank_js_regex_literal(chars: list[str], raw_line: str, start: int) -> int:
+    """Blank a JS regex literal starting at ``start``; return index past it."""
+    end = _skip_js_regex_literal(raw_line, start)
+    for j in range(start, end):
+        chars[j] = " "
+    return end
 
 
 def _skip_js_template_literal(raw_line: str, start: int) -> int:
@@ -185,8 +189,9 @@ def _skip_js_template_literal(raw_line: str, start: int) -> int:
 def _find_js_template_interpolation_end(raw_line: str, start: int) -> int:
     """Return index of the ``}`` that closes a ``${`` body starting at ``start``.
 
-    Tracks brace depth while skipping strings and nested templates so braces
-    inside those regions do not end the interpolation early.
+    Tracks brace depth while skipping strings, nested templates, line/block
+    comments, and regex literals so braces inside those regions do not end the
+    interpolation early (PRRT_kwDOSJAM6s6ZtYk3).
     """
     i = start
     n = len(raw_line)
@@ -211,6 +216,23 @@ def _find_js_template_interpolation_end(raw_line: str, start: int) -> int:
                 in_single = False
             i += 1
             continue
+        if ch == "/":
+            if i + 1 < n and raw_line[i + 1] == "/":
+                i += 2
+                while i < n and raw_line[i] != "\n":
+                    i += 1
+                continue
+            if i + 1 < n and raw_line[i + 1] == "*":
+                i += 2
+                while i < n:
+                    if raw_line.startswith("*/", i):
+                        i += 2
+                        break
+                    i += 1
+                continue
+            if (i + 1 >= n or raw_line[i + 1] != "=") and _js_regex_literal_start(raw_line, i):
+                i = _skip_js_regex_literal(raw_line, i)
+                continue
         if ch == "`":
             i = _skip_js_template_literal(raw_line, i)
             continue
