@@ -16,6 +16,14 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _peel_all_outer_unconditional_verdict_reason_wrappers,
     _peel_one_unconditional_verdict_reason_wrapper,
     _span_is_python_dunder,
+    _strip_final_answer_attempt_prefix,
+    _strip_markdown_attempt_prefixes,
+    _strip_markdown_blockquote_prefix,
+    _strip_markdown_emphasis_prefix,
+    _strip_markdown_heading_prefix,
+    _strip_markdown_list_prefix,
+    _strip_markdown_task_list_checkbox,
+    _strip_verdict_result_label_attempt_prefix,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_PYTHON_DUNDER,
@@ -883,6 +891,55 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_awf_deeply_nested_list_prefix_attempt_strip_stays_linear(
+        self,
+    ) -> None:
+        # Per-iteration re.sub peels are quadratic on deep nested list prefixes
+        # and can stall the monitor event loop before output-size limits apply
+        # (PRRT_kwDOSJAM6s6Zq2nB). Tens of thousands of ``- `` layers must still
+        # classify as an attempt without approaching the default test timeout.
+        nested = ("- " * 20_000) + "AWF-VERDICT: SHIPPED: done"
+        result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{nested}")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    def test_private_linear_markdown_attempt_prefix_strip_edges(self) -> None:
+        # Direct contract for the O(n) attempt-prefix peel
+        # (PRRT_kwDOSJAM6s6Zq2nB): interleaved nests, greedy blockquotes, and
+        # prose/emphasis/heading wrappers strip without a per-layer rebuild.
+        assert _strip_markdown_attempt_prefixes("- > - AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_attempt_prefixes("> - > AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_attempt_prefixes("- [ ] AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert (
+            _strip_markdown_attempt_prefixes("Final answer: AWF-VERDICT: X: y")
+            == "AWF-VERDICT: X: y"
+        )
+        assert _strip_markdown_attempt_prefixes("Verdict: AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_attempt_prefixes("**AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_attempt_prefixes("### AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_attempt_prefixes("plain") == "plain"
+        assert _strip_markdown_attempt_prefixes(("> " * 500) + "AWF-VERDICT: X: y") == (
+            "AWF-VERDICT: X: y"
+        )
+        # Single-prefix helpers remain for one-shot callers / parity with the
+        # cursor peel bodies.
+        assert _strip_markdown_list_prefix("- AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_blockquote_prefix("> AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_task_list_checkbox("[ ] AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert (
+            _strip_final_answer_attempt_prefix("Final answer: AWF-VERDICT: X: y")
+            == "AWF-VERDICT: X: y"
+        )
+        assert (
+            _strip_verdict_result_label_attempt_prefix("Result: AWF-VERDICT: X: y")
+            == "AWF-VERDICT: X: y"
+        )
+        assert _strip_markdown_emphasis_prefix("**AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
+        assert _strip_markdown_heading_prefix("### AWF-VERDICT: X: y") == "AWF-VERDICT: X: y"
 
     @pytest.mark.unit
     def test_private_awf_verdict_list_prefixed_valid_final_fail_closed(self) -> None:

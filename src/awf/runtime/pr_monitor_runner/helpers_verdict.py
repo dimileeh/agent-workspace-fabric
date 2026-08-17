@@ -1478,6 +1478,24 @@ def _strip_verdict_result_label_attempt_prefix(stripped: str) -> str:
     return _VERDICT_RESULT_LABEL_ATTEMPT_PREFIX.sub("", stripped, count=1)
 
 
+# Cursor-local attempt-prefix patterns (no ``^``) so ``match(s, pos)`` can peel
+# nested wrappers without per-layer string rebuilds. Same bodies as the
+# ``^``-anchored helpers used by single-prefix ``.sub`` callers
+# (PRRT_kwDOSJAM6s6Zq2nB).
+_MARKDOWN_ATTEMPT_PREFIXES_AT: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:>\s*)+"),
+    re.compile(r"(?:[-*+]|\d+[.)])\s+"),
+    re.compile(r"\[(?: |x|X)\]\s+"),
+    re.compile(
+        r"(?:(?:my|the)\s+)?final\s+answer(?:\s+is)?\s*[:\-–—]\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:verdict|result)\s*[:\-–—]\s*", re.IGNORECASE),
+    re.compile(r"(?:\*{1,3}|_{1,3})(?=\S)"),
+    re.compile(r"#{1,6}\s+"),
+)
+
+
 def _strip_markdown_attempt_prefixes(segment: str) -> str:
     """Strip leading Markdown / prose-label wrappers until none apply.
 
@@ -1490,25 +1508,26 @@ def _strip_markdown_attempt_prefixes(segment: str) -> str:
     item, and a bare start-only check misses ``Final answer:`` /
     ``Verdict:`` / ``Result:`` / emphasis / heading wrappers — so the marker
     no longer looks like a leading attempt.
+
+    Peel with a cursor on the original string so deeply nested list prefixes
+    stay O(n) rather than rebuilding via per-layer ``re.sub``
+    (PRRT_kwDOSJAM6s6Zq2nB).
     """
-    normalized = segment.lstrip()
-    while True:
-        stripped = _strip_markdown_heading_prefix(
-            _strip_markdown_emphasis_prefix(
-                _strip_verdict_result_label_attempt_prefix(
-                    _strip_final_answer_attempt_prefix(
-                        _strip_markdown_task_list_checkbox(
-                            _strip_markdown_list_prefix(
-                                _strip_markdown_blockquote_prefix(normalized)
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        if stripped == normalized:
-            return normalized
-        normalized = stripped
+    s = segment.lstrip()
+    pos = 0
+    n = len(s)
+    # Same per-round apply-all order as the former nested ``.sub`` chain
+    # (blockquote → list → task-list → final-answer → verdict/result →
+    # emphasis → heading); repeat until a round makes no progress.
+    while pos < n:
+        start = pos
+        for pattern in _MARKDOWN_ATTEMPT_PREFIXES_AT:
+            match = pattern.match(s, pos)
+            if match is not None:
+                pos = match.end()
+        if pos == start:
+            break
+    return s[pos:]
 
 
 def _awf_verdict_segment_is_attempt(segment: str) -> bool:
