@@ -201,7 +201,9 @@ _DEFINE_DIRECTIVE_LINE_RE = re.compile(r"#[ \t]*define\b")
 # FEATURE_ENABLED`` kept a line-aligned salvage prefix / clean merge-file
 # equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zse8m). Bare,
 # dotted, and subscript targets match assign shapes; comma lists bind each
-# name. Requires whitespace after ``del`` so ``deleted`` is not a false hit.
+# name. Requires whitespace or ``(`` after ``del`` so ``deleted`` is not a
+# false hit. Parenthesized ``del(NAME)`` / ``del (NAME)`` must bind too
+# (PRRT_kwDOSJAM6s6ZsmNH).
 _DEL_TARGET = (
     rf"(?:{_ASSIGN_SUBSCRIPT_TARGET}|"
     r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
@@ -212,8 +214,9 @@ _DEL_TARGET_SCAN = (
 )
 _DEL_TARGET_RE = re.compile(_DEL_TARGET_SCAN)
 _INLINE_DEL_BINDING_RE = re.compile(
-    r"(?:^|(?<=[^A-Za-z0-9_]))del[ \t]+"
+    r"(?:^|(?<=[^A-Za-z0-9_]))del(?:[ \t]*\([ \t]*|[ \t]+)"
     rf"({_DEL_TARGET_SCAN}(?:[ \t]*,[ \t]*{_DEL_TARGET_SCAN})*)"
+    r"[ \t]*\)?"
 )
 
 
@@ -465,8 +468,9 @@ def _del_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return names deleted by ``del`` on ``raw_line`` (statement or mid-line).
 
     Tip-extra ``del FEATURE_ENABLED`` / ``if ready: del FEATURE_ENABLED`` /
-    ``del FLAGS["enabled"]`` must supersede salvage of those bindings; assign
-    and call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6Zse8m).
+    ``del FLAGS["enabled"]`` / ``del(FEATURE_ENABLED)`` must supersede salvage
+    of those bindings; assign and call scanners alone leave the salvage
+    retained (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZsmNH).
     Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
     ``_executable_call_scan_text``. Subscript spellings recover from
     ``raw_line`` because scan blanks quoted indices.

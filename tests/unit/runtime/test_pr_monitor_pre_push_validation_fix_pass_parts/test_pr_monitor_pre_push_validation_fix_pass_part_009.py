@@ -493,6 +493,20 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob='FLAGS = {}\nFLAGS["enabled"] = True\n',
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\ndel FLAGS["enabled"]\n'),
     )
+    # Parenthesized ``del(NAME)`` / ``del (NAME)`` are valid Python and must
+    # supersede like bare ``del NAME`` (PRRT_kwDOSJAM6s6ZsmNH).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\ndel(FEATURE_ENABLED)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\ndel (FEATURE_ENABLED)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nif ready: del(FEATURE_ENABLED)\n",
+    )
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n# del FEATURE_ENABLED\n",

@@ -481,6 +481,23 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_sub,
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\ndel FLAGS["enabled"]\n'),
     )
+    # Parenthesized ``del(NAME)`` / ``del (NAME)`` supersede modified salvage
+    # the same way (PRRT_kwDOSJAM6s6ZsmNH).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\ndel(FEATURE_ENABLED)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\ndel (FEATURE_ENABLED)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nif ready: del(FEATURE_ENABLED)\n"),
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,
         commit_blob=commit,
