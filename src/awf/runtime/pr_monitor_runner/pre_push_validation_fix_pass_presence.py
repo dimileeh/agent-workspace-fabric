@@ -110,8 +110,18 @@ _INLINE_ASSIGN_BINDING_RE = re.compile(
     r")"
 )
 # Same-line call kwargs / default parameters: ``name=`` after ``(`` or ``,``
-# is not a rebind (PRRT_kwDOSJAM6s6ZsJyZ).
+# is not a rebind (PRRT_kwDOSJAM6s6ZsJyZ). Applied only inside unmatched ``(``
+# … ``)`` and never for ``:=`` so bare unpacking / parenthesized walrus still
+# count (PRRT_kwDOSJAM6s6ZsOT0).
 _INLINE_ASSIGN_KWARG_BEFORE_RE = re.compile(r"[(,][ \t]*$")
+# Prior targets in bare ``a, b, name =`` when the last name is kept as an
+# unpacking bind (PRRT_kwDOSJAM6s6ZsOT0).
+_INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"((?:[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+    r"(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)*)"
+    r"[ \t]*,[ \t]*$"
+)
 # Type token in statement-leading ``name: T =``: bare ``T =`` after ``ident:``
 # must not invent a second binding key (PRRT_kwDOSJAM6s6ZsJyZ). Requires a
 # bare identifier immediately before ``:`` so ``if ready: name =`` still binds.
@@ -616,6 +626,41 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     return None
 
 
+def _paren_depth(text: str) -> int:
+    """Return net ``(`` / ``)`` depth over ``text`` (floored at 0)."""
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+    return depth
+
+
+def _inline_assign_is_kwarg_or_default(*, before: str, matched: str, name: str) -> bool:
+    """True when an equals-style bind is a call kwarg / default, not a rebind.
+
+    ``name=`` after ``(`` / ``,`` inside unmatched parens is a kwarg or default
+    (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking ``a, name =`` sits at paren-depth 0,
+    and ``:=`` is never kwarg syntax, so those stay rebinds
+    (PRRT_kwDOSJAM6s6ZsOT0).
+    """
+    if not _INLINE_ASSIGN_KWARG_BEFORE_RE.search(before):
+        return False
+    op = matched[len(name) :]
+    if ":=" in op:
+        return False
+    return _paren_depth(before) > 0
+
+
+def _unpacking_lhs_names_before(before: str) -> tuple[str, ...]:
+    """Return prior bare-unpacking targets when ``before`` ends with ``,``."""
+    match = _INLINE_UNPACK_LHS_BEFORE_RE.search(before)
+    if match is None:
+        return ()
+    return tuple(part.strip() for part in match.group(1).split(","))
+
+
 def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return equals-style assign names found anywhere on ``raw_line``.
 
@@ -626,7 +671,8 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     names. Bare YAML ``key:`` and typed ``name: T =`` forms are not matched
     mid-line (typed stays statement-leading). Call kwargs, default parameters,
     and the type token in ``name: T =`` are skipped so phantoms cannot enter
-    salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ).
+    salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking and
+    parenthesized walrus after ``,`` / ``(`` still bind (PRRT_kwDOSJAM6s6ZsOT0).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
@@ -635,11 +681,23 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     names: list[str] = []
     for match in _INLINE_ASSIGN_BINDING_RE.finditer(scan):
         before = scan[: match.start()]
-        if _INLINE_ASSIGN_KWARG_BEFORE_RE.search(before):
+        name = match.group(1)
+        if _inline_assign_is_kwarg_or_default(before=before, matched=match.group(0), name=name):
             continue
         if _INLINE_ASSIGN_TYPE_ANNOTATION_BEFORE_RE.search(before):
             continue
-        names.append(match.group(1))
+        # Depth-0 comma before the matched target → bare unpacking; include
+        # earlier LHS names so ``FEATURE_ENABLED, other =`` supersedes too.
+        if (
+            _INLINE_ASSIGN_KWARG_BEFORE_RE.search(before)
+            and _paren_depth(before) == 0
+            and ":=" not in match.group(0)[len(name) :]
+        ):
+            for prior in _unpacking_lhs_names_before(before):
+                if prior not in names:
+                    names.append(prior)
+        if name not in names:
+            names.append(name)
     return tuple(names)
 
 

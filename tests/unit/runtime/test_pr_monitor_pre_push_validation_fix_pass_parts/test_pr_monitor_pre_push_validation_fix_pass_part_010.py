@@ -337,6 +337,28 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             "x = 1\nFEATURE_ENABLED = True\ny = 2\ndef helper(FEATURE_ENABLED=False):\n    pass\n"
         ),
     )
+    # Unpacking LHS / parenthesized walrus after ``,`` or ``(`` still rebind
+    # (PRRT_kwDOSJAM6s6ZsOT0); the kwarg filter must not keep FIXED evidence.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\na, FEATURE_ENABLED = get_flags()\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nFEATURE_ENABLED, other = get_flags()\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\n(FEATURE_ENABLED := False)\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent,
+        commit_blob=commit,
+        head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 2\nz = (FEATURE_ENABLED := False)\n"),
+    )
     # Unrelated tip kwargs must not collide with salvage-changed kwarg phantoms.
     parent_kw = "configure(timeout=10)\nFEATURE_ENABLED = False\n"
     commit_kw = "configure(timeout=30)\nFEATURE_ENABLED = True\n"

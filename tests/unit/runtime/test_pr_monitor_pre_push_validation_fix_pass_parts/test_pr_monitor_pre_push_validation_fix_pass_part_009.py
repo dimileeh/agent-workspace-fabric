@@ -368,6 +368,24 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob=("FEATURE_ENABLED = True\ndef helper(x, FEATURE_ENABLED=False):\n    pass\n"),
     )
+    # Bare unpacking / parenthesized walrus after ``,`` / ``(`` are real rebinds,
+    # not kwargs — tip-extra must still drop FIXED salvage (PRRT_kwDOSJAM6s6ZsOT0).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\na, FEATURE_ENABLED = get_flags()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nFEATURE_ENABLED, other = get_flags()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\n(FEATURE_ENABLED := False)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nx = (FEATURE_ENABLED := False)\n",
+    )
     # Typed rebind still supersedes via statement-leading ``name: T =``; the
     # type token alone must not invent a second binding key.
     assert not _added_salvage_blob_retained(
