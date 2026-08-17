@@ -654,6 +654,65 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_json,
         head_blob=('{\n  "feature-enabled": true\n}\n# "feature-enabled": false\n'),
     )
+    # TOML table / array-table headers must qualify leaf keys so ``[feature]``
+    # ``enabled`` and ``[logging]`` ``enabled`` do not collide as bare
+    # ``enabled``. Salvage of ``feature.enabled`` plus a tip that adds
+    # ``logging.enabled`` still merge-file-matches HEAD; unqualified keys would
+    # discard salvage and leave a later FIXED retry as fixed_without_head_advance
+    # (PRRT_kwDOSJAM6s6ZqpBC).
+    parent_toml_table = '[feature]\nenabled = false\n[logging]\nlevel = "info"\n'
+    commit_toml_table = '[feature]\nenabled = true\n[logging]\nlevel = "info"\n'
+    toml_table_changed = _salvage_changed_binding_names(
+        parent_blob=parent_toml_table, commit_blob=commit_toml_table
+    )
+    assert "feature.enabled" in toml_table_changed
+    assert "enabled" not in toml_table_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_table,
+        commit_blob=commit_toml_table,
+        head_blob=('[feature]\nenabled = true\n[logging]\nlevel = "info"\nenabled = false\n'),
+    )
+    # Same-table tip rebind of the salvaged leaf still supersedes.
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_toml_table,
+        commit_blob=commit_toml_table,
+        head_blob=('[feature]\nenabled = true\nenabled = false\n[logging]\nlevel = "info"\n'),
+    )
+    # Array tables and dotted / quoted table paths qualify the same way.
+    parent_arr = '[[feature]]\nenabled = false\n[[logging]]\nlevel = "info"\n'
+    commit_arr = '[[feature]]\nenabled = true\n[[logging]]\nlevel = "info"\n'
+    arr_changed = _salvage_changed_binding_names(parent_blob=parent_arr, commit_blob=commit_arr)
+    assert "feature.enabled" in arr_changed
+    assert "enabled" not in arr_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_arr,
+        commit_blob=commit_arr,
+        head_blob=('[[feature]]\nenabled = true\n[[logging]]\nlevel = "info"\nenabled = false\n'),
+    )
+    parent_dotted_table = '[feature.sub]\nenabled = false\n[logging]\nlevel = "info"\n'
+    commit_dotted_table = '[feature.sub]\nenabled = true\n[logging]\nlevel = "info"\n'
+    dotted_table_changed = _salvage_changed_binding_names(
+        parent_blob=parent_dotted_table, commit_blob=commit_dotted_table
+    )
+    assert "feature.sub.enabled" in dotted_table_changed
+    assert "enabled" not in dotted_table_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_dotted_table,
+        commit_blob=commit_dotted_table,
+        head_blob=('[feature.sub]\nenabled = true\n[logging]\nlevel = "info"\nenabled = false\n'),
+    )
+    parent_quoted_table = '["feature"]\nenabled = false\n["logging"]\nlevel = "info"\n'
+    commit_quoted_table = '["feature"]\nenabled = true\n["logging"]\nlevel = "info"\n'
+    quoted_table_changed = _salvage_changed_binding_names(
+        parent_blob=parent_quoted_table, commit_blob=commit_quoted_table
+    )
+    assert "feature.enabled" in quoted_table_changed
+    assert "enabled" not in quoted_table_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_quoted_table,
+        commit_blob=commit_quoted_table,
+        head_blob=('["feature"]\nenabled = true\n["logging"]\nlevel = "info"\nenabled = false\n'),
+    )
     # TOML bare / quoted keys with ``=`` and hyphens must supersede like JSON
     # quoted ``:`` keys (PRRT_kwDOSJAM6s6Zqip3).
     parent_toml = "feature-enabled = false\n"

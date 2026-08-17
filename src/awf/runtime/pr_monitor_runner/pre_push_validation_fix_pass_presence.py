@@ -93,6 +93,15 @@ _YAML_MAPPING_SCOPE_OPENER_RE = re.compile(
     r"|'[^'\n]+'"
     r")[ \t]*:[ \t]*(?:#.*)?$"
 )
+# TOML ``[table]`` / ``[[array.table]]`` headers replace the current table scope
+# so leaves under different tables qualify distinctly (``feature.enabled`` vs
+# ``logging.enabled``; PRRT_kwDOSJAM6s6ZqpBC). Key path reuses assign segments
+# (bare / quoted / dotted). Closing brackets must match opener count.
+_TOML_TABLE_HEADER_RE = re.compile(
+    r"^[ \t]*(\[{1,2})[ \t]*"
+    rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})*)"
+    r"[ \t]*(\]{1,2})[ \t]*(?:#.*)?$"
+)
 
 
 def _advance_string_or_block_comment_state(
@@ -525,7 +534,9 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
     (``- nested:``; PRRT_kwDOSJAM6s6ZqeWt). Bare ``else:`` / ``try:`` /
     ``except:`` / ``finally:`` do not push (PRRT_kwDOSJAM6s6Zqeen). Assignments
     with values, ``#define``, and ``let``/``const``/``var`` bind a name but do
-    not push.
+    not push. TOML ``[table]`` / ``[[array]]`` headers are not nestable indent
+    openers; callers track them via ``_toml_table_header_path``
+    (PRRT_kwDOSJAM6s6ZqpBC).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//"):
@@ -536,6 +547,23 @@ def _opens_nested_binding_scope(raw_line: str) -> bool:
         if pattern.match(raw_line) is not None:
             return True
     return _YAML_MAPPING_SCOPE_OPENER_RE.match(raw_line) is not None
+
+
+def _toml_table_header_path(raw_line: str) -> str | None:
+    """Return normalized TOML table path for a ``[table]`` / ``[[array]]`` line.
+
+    Matching opener/closer bracket counts are required so ``[a]]`` / ``[[a]``
+    do not invent a table scope. The path is normalized like assign keys
+    (``feature.sub`` / ``"feature"`` → ``feature``) so leaves qualify as
+    ``feature.enabled`` under both spellings (PRRT_kwDOSJAM6s6ZqpBC).
+    """
+    match = _TOML_TABLE_HEADER_RE.match(raw_line)
+    if match is None:
+        return None
+    opener, raw_path, closer = match.group(1), match.group(2), match.group(3)
+    if len(opener) != len(closer):
+        return None
+    return _normalize_assign_binding_name(raw_path)
 
 
 def _line_indent(raw_line: str) -> int:
@@ -577,17 +605,20 @@ def _binding_span_at(lines: list[str], start: int) -> tuple[str, ...]:
 def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
     """Map each scoped binding key to the span of its last occurrence in ``text``.
 
-    Keys are qualified by enclosing def/class/function scopes (``A.ok``) and by
-    YAML/mapping openers with no same-line scalar (``feature.enabled``) so
-    same-named leaves under different parents do not collide
-    (PRRT_kwDOSJAM6s6ZqKN3, PRRT_kwDOSJAM6s6ZqZo2). Lines that start inside
-    ``/*`` or a triple-quoted string are ignored so docstring prose does not
-    invent bindings (PRRT_kwDOSJAM6s6ZqPO9).
+    Keys are qualified by enclosing def/class/function scopes (``A.ok``), by
+    YAML/mapping openers with no same-line scalar (``feature.enabled``), and by
+    the current TOML ``[table]`` / ``[[array]]`` path so same-named leaves under
+    different parents do not collide (PRRT_kwDOSJAM6s6ZqKN3,
+    PRRT_kwDOSJAM6s6ZqZo2, PRRT_kwDOSJAM6s6ZqpBC). Lines that start inside ``/*``
+    or a triple-quoted string are ignored so docstring prose does not invent
+    bindings (PRRT_kwDOSJAM6s6ZqPO9).
     """
     lines = text.splitlines()
     last_start: dict[str, int] = {}
     # (indent, name) stack for nestable declaration openers.
     scope_stack: list[tuple[int, str]] = []
+    # Current TOML table path (replaced by each table/array-table header).
+    toml_table_path: str | None = None
     in_block_comment = False
     in_triple_double = False
     in_triple_single = False
@@ -603,13 +634,21 @@ def _last_binding_spans(text: str) -> dict[str, tuple[str, ...]]:
         )
         if line_in_non_code or raw_line.strip() == "":
             continue
+        table_path = _toml_table_header_path(raw_line)
+        if table_path is not None:
+            toml_table_path = table_path
+            scope_stack.clear()
+            continue
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
         name = _binding_name_for_line(raw_line)
         if name is None:
             continue
-        key = _scoped_binding_key([entry[1] for entry in scope_stack], name)
+        scope_names = ([toml_table_path] if toml_table_path is not None else []) + [
+            entry[1] for entry in scope_stack
+        ]
+        key = _scoped_binding_key(scope_names, name)
         last_start[key] = idx
         if _opens_nested_binding_scope(raw_line):
             scope_stack.append((indent, name))
@@ -649,6 +688,7 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
     lines = text.splitlines()
     keys: set[str] = set()
     scope_stack: list[tuple[int, str]] = []
+    toml_table_path: str | None = None
     in_block_comment = False
     in_triple_double = False
     in_triple_single = False
@@ -664,13 +704,21 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         )
         if line_in_non_code or raw_line.strip() == "":
             continue
+        table_path = _toml_table_header_path(raw_line)
+        if table_path is not None:
+            toml_table_path = table_path
+            scope_stack.clear()
+            continue
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
         name = _binding_name_for_line(raw_line)
         if name is None:
             continue
-        key = _scoped_binding_key([entry[1] for entry in scope_stack], name)
+        scope_names = ([toml_table_path] if toml_table_path is not None else []) + [
+            entry[1] for entry in scope_stack
+        ]
+        key = _scoped_binding_key(scope_names, name)
         if idx in line_indices:
             keys.add(key)
         if _opens_nested_binding_scope(raw_line):
@@ -713,11 +761,12 @@ def _tip_extra_can_supersede_modified_salvage(
     full-line multiset would over-reject surplus salvage assignment copies
     (PRRT_kwDOSJAM6s6ZqGeU). Body-only declaration edits still count as changed
     bindings (PRRT_kwDOSJAM6s6ZqHvh). Parent-only (deleted) salvage names also
-    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).     Tip-extra
-    binding keys are resolved against the full tip blob so an unrelated later
-    ``def ok`` under another class does not collide with salvaged ``A.ok``
-    (PRRT_kwDOSJAM6s6ZqKN3), and nested YAML ``logging.enabled`` does not
-    collide with salvaged ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2).
+    count so tip reintroduction supersedes (PRRT_kwDOSJAM6s6ZqKGY).     Tip-extra binding keys are resolved against the full tip blob so an
+    unrelated later ``def ok`` under another class does not collide with salvaged
+    ``A.ok`` (PRRT_kwDOSJAM6s6ZqKN3), nested YAML ``logging.enabled`` does not
+    collide with salvaged ``feature.enabled`` (PRRT_kwDOSJAM6s6ZqZo2), and
+    TOML ``[logging] enabled`` does not collide with salvaged
+    ``[feature] enabled`` (PRRT_kwDOSJAM6s6ZqpBC).
     """
     changed = _salvage_changed_binding_names(parent_blob=parent_blob, commit_blob=commit_blob)
     if not changed:
