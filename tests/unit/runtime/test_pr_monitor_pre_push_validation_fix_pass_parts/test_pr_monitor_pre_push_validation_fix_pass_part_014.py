@@ -84,6 +84,31 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_sub,
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nOTHER["enabled"] = False\n'),
     )
+    # Nonliteral subscript overrides cannot be related by exact-key intersection:
+    # after salvage ``FLAGS["enabled"] = True``, tip ``FLAGS[key] = False`` emits
+    # ``FLAGS[key]``, which does not overlap ``FLAGS["enabled"]``. Fail closed on
+    # tip-extra nonliteral subscripts that share a salvaged receiver
+    # (PRRT_kwDOSJAM6s6Zv4pe).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nkey = "enabled"\nFLAGS[key] = False\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS[key] = False\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nkey = "enabled"\nOTHER[key] = False\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob=commit_sub,
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nFLAGS[0] = False\n'),
+    )
     # Nested / mid-statement rebinds must supersede: line-start assign matching
     # misses ``if ready: FEATURE_ENABLED = False`` so merge-file equality would
     # retain stale FIXED evidence (PRRT_kwDOSJAM6s6ZsD5y).
@@ -1320,4 +1345,35 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_deleted,
         commit_blob=commit_deleted,
         head_blob="x = 1\ny = 2\nother = 1\n",
+    )
+
+
+@pytest.mark.unit
+def test_added_salvage_rejects_nonliteral_subscript_on_salvaged_receiver() -> None:
+    """Tip ``FLAGS[key] =`` after added ``FLAGS["enabled"]`` salvage must not retain.
+
+    Exact-key intersection misses computed indices; fail closed when the
+    tip-extra nonliteral subscript shares the salvaged receiver
+    (PRRT_kwDOSJAM6s6Zv4pe).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+        _added_salvage_blob_retained,
+    )
+
+    salvage = 'FLAGS = {}\nFLAGS["enabled"] = True\n'
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'key = "enabled"\nFLAGS[key] = False\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "FLAGS[key] = False\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'key = "enabled"\nOTHER[key] = False\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "FLAGS[0] = False\n",
     )

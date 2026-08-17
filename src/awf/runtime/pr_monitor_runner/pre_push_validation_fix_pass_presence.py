@@ -462,6 +462,46 @@ def _tip_extra_line_indices(*, commit_blob: str, head_blob: str) -> set[int]:
     return extra
 
 
+def _subscript_binding_receiver(name: str) -> str | None:
+    """Return the receiver prefix before the first ``[`` in a subscript key."""
+    bracket = name.find("[")
+    if bracket <= 0:
+        return None
+    return name[:bracket]
+
+
+def _binding_key_has_nonliteral_subscript(name: str) -> bool:
+    """Return True when ``name`` contains a bare-ident subscript index."""
+    return re.search(r"\[[A-Za-z_][A-Za-z0-9_]*\]", name) is not None
+
+
+def _nonliteral_subscript_shares_receiver(
+    *, tip_extra_keys: set[str], candidate_keys: set[str]
+) -> bool:
+    """Return True when tip-extra ``FLAGS[key]`` shares a salvaged receiver.
+
+    Exact-key intersection cannot relate ``FLAGS[key]`` to salvaged
+    ``FLAGS["enabled"]``; fail closed so a computed override cannot keep stale
+    FIXED evidence after salvage (PRRT_kwDOSJAM6s6Zv4pe).
+    """
+    salvaged_receivers: set[str] = set()
+    for key in candidate_keys:
+        recv = _subscript_binding_receiver(key)
+        if recv is not None:
+            salvaged_receivers.add(recv)
+        elif "[" not in key and key:
+            salvaged_receivers.add(key)
+    if not salvaged_receivers:
+        return False
+    for key in tip_extra_keys:
+        if not _binding_key_has_nonliteral_subscript(key):
+            continue
+        recv = _subscript_binding_receiver(key)
+        if recv is not None and recv in salvaged_receivers:
+            return True
+    return False
+
+
 def _tip_extra_keys_supersede_baseline(
     *, baseline_blob: str, head_blob: str, candidate_keys: set[str]
 ) -> bool:
@@ -471,6 +511,9 @@ def _tip_extra_keys_supersede_baseline(
     as tip-only; requiring last-binding inequality keeps those retained
     (PRRT_kwDOSJAM6s6ZqGeU) while duplicate-occurrence overrides that change
     the effective final binding still supersede (PRRT_kwDOSJAM6s6ZrFdv).
+    Exact-key intersection cannot relate ``FLAGS[key]`` to salvaged
+    ``FLAGS["enabled"]``; tip-extra nonliteral subscripts that share a salvaged
+    receiver fail closed (PRRT_kwDOSJAM6s6Zv4pe).
     """
     if not candidate_keys:
         return False
@@ -480,7 +523,13 @@ def _tip_extra_keys_supersede_baseline(
     tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
     overlapping = candidate_keys & tip_extra_keys
     if not overlapping:
-        return False
+        # Computed index (``FLAGS[key]``) never equals literal salvage keys; reject
+        # when the tip-extra subscript shares a salvaged receiver
+        # (PRRT_kwDOSJAM6s6Zv4pe).
+        return _nonliteral_subscript_shares_receiver(
+            tip_extra_keys=tip_extra_keys,
+            candidate_keys=candidate_keys,
+        )
     baseline_spans = _last_binding_spans(baseline_blob)
     head_spans = _last_binding_spans(head_blob)
     return any(baseline_spans.get(key) != head_spans.get(key) for key in overlapping)
