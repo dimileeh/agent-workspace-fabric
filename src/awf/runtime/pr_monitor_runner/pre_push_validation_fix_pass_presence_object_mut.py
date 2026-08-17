@@ -130,19 +130,16 @@ def _object_assign_target_and_args(
     """
     target_match = _OBJECT_ASSIGN_TARGET_RE.match(raw_line, match_start)
     if target_match is None:
-        # ``finditer`` may start mid-line; search from match_start within the call.
-        target_match = _OBJECT_ASSIGN_TARGET_RE.search(raw_line, match_start)
-        if target_match is None or target_match.start() != match_start:
-            return None
+        return None
     target = target_match.group(1)
     open_paren = raw_line.find("(", match_start)
-    if open_paren < 0:
+    if open_paren < 0:  # pragma: no cover — INLINE/TARGET patterns already require '('
         return None
     args = _update_call_argument_span(raw_line, open_paren)
     if args is None:
         return target, None
     parts = _split_top_level_call_args(args)
-    if not parts:
+    if not parts:  # pragma: no cover — TARGET match implies at least the receiver arg
         return target, None
     return target, parts[1:]
 
@@ -200,7 +197,7 @@ def _object_assign_call_unclosed(raw_line: str) -> bool:
         ):
             continue
         open_paren = raw_line.find("(", match.start())
-        if open_paren < 0:
+        if open_paren < 0:  # pragma: no cover — INLINE pattern already requires '('
             continue
         if _update_call_argument_span(raw_line, open_paren) is None:
             return True
@@ -335,18 +332,16 @@ def _object_define_property_target_and_args(
     """
     target_match = _OBJECT_DEFINE_PROPERTY_TARGET_RE.match(raw_line, match_start)
     if target_match is None:
-        target_match = _OBJECT_DEFINE_PROPERTY_TARGET_RE.search(raw_line, match_start)
-        if target_match is None or target_match.start() != match_start:
-            return None
+        return None
     target = target_match.group(1)
     open_paren = raw_line.find("(", match_start)
-    if open_paren < 0:
+    if open_paren < 0:  # pragma: no cover — INLINE/TARGET patterns already require '('
         return None
     args = _update_call_argument_span(raw_line, open_paren)
     if args is None:
         return target, None
     parts = _split_top_level_call_args(args)
-    if not parts:
+    if not parts:  # pragma: no cover — TARGET match implies at least the receiver arg
         return target, None
     return target, parts[1:]
 
@@ -404,7 +399,7 @@ def _object_define_property_call_unclosed(raw_line: str) -> bool:
         ):
             continue
         open_paren = raw_line.find("(", match.start())
-        if open_paren < 0:
+        if open_paren < 0:  # pragma: no cover — INLINE pattern already requires '('
             continue
         if _update_call_argument_span(raw_line, open_paren) is None:
             return True
@@ -462,18 +457,16 @@ def _object_define_properties_target_and_args(
     """
     target_match = _OBJECT_DEFINE_PROPERTIES_TARGET_RE.match(raw_line, match_start)
     if target_match is None:
-        target_match = _OBJECT_DEFINE_PROPERTIES_TARGET_RE.search(raw_line, match_start)
-        if target_match is None or target_match.start() != match_start:
-            return None
+        return None
     target = target_match.group(1)
     open_paren = raw_line.find("(", match_start)
-    if open_paren < 0:
+    if open_paren < 0:  # pragma: no cover — INLINE/TARGET patterns already require '('
         return None
     args = _update_call_argument_span(raw_line, open_paren)
     if args is None:
         return target, None
     parts = _split_top_level_call_args(args)
-    if not parts:
+    if not parts:  # pragma: no cover — TARGET match implies at least the receiver arg
         return target, None
     return target, parts[1:]
 
@@ -532,7 +525,7 @@ def _object_define_properties_call_unclosed(raw_line: str) -> bool:
         ):
             continue
         open_paren = raw_line.find("(", match.start())
-        if open_paren < 0:
+        if open_paren < 0:  # pragma: no cover — INLINE pattern already requires '('
             continue
         if _update_call_argument_span(raw_line, open_paren) is None:
             return True
@@ -796,18 +789,16 @@ def _reflect_set_target_and_args(
     """
     target_match = _REFLECT_SET_TARGET_RE.match(raw_line, match_start)
     if target_match is None:
-        target_match = _REFLECT_SET_TARGET_RE.search(raw_line, match_start)
-        if target_match is None or target_match.start() != match_start:
-            return None
+        return None
     target = target_match.group(1)
     open_paren = raw_line.find("(", match_start)
-    if open_paren < 0:
+    if open_paren < 0:  # pragma: no cover — INLINE/TARGET patterns already require '('
         return None
     args = _update_call_argument_span(raw_line, open_paren)
     if args is None:
         return target, None
     parts = _split_top_level_call_args(args)
-    if not parts:
+    if not parts:  # pragma: no cover — TARGET match implies at least the receiver arg
         return target, None
     return target, parts[1:]
 
@@ -865,7 +856,7 @@ def _reflect_set_call_unclosed(raw_line: str) -> bool:
         ):
             continue
         open_paren = raw_line.find("(", match.start())
-        if open_paren < 0:
+        if open_paren < 0:  # pragma: no cover — INLINE pattern already requires '('
             continue
         if _update_call_argument_span(raw_line, open_paren) is None:
             return True
