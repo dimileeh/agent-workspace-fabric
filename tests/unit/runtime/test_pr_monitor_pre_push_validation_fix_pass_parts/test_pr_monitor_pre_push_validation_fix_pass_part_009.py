@@ -478,6 +478,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\n[FEATURE_ENABLED, other] = [False, 1]\n",
     )
+    # JS object destructuring: ``{name} =`` / ``({name} = …)`` place ``}`` before
+    # ``=``, so paren/list-only unpack scanners emit no binding and reuse FIXED
+    # salvage (PRRT_kwDOSJAM6s6ZtZ_0).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob=("FEATURE_ENABLED = true\n({FEATURE_ENABLED} = {FEATURE_ENABLED: false});\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\n{FEATURE_ENABLED} = {FEATURE_ENABLED: false};\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = true\n",
+        head_blob="FEATURE_ENABLED = true\n({a, FEATURE_ENABLED} = obj);\n",
+    )
     # Starred / trailing-comma paren-list unpack must bind too; plain-target
     # bodies miss these and keep FIXED salvage (PRRT_kwDOSJAM6s6ZsfLc).
     assert not _added_salvage_blob_retained(

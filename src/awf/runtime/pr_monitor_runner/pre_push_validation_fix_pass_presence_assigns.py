@@ -164,7 +164,9 @@ _INLINE_UNPACK_LHS_BEFORE_RE = re.compile(
 # (PRRT_kwDOSJAM6s6ZsnYi). Starred items and trailing commas remain covered
 # via target extraction inside the body (PRRT_kwDOSJAM6s6ZsfLc).
 _AFTER_PAREN_LIST_UNPACK_ASSIGN_RE = re.compile(rf"[ \t]*{_EQUALS_STYLE_ASSIGN_OP}")
-_BRACKET_CLOSE_FOR_OPEN = {"(": ")", "[": "]"}
+# Include ``{}`` so JS object destructuring ``{a} =`` / ``({a} = …)`` binds like
+# paren/list unpacking (PRRT_kwDOSJAM6s6ZtZ_0).
+_BRACKET_CLOSE_FOR_OPEN = {"(": ")", "[": "]", "{": "}"}
 # Trailing ``target: `` before a matched type token in ``target: T =``. The
 # target is recovered so mid-line / nested typed assigns bind ``target`` rather
 # than ``T`` (PRRT_kwDOSJAM6s6Zs0s8). Suite headers are excluded via
@@ -439,11 +441,11 @@ def _unpacking_lhs_names_before(before: str, *, raw_before: str) -> tuple[str, .
 
 
 def _matching_bracket_closer_index(text: str, start: int) -> int | None:
-    """Return index of the closer matching ``text[start]`` (``(`` / ``[``), or None.
+    """Return index of the closer matching ``text[start]`` (``(`` / ``[`` / ``{``), or None.
 
-    ``()`` and ``[]`` may nest interchangeably so ``(a, [b, c]) =`` still
-    resolves (PRRT_kwDOSJAM6s6ZsnYi). ``text`` is executable-scan output where
-    strings are already blanked.
+    ``()``, ``[]``, and ``{}`` may nest interchangeably so ``(a, [b, c]) =`` /
+    ``({a} = …)`` still resolve (PRRT_kwDOSJAM6s6ZsnYi, PRRT_kwDOSJAM6s6ZtZ_0).
+    ``text`` is executable-scan output where strings are already blanked.
     """
     opener = text[start]
     closer = _BRACKET_CLOSE_FOR_OPEN.get(opener)
@@ -456,7 +458,7 @@ def _matching_bracket_closer_index(text: str, start: int) -> int | None:
         if nested is not None:
             stack.append(nested)
             continue
-        if ch in ")]":
+        if ch in ")]}":
             if not stack or ch != stack[-1]:
                 return None
             stack.pop()
@@ -466,23 +468,25 @@ def _matching_bracket_closer_index(text: str, start: int) -> int | None:
 
 
 def _paren_list_unpack_binding_names(raw_line: str, *, scan: str) -> tuple[str, ...]:
-    """Return targets from ``(a, b) =`` / ``[a, b] =`` forms on the line.
+    """Return targets from ``(a, b) =`` / ``[a, b] =`` / ``{a} =`` forms on the line.
 
-    Parenthesized and list unpacking place ``)`` / ``]`` immediately before
-    ``=``, so identifier-before-assign patterns find nothing and would keep
-    stale FIXED salvage (PRRT_kwDOSJAM6s6ZsZ5d). Bodies are scanned with
+    Parenthesized, list, and JS object-destructuring unpacking place ``)`` /
+    ``]`` / ``}`` immediately before ``=``, so identifier-before-assign
+    patterns find nothing and would keep stale FIXED salvage
+    (PRRT_kwDOSJAM6s6ZsZ5d, PRRT_kwDOSJAM6s6ZtZ_0). Bodies are scanned with
     balanced brackets so nested ``(other, (FEATURE_ENABLED, rest)) =`` /
-    ``[other, [FEATURE_ENABLED, rest]] =`` still bind (PRRT_kwDOSJAM6s6ZsnYi).
-    Starred items and trailing commas are included so ``(a, *rest) =`` /
-    ``(a, b,) =`` still bind (PRRT_kwDOSJAM6s6ZsfLc). Subscript spellings are
-    recovered from ``raw_line`` because scan blanks quoted indices.
+    ``[other, [FEATURE_ENABLED, rest]] =`` / ``({FEATURE_ENABLED} = …)`` still
+    bind (PRRT_kwDOSJAM6s6ZsnYi). Starred items and trailing commas are
+    included so ``(a, *rest) =`` / ``(a, b,) =`` still bind
+    (PRRT_kwDOSJAM6s6ZsfLc). Subscript spellings are recovered from
+    ``raw_line`` because scan blanks quoted indices.
     """
     names: list[str] = []
     idx = 0
     length = len(scan)
     while idx < length:
         ch = scan[idx]
-        if ch not in "([":
+        if ch not in "([{":
             idx += 1
             continue
         # Require a non-identifier boundary before the opener so ``foo(a) =`` /
@@ -522,9 +526,10 @@ def _inline_assign_binding_names(raw_line: str) -> tuple[str, ...]:
     kwargs, default parameters, and type tokens are skipped so phantoms cannot
     enter salvage / tip-extra key sets (PRRT_kwDOSJAM6s6ZsJyZ). Bare unpacking
     and parenthesized walrus after ``,`` / ``(`` still bind
-    (PRRT_kwDOSJAM6s6ZsOT0). Parenthesized / list unpacking ``(a, b) =`` /
-    ``[a, b] =`` bind too, including nested targets (PRRT_kwDOSJAM6s6ZsZ5d,
-    PRRT_kwDOSJAM6s6ZsnYi). Subscript targets recover their spelling from
+    (PRRT_kwDOSJAM6s6ZsOT0). Parenthesized / list / object-destructuring
+    unpacking ``(a, b) =`` / ``[a, b] =`` / ``{a} =`` bind too, including
+    nested targets (PRRT_kwDOSJAM6s6ZsZ5d, PRRT_kwDOSJAM6s6ZsnYi,
+    PRRT_kwDOSJAM6s6ZtZ_0). Subscript targets recover their spelling from
     ``raw_line`` because scan blanking turns ``FLAGS["enabled"]`` into
     ``FLAGS[         ]``.
     """
