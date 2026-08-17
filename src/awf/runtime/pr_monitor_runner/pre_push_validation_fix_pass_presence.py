@@ -18,13 +18,16 @@ from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 # Binding targets that an appended tip can rebind to supersede added salvage.
 # Optional YAML block-sequence marker (``- ``) before the key so list-item
 # mappings bind like nested leaves (PRRT_kwDOSJAM6s6ZqeWt).
+# Optional shell ``export `` before the key so ``export FEATURE_ENABLED=true``
+# binds like bare ``FEATURE_ENABLED=true`` (PRRT_kwDOSJAM6s6ZqseO). Declaration
+# forms (``export class`` / ``export const``) still match earlier patterns.
 # Bare keys allow ``-`` so TOML / YAML hyphenated names bind
 # (``feature-enabled = true``; PRRT_kwDOSJAM6s6Zqip3).
 # TOML dotted keys join bare or quoted segments with ``.``
 # (``feature.enabled`` / ``site."google.com"``; PRRT_kwDOSJAM6s6Zql88).
 _ASSIGN_KEY_SEGMENT = r'(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')'
 _ASSIGN_BINDING_RE = re.compile(
-    r"(?m)^[ \t]*(?:-[ \t]+)?(?:"
+    r"(?m)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?:"
     # Dotted TOML keys (≥1 ``.``): require the full path before ``=`` / ``:``
     # so ``feature.enabled = true`` binds as ``feature.enabled``, not nothing.
     rf"({_ASSIGN_KEY_SEGMENT}(?:\.{_ASSIGN_KEY_SEGMENT})+)"
@@ -467,16 +470,17 @@ def _binding_names(text: str) -> set[str]:
     """Return names bound by assignments / defs / defines in ``text``.
 
     Used to detect when appended tip content rebinds a name from an added salvage
-    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, YAML
+    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, shell
+    ``export FEATURE_ENABLED=true`` then ``export FEATURE_ENABLED=false``, YAML
     ``feature_enabled: true`` then ``feature_enabled: false``, quoted JSON
     ``"feature-enabled": true`` then ``"feature-enabled": false``, TOML
     ``feature-enabled = true`` / ``"feature-enabled" = true``, or TOML dotted
     ``feature.enabled = true`` / ``feature."enabled" = true``), which keeps a
     line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3,
-    PRRT_kwDOSJAM6s6Zql88). Lines that start inside ``/*`` or a triple-quoted
-    string are skipped so Google-style docstring Args prose cannot falsely
-    supersede (PRRT_kwDOSJAM6s6ZqPO9).
+    PRRT_kwDOSJAM6s6ZqseO, PRRT_kwDOSJAM6s6ZqNAk, PRRT_kwDOSJAM6s6ZqQfh,
+    PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6Zql88). Lines that start inside ``/*``
+    or a triple-quoted string are skipped so Google-style docstring Args prose
+    cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
     """
     names: set[str] = set()
     in_block_comment = False
@@ -751,11 +755,12 @@ def _tip_extra_can_supersede_modified_salvage(
 
     Baseline-backed retention uses clean ``git merge-file`` equality with HEAD.
     A tip can keep the salvage hunk and append a later rebinding of the same
-    name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``); with
+    name (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, or shell
+    ``export FEATURE_ENABLED=true`` then ``export FEATURE_ENABLED=false``); with
     surrounding context merge-file reproduces that tip cleanly, so equality
     alone would retain stale FIXED evidence. Only scoped keys whose last binding
     span (opener plus indented body) changed vs parent count — unrelated appends
-    and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j). Tip-extra lines use
+    and later hunks stay retained (PRRT_kwDOSJAM6s6Zp_3j, PRRT_kwDOSJAM6s6ZqseO). Tip-extra lines use
     set difference except for declaration openers, which need multiset counting
     so same-signature redefinitions are not dropped (PRRT_kwDOSJAM6s6ZqDij);
     full-line multiset would over-reject surplus salvage assignment copies

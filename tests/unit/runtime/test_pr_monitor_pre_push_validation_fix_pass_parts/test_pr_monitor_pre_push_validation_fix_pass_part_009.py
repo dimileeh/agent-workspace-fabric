@@ -341,6 +341,13 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
             "export default async function guard() {\n  return false;\n}\n"
         ),
     )
+    # Shell ``export NAME=value`` must bind like bare assignments; otherwise an
+    # appended ``export FEATURE_ENABLED=false`` keeps a line-aligned prefix and
+    # reuses stale FIXED evidence (PRRT_kwDOSJAM6s6ZqseO).
+    assert not _added_salvage_blob_retained(
+        commit_blob="export FEATURE_ENABLED=true\n",
+        head_blob="export FEATURE_ENABLED=true\nexport FEATURE_ENABLED=false\n",
+    )
     # Comment-only / unrelated appends cannot supersede the salvage binding.
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED = True\n",
@@ -488,6 +495,23 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent,
         commit_blob=commit,
         head_blob=("x = 1\nFEATURE_ENABLED = True\ny = 3\nFEATURE_ENABLED = False\n"),
+    )
+    # Shell ``export NAME=value`` rebinds must supersede like bare assignments
+    # (PRRT_kwDOSJAM6s6ZqseO).
+    parent_export = "x=1\nexport FEATURE_ENABLED=false\ny=2\n"
+    commit_export = "x=1\nexport FEATURE_ENABLED=true\ny=2\n"
+    assert _salvage_changed_binding_names(parent_blob=parent_export, commit_blob=commit_export) == {
+        "FEATURE_ENABLED"
+    }
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_export,
+        commit_blob=commit_export,
+        head_blob=("x=1\nexport FEATURE_ENABLED=true\ny=2\nexport FEATURE_ENABLED=false\n"),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_export,
+        commit_blob=commit_export,
+        head_blob="x=1\nexport FEATURE_ENABLED=true\ny=2\nother=1\n",
     )
     # YAML-style key rebinds must supersede like equals-style assignments
     # (PRRT_kwDOSJAM6s6ZqNAk).
