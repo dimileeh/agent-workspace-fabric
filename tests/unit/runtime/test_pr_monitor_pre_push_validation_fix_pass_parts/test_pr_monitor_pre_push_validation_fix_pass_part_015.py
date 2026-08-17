@@ -319,6 +319,7 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
         _binding_names_for_line,
         _del_binding_names,
         _object_assign_mutation_binding_names,
+        _object_define_property_mutation_binding_names,
         _setattr_mutation_binding_names,
         _setitem_mutation_binding_names,
         _unset_binding_names,
@@ -338,6 +339,18 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
     assert _update_mutation_binding_names("// FLAGS.update(enabled=False)") == ()
     assert _object_assign_mutation_binding_names("// Object.assign(guard, {enabled: false})") == ()
     assert _object_assign_mutation_binding_names("# Object.assign(guard, {enabled: false})") == ()
+    assert (
+        _object_define_property_mutation_binding_names(
+            '// Object.defineProperty(guard, "enabled", {value: false})'
+        )
+        == ()
+    )
+    assert (
+        _object_define_property_mutation_binding_names(
+            '# Object.defineProperty(guard, "enabled", {value: false})'
+        )
+        == ()
+    )
     assert _del_binding_names("# del guard.enabled") == ()
     assert _del_binding_names("// delete guard.enabled") == ()
     # ``#undef`` is a preprocessor binding (like ``#define``), not a comment
@@ -485,6 +498,134 @@ def test_opaque_object_assign_shares_salvaged_receiver() -> None:
     assert _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob=salvage + "Object.assign(\n  other,\n  extra\n);\n",
+    )
+
+
+@pytest.mark.unit
+def test_object_define_property_mutation_binding_names() -> None:
+    """``Object.defineProperty`` synthesizes ``target.key`` (PRRT_kwDOSJAM6s6Zy4pR)."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _join_incomplete_object_define_property_line,
+        _object_define_property_call_unclosed,
+        _object_define_property_mutation_args_fully_synthesizable,
+        _object_define_property_mutation_binding_names,
+    )
+
+    assert _object_define_property_mutation_binding_names(
+        'Object.defineProperty(guard, "enabled", {value: false})'
+    ) == ("guard.enabled",)
+    assert _object_define_property_mutation_binding_names(
+        "Object.defineProperty(guard, 'enabled', {value: false})"
+    ) == ("guard.enabled",)
+    assert _object_define_property_mutation_binding_names(
+        'globalThis.Object.defineProperty(guard, "enabled", {value: false})'
+    ) == ("guard.enabled",)
+    assert (
+        _object_define_property_mutation_binding_names(
+            "Object.defineProperty(guard, key, {value: false})"
+        )
+        == ()
+    )
+    assert (
+        _object_define_property_mutation_binding_names(
+            'Object.defineProperty(guard, "enabled", {value: false'
+        )
+        == ()
+    )
+    assert (
+        _object_define_property_mutation_binding_names(
+            'msg = "Object.defineProperty(guard, \\"enabled\\", {value: false})"'
+        )
+        == ()
+    )
+    assert _object_define_property_mutation_args_fully_synthesizable(
+        'Object.defineProperty(guard, "enabled", {value: false})'
+    )
+    assert not _object_define_property_mutation_args_fully_synthesizable(
+        "Object.defineProperty(guard, key, {value: false})"
+    )
+    multi = [
+        "Object.defineProperty(",
+        "  guard,",
+        '  "enabled",',
+        "  {value: false}",
+        ");",
+    ]
+    assert _object_define_property_call_unclosed(multi[0])
+    joined = _join_incomplete_object_define_property_line(multi, 0)
+    assert not _object_define_property_call_unclosed(joined)
+    assert _object_define_property_mutation_binding_names(joined) == ("guard.enabled",)
+
+
+@pytest.mark.unit
+def test_opaque_object_define_property_shares_salvaged_receiver() -> None:
+    """Opaque ``Object.defineProperty`` fail-closed on salvaged receivers."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+        _tip_extra_opaque_object_define_property_shares_receiver,
+    )
+
+    salvage = "guard.enabled = true\n"
+    assert _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(guard, key, {value: false})\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + 'Object.defineProperty(guard, "enabled", {value: false})\n',
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(other, key, {value: false})\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "// Object.defineProperty(guard, key, {value: false})\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(guard, key, {value: false})\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'Object.defineProperty(guard, "enabled", {value: false})\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + 'Object.defineProperty(guard, "other", {value: false})\n',
+    )
+    nested = "config.guard.enabled = true\n"
+    assert _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=nested,
+        head_blob=nested + "Object.defineProperty(config.guard, key, {value: false})\n",
+        candidate_keys={"config.guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=nested,
+        head_blob=nested + "Object.defineProperty(config.guard, key, {value: false})\n",
+    )
+    assert _tip_extra_opaque_object_define_property_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(\n  guard,\n  key,\n  {value: false}\n);\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=(
+            salvage + 'Object.defineProperty(\n  guard,\n  "enabled",\n  {value: false}\n);\n'
+        ),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.defineProperty(\n  other,\n  key,\n  {value: false}\n);\n",
     )
 
 

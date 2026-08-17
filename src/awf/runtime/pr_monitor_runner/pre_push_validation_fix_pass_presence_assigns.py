@@ -345,6 +345,22 @@ _OBJECT_LITERAL_KEY_ENTRY_RE = re.compile(
     r")"
     r"(?:[ \t]*:|[ \t]*$)"
 )
+# JS ``Object.defineProperty(guard, "enabled", {value: false})`` mutates an
+# attribute without an equals-style binding; call names are only ``Object`` /
+# ``Object.defineProperty``, which never intersect salvaged ``guard.enabled``
+# (PRRT_kwDOSJAM6s6Zy4pR).
+_INLINE_OBJECT_DEFINE_PROPERTY_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*Object\.defineProperty"
+    r"[ \t]*\("
+)
+_OBJECT_DEFINE_PROPERTY_TARGET_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*Object\.defineProperty"
+    rf"[ \t]*\([ \t]*({_SETATTR_OBJ})"
+    r"(?=[ \t]*[,)])"
+)
+_OBJECT_DEFINE_PROPERTY_PROP_LIT_RE = re.compile(r'^(?:"([^"\n]+)"|\'([^\'\n]+)\')$')
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -1273,6 +1289,195 @@ def _object_assign_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _object_define_property_literal_key(prop_arg: str) -> str | None:
+    """Return a string-literal property name, or None when opaque."""
+    match = _OBJECT_DEFINE_PROPERTY_PROP_LIT_RE.match(prop_arg.strip())
+    if match is None:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def _object_define_property_target_and_args(
+    raw_line: str, *, match_start: int
+) -> tuple[str, list[str] | None] | None:
+    """Return ``(target, remaining_args)`` for an ``Object.defineProperty`` call.
+
+    ``remaining_args`` is ``None`` when the argument list is unclosed (fail closed
+    on a shared salvaged receiver). Returns ``None`` when no target can be read.
+    """
+    target_match = _OBJECT_DEFINE_PROPERTY_TARGET_RE.match(raw_line, match_start)
+    if target_match is None:
+        target_match = _OBJECT_DEFINE_PROPERTY_TARGET_RE.search(raw_line, match_start)
+        if target_match is None or target_match.start() != match_start:
+            return None
+    target = target_match.group(1)
+    open_paren = raw_line.find("(", match_start)
+    if open_paren < 0:
+        return None
+    args = _update_call_argument_span(raw_line, open_paren)
+    if args is None:
+        return target, None
+    parts = _split_top_level_call_args(args)
+    if not parts:
+        return target, None
+    return target, parts[1:]
+
+
+def _object_define_property_call_targets(
+    raw_line: str,
+) -> tuple[tuple[str, bool], ...]:
+    """Return ``(target, prop_fully_synthesizable)`` for each defineProperty.
+
+    Unclosed or opaque property names report ``prop_fully_synthesizable=False`` so
+    tip-extra fail-closed can drop stale salvage (PRRT_kwDOSJAM6s6Zy4pR).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    out: list[tuple[str, bool]] = []
+    for match in _INLINE_OBJECT_DEFINE_PROPERTY_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("defineProperty",),
+        ):
+            continue
+        parsed = _object_define_property_target_and_args(raw_line, match_start=match.start())
+        if parsed is None:
+            continue
+        target, rest = parsed
+        if rest is None or not rest:
+            out.append((target, False))
+            continue
+        fully = _object_define_property_literal_key(rest[0]) is not None
+        out.append((target, fully))
+    return tuple(out)
+
+
+def _object_define_property_call_unclosed(raw_line: str) -> bool:
+    """Return True when an executable ``Object.defineProperty(`` lacks ``)``.
+
+    Formatters split ``Object.defineProperty(guard, "enabled", {…})`` across
+    lines; per-line scanners then see no target on the opener and no mutation on
+    continuations (PRRT_kwDOSJAM6s6Zy4pR).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return False
+    scan = _executable_call_scan_text(raw_line)
+    for match in _INLINE_OBJECT_DEFINE_PROPERTY_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("defineProperty",),
+        ):
+            continue
+        open_paren = raw_line.find("(", match.start())
+        if open_paren < 0:
+            continue
+        if _update_call_argument_span(raw_line, open_paren) is None:
+            return True
+    return False
+
+
+def _join_incomplete_object_define_property_line(lines: list[str], idx: int) -> str:
+    """Join ``lines[idx]`` with following lines until ``defineProperty(…)`` closes.
+
+    Tip-extra scanners must see the target and property together; otherwise
+    multiline defines retain stale salvage (PRRT_kwDOSJAM6s6Zy4pR).
+    """
+    raw_line = lines[idx]
+    if not _object_define_property_call_unclosed(raw_line):
+        return raw_line
+    joined = raw_line.rstrip()
+    j = idx + 1
+    while j < len(lines):
+        nxt = lines[j]
+        nxt_stripped = nxt.strip()
+        if _object_assign_join_gap_skippable(nxt_stripped):
+            j += 1
+            continue
+        if nxt_stripped.startswith("/*") and "*/" not in nxt_stripped:
+            j += 1
+            while j < len(lines):
+                close_line = lines[j]
+                j += 1
+                if "*/" not in close_line:
+                    continue
+                after = close_line.split("*/", 1)[1].strip()
+                if after == "":
+                    break
+                joined = f"{joined} {after}"
+                break
+            else:
+                break
+            if not _object_define_property_call_unclosed(joined):
+                break
+            continue
+        joined = f"{joined} {nxt.lstrip(' \t')}"
+        j += 1
+        if not _object_define_property_call_unclosed(joined):
+            break
+    return joined
+
+
+def _join_incomplete_object_mutation_line(lines: list[str], idx: int) -> str:
+    """Join incomplete ``Object.assign`` / ``Object.defineProperty`` argument lists."""
+    raw_line = lines[idx]
+    if _object_assign_call_unclosed(raw_line):
+        return _join_incomplete_object_assign_line(lines, idx)
+    if _object_define_property_call_unclosed(raw_line):
+        return _join_incomplete_object_define_property_line(lines, idx)
+    return raw_line
+
+
+def _object_define_property_mutation_args_fully_synthesizable(raw_line: str) -> bool:
+    """Return True when every ``defineProperty`` property arg is a string literal."""
+    calls = _object_define_property_call_targets(raw_line)
+    if not calls:
+        return False
+    return all(fully for _target, fully in calls)
+
+
+def _object_define_property_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return ``target.key`` keys mutated by ``Object.defineProperty`` literals.
+
+    Tip-extra ``Object.defineProperty(guard, "enabled", {value: false})`` must
+    supersede salvage of ``guard.enabled``; assign and call scanners alone leave
+    the salvage retained (PRRT_kwDOSJAM6s6Zy4pR). Opaque property names synthesize
+    nothing here and are handled by tip-extra receiver fail-closed.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for match in _INLINE_OBJECT_DEFINE_PROPERTY_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("defineProperty",),
+        ):
+            continue
+        parsed = _object_define_property_target_and_args(raw_line, match_start=match.start())
+        if parsed is None:
+            continue
+        target, rest = parsed
+        if rest is None or not rest:
+            continue
+        key = _object_define_property_literal_key(rest[0])
+        if not key:
+            continue
+        binding = f"{target}.{key}"
+        if binding not in names:
+            names.append(binding)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
@@ -1293,7 +1498,8 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     (PRRT_kwDOSJAM6s6Zu8Kn). ``__setitem__`` / ``__delitem__`` / ``update``
     targets synthesize ``obj["key"]`` the same way (PRRT_kwDOSJAM6s6ZwrnH).
     ``Object.assign`` object-literal keys synthesize ``target.key``
-    (PRRT_kwDOSJAM6s6Zxwhs).
+    (PRRT_kwDOSJAM6s6Zxwhs). ``Object.defineProperty`` string-literal property
+    names synthesize ``target.key`` the same way (PRRT_kwDOSJAM6s6Zy4pR).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
@@ -1304,6 +1510,7 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     setitem = _setitem_mutation_binding_names(raw_line)
     update_call = _update_mutation_binding_names(raw_line)
     object_assign = _object_assign_mutation_binding_names(raw_line)
+    object_define = _object_define_property_mutation_binding_names(raw_line)
     if (
         primary is None
         and not inline
@@ -1314,6 +1521,7 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
         and not setitem
         and not update_call
         and not object_assign
+        and not object_define
     ):
         return ()
     names: list[str] = []
@@ -1328,6 +1536,7 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
         *setitem,
         *update_call,
         *object_assign,
+        *object_define,
     ):
         if name not in names:
             names.append(name)
