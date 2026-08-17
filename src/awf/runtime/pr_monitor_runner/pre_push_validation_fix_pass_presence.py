@@ -729,6 +729,10 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     Import-only receivers (``from guards import guard`` / ``import guards``) are
     not bindings; union salvage call-site names into the call-candidate set so
     tip ``guard.disable()`` still supersedes (PRRT_kwDOSJAM6s6ZryCh).
+    Indirect attribute mutations (``setattr(guard, "enabled", False)`` /
+    ``delattr`` / ``object.__setattr__`` / ``guard.__setattr__``) synthesize
+    ``guard.enabled`` binding keys so they supersede like a rebind
+    (PRRT_kwDOSJAM6s6Zu8Kn).
     """
     if len(head_blob) <= len(salvage):
         return False

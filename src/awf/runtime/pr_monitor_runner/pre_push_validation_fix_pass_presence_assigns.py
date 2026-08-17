@@ -271,6 +271,28 @@ _INLINE_UPDATE_PREFIX_RE = re.compile(
     r"(?:\+\+|--)"
     rf"({_UPDATE_TARGET_SCAN})"
 )
+# Python ``setattr`` / ``delattr`` (and ``object.__setattr__`` /
+# ``receiver.__setattr__`` / ``__delattr__``) mutate an attribute without an
+# equals-style binding or a call name that intersects salvage ``obj.attr``;
+# tip ``setattr(guard, "enabled", False)`` kept a line-aligned salvage prefix /
+# clean merge-file equality and reused stale FIXED evidence
+# (PRRT_kwDOSJAM6s6Zu8Kn). Free-function form takes ``(obj, "attr", …)``;
+# method form takes ``obj.__setattr__("attr", …)``. Match on ``raw_line`` so
+# quoted attr names survive ``_executable_call_scan_text`` blanking, then drop
+# hits whose helper keyword was blanked (comment / string / ``/* … */``).
+_SETATTR_OBJ = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_SETATTR_ATTR_LIT = r"(?:\"([^\"\n]+)\"|'([^'\n]+)')"
+_SETATTR_HELPER = r"(?:setattr|delattr|__setattr__|__delattr__)"
+_INLINE_SETATTR_FREE_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"(?:[A-Za-z_][A-Za-z0-9_]*\.)*{_SETATTR_HELPER}"
+    rf"[ \t]*\([ \t]*({_SETATTR_OBJ})[ \t]*,[ \t]*{_SETATTR_ATTR_LIT}"
+)
+_INLINE_SETATTR_METHOD_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"({_SETATTR_OBJ})\.(?:__setattr__|__delattr__)"
+    rf"[ \t]*\([ \t]*{_SETATTR_ATTR_LIT}"
+)
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -673,6 +695,59 @@ def _update_expr_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _setattr_helper_executable(*, raw_line: str, scan: str, match_start: int) -> bool:
+    """True when the setattr/delattr helper keyword at ``match_start`` is executable."""
+    open_paren = raw_line.find("(", match_start)
+    if open_paren < 0:
+        return False
+    helper_scan = scan[match_start:open_paren]
+    return any(
+        token in helper_scan for token in ("setattr", "delattr", "__setattr__", "__delattr__")
+    )
+
+
+def _setattr_mutation_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return ``obj.attr`` keys mutated by setattr/delattr helpers on ``raw_line``.
+
+    Tip-extra ``setattr(guard, "enabled", False)`` / ``delattr(guard, "enabled")`` /
+    ``object.__setattr__(guard, "enabled", False)`` /
+    ``guard.__setattr__("enabled", False)`` / ``guard.__delattr__("enabled")``
+    must supersede salvage of ``guard.enabled``; assign and call scanners alone
+    leave the salvage retained (PRRT_kwDOSJAM6s6Zu8Kn). Match operands on
+    ``raw_line`` so quoted attr literals remain visible, then drop hits whose
+    helper keyword was blanked by ``_executable_call_scan_text``.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+
+    def _attr_from_groups(match: re.Match[str], double_idx: int, single_idx: int) -> str | None:
+        attr = match.group(double_idx) or match.group(single_idx)
+        return attr if attr else None
+
+    for match in _INLINE_SETATTR_FREE_RE.finditer(raw_line):
+        if not _setattr_helper_executable(raw_line=raw_line, scan=scan, match_start=match.start()):
+            continue
+        attr = _attr_from_groups(match, 2, 3)
+        if not attr:
+            continue
+        key = f"{match.group(1)}.{attr}"
+        if key not in names:
+            names.append(key)
+    for match in _INLINE_SETATTR_METHOD_RE.finditer(raw_line):
+        if not _setattr_helper_executable(raw_line=raw_line, scan=scan, match_start=match.start()):
+            continue
+        attr = _attr_from_groups(match, 2, 3)
+        if not attr:
+            continue
+        key = f"{match.group(1)}.{attr}"
+        if key not in names:
+            names.append(key)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
@@ -685,19 +760,23 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     ``unset 'NAME'`` / ``unset "NAME"``) are included the same way
     (PRRT_kwDOSJAM6s6ZuRSm, PRRT_kwDOSJAM6s6Zu20N). JS/C/C++ ``++`` / ``--``
     update targets are included so increment/decrement supersedes without an
-    equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb).
+    equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb). ``setattr`` / ``delattr`` /
+    ``__setattr__`` / ``__delattr__`` targets are included so indirect attribute
+    mutations supersede without a rebind or intersecting call name
+    (PRRT_kwDOSJAM6s6Zu8Kn).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
     deleted = _del_binding_names(raw_line)
     unset = _unset_binding_names(raw_line)
     updated = _update_expr_binding_names(raw_line)
-    if primary is None and not inline and not deleted and not unset and not updated:
+    mutated = _setattr_mutation_binding_names(raw_line)
+    if primary is None and not inline and not deleted and not unset and not updated and not mutated:
         return ()
     names: list[str] = []
     if primary is not None:
         names.append(primary)
-    for name in (*inline, *deleted, *unset, *updated):
+    for name in (*inline, *deleted, *unset, *updated, *mutated):
         if name not in names:
             names.append(name)
     return tuple(names)

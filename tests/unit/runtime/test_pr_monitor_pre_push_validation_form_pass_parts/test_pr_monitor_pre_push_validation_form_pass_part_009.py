@@ -763,6 +763,55 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="guard.enabled = true\n",
         head_blob="guard.enabled = true\ndelete other\n",
     )
+    # Indirect attribute mutations via setattr/delattr leave no binding key and
+    # only a bare ``setattr`` call name, which does not intersect salvage
+    # ``guard.enabled``; without recognizing the helper target, tip appends keep
+    # a line-aligned prefix and reuse stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zu8Kn).
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\nsetattr(guard, "enabled", False)\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob="guard.enabled = True\nsetattr(guard, 'enabled', False)\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\ndelattr(guard, "enabled")\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob=('guard.enabled = True\nobject.__setattr__(guard, "enabled", False)\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob=('guard.enabled = True\nbuiltins.setattr(guard, "enabled", False)\n'),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\nguard.__setattr__("enabled", False)\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\nguard.__delattr__("enabled")\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob=('guard.enabled = True\nif ready: setattr(guard, "enabled", False)\n'),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\n# setattr(guard, "enabled", False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\nsetattr(other, "enabled", False)\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="guard.enabled = True\n",
+        head_blob='guard.enabled = True\nsetattr(guard, "other", False)\n',
+    )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;
     # assign/del/delete scanners previously missed it, so tip
     # ``unset FEATURE_ENABLED`` kept a line-aligned salvage prefix and reused
