@@ -139,6 +139,22 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob='"feature-enabled": true\n',
         head_blob='"feature-enabled": true\n"other-key": 1\n',
     )
+    # YAML/JSON ``:`` treats ``"a.b"`` and ``a.b`` as one key. Re-quoting
+    # non-bare segments (correct for TOML ``=``) made quote-only tip rebinds
+    # miss salvage names and retain superseded FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZqtHj).
+    assert not _added_salvage_blob_retained(
+        commit_blob='"a.b": true\n',
+        head_blob='"a.b": true\na.b: false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="a.b: true\n",
+        head_blob='a.b: true\n"a.b": false\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="'a.b': true\n",
+        head_blob="'a.b': true\na.b: false\n",
+    )
     # TOML bare keys may include hyphens (`feature-enabled = true`). Identifier-
     # only matching left both salvage and appended rebind unbound, so the tip
     # kept a line-aligned prefix and reused stale FIXED evidence
@@ -812,6 +828,23 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_ab,
         commit_blob=commit_ab,
         head_blob='"a.b" = true\na.b = false\n',
+    )
+    # YAML ``:`` quote-only rebinds of dotted keys must supersede (unlike TOML
+    # ``=`` where ``"a.b"`` ≠ ``a.b``; PRRT_kwDOSJAM6s6ZqtHj).
+    parent_yaml_ab = '"a.b": false\n'
+    commit_yaml_ab = '"a.b": true\n'
+    assert _salvage_changed_binding_names(
+        parent_blob=parent_yaml_ab, commit_blob=commit_yaml_ab
+    ) == {"a.b"}
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_yaml_ab,
+        commit_blob=commit_yaml_ab,
+        head_blob='"a.b": true\na.b: false\n',
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob="a.b: false\n",
+        commit_blob="a.b: true\n",
+        head_blob='a.b: true\n"a.b": false\n',
     )
     parent_json_sq = "{\n  'feature-enabled': false\n}\n"
     commit_json_sq = "{\n  'feature-enabled': true\n}\n"

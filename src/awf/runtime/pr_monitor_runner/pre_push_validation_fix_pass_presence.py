@@ -54,9 +54,11 @@ _ASSIGN_BINDING_RE = re.compile(
     r"|"
     # Quoted JSON/YAML mapping keys (``"feature-enabled": …`` / ``'k': …``)
     # and quoted TOML keys (``"feature-enabled" = …``). Include the surrounding
-    # quotes in the capture so a key whose name contains ``.`` (``"a.b"``) stays
-    # one segment and does not collapse with dotted ``a.b``
-    # (PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6ZqoYV).
+    # quotes in the capture so a TOML key whose name contains ``.`` (``"a.b"``)
+    # stays one segment and does not collapse with dotted ``a.b``; YAML/JSON
+    # ``:`` bindings strip without re-quoting so the same spellings still match
+    # (PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6ZqoYV,
+    # PRRT_kwDOSJAM6s6ZqtHj).
     r'("[^"\n]+")[ \t]*(?::[ \t]*(?!=)|=(?!=))'
     r"|"
     r"('[^'\n]+')[ \t]*(?::[ \t]*(?!=)|=(?!=))"
@@ -386,29 +388,37 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
 
 
-def _format_normalized_assign_key_segment(segment: str) -> str:
+def _format_normalized_assign_key_segment(segment: str, *, requote_non_bare: bool = True) -> str:
     """Return ``segment`` bare when valid; otherwise keep a quoted form.
 
-    Bare TOML/YAML key segments round-trip without quotes. Segments that contain
-    ``.`` or other non-bare characters must stay quoted so joining with ``.``
-    does not invent extra path boundaries (PRRT_kwDOSJAM6s6ZqoYV).
+    Bare TOML/YAML key segments round-trip without quotes. For TOML ``=``
+    bindings, segments that contain ``.`` or other non-bare characters must
+    stay quoted so joining with ``.`` does not invent extra path boundaries
+    (PRRT_kwDOSJAM6s6ZqoYV). YAML/JSON ``:`` bindings pass
+    ``requote_non_bare=False`` because ``"a.b"`` and ``a.b`` are one key
+    (PRRT_kwDOSJAM6s6ZqtHj).
     """
     if _BARE_ASSIGN_KEY_SEGMENT_RE.fullmatch(segment):
+        return segment
+    if not requote_non_bare:
         return segment
     if '"' not in segment:
         return f'"{segment}"'
     return f"'{segment}'"
 
 
-def _normalize_assign_binding_name(name: str) -> str:
+def _normalize_assign_binding_name(name: str, *, requote_non_bare: bool = True) -> str:
     """Strip redundant quotes from key segments for stable comparison.
 
     ``feature.enabled``, ``feature."enabled"``, and ``"feature".enabled`` all
     normalize to ``feature.enabled`` so mixed spellings supersede each other
-    (PRRT_kwDOSJAM6s6Zql88). Segments that are not valid bare keys (for example
-    ``google.com``) keep quotes after normalize so ``site."google.com"`` stays
-    distinct from ``site.google.com``, and a quoted key ``"a.b"`` stays distinct
-    from dotted ``a.b`` (PRRT_kwDOSJAM6s6ZqoYV). Non-segment names are unchanged.
+    (PRRT_kwDOSJAM6s6Zql88). For TOML ``=`` bindings, segments that are not
+    valid bare keys (for example ``google.com``) keep quotes after normalize so
+    ``site."google.com"`` stays distinct from ``site.google.com``, and a quoted
+    key ``"a.b"`` stays distinct from dotted ``a.b`` (PRRT_kwDOSJAM6s6ZqoYV).
+    YAML/JSON ``:`` bindings set ``requote_non_bare=False`` so quote-only
+    rebinds of the same key still intersect (PRRT_kwDOSJAM6s6ZqtHj).
+    Non-segment names are unchanged.
     """
     if "." not in name and name[:1] not in "\"'":
         return name
@@ -431,7 +441,10 @@ def _normalize_assign_binding_name(name: str) -> str:
         pos = match.end()
     if pos != length or not segments:
         return name
-    return ".".join(_format_normalized_assign_key_segment(segment) for segment in segments)
+    return ".".join(
+        _format_normalized_assign_key_segment(segment, requote_non_bare=requote_non_bare)
+        for segment in segments
+    )
 
 
 def _binding_name_for_line(raw_line: str) -> str | None:
@@ -461,7 +474,12 @@ def _binding_name_for_line(raw_line: str) -> str | None:
         if match is not None:
             for group in match.groups():
                 if group:
-                    return _normalize_assign_binding_name(group)
+                    # Colon-only YAML/JSON matches have no ``=`` in the binder
+                    # span (value text is not captured). Those must not re-quote
+                    # non-bare segments: ``"a.b"`` and ``a.b`` are one key
+                    # (PRRT_kwDOSJAM6s6ZqtHj). TOML/assign ``=`` keeps quotes.
+                    requote_non_bare = pattern is not _ASSIGN_BINDING_RE or "=" in match.group(0)
+                    return _normalize_assign_binding_name(group, requote_non_bare=requote_non_bare)
             return None
     return None
 
