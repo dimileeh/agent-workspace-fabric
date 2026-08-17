@@ -489,6 +489,44 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="check();\n",
         head_blob='const marker = "*/"; /*\ncheck();\n',
     )
+    # Possessives / contractions / inch marks must not open ordinary-string
+    # opacity, or a later real ``/*`` / ``#if`` in the prepended prefix is
+    # ignored and suffix salvage is retained under a disabling region
+    # (PRRT_kwDOSJAM6s6Zq7kr).
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="user's note\n/*\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="don't touch\n/*\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob='the 5" panel\n/*\ncheck();\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="it's fine\n#if 0\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="users' notes\n/*\ncheck();\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="check();\n",
+        head_blob="grab 'em\n/*\ncheck();\n",
+    )
+    # Same opener filter for binding-state scanning: a prose apostrophe must
+    # not swallow a same-line ``/*`` that should hide a later rebind.
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob="FEATURE_ENABLED = True\nuser's note /*\nFEATURE_ENABLED = False\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED = True\n",
+        head_blob='FEATURE_ENABLED = True\npanel 5" /*\nFEATURE_ENABLED = False\n',
+    )
     # Closed wrappers before the salvage suffix are fine (benign prepend region).
     assert _added_salvage_blob_retained(
         commit_blob="check();\n",

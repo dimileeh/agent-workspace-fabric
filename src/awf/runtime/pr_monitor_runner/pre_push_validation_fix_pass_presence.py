@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.helpers_verdict import (
+    _ascii_double_quote_is_delimiter,
+    _ascii_single_quote_is_delimiter,
+)
 from awf.runtime.pr_monitor_runner.path_helpers import _changed_paths_from_name_only_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _git_env_for_merge_safety_object_lookup,
@@ -145,10 +149,11 @@ def _advance_string_or_block_comment_state(
     (PRRT_kwDOSJAM6s6ZqPO9). Ordinary ``"..."`` / ``'...'`` strings (with ``\\``
     escapes) and ``#`` / ``//`` line comments are opaque so a URL/glob or
     comment containing ``/*`` / nested quotes cannot open state and hide a
-    later real rebind (PRRT_kwDOSJAM6s6ZqSbO). Matches the opener/closer
-    vocabulary that ``_prefix_leaves_open_disabling_context`` already tracks
-    for prepend checks; ``#if`` depth is intentionally omitted here (dead-code
-    rebinds stay fail-closed).
+    later real rebind (PRRT_kwDOSJAM6s6ZqSbO). Possessives, contractions, and
+    inch marks are not string openers (PRRT_kwDOSJAM6s6Zq7kr). Matches the
+    opener/closer vocabulary that ``_prefix_leaves_open_disabling_context``
+    already tracks for prepend checks; ``#if`` depth is intentionally omitted
+    here (dead-code rebinds stay fail-closed).
     """
     i = 0
     n = len(chunk)
@@ -181,7 +186,7 @@ def _advance_string_or_block_comment_state(
             if ch == "\\" and i + 1 < n:
                 i += 2
                 continue
-            if ch == '"':
+            if ch == '"' and _ascii_double_quote_is_delimiter(chunk, i, True):
                 in_double_string = False
             i += 1
             continue
@@ -190,7 +195,7 @@ def _advance_string_or_block_comment_state(
             if ch == "\\" and i + 1 < n:
                 i += 2
                 continue
-            if ch == "'":
+            if ch == "'" and _ascii_single_quote_is_delimiter(chunk, i, True):
                 in_single_string = False
             i += 1
             continue
@@ -216,11 +221,11 @@ def _advance_string_or_block_comment_state(
             in_triple_single = True
             i += 3
             continue
-        if chunk[i] == '"':
+        if chunk[i] == '"' and _ascii_double_quote_is_delimiter(chunk, i, False):
             in_double_string = True
             i += 1
             continue
-        if chunk[i] == "'":
+        if chunk[i] == "'" and _ascii_single_quote_is_delimiter(chunk, i, False):
             in_single_string = True
             i += 1
             continue
@@ -309,11 +314,13 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     (PRRT_kwDOSJAM6s6ZpaIn). Ordinary ``"..."`` / ``'...'`` strings (with ``\\``
     escapes) and ``//`` line comments are opaque so a quoted or commented
     ``/*`` token cannot open block-comment state and reject a still-valid
-    salvage suffix (PRRT_kwDOSJAM6s6Zq2m_). Hash-line bodies are still scanned
-    for trailing ``/*`` / triple-quotes (``#endif /*``, ``#define X /*``), and
-    closing a multi-line ``*/`` keeps line-start so a same-line ``#if`` is not
-    missed (PRRT_kwDOSJAM6s6ZpdMC). Closed wrappers and plain header lines
-    return False.
+    salvage suffix (PRRT_kwDOSJAM6s6Zq2m_). Possessives, contractions, and inch
+    marks are not string openers — otherwise they mask a later real ``/*`` /
+    ``#if`` and retain salvage under a disabling region (PRRT_kwDOSJAM6s6Zq7kr).
+    Hash-line bodies are still scanned for trailing ``/*`` / triple-quotes
+    (``#endif /*``, ``#define X /*``), and closing a multi-line ``*/`` keeps
+    line-start so a same-line ``#if`` is not missed (PRRT_kwDOSJAM6s6ZpdMC).
+    Closed wrappers and plain header lines return False.
     """
     in_block_comment = False
     in_triple_double = False
@@ -361,7 +368,7 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
                 i += 2
                 at_line_start = False
                 continue
-            if ch == '"':
+            if ch == '"' and _ascii_double_quote_is_delimiter(prefix, i, True):
                 in_double_string = False
             elif ch == "\n":
                 at_line_start = True
@@ -376,7 +383,7 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
                 i += 2
                 at_line_start = False
                 continue
-            if ch == "'":
+            if ch == "'" and _ascii_single_quote_is_delimiter(prefix, i, True):
                 in_single_string = False
             elif ch == "\n":
                 at_line_start = True
@@ -408,12 +415,12 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
             i += 3
             at_line_start = False
             continue
-        if ch == '"':
+        if ch == '"' and _ascii_double_quote_is_delimiter(prefix, i, False):
             in_double_string = True
             i += 1
             at_line_start = False
             continue
-        if ch == "'":
+        if ch == "'" and _ascii_single_quote_is_delimiter(prefix, i, False):
             in_single_string = True
             i += 1
             at_line_start = False
