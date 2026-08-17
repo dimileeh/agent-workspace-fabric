@@ -77,7 +77,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.node.compose_manager import (
+from awf.node.compose_manager_clarification_upgrade import (
     mark_persisted_clarification_model_network_reconciled,
     upgrade_persisted_clarification_service,
 )

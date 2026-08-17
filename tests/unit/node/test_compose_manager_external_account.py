@@ -12,10 +12,8 @@ import pytest
 import yaml
 
 from awf.db.enums import AgentRuntime
-from awf.node.compose_manager import (
-    AuthMount,
-    ComposeManager,
-    WorkspaceComposeSpec,
+from awf.node.compose_manager import AuthMount, ComposeManager, WorkspaceComposeSpec
+from awf.node.compose_manager_clarification_upgrade import (
     upgrade_persisted_clarification_service,
 )
 from awf.node.stack_launcher_auth_helpers import (
