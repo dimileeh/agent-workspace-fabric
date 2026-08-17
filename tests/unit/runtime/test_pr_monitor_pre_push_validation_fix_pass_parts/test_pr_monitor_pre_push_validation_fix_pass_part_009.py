@@ -121,6 +121,15 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_guard_salvage,
         head_blob=_guard_salvage + "/*\ndisable_guard()\n*/\n",
     )
+    # Same-line ``/* … */`` must also be non-executable (PRRT_kwDOSJAM6s6Zrhbs).
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "/* disable_guard() */\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_guard_salvage,
+        head_blob=_guard_salvage + "code; /* disable_guard() */\n",
+    )
     # Scoped salvage defs: tip-extra bare call to the leaf still supersedes.
     _scoped_guard_salvage = (
         "class Guards:\n"
@@ -189,6 +198,21 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
     assert _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + 'x = "guard.disable()"\n',
+    )
+    # Same-line block comments must not count as tip-extra calls
+    # (PRRT_kwDOSJAM6s6Zrhbs).
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "/* guard.disable() */\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "code; /* guard.disable() */\n",
+    )
+    # Real call after a closed same-line block comment still supersedes.
+    assert not _added_salvage_blob_retained(
+        commit_blob=_member_guard_salvage,
+        head_blob=_member_guard_salvage + "/* note */ guard.disable()\n",
     )
     assert _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
@@ -851,6 +875,22 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         parent_blob=parent_member,
         commit_blob=commit_member,
         head_blob=commit_member + 'x = "guard.disable()"\n',
+    )
+    # Same-line ``/* … */`` tip extras are non-executable (PRRT_kwDOSJAM6s6Zrhbs).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "/* guard.disable() */\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "code; /* guard.disable() */\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "/* note */ guard.disable()\n",
     )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_member,

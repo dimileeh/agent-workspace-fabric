@@ -831,12 +831,14 @@ def _tip_extra_keys_supersede_baseline(
 
 
 def _executable_call_scan_text(raw_line: str) -> str:
-    """Return ``raw_line`` with strings and line-comment tails replaced by spaces.
+    """Return ``raw_line`` with strings and comment regions replaced by spaces.
 
     Preserves indices so ``_CALL_SITE_RE.finditer`` aligns with the original line
     for definition-prefix checks. Nested calls inside ``print(guard.disable())``
-    stay visible; ``"guard.disable()"`` and ``code  # guard.disable()`` do not
-    (PRRT_kwDOSJAM6s6ZrYJk).
+    stay visible; ``"guard.disable()"``, ``code  # guard.disable()``, and
+    same-line ``/* guard.disable() */`` / ``code; /* guard.disable() */`` do not
+    (PRRT_kwDOSJAM6s6ZrYJk, PRRT_kwDOSJAM6s6Zrhbs). Unclosed ``/*`` blanks
+    through end of line (multi-line ``/*`` state is handled by callers).
     """
     chars = list(raw_line)
     i = 0
@@ -879,11 +881,31 @@ def _executable_call_scan_text(raw_line: str) -> str:
                 chars[i] = " "
                 i += 1
             continue
-        if ch == "#" or (ch == "/" and i + 1 < n and raw_line[i + 1] == "/"):
+        if ch == "#":
             while i < n:
                 chars[i] = " "
                 i += 1
             break
+        if ch == "/" and i + 1 < n:
+            nxt = raw_line[i + 1]
+            if nxt == "/":
+                while i < n:
+                    chars[i] = " "
+                    i += 1
+                break
+            if nxt == "*":
+                chars[i] = " "
+                chars[i + 1] = " "
+                i += 2
+                while i < n:
+                    if raw_line.startswith("*/", i):
+                        chars[i] = " "
+                        chars[i + 1] = " "
+                        i += 2
+                        break
+                    chars[i] = " "
+                    i += 1
+                continue
         if ch == '"' and _ascii_double_quote_is_delimiter(raw_line, i, False):
             chars[i] = " "
             in_double = True
@@ -909,9 +931,10 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     ``Guards.disable_guard`` (PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrWwo).
     Nested / mid-expression calls (``if ready: guard.disable()``,
     ``result = guard.disable()``, ``print(guard.disable())``) are included
-    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` comments and string literals are
-    ignored. Definitions are not call sites: ``def name(`` / ``function name(``
-    / ``class Name(`` are skipped via ``_CALL_SITE_DEFINITION_PREFIX_RE``.
+    (PRRT_kwDOSJAM6s6ZrYJk). ``#`` / ``//`` / same-line ``/* … */`` comments and
+    string literals are ignored (PRRT_kwDOSJAM6s6Zrhbs). Definitions are not
+    call sites: ``def name(`` / ``function name(`` / ``class Name(`` are skipped
+    via ``_CALL_SITE_DEFINITION_PREFIX_RE``.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
