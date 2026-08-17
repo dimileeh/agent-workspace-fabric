@@ -159,6 +159,32 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "guard.disable()\n",
     )
+    # Import-only receivers are not bindings: salvage ``from guards import guard``
+    # + ``guard.enable()`` yields empty ``_last_binding_spans``, so call
+    # candidates must come from salvage call sites or tip ``guard.disable()``
+    # retains stale FIXED evidence (PRRT_kwDOSJAM6s6ZryCh).
+    _import_guard_salvage = "from guards import guard\nguard.enable()\n"
+    assert not _added_salvage_blob_retained(
+        commit_blob=_import_guard_salvage,
+        head_blob=_import_guard_salvage + "guard.disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_import_guard_salvage,
+        head_blob=_import_guard_salvage + 'guard["disable"]()\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_import_guard_salvage,
+        head_blob=_import_guard_salvage + "# guard.disable()\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_import_guard_salvage,
+        head_blob=_import_guard_salvage + "other.disable()\n",
+    )
+    _import_module_salvage = "import guards\nguards.enable()\n"
+    assert not _added_salvage_blob_retained(
+        commit_blob=_import_module_salvage,
+        head_blob=_import_module_salvage + "guards.disable()\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob=_member_guard_salvage,
         head_blob=_member_guard_salvage + "await guard.disable()\n",

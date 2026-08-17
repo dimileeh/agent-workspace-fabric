@@ -1313,6 +1313,9 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
     or ``guard.disable()`` after ``guard.enable()``, produces no binding key, so
     assignment-only matching would retain stale FIXED evidence
     (PRRT_kwDOSJAM6s6ZrJ3a, PRRT_kwDOSJAM6s6ZrSYE).
+    Import-only receivers (``from guards import guard`` / ``import guards``) are
+    not bindings; union salvage call-site names into the call-candidate set so
+    tip ``guard.disable()`` still supersedes (PRRT_kwDOSJAM6s6ZryCh).
     """
     if len(head_blob) <= len(salvage):
         return False
@@ -1323,10 +1326,15 @@ def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool
         candidate_keys=salvage_keys,
     ):
         return True
+    # Added salvage has no parent diff: treat every salvage call name as a
+    # candidate (mirrors ``_salvage_changed_call_names`` on the modified path).
+    call_names = set(_call_site_name_counts(salvage))
+    call_candidates = salvage_keys | call_names
     return _tip_extra_calls_candidate_keys(
         baseline_blob=salvage,
         head_blob=head_blob,
-        candidate_keys=salvage_keys,
+        candidate_keys=call_candidates,
+        receiver_prefix_keys=call_names,
     )
 
 
