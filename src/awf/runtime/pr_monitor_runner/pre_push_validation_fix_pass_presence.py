@@ -33,10 +33,16 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns
     _binding_names_for_line as _binding_names_for_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _join_incomplete_object_assign_line as _join_incomplete_object_assign_line,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _normalize_assign_binding_name as _normalize_assign_binding_name,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _object_assign_call_targets as _object_assign_call_targets,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+    _object_assign_call_unclosed as _object_assign_call_unclosed,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
     _update_mutation_args_fully_synthesizable as _update_mutation_args_fully_synthesizable,
@@ -415,14 +421,15 @@ def _last_binding_start_indices(text: str) -> dict[str, int]:
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
-        names = _binding_names_for_line(raw_line)
+        scan_line = _join_incomplete_object_assign_line(lines, idx)
+        names = _binding_names_for_line(scan_line)
         if not names:
             continue
         for name in names:
             key = _scoped_binding_key_for_line(
                 scope_stack,
                 binding_name=name,
-                raw_line=raw_line,
+                raw_line=scan_line,
                 toml_table_path=toml_table_path,
             )
             last_start[key] = idx
@@ -786,7 +793,10 @@ def _tip_extra_opaque_object_assign_shares_receiver(
     sources are not fully synthesizable object literals
     (PRRT_kwDOSJAM6s6Zxwhs). Literal-key forms synthesize ``guard.enabled`` via
     binding names instead, so unrelated keys keep salvage like
-    ``Object.assign(guard, {other: false})``.
+    ``Object.assign(guard, {other: false})``. Multiline
+    ``Object.assign(\\n  guard,\\n  …)`` joins continued argument lists before
+    scanning; an opener that remains unclosed with no parseable target after
+    look-ahead also fails closed (PRRT_kwDOSJAM6s6Zyo4_).
     """
     receivers = _salvaged_alias_reference_names(candidate_keys)
     if not receivers:
@@ -810,7 +820,13 @@ def _tip_extra_opaque_object_assign_shares_receiver(
         )
         if line_in_non_code or idx not in extra_indices or raw_line.strip() == "":
             continue
-        for target, fully_synthesizable in _object_assign_call_targets(raw_line):
+        scan_line = _join_incomplete_object_assign_line(lines, idx)
+        targets = _object_assign_call_targets(scan_line)
+        # Opener with no parseable target after join (still unclosed) — cannot
+        # prove the tip does not mutate a salvaged receiver.
+        if not targets and _object_assign_call_unclosed(scan_line):
+            return True
+        for target, fully_synthesizable in targets:
             if fully_synthesizable:
                 continue
             if target in receivers:
@@ -1004,14 +1020,15 @@ def _scoped_binding_keys_on_lines(*, text: str, line_indices: set[int]) -> set[s
         indent = _line_indent(raw_line)
         while scope_stack and scope_stack[-1][0] >= indent:
             scope_stack.pop()
-        names = _binding_names_for_line(raw_line)
+        scan_line = _join_incomplete_object_assign_line(lines, idx)
+        names = _binding_names_for_line(scan_line)
         if not names:
             continue
         for name in names:
             key = _scoped_binding_key_for_line(
                 scope_stack,
                 binding_name=name,
-                raw_line=raw_line,
+                raw_line=scan_line,
                 toml_table_path=toml_table_path,
             )
             if idx in line_indices:

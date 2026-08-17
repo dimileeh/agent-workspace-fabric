@@ -629,6 +629,19 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_js_guard,
         head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(guard, {other: false})\n"),
     )
+    # Multiline Object.assign after salvage (PRRT_kwDOSJAM6s6Zyo4_).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=(
+            "x = 1\nguard.enabled = true\ny = 2\nObject.assign(\n  guard,\n  {enabled: false}\n);\n"
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_js_guard,
+        commit_blob=commit_js_guard,
+        head_blob=("x = 1\nguard.enabled = true\ny = 2\nObject.assign(\n  guard,\n  other\n);\n"),
+    )
     # Shell ``unset`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6ZuRSm).
     parent_shell = "x=1\nFEATURE_ENABLED=false\ny=2\n"
     commit_shell = "x=1\nFEATURE_ENABLED=true\ny=2\n"

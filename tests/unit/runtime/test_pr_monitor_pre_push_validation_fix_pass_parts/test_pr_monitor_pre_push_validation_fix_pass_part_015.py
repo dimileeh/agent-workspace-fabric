@@ -353,6 +353,8 @@ def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
 def test_object_assign_mutation_binding_names() -> None:
     """``Object.assign`` synthesizes ``target.key`` bindings (PRRT_kwDOSJAM6s6Zxwhs)."""
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _join_incomplete_object_assign_line,
+        _object_assign_call_unclosed,
         _object_assign_mutation_args_fully_synthesizable,
         _object_assign_mutation_binding_names,
     )
@@ -395,6 +397,17 @@ def test_object_assign_mutation_binding_names() -> None:
     assert not _object_assign_mutation_args_fully_synthesizable(
         "Object.assign(guard, {[k]: false})"
     )
+    # Multiline argument lists join before mutation scanning (PRRT_kwDOSJAM6s6Zyo4_).
+    multi = [
+        "Object.assign(",
+        "  guard,",
+        "  {enabled: false}",
+        ");",
+    ]
+    assert _object_assign_call_unclosed(multi[0])
+    joined = _join_incomplete_object_assign_line(multi, 0)
+    assert not _object_assign_call_unclosed(joined)
+    assert _object_assign_mutation_binding_names(joined) == ("guard.enabled",)
 
 
 @pytest.mark.unit
@@ -452,6 +465,26 @@ def test_opaque_object_assign_shares_salvaged_receiver() -> None:
     assert not _added_salvage_blob_retained(
         commit_blob=nested,
         head_blob=nested + "Object.assign(config.guard, other)\n",
+    )
+    # Multiline ``Object.assign(\n  guard,\n  …)`` must join before scanning;
+    # per-line targets miss the opener and leave no ``guard.enabled`` mutation
+    # on continuations (PRRT_kwDOSJAM6s6Zyo4_).
+    assert _tip_extra_opaque_object_assign_shares_receiver(
+        baseline_blob=salvage,
+        head_blob=salvage + "Object.assign(\n  guard,\n  other\n);\n",
+        candidate_keys={"guard.enabled"},
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.assign(\n  guard,\n  other\n);\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.assign(\n  guard,\n  {enabled: false}\n);\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob=salvage + "Object.assign(\n  other,\n  extra\n);\n",
     )
 
 

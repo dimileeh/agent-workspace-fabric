@@ -938,6 +938,15 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="guard.enabled = true\n",
         head_blob="guard.enabled = true\nObject.assign(guard, {other: false})\n",
     )
+    # Multiline Object.assign after salvage (PRRT_kwDOSJAM6s6Zyo4_).
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(\n  guard,\n  {enabled: false}\n);\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="guard.enabled = true\n",
+        head_blob="guard.enabled = true\nObject.assign(\n  guard,\n  other\n);\n",
+    )
     # Shell ``unset`` removes a salvage binding without a rebind or call site;
     # assign/del/delete scanners previously missed it, so tip
     # ``unset FEATURE_ENABLED`` kept a line-aligned salvage prefix and reused

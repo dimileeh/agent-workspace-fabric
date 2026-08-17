@@ -1136,6 +1136,86 @@ def _object_assign_call_targets(
     return tuple(out)
 
 
+def _object_assign_call_unclosed(raw_line: str) -> bool:
+    """Return True when an executable ``Object.assign(`` lacks a closing ``)``.
+
+    Formatters split ``Object.assign(guard, {enabled: false})`` across lines;
+    per-line scanners then see no target on the opener and no mutation on
+    continuations (PRRT_kwDOSJAM6s6Zyo4_).
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return False
+    scan = _executable_call_scan_text(raw_line)
+    for match in _INLINE_OBJECT_ASSIGN_RE.finditer(raw_line):
+        if not _helper_keyword_executable(
+            raw_line=raw_line,
+            scan=scan,
+            match_start=match.start(),
+            tokens=("assign",),
+        ):
+            continue
+        open_paren = raw_line.find("(", match.start())
+        if open_paren < 0:
+            continue
+        if _update_call_argument_span(raw_line, open_paren) is None:
+            return True
+    return False
+
+
+def _object_assign_join_gap_skippable(stripped: str) -> bool:
+    """Return True when ``stripped`` is only blank / comment between call lines."""
+    if stripped == "" or stripped.startswith("//") or stripped.startswith("#"):
+        return True
+    if stripped.startswith("/*") and "*/" in stripped:
+        after = stripped.split("*/", 1)[1].strip()
+        return after == ""
+    return False
+
+
+def _join_incomplete_object_assign_line(lines: list[str], idx: int) -> str:
+    """Join ``lines[idx]`` with following lines until ``Object.assign(…)`` closes.
+
+    Tip-extra scanners must see the target and sources together; otherwise
+    multiline assigns retain stale salvage (PRRT_kwDOSJAM6s6Zyo4_). Skip blank /
+    line-comment / whole-line ``/* … */`` gaps. Stop at the first join that
+    closes every ``Object.assign`` on the opener, or at EOF (caller fail-closes).
+    """
+    raw_line = lines[idx]
+    if not _object_assign_call_unclosed(raw_line):
+        return raw_line
+    joined = raw_line.rstrip()
+    j = idx + 1
+    while j < len(lines):
+        nxt = lines[j]
+        nxt_stripped = nxt.strip()
+        if _object_assign_join_gap_skippable(nxt_stripped):
+            j += 1
+            continue
+        if nxt_stripped.startswith("/*") and "*/" not in nxt_stripped:
+            j += 1
+            while j < len(lines):
+                close_line = lines[j]
+                j += 1
+                if "*/" not in close_line:
+                    continue
+                after = close_line.split("*/", 1)[1].strip()
+                if after == "":
+                    break
+                joined = f"{joined} {after}"
+                break
+            else:
+                break
+            if not _object_assign_call_unclosed(joined):
+                break
+            continue
+        joined = f"{joined} {nxt.lstrip(' \t')}"
+        j += 1
+        if not _object_assign_call_unclosed(joined):
+            break
+    return joined
+
+
 def _object_assign_mutation_args_fully_synthesizable(raw_line: str) -> bool:
     """Return True when every ``Object.assign`` source arg is a plain object literal.
 
