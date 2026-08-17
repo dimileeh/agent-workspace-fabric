@@ -50,16 +50,17 @@ _ASSIGN_BINDING_RE = re.compile(
     r")"
     r"|"
     # Quoted JSON/YAML mapping keys (``"feature-enabled": …`` / ``'k': …``)
-    # and quoted TOML keys (``"feature-enabled" = …``). Identifier-only /
-    # colon-only matching left these unbound so a tip could append a duplicate
-    # key after salvage and still reuse FIXED evidence (PRRT_kwDOSJAM6s6ZqQfh,
-    # PRRT_kwDOSJAM6s6Zqip3).
-    r'"([^"\n]+)"[ \t]*(?::[ \t]*(?!=)|=(?!=))'
+    # and quoted TOML keys (``"feature-enabled" = …``). Include the surrounding
+    # quotes in the capture so a key whose name contains ``.`` (``"a.b"``) stays
+    # one segment and does not collapse with dotted ``a.b``
+    # (PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6ZqoYV).
+    r'("[^"\n]+")[ \t]*(?::[ \t]*(?!=)|=(?!=))'
     r"|"
-    r"'([^'\n]+)'[ \t]*(?::[ \t]*(?!=)|=(?!=))"
+    r"('[^'\n]+')[ \t]*(?::[ \t]*(?!=)|=(?!=))"
     r")"
 )
 _ASSIGN_KEY_SEGMENT_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*|"[^"\n]+"|\'[^\'\n]+\')')
+_BARE_ASSIGN_KEY_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _DEF_BINDING_RE = re.compile(r"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
 _CLASS_BINDING_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?class[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
@@ -373,14 +374,31 @@ def _prefix_leaves_open_disabling_context(prefix: str) -> bool:
     return in_block_comment or in_triple_double or in_triple_single or if_depth > 0
 
 
+def _format_normalized_assign_key_segment(segment: str) -> str:
+    """Return ``segment`` bare when valid; otherwise keep a quoted form.
+
+    Bare TOML/YAML key segments round-trip without quotes. Segments that contain
+    ``.`` or other non-bare characters must stay quoted so joining with ``.``
+    does not invent extra path boundaries (PRRT_kwDOSJAM6s6ZqoYV).
+    """
+    if _BARE_ASSIGN_KEY_SEGMENT_RE.fullmatch(segment):
+        return segment
+    if '"' not in segment:
+        return f'"{segment}"'
+    return f"'{segment}'"
+
+
 def _normalize_assign_binding_name(name: str) -> str:
-    """Strip quotes from dotted TOML key segments for stable comparison.
+    """Strip redundant quotes from key segments for stable comparison.
 
     ``feature.enabled``, ``feature."enabled"``, and ``"feature".enabled`` all
     normalize to ``feature.enabled`` so mixed spellings supersede each other
-    (PRRT_kwDOSJAM6s6Zql88). Non-dotted names are returned unchanged.
+    (PRRT_kwDOSJAM6s6Zql88). Segments that are not valid bare keys (for example
+    ``google.com``) keep quotes after normalize so ``site."google.com"`` stays
+    distinct from ``site.google.com``, and a quoted key ``"a.b"`` stays distinct
+    from dotted ``a.b`` (PRRT_kwDOSJAM6s6ZqoYV). Non-segment names are unchanged.
     """
-    if "." not in name:
+    if "." not in name and name[:1] not in "\"'":
         return name
     segments: list[str] = []
     pos = 0
@@ -399,7 +417,9 @@ def _normalize_assign_binding_name(name: str) -> str:
         else:
             segments.append(raw)
         pos = match.end()
-    return ".".join(segments) if pos == length and segments else name
+    if pos != length or not segments:
+        return name
+    return ".".join(_format_normalized_assign_key_segment(segment) for segment in segments)
 
 
 def _binding_name_for_line(raw_line: str) -> str | None:

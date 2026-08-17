@@ -196,6 +196,30 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob='site."google.com" = true\n',
         head_blob='site."google.com" = true\nsite."google.com" = false\n',
     )
+    # Quoted segments that contain dots must stay distinct from bare dotted
+    # paths: site."google.com" ≠ site.google.com, and "a.b" ≠ a.b. Collapsing
+    # them let tip extras look like rebinds and drop FIXED evidence
+    # (PRRT_kwDOSJAM6s6ZqoYV).
+    assert _added_salvage_blob_retained(
+        commit_blob='site."google.com" = true\n',
+        head_blob='site."google.com" = true\nsite.google.com = false\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="site.google.com = true\n",
+        head_blob='site.google.com = true\nsite."google.com" = false\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob='"a.b" = true\n',
+        head_blob='"a.b" = true\na.b = false\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="a.b = true\n",
+        head_blob='a.b = true\n"a.b" = false\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="'a.b' = true\n",
+        head_blob="'a.b' = true\na.b = false\n",
+    )
     assert not _added_salvage_blob_retained(
         commit_blob="a.b.c = 1\n",
         head_blob="a.b.c = 1\na.b.c = 2\n",
@@ -680,6 +704,31 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         parent_blob=parent_toml_dot,
         commit_blob=commit_toml_dot,
         head_blob="feature.enabled = true\nother.key = 1\n",
+    )
+    # Distinct dotted / quoted-dot keys must not cross-supersede
+    # (PRRT_kwDOSJAM6s6ZqoYV).
+    parent_host = 'site."google.com" = false\n'
+    commit_host = 'site."google.com" = true\n'
+    assert _salvage_changed_binding_names(parent_blob=parent_host, commit_blob=commit_host) == {
+        'site."google.com"'
+    }
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_host,
+        commit_blob=commit_host,
+        head_blob='site."google.com" = true\nsite.google.com = false\n',
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_host,
+        commit_blob=commit_host,
+        head_blob='site."google.com" = true\nsite."google.com" = false\n',
+    )
+    parent_ab = '"a.b" = false\n'
+    commit_ab = '"a.b" = true\n'
+    assert _salvage_changed_binding_names(parent_blob=parent_ab, commit_blob=commit_ab) == {'"a.b"'}
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_ab,
+        commit_blob=commit_ab,
+        head_blob='"a.b" = true\na.b = false\n',
     )
     parent_json_sq = "{\n  'feature-enabled': false\n}\n"
     commit_json_sq = "{\n  'feature-enabled': true\n}\n"
