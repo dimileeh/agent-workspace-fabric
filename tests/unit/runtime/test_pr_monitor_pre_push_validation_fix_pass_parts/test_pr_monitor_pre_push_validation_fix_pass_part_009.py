@@ -134,6 +134,13 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob=_scoped_guard_salvage,
         head_blob=_scoped_guard_salvage + "disable_guard()\n",
     )
+    # Tip member call on a different receiver sharing only the method leaf must
+    # not match scoped ``Guards.disable_guard`` via unpaired leaf collision
+    # (PRRT_kwDOSJAM6s6ZrWwo).
+    assert _added_salvage_blob_retained(
+        commit_blob=_scoped_guard_salvage,
+        head_blob=_scoped_guard_salvage + "other.disable_guard()\n",
+    )
     # Member-call overrides: tip ``guard.disable()`` must supersede salvage that
     # bound ``guard`` and called ``guard.enable()``. Bare identifier-then-``(``
     # matching misses dotted receivers/callees and would retain stale FIXED
@@ -796,6 +803,13 @@ def test_tip_extra_can_supersede_modified_salvage_call_site_override() -> None:
         parent_blob=parent_member,
         commit_blob=commit_member,
         head_blob=commit_member + "other.noop()\n",
+    )
+    # Unrelated tip member call sharing only the method leaf must not supersede
+    # (mirrors added-salvage retain for ``other.disable()``; PRRT_kwDOSJAM6s6ZrWwo).
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_member,
+        commit_blob=commit_member,
+        head_blob=commit_member + "other.disable()\n",
     )
 
 

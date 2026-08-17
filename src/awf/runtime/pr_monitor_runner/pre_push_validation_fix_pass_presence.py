@@ -825,12 +825,14 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     """Return receiver/callee names for a statement-leading call, or empty.
 
     Bare ``disable_guard()`` yields ``{disable_guard}``. Dotted
-    ``guard.disable()`` / ``a.b.c()`` yields the receiver and final callee
-    (``{guard, disable}`` / ``{a, c}``) so tip member calls intersect salvage
-    bindings and method leaves (PRRT_kwDOSJAM6s6ZrSYE). ``#`` / ``//`` comments
-    are ignored. Definitions are not call sites: ``def name(`` / ``function
-    name(`` leave the keyword before ``(`` so ``_CALL_SITE_RE`` does not match
-    them.
+    ``guard.disable()`` / ``a.b.c()`` yields the receiver and the full dotted
+    callee (``{guard, guard.disable}`` / ``{a, a.b.c}``) so tip member calls
+    intersect salvage bindings and the same qualified callee — not an unpaired
+    method leaf that would collide with ``other.disable()`` or scoped
+    ``Guards.disable_guard`` (PRRT_kwDOSJAM6s6ZrSYE, PRRT_kwDOSJAM6s6ZrWwo).
+    ``#`` / ``//`` comments are ignored. Definitions are not call sites:
+    ``def name(`` / ``function name(`` leave the keyword before ``(`` so
+    ``_CALL_SITE_RE`` does not match them.
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
@@ -838,10 +840,11 @@ def _call_site_names_for_line(raw_line: str) -> frozenset[str]:
     match = _CALL_SITE_RE.match(raw_line)
     if match is None:
         return frozenset()
-    parts = match.group(1).split(".")
+    dotted = match.group(1)
+    parts = dotted.split(".")
     if len(parts) == 1:
         return frozenset(parts)
-    return frozenset({parts[0], parts[-1]})
+    return frozenset({parts[0], dotted})
 
 
 def _candidate_keys_include_call_name(candidate_keys: set[str], name: str) -> bool:
