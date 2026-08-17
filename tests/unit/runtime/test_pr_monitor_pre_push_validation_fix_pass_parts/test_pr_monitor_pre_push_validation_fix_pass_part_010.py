@@ -509,6 +509,48 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_sub,
         head_blob=('FLAGS = {}\nFLAGS["enabled"] = True\nother, FLAGS["enabled"] = get_flags()\n'),
     )
+    # ``++`` / ``--`` update expressions supersede modified salvage the same
+    # way compound assigns do (PRRT_kwDOSJAM6s6Zs-Rb).
+    parent_budget = "x = 1\nretryBudget = 0\ny = 2\n"
+    commit_budget = "x = 1\nretryBudget = 2\ny = 2\n"
+    for update_line in (
+        "retryBudget++\n",
+        "retryBudget--\n",
+        "++retryBudget\n",
+        "--retryBudget\n",
+    ):
+        assert _tip_extra_can_supersede_modified_salvage(
+            parent_blob=parent_budget,
+            commit_blob=commit_budget,
+            head_blob=commit_budget + update_line,
+        )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_budget,
+        commit_blob=commit_budget,
+        head_blob=commit_budget + "if (ready) retryBudget--\n",
+    )
+    parent_count = "obj.count = 0\n"
+    commit_count = "obj.count = 1\n"
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_count,
+        commit_blob=commit_count,
+        head_blob=commit_count + "obj.count++\n",
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_sub,
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = 1\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = 1\nFLAGS["enabled"]++\n'),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_budget,
+        commit_blob=commit_budget,
+        head_blob=commit_budget + "# retryBudget--\n",
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_budget,
+        commit_blob=commit_budget,
+        head_blob=commit_budget + "other--\n",
+    )
     # ``del`` supersedes modified salvage the same way (PRRT_kwDOSJAM6s6Zse8m).
     assert _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent,

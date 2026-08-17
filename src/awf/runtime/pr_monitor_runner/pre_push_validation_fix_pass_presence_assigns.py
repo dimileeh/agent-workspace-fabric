@@ -222,6 +222,26 @@ _INLINE_DEL_BINDING_RE = re.compile(
     rf"({_DEL_TARGET_SCAN}(?:[ \t]*,[ \t]*{_DEL_TARGET_SCAN})*)"
     r"[ \t]*\)?"
 )
+# JS/C/C++ ``++`` / ``--`` update expressions mutate a salvage binding without
+# an equals-style rebind or call site, so tip ``retryBudget--`` /
+# ``++retryBudget`` kept a line-aligned salvage prefix / clean merge-file
+# equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zs-Rb). Bare,
+# dotted, and subscript targets match assign shapes. Lookbehind excludes a
+# preceding ``+`` / ``-`` so ``x+++y`` does not invent a prefix update of ``y``.
+_UPDATE_TARGET_SCAN = (
+    rf"(?:{_ASSIGN_SUBSCRIPT_TARGET_SCAN}|"
+    r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*)"
+)
+_INLINE_UPDATE_POSTFIX_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_]))"
+    rf"({_UPDATE_TARGET_SCAN})"
+    r"(?:\+\+|--)"
+)
+_INLINE_UPDATE_PREFIX_RE = re.compile(
+    r"(?:^|(?<=[^A-Za-z0-9_+-]))"
+    r"(?:\+\+|--)"
+    rf"({_UPDATE_TARGET_SCAN})"
+)
 
 
 def _normalize_subscript_binding_name(name: str) -> str:
@@ -564,6 +584,30 @@ def _del_binding_names(raw_line: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _update_expr_binding_names(raw_line: str) -> tuple[str, ...]:
+    """Return names mutated by ``++`` / ``--`` on ``raw_line``.
+
+    Tip-extra ``retryBudget--`` / ``++retryBudget`` / ``if (ready) obj.count++`` /
+    ``FLAGS["enabled"]++`` must supersede salvage of those bindings; assign and
+    call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6Zs-Rb).
+    Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
+    ``_executable_call_scan_text``. Subscript spellings recover from
+    ``raw_line`` because scan blanks quoted indices.
+    """
+    stripped = raw_line.lstrip(" \t")
+    if stripped.startswith("//") or stripped.startswith("#"):
+        return ()
+    scan = _executable_call_scan_text(raw_line)
+    names: list[str] = []
+    for pattern in (_INLINE_UPDATE_POSTFIX_RE, _INLINE_UPDATE_PREFIX_RE):
+        for match in pattern.finditer(scan):
+            raw_name = raw_line[match.start(1) : match.end(1)]
+            name = _normalize_subscript_binding_name(raw_name) if "[" in raw_name else raw_name
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
 def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     """Return all binding names on ``raw_line`` (leading first, then mid-line).
 
@@ -571,17 +615,20 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     Additional mid-line equals-style assigns are appended so compound tip-extra
     lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y). Python
     ``del`` targets are included so deletions supersede without a rebind
-    (PRRT_kwDOSJAM6s6Zse8m).
+    (PRRT_kwDOSJAM6s6Zse8m). JS/C/C++ ``++`` / ``--`` update targets are
+    included so increment/decrement supersedes without an equals-style rebind
+    (PRRT_kwDOSJAM6s6Zs-Rb).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)
     deleted = _del_binding_names(raw_line)
-    if primary is None and not inline and not deleted:
+    updated = _update_expr_binding_names(raw_line)
+    if primary is None and not inline and not deleted and not updated:
         return ()
     names: list[str] = []
     if primary is not None:
         names.append(primary)
-    for name in (*inline, *deleted):
+    for name in (*inline, *deleted, *updated):
         if name not in names:
             names.append(name)
     return tuple(names)

@@ -506,6 +506,40 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="FEATURE_ENABLED = True\n",
         head_blob="FEATURE_ENABLED = True\nx = (FEATURE_ENABLED := False)\n",
     )
+    # ``++`` / ``--`` update expressions mutate a salvage binding without a
+    # rebind or call site; neither assign scanner nor call scanner recorded the
+    # target, so prefix retention reused stale FIXED evidence
+    # (PRRT_kwDOSJAM6s6Zs-Rb).
+    for update_line in (
+        "retryBudget++\n",
+        "retryBudget--\n",
+        "++retryBudget\n",
+        "--retryBudget\n",
+    ):
+        assert not _added_salvage_blob_retained(
+            commit_blob="retryBudget = 2\n",
+            head_blob="retryBudget = 2\n" + update_line,
+        )
+    assert not _added_salvage_blob_retained(
+        commit_blob="retryBudget = 2\n",
+        head_blob="retryBudget = 2\nif (ready) retryBudget--\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="obj.count = 1\n",
+        head_blob="obj.count = 1\nobj.count++\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob='FLAGS = {}\nFLAGS["enabled"] = 1\n',
+        head_blob=('FLAGS = {}\nFLAGS["enabled"] = 1\nFLAGS["enabled"]++\n'),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="retryBudget = 2\n",
+        head_blob="retryBudget = 2\n# retryBudget--\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="retryBudget = 2\n",
+        head_blob="retryBudget = 2\nother--\n",
+    )
     # ``del`` removes a salvage binding without a rebind or call site; neither
     # assign scanner nor call scanner recorded the target, so prefix retention
     # reused stale FIXED evidence (PRRT_kwDOSJAM6s6Zse8m).
