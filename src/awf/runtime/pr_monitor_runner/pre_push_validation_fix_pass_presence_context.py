@@ -432,13 +432,15 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
     retention must fail closed (PRRT_kwDOSJAM6s6ZtJG5). Brace-continuation
     headers (``} else`` / ``} catch`` / same-line ``if (...) {} else``) likewise
     attach the following line as their body (PRRT_kwDOSJAM6s6ZtYk1).
-    A trailing Python decorator (``@no_op`` / stacked ``@a``/``@b``) likewise
-    attaches to the following ``def``/``class`` and can replace it, so an open
-    decorator prefix must reject suffix retention (PRRT_kwDOSJAM6s6ZwrnM).
+    A trailing Python decorator (``@no_op`` / stacked ``@a``/``@b`` / call-form
+    ``@dec(`` spanning lines then ``)``) likewise attaches to the following
+    ``def``/``class`` and can replace it, so an open decorator prefix must reject
+    suffix retention (PRRT_kwDOSJAM6s6ZwrnM, PRRT_kwDOSJAM6s6ZxeRW).
     """
     brace_depth = 0
     awaiting_body = False
     awaiting_decorator = False
+    decorator_paren_depth = 0
     header_paren_depth: int | None = None
 
     for raw_line in prefix.splitlines():
@@ -446,10 +448,22 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
         stripped = code.strip()
         if awaiting_body and stripped:
             awaiting_body = False
-        if awaiting_decorator and stripped and _PYTHON_DECORATOR_RE.match(code) is None:
-            awaiting_decorator = False
-
         brace_delta = _delta_brackets_outside_strings(code, opens="{", closes="}")
+        if awaiting_decorator and stripped:
+            if decorator_paren_depth > 0:
+                # Argument continuations of ``@dec(`` stay inside the decorator;
+                # do not clear until parens close and a non-decorator line follows
+                # (PRRT_kwDOSJAM6s6ZxeRW).
+                decorator_paren_depth = max(
+                    0,
+                    decorator_paren_depth
+                    + _delta_brackets_outside_strings(code, opens="(", closes=")"),
+                )
+                brace_depth = max(0, brace_depth + brace_delta)
+                continue
+            if _PYTHON_DECORATOR_RE.match(code) is None:
+                awaiting_decorator = False
+
         if header_paren_depth is not None:
             header_paren_depth += _delta_brackets_outside_strings(code, opens="(", closes=")")
             brace_depth = max(0, brace_depth + brace_delta)
@@ -473,6 +487,9 @@ def _prefix_opens_control_flow_over_suffix(prefix: str) -> bool:
 
         if _PYTHON_DECORATOR_RE.match(code) is not None:
             awaiting_decorator = True
+            decorator_paren_depth = max(
+                0, _delta_brackets_outside_strings(code, opens="(", closes=")")
+            )
             brace_depth = max(0, brace_depth + brace_delta)
             continue
 

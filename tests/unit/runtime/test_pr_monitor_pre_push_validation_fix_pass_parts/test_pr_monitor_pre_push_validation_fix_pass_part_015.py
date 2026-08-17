@@ -217,12 +217,27 @@ def test_decorator_prefix_rejects_added_salvage_suffix() -> None:
     assert _prefix_opens_control_flow_over_suffix("@no_op\n\n") is True
     assert _prefix_opens_control_flow_over_suffix("@no_op\n# note\n") is True
     assert _prefix_opens_control_flow_over_suffix("@functools.lru_cache(maxsize=None)\n") is True
+    # Call-form argument continuations must keep the decorator open until the
+    # decorated def/class (PRRT_kwDOSJAM6s6ZxeRW).
+    assert _prefix_opens_control_flow_over_suffix("@dec(\n  x=1\n)\n") is True
+    assert (
+        _prefix_opens_control_flow_over_suffix("@functools.lru_cache(\n  maxsize=None\n)\n") is True
+    )
+    assert _prefix_opens_control_flow_over_suffix("@a(\n  1\n)\n@b\n") is True
     # Decorator already applied to a declaration in the prefix is not open.
     assert _prefix_opens_control_flow_over_suffix("@no_op\ndef helper():\n    return 1\n") is False
+    assert (
+        _prefix_opens_control_flow_over_suffix("@dec(\n  x=1\n)\ndef helper():\n    return 1\n")
+        is False
+    )
 
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
         head_blob="@no_op\n" + salvage,
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=salvage,
+        head_blob="@dec(\n  x=1\n)\n" + salvage,
     )
     assert not _added_salvage_blob_retained(
         commit_blob=salvage,
