@@ -716,6 +716,41 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
         commit_blob=commit_seq_sibling,
         head_blob=("features:\n  - name: a\n    enabled: true\n    enabled: false\n"),
     )
+    # Quoted scalars may contain ``#``; truncating at ``#`` would collapse
+    # ``"a#1"`` / ``"a#2"`` to the same identity and falsely supersede salvage
+    # when a sibling tip rebinds (PRRT_kwDOSJAM6s6Zq135).
+    parent_hash_quoted = 'features:\n  - name: "a#1"\n    enabled: false\n'
+    commit_hash_quoted = 'features:\n  - name: "a#1"\n    enabled: true\n'
+    hash_quoted_changed = _salvage_changed_binding_names(
+        parent_blob=parent_hash_quoted, commit_blob=commit_hash_quoted
+    )
+    assert "features.name.a#1.enabled" in hash_quoted_changed
+    assert "features.name.a#1" in hash_quoted_changed
+    assert 'features.name."a' not in hash_quoted_changed
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_hash_quoted,
+        commit_blob=commit_hash_quoted,
+        head_blob=(
+            'features:\n  - name: "a#1"\n    enabled: true\n  - name: "a#2"\n    enabled: false\n'
+        ),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_hash_quoted,
+        commit_blob=commit_hash_quoted,
+        head_blob=('features:\n  - name: "a#1"\n    enabled: true\n    enabled: false\n'),
+    )
+    parent_hash_single = "features:\n  - name: 'a#1'\n    enabled: false\n"
+    commit_hash_single = "features:\n  - name: 'a#1'\n    enabled: true\n"
+    assert "features.name.a#1.enabled" in _salvage_changed_binding_names(
+        parent_blob=parent_hash_single, commit_blob=commit_hash_single
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_hash_single,
+        commit_blob=commit_hash_single,
+        head_blob=(
+            "features:\n  - name: 'a#1'\n    enabled: true\n  - name: 'a#2'\n    enabled: false\n"
+        ),
+    )
     # Bare Python control-flow headers (``else:`` / ``try:`` / ``except:`` /
     # ``finally:``) must not open YAML mapping scopes. Treating them as parents
     # qualifies tip rebinds as ``else.FEATURE_ENABLED`` so they miss the
