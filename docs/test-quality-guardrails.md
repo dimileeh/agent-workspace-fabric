@@ -34,8 +34,10 @@ unconditional branch wrapper, and tests with unconditional skip markers:
 def test_later():
     assert real_behavior()
 
+
 def test_later():
     pytest.skip("TODO")
+
 
 def test_later():
     if True:
@@ -48,6 +50,7 @@ Conditional skips are allowed when they preserve a real test body:
 @pytest.mark.skipif(not HAS_DOCKER, reason="requires Docker")
 def test_docker_flow():
     assert run_flow()
+
 
 def test_tool_flow():
     if not has_tool():
