@@ -777,6 +777,38 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="export FEATURE_ENABLED=true\n",
         head_blob="export FEATURE_ENABLED=true\nif true; then unset -v FEATURE_ENABLED; fi\n",
     )
+    # Quoted unset operands are blanked by ``_executable_call_scan_text`` before
+    # the bare-name matcher runs; recover them so tip ``unset 'FEATURE_ENABLED'``
+    # / ``unset "FEATURE_ENABLED"`` still supersede salvage
+    # (PRRT_kwDOSJAM6s6Zu20N).
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob="FEATURE_ENABLED=true\nunset 'FEATURE_ENABLED'\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob='FEATURE_ENABLED=true\nunset "FEATURE_ENABLED"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob="FEATURE_ENABLED=true\nunset -v 'FEATURE_ENABLED'\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob='FEATURE_ENABLED=true\nunset -- "FEATURE_ENABLED"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob="FEATURE_ENABLED=true\nunset 'FEATURE_ENABLED' OTHER\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="export FEATURE_ENABLED=true\n",
+        head_blob=("export FEATURE_ENABLED=true\nif true; then unset -v 'FEATURE_ENABLED'; fi\n"),
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob="FEATURE_ENABLED=true\n",
+        head_blob="FEATURE_ENABLED=true\n# unset 'FEATURE_ENABLED'\n",
+    )
     assert _added_salvage_blob_retained(
         commit_blob="FEATURE_ENABLED=true\n",
         head_blob="FEATURE_ENABLED=true\n# unset FEATURE_ENABLED\n",

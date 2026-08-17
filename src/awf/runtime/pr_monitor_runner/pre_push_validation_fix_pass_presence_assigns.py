@@ -237,15 +237,19 @@ _INLINE_DEL_BINDING_RE = re.compile(
 # ``unset -v FEATURE_ENABLED`` kept a line-aligned salvage prefix / clean
 # merge-file equality and reused stale FIXED evidence (PRRT_kwDOSJAM6s6ZuRSm).
 # Optional short options (``-v`` / ``-f`` / ``-n`` / combinations) and ``--``
-# precede one or more bare shell identifiers; ``unsettable`` is not a hit
-# because whitespace (or options) is required after ``unset``.
+# precede one or more bare or quoted shell identifiers; ``unsettable`` is not a
+# hit because whitespace (or options) is required after ``unset``. Quoted
+# operands (``unset 'FEATURE_ENABLED'`` / ``unset "FEATURE_ENABLED"``) must be
+# recovered from ``raw_line``: ``_executable_call_scan_text`` blanks the quoted
+# span before a bare-name-only matcher would run (PRRT_kwDOSJAM6s6Zu20N).
 _UNSET_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
-_UNSET_NAME_RE = re.compile(_UNSET_NAME)
+_UNSET_OPERAND = rf"(?:{_UNSET_NAME}|'[^'\n]*'|\"[^\n\"]*\")"
+_UNSET_OPERAND_RE = re.compile(_UNSET_OPERAND)
 _INLINE_UNSET_BINDING_RE = re.compile(
     r"(?:^|(?<=[^A-Za-z0-9_]))unset"
     r"(?:[ \t]+(?:-[A-Za-z]+|--))*"
     r"[ \t]+"
-    rf"({_UNSET_NAME}(?:[ \t]+{_UNSET_NAME})*)"
+    rf"({_UNSET_OPERAND}(?:[ \t]+{_UNSET_OPERAND})*)"
 )
 # JS/C/C++ ``++`` / ``--`` update expressions mutate a salvage binding without
 # an equals-style rebind or call site, so tip ``retryBudget--`` /
@@ -620,21 +624,27 @@ def _unset_binding_names(raw_line: str) -> tuple[str, ...]:
     """Return names removed by shell ``unset`` on ``raw_line``.
 
     Tip-extra ``unset FEATURE_ENABLED`` / ``unset -v FEATURE_ENABLED`` /
-    ``unset -- FEATURE_ENABLED`` / ``if true; then unset FEATURE_ENABLED; fi``
+    ``unset -- FEATURE_ENABLED`` / ``unset 'FEATURE_ENABLED'`` /
+    ``unset "FEATURE_ENABLED"`` / ``if true; then unset FEATURE_ENABLED; fi``
     must supersede salvage of those bindings; assign, ``del`` / ``delete``, and
-    call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6ZuRSm).
-    Strings and ``#`` / ``//`` / ``/* … */`` regions are blanked via
-    ``_executable_call_scan_text``.
+    call scanners alone leave the salvage retained (PRRT_kwDOSJAM6s6ZuRSm,
+    PRRT_kwDOSJAM6s6Zu20N). Match operands on ``raw_line`` so quoted literals
+    remain visible, then drop hits whose ``unset`` keyword was blanked by
+    ``_executable_call_scan_text`` (comment / string / ``/* … */`` regions).
     """
     stripped = raw_line.lstrip(" \t")
     if stripped.startswith("//") or stripped.startswith("#"):
         return ()
     scan = _executable_call_scan_text(raw_line)
     names: list[str] = []
-    for match in _INLINE_UNSET_BINDING_RE.finditer(scan):
-        for part_match in _UNSET_NAME_RE.finditer(scan, match.start(1), match.end(1)):
-            name = raw_line[part_match.start() : part_match.end()]
-            if name not in names:
+    for match in _INLINE_UNSET_BINDING_RE.finditer(raw_line):
+        # ``unset`` starts at match.start(); skip when that span is non-executable.
+        if scan[match.start() : match.start() + 5] != "unset":
+            continue
+        for part_match in _UNSET_OPERAND_RE.finditer(raw_line, match.start(1), match.end(1)):
+            token = part_match.group(0)
+            name = token[1:-1] if token[:1] in "'\"" else token
+            if name and name not in names:
                 names.append(name)
     return tuple(names)
 
@@ -671,10 +681,11 @@ def _binding_names_for_line(raw_line: str) -> tuple[str, ...]:
     lines still supersede salvage-bound names (PRRT_kwDOSJAM6s6ZsD5y). Python
     ``del`` and JS ``delete`` targets are included so deletions supersede
     without a rebind (PRRT_kwDOSJAM6s6Zse8m, PRRT_kwDOSJAM6s6ZtiIE). Shell
-    ``unset`` targets (including ``unset -v NAME``) are included the same way
-    (PRRT_kwDOSJAM6s6ZuRSm). JS/C/C++ ``++`` / ``--`` update targets are
-    included so increment/decrement supersedes without an equals-style rebind
-    (PRRT_kwDOSJAM6s6Zs-Rb).
+    ``unset`` targets (including ``unset -v NAME`` and quoted
+    ``unset 'NAME'`` / ``unset "NAME"``) are included the same way
+    (PRRT_kwDOSJAM6s6ZuRSm, PRRT_kwDOSJAM6s6Zu20N). JS/C/C++ ``++`` / ``--``
+    update targets are included so increment/decrement supersedes without an
+    equals-style rebind (PRRT_kwDOSJAM6s6Zs-Rb).
     """
     primary = _binding_name_for_line(raw_line)
     inline = _inline_assign_binding_names(raw_line)

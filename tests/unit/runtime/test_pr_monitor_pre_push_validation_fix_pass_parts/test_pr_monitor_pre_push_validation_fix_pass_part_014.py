@@ -447,6 +447,45 @@ def test_tip_extra_can_supersede_modified_salvage_rebinding() -> None:
             "x=1\nexport FEATURE_ENABLED=true\ny=2\nif true; then unset -v FEATURE_ENABLED; fi\n"
         ),
     )
+    # Quoted unset targets must supersede too; scan blanking otherwise drops the
+    # operand before the bare-name matcher (PRRT_kwDOSJAM6s6Zu20N).
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=("x=1\nFEATURE_ENABLED=true\ny=2\nunset 'FEATURE_ENABLED'\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=('x=1\nFEATURE_ENABLED=true\ny=2\nunset "FEATURE_ENABLED"\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=("x=1\nFEATURE_ENABLED=true\ny=2\nunset -v 'FEATURE_ENABLED'\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=('x=1\nFEATURE_ENABLED=true\ny=2\nunset -- "FEATURE_ENABLED"\n'),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=("x=1\nFEATURE_ENABLED=true\ny=2\nunset 'FEATURE_ENABLED' OTHER\n"),
+    )
+    assert _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_export_unset,
+        commit_blob=commit_export_unset,
+        head_blob=(
+            "x=1\nexport FEATURE_ENABLED=true\ny=2\nif true; then unset -v 'FEATURE_ENABLED'; fi\n"
+        ),
+    )
+    assert not _tip_extra_can_supersede_modified_salvage(
+        parent_blob=parent_shell,
+        commit_blob=commit_shell,
+        head_blob=("x=1\nFEATURE_ENABLED=true\ny=2\n# unset 'FEATURE_ENABLED'\n"),
+    )
     assert not _tip_extra_can_supersede_modified_salvage(
         parent_blob=parent_shell,
         commit_blob=commit_shell,
