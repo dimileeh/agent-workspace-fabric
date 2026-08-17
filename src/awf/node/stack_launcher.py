@@ -56,6 +56,9 @@ from awf.node.stack_launcher_auth_helpers import (
     clarification_auth_target as _helper_clarification_auth_target,
 )
 from awf.node.stack_launcher_auth_helpers import (
+    clarification_contained_credential_files as _clarification_contained_credential_files,
+)
+from awf.node.stack_launcher_auth_helpers import (
     external_account_credential_source_environment_names as _clarification_external_account_credential_source_environment_names,
 )
 from awf.node.stack_launcher_auth_helpers import (
@@ -1228,6 +1231,13 @@ class ComposeStackLauncher:
                 agent_model=request.agent_model,
             ),
             clarification_auth_mounts=clarification_auth_mounts,
+            clarification_auth_credential_files=_clarification_contained_credential_files(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=str(layout.mirror_path),
+                agent_runtime=request.agent_runtime,
+                agent_model=request.agent_model,
+            ),
             clarification_external_account_subject_token_file_rewrites=(
                 clarification_external_account_subject_token_file_rewrites
             ),

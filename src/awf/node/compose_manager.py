@@ -161,6 +161,9 @@ def upgrade_persisted_clarification_service(
         aws_profile_path_rewrites as _aws_profile_path_rewrites,
     )
     from awf.node.stack_launcher_auth_helpers import (
+        clarification_contained_credential_files as _clarification_contained_credential_files,
+    )
+    from awf.node.stack_launcher_auth_helpers import (
         external_account_subject_token_file_rewrites as _external_account_subject_token_file_rewrites,
     )
     from awf.node.stack_launcher_auth_helpers import (
@@ -270,6 +273,13 @@ def upgrade_persisted_clarification_service(
                 external_account_subject_token_file_rewrites
             ),
             rewrite_aws_profile_paths=bool(aws_profile_rewrites),
+            contained_credential_files=_clarification_contained_credential_files(
+                provider_auth_mounts,
+                agent_environment=agent_environment_items,
+                mirror_target=mirror_target,
+                agent_runtime=runtime_enum,
+                agent_model=agent_model,
+            ),
         )
     if "host.docker.internal:host-gateway" in agent.get("extra_hosts", []):
         clarification["extra_hosts"] = ["host.docker.internal:host-gateway"]
@@ -505,6 +515,8 @@ class WorkspaceComposeSpec:
     clarification_enabled: bool = False
     clarification_agent_environment: tuple[tuple[str, str], ...] = ()
     clarification_auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_auth_credential_files: tuple[tuple[str, ...], ...] = ()
+    """Per clarification mount, the credential files discovered inside a directory mount."""
     clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
     clarification_aws_profile_path_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
@@ -675,7 +687,16 @@ class ComposeManager:
                 for m in spec.clarification_auth_mounts
             ],
             clarification_auth_copy_snippets=[
-                "\n".join(clarification_auth_copy_lines(index))
+                "\n".join(
+                    clarification_auth_copy_lines(
+                        index,
+                        contained_credential_files=(
+                            spec.clarification_auth_credential_files[index]
+                            if index < len(spec.clarification_auth_credential_files)
+                            else ()
+                        ),
+                    )
+                )
                 for index, _ in enumerate(spec.clarification_auth_mounts)
             ],
             clarification_external_account_subject_token_file_rewrites_json=json.dumps(

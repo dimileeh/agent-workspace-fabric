@@ -879,7 +879,130 @@ def aws_profile_path_rewrites(
     )
 
 
-def clarification_auth_copy_lines(index: int) -> tuple[str, ...]:
+def clarification_contained_credential_files(
+    auth_mounts: Sequence[AuthMount],
+    *,
+    agent_environment: tuple[tuple[str, str], ...],
+    mirror_target: str,
+    agent_runtime: AgentRuntime | str,
+    agent_model: str | None = None,
+) -> tuple[tuple[str, ...], ...]:
+    """Return, per staged clarification mount, the credential files inside it.
+
+    A directory mount is retained whenever a discovered credential — an ADC
+    credential source, an AWS profile reference, or a provider credential file
+    — lives *below* it, which happens for unrecognized parents such as a
+    bundled secret lease or a helper stored beside SSH keys. Staging such a
+    directory wholesale would hand the reason-only clarification container the
+    unrelated keys and secrets that provider and Git-auth filtering excluded,
+    so the entrypoint copies exactly these paths instead.
+    """
+
+    # Import lazily because the stack launcher uses these helpers while it is
+    # importing; by invocation time its shared selection helpers are defined.
+    from awf.node.stack_launcher import (
+        _clarification_aws_profile_mount_targets,
+        _clarification_credential_process_environment_names,
+        _clarification_model_provider_auth_mount_targets,
+        _clarification_model_provider_environment_names,
+        _clarification_provider_auth_mounts,
+        _clarification_resolve_aws_web_identity_token_file_placeholder,
+        _clarification_resolve_google_credentials_placeholder,
+    )
+
+    agent_environment = _clarification_resolve_google_credentials_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    agent_environment = _clarification_resolve_aws_web_identity_token_file_placeholder(
+        agent_environment,
+        auth_mounts=auth_mounts,
+        agent_runtime=agent_runtime,
+    )
+    provider_environment_names = _clarification_model_provider_environment_names(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+    )
+    provider_mount_targets = _clarification_model_provider_auth_mount_targets(
+        agent_environment,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    credential_process_environment_names = _clarification_credential_process_environment_names(
+        auth_mounts,
+        agent_environment=agent_environment,
+        mirror_target=mirror_target,
+        agent_runtime=agent_runtime,
+        agent_model=agent_model,
+        provider_environment_names=provider_environment_names,
+    )
+    credential_paths = (
+        set(provider_mount_targets)
+        | set(
+            external_account_credential_source_paths(
+                auth_mounts,
+                agent_environment=agent_environment,
+                provider_environment_names=provider_environment_names,
+                mirror_target=mirror_target,
+                allowed_credential_process_environment_names=(credential_process_environment_names),
+            )
+        )
+        | set(
+            aws_profile_credential_paths(
+                auth_mounts,
+                agent_environment=agent_environment,
+                provider_mount_targets=_clarification_aws_profile_mount_targets(
+                    agent_environment,
+                    provider_mount_targets=provider_mount_targets,
+                ),
+                mirror_target=mirror_target,
+                allowed_credential_process_environment_names=(credential_process_environment_names),
+            )
+        )
+    )
+    return tuple(
+        tuple(
+            sorted(
+                {
+                    posixpath.relpath(posixpath.normpath(path), posixpath.normpath(mount.target))
+                    for path in credential_paths
+                    if path_is_below(path, mount.target)
+                }
+            )
+        )
+        for mount in _provider_auth_mount_staging_order(
+            _clarification_provider_auth_mounts(
+                auth_mounts,
+                agent_environment=agent_environment,
+                mirror_target=mirror_target,
+                agent_runtime=agent_runtime,
+                agent_model=agent_model,
+                provider_environment_names=provider_environment_names,
+            )
+        )
+    )
+
+
+def _clarification_credential_copy_lines(
+    *, source: str, target: str, credential_file: str
+) -> tuple[str, ...]:
+    """Stage one discovered credential from a mount, preserving its relative path."""
+
+    quoted = shlex.quote(credential_file)
+    return (
+        f'      if [ -f "{source}"/{quoted} ] && [ ! -L "{source}"/{quoted} ]; then',
+        f'        mkdir -p "$(dirname "{target}"/{quoted})"',
+        f'        cp -a "{source}"/{quoted} "{target}"/{quoted}',
+        "      fi",
+    )
+
+
+def clarification_auth_copy_lines(
+    index: int, *, contained_credential_files: Sequence[str] = ()
+) -> tuple[str, ...]:
     """Return the shell lines that stage one clarification auth mount.
 
     The rendered Compose entrypoint and the legacy persisted-stack migration
@@ -887,10 +1010,28 @@ def clarification_auth_copy_lines(index: int) -> tuple[str, ...]:
     between them: a reason-only clarification container receives the provider
     credentials, never the surrounding session history, settings, hooks, or MCP
     configuration that lives in the same provider home.
+
+    ``contained_credential_files`` names the credentials discovered inside a
+    directory mount that no per-provider allowlist covers, so an unrecognized
+    parent directory stages those files alone instead of its whole contents.
     """
 
     target = f"$AWF_CLARIFICATION_AUTH_TARGET_{index}"
     source = f"/run/awf/clarification-auth/{index}"
+    unrecognized_directory_lines: tuple[str, ...] = (
+        tuple(
+            line
+            for credential_file in contained_credential_files
+            for line in _clarification_credential_copy_lines(
+                source=source,
+                target=target,
+                credential_file=credential_file,
+            )
+        )
+        # A mount selected as a provider store in its own right holds no
+        # contained credential path, so it still stages that whole store.
+        or (f'      cp -a {source}/. "{target}/"',)
+    )
     return (
         f'mkdir -p "$(dirname "{target}")"',
         f"if [ -d {source} ]; then",
@@ -901,7 +1042,7 @@ def clarification_auth_copy_lines(index: int) -> tuple[str, ...]:
             for mount_target, credential_files in _CLARIFICATION_CREDENTIAL_FILE_ALLOWLIST
         ),
         "    *)",
-        f'      cp -a {source}/. "{target}/"',
+        *unrecognized_directory_lines,
         '      credential_files=""',
         "      ;;",
         "  esac",
@@ -955,12 +1096,22 @@ def legacy_clarification_entrypoint(
     *,
     rewrite_external_account_subject_token_file: bool = False,
     rewrite_aws_profile_paths: bool = False,
+    contained_credential_files: Sequence[Sequence[str]] = (),
 ) -> list[str]:
     """Copy staged auth and rewrite credential-file paths when required."""
 
     lines: list[str] = []
     for index in range(mount_count):
-        lines.extend(clarification_auth_copy_lines(index))
+        lines.extend(
+            clarification_auth_copy_lines(
+                index,
+                contained_credential_files=(
+                    contained_credential_files[index]
+                    if index < len(contained_credential_files)
+                    else ()
+                ),
+            )
+        )
     if rewrite_external_account_subject_token_file:
         lines.extend(
             (

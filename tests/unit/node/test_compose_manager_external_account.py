@@ -18,7 +18,10 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
     upgrade_persisted_clarification_service,
 )
-from awf.node.stack_launcher_auth_helpers import legacy_clarification_entrypoint
+from awf.node.stack_launcher_auth_helpers import (
+    clarification_contained_credential_files,
+    legacy_clarification_entrypoint,
+)
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -897,3 +900,154 @@ def test_upgrade_persisted_clarification_stages_aws_profile_helper(tmp_path: Pat
         f"{aws_home}:/run/awf/clarification-auth/0:ro",
         f"{helper}:/run/awf/clarification-auth/1:ro",
     ]
+
+
+@pytest.mark.unit
+def test_clarification_stages_only_credentials_from_unrecognized_directory_mount(
+    manager: ComposeManager, tmp_path: Path
+) -> None:
+    """A directory mount kept for one credential stages that credential alone.
+
+    The mount selector retains an unrecognized parent directory — a bundled
+    secret lease, or a helper stored beside SSH keys — whenever a discovered
+    ADC dependency lives inside it. Copying that directory wholesale would hand
+    the reason-only clarification container the unrelated keys and secrets that
+    provider and Git-auth filtering deliberately excluded.
+    """
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    secrets_target = "/run/awf/secrets/google"
+    adc_target = f"{secrets_target}/external-account-adc.json"
+    subject_token_target = f"{secrets_target}/subject-token"
+    (secrets / "external-account-adc.json").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (secrets / "subject-token").write_text("subject-token", encoding="utf-8")
+    (secrets / "unrelated-secret").write_text("unrelated-secret", encoding="utf-8")
+
+    credential_files = clarification_contained_credential_files(
+        (AuthMount(source=str(secrets), target=secrets_target, mode="ro"),),
+        agent_environment=(
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
+        ),
+        mirror_target=str(tmp_path / "mirror"),
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    assert credential_files == (("external-account-adc.json", "subject-token"),)
+
+    staged_secrets = tmp_path / "clarification-auth" / "secrets"
+    parsed = yaml.safe_load(
+        manager.render(
+            _spec(
+                tmp_path,
+                clarification_enabled=True,
+                clarification_agent_environment=(
+                    (
+                        "GOOGLE_APPLICATION_CREDENTIALS",
+                        str(staged_secrets / "external-account-adc.json"),
+                    ),
+                ),
+                clarification_auth_mounts=(
+                    AuthMount(source=str(secrets), target=str(staged_secrets), mode="ro"),
+                ),
+                clarification_auth_credential_files=credential_files,
+            )
+        ).compose_file.read_text()
+    )
+    entrypoint = parsed["services"]["clarification"]["entrypoint"]
+    script = entrypoint[2].replace("/run/awf/clarification-auth/0", str(secrets))
+
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_secrets),
+        },
+    )
+
+    assert (staged_secrets / "subject-token").read_text(encoding="utf-8") == "subject-token"
+    assert (staged_secrets / "external-account-adc.json").exists()
+    assert not (staged_secrets / "unrelated-secret").exists()
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_stages_only_contained_credentials(
+    tmp_path: Path,
+) -> None:
+    """Legacy migration applies the same contained-credential staging."""
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    secrets_target = "/run/awf/secrets/google"
+    adc_target = f"{secrets_target}/external-account-adc.json"
+    subject_token_target = f"{secrets_target}/subject-token"
+    (secrets / "external-account-adc.json").write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "credential_source": {"file": subject_token_target},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (secrets / "subject-token").write_text("subject-token", encoding="utf-8")
+    (secrets / "unrelated-secret").write_text("unrelated-secret", encoding="utf-8")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {
+                            "CLAUDE_CODE_USE_VERTEX": "1",
+                            "GOOGLE_APPLICATION_CREDENTIALS": adc_target,
+                        },
+                        "volumes": [f"{secrets}:{secrets_target}:ro"],
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_secret_lease",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    clarification = yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"][
+        "clarification"
+    ]
+    staged_secrets = tmp_path / "clarification-auth" / "secrets"
+    entrypoint = clarification["entrypoint"]
+    script = entrypoint[2].replace("/run/awf/clarification-auth/0", str(secrets))
+
+    subprocess.run(
+        [entrypoint[0], entrypoint[1], script, entrypoint[3], "true"],
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GOOGLE_APPLICATION_CREDENTIALS": str(staged_secrets / "external-account-adc.json"),
+            "AWF_CLARIFICATION_AUTH_TARGET_0": str(staged_secrets),
+            "AWF_CLARIFICATION_EXTERNAL_ACCOUNT_SUBJECT_TOKEN_FILE_REWRITES": json.dumps(
+                [[subject_token_target, str(staged_secrets / "subject-token")]]
+            ),
+        },
+    )
+
+    assert (staged_secrets / "subject-token").read_text(encoding="utf-8") == "subject-token"
+    assert not (staged_secrets / "unrelated-secret").exists()
+    assert json.loads((staged_secrets / "external-account-adc.json").read_text(encoding="utf-8"))[
+        "credential_source"
+    ]["file"] == str(staged_secrets / "subject-token")
