@@ -115,6 +115,29 @@ def test_added_salvage_blob_retained_rejects_mid_line_modified_occurrence() -> N
         commit_blob="feature_enabled: true\n",
         head_blob="feature_enabled: true\nother_key: 1\n",
     )
+    # Nested YAML leaves under different parents must not collide as bare
+    # ``enabled`` on the added-file append path. Flat ``_binding_names`` would
+    # intersect salvage ``feature.enabled`` with an unrelated ``logging.enabled``
+    # append and discard still-valid FIXED evidence (PRRT_kwDOSJAM6s6Zq76q;
+    # baseline-backed path already scopes via PRRT_kwDOSJAM6s6ZqZo2).
+    assert _added_salvage_blob_retained(
+        commit_blob="feature:\n  enabled: true\n",
+        head_blob=("feature:\n  enabled: true\nlogging:\n  enabled: false\n"),
+    )
+    # Same-parent nested rebind under the salvage prefix still supersedes.
+    assert not _added_salvage_blob_retained(
+        commit_blob="feature:\n  enabled: true\n",
+        head_blob=("feature:\n  enabled: true\n  enabled: false\n"),
+    )
+    # TOML table siblings: ``[feature] enabled`` vs ``[logging] enabled``.
+    assert _added_salvage_blob_retained(
+        commit_blob="[feature]\nenabled = true\n",
+        head_blob=("[feature]\nenabled = true\n[logging]\nenabled = false\n"),
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob="[feature]\nenabled = true\n",
+        head_blob=("[feature]\nenabled = true\nenabled = false\n"),
+    )
     # Quoted JSON/YAML mapping keys (incl. hyphenated) must supersede like bare
     # identifiers; identifier-only matching left `"feature-enabled"` unbound so
     # an appended duplicate kept a line-aligned prefix and reused stale FIXED

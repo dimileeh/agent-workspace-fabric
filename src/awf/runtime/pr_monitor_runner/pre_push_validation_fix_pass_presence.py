@@ -566,42 +566,6 @@ def _binding_name_for_line(raw_line: str) -> str | None:
     return None
 
 
-def _binding_names(text: str) -> set[str]:
-    """Return names bound by assignments / defs / defines in ``text``.
-
-    Used to detect when appended tip content rebinds a name from an added salvage
-    blob (``FEATURE_ENABLED = True`` then ``FEATURE_ENABLED = False``, shell
-    ``export FEATURE_ENABLED=true`` / ``declare -x FEATURE_ENABLED=true`` then a
-    later false rebind, YAML ``feature_enabled: true`` then ``feature_enabled:
-    false``, quoted JSON ``"feature-enabled": true`` then ``"feature-enabled":
-    false``, TOML ``feature-enabled = true`` / ``"feature-enabled" = true``, or
-    TOML dotted ``feature.enabled = true`` / ``feature."enabled" = true``), which
-    keeps a line-aligned prefix while superseding the fix (PRRT_kwDOSJAM6s6Zp8jM,
-    PRRT_kwDOSJAM6s6ZqseO, PRRT_kwDOSJAM6s6ZqxX4, PRRT_kwDOSJAM6s6ZqNAk,
-    PRRT_kwDOSJAM6s6ZqQfh, PRRT_kwDOSJAM6s6Zqip3, PRRT_kwDOSJAM6s6Zql88). Lines
-    that start inside ``/*`` or a triple-quoted string are skipped so Google-style
-    docstring Args prose cannot falsely supersede (PRRT_kwDOSJAM6s6ZqPO9).
-    """
-    names: set[str] = set()
-    in_block_comment = False
-    in_triple_double = False
-    in_triple_single = False
-    for raw_line in text.splitlines():
-        if not (in_block_comment or in_triple_double or in_triple_single):
-            name = _binding_name_for_line(raw_line)
-            if name is not None:
-                names.add(name)
-        in_block_comment, in_triple_double, in_triple_single = (
-            _advance_string_or_block_comment_state(
-                raw_line + "\n",
-                in_block_comment=in_block_comment,
-                in_triple_double=in_triple_double,
-                in_triple_single=in_triple_single,
-            )
-        )
-    return names
-
-
 def _is_declaration_opener_line(raw_line: str) -> bool:
     """Return True for def/class/function/let/const/var/#define opener lines.
 
@@ -959,14 +923,27 @@ def _tip_extra_can_supersede_modified_salvage(
     return bool(changed & tip_extra_keys)
 
 
-def _suffix_can_supersede_added_salvage(*, salvage: str, suffix: str) -> bool:
-    """Return True when ``suffix`` rebinds a name bound in ``salvage``."""
-    if not suffix:
+def _suffix_can_supersede_added_salvage(*, salvage: str, head_blob: str) -> bool:
+    """Return True when tip-appended content rebinds a scoped name from ``salvage``.
+
+    Uses the same parent-qualified keys as the baseline-backed path so nested
+    YAML/TOML/class leaves under different parents do not collide as bare
+    ``enabled`` / ``ok`` (PRRT_kwDOSJAM6s6Zq76q; compare PRRT_kwDOSJAM6s6ZqZo2,
+    PRRT_kwDOSJAM6s6ZqpBC, PRRT_kwDOSJAM6s6ZqKN3). Tip-extra keys resolve against
+    the full tip blob so a same-parent nested rebind under the salvage prefix
+    still qualifies. Flat leaf intersection previously discarded retained FIXED
+    evidence when an unrelated descendant append shared only the leaf name.
+    """
+    if len(head_blob) <= len(salvage):
         return False
-    salvage_names = _binding_names(salvage)
-    if not salvage_names:
+    salvage_keys = set(_last_binding_spans(salvage))
+    if not salvage_keys:
         return False
-    return bool(salvage_names & _binding_names(suffix))
+    extra_indices = _tip_extra_line_indices(commit_blob=salvage, head_blob=head_blob)
+    if not extra_indices:
+        return False
+    tip_extra_keys = _scoped_binding_keys_on_lines(text=head_blob, line_indices=extra_indices)
+    return bool(salvage_keys & tip_extra_keys)
 
 
 def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
@@ -988,8 +965,8 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
     quoted ``/*`` token cannot falsely reject a valid salvage
     (PRRT_kwDOSJAM6s6Zq2m_).
     Prefix retention with a non-empty append additionally rejects when the
-    appended suffix rebinds a name bound in the salvage
-    (PRRT_kwDOSJAM6s6Zp8jM).
+    appended tip-extra lines rebind a **scoped** name bound in the salvage
+    (PRRT_kwDOSJAM6s6Zp8jM, PRRT_kwDOSJAM6s6Zq76q).
 
     An empty salvage blob (new empty file) is a vacuous substring of every tip;
     retain only when the tip blob is also exactly empty (PRRT_kwDOSJAM6s6ZpEZh).
@@ -1015,7 +992,7 @@ def _added_salvage_blob_retained(*, commit_blob: str, head_blob: str) -> bool:
             return True
         return not _suffix_can_supersede_added_salvage(
             salvage=commit_blob,
-            suffix=head_blob[len(commit_blob) :],
+            head_blob=head_blob,
         )
     # Prepend: salvage remains a line-aligned suffix (not already covered above),
     # and the prepended prefix must not leave an open disabling context.
