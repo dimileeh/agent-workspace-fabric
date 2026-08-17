@@ -41,7 +41,10 @@ from awf.runtime.pr_monitor_runner.constants import (
     _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.fix_cycle import (
+    _RESOLVABLE_THREAD_VERDICTS,
+    _clear_published_salvage_durably,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 
@@ -654,6 +657,14 @@ async def _resolve_addressed_outdated_threads(
             workspace_id=workspace_id,
             state=state,
             context="resolve_outdated_thread",
+        )
+        # Publication + resolve done — drop obsolete tip evidence
+        # (PRRT_kwDOSJAM6s6Zzwl4).
+        await _clear_published_salvage_durably(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=tid,
         )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,

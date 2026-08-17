@@ -410,7 +410,9 @@ async def _invoke_cli_for_verdict_result(
     the feedback body that produced it so an edited thread cannot reuse stale
     tip keys while ``agent_failed`` skips stale-body cleanup. Tip evidence is
     retained across FIXED accept and addressed-state clear until publication
-    succeeds (PRRT_kwDOSJAM6s6ZnvBN). Evidence is never retained for
+    succeeds (PRRT_kwDOSJAM6s6ZnvBN); successful push/resolve then drops the
+    ``__salvaged_fix_*`` keys so they do not accumulate
+    (PRRT_kwDOSJAM6s6Zzwl4). Evidence is never retained for
     ``isolated_worktree_host_path`` runs: those tips are discarded with the
     clarification checkout.
 

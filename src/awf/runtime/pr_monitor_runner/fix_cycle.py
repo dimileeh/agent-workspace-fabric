@@ -50,6 +50,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
+    _clear_salvaged_fix_state,
     _defer_reason_state_key,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -75,6 +76,20 @@ from awf.runtime.pr_monitor_runner.types import (
 # them in a later fix-cycle pass is never resolved even if an earlier pass
 # queued it for resolution.
 _RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
+
+
+async def _clear_published_salvage_durably(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    item_id: str,
+) -> None:
+    """Clear and selectively persist obsolete tip keys after publication succeeds."""
+    _clear_salvaged_fix_state(state, item_id)
+    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+    if callable(persist):
+        await persist(workspace_id, state, salvage_item_id=item_id)
 
 
 async def _run_fix_cycle(
@@ -585,6 +600,21 @@ async def _run_fix_cycle(
             source_head_sha=pushed_head_sha,
         )
 
+    # Review-level comments are not GraphQL-resolved; publication is the tip.
+    # Drop obsolete tip keys for those publish-dependent items now. Inline
+    # threads keep salvage until ``resolve_thread`` succeeds below so a
+    # resolve requeue can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
+    threads_to_resolve_set = set(threads_to_resolve)
+    for item_id in dict.fromkeys(publish_dependent_ids):
+        if item_id in threads_to_resolve_set:
+            continue
+        await _clear_published_salvage_durably(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=item_id,
+        )
+
     resolution_head_sha = pushed_head_sha or pr_head_sha
     for comment, verdict_result in fixed_review_comments:
         await self._record_pr_feedback_resolution(
@@ -834,6 +864,14 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 state=state,
                 context="resolve_thread",
+            )
+            # Tip evidence survived push/resolve requeue; publication + resolve are
+            # done, so drop obsolete ``__salvaged_fix_*`` keys (PRRT_kwDOSJAM6s6Zzwl4).
+            await _clear_published_salvage_durably(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=tid,
             )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,

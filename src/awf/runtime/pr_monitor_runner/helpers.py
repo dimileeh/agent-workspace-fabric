@@ -67,6 +67,15 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key as _outdated_resolve_requeued_key,
 )
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_body_hash_state_key as _salvaged_fix_body_hash_state_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_head_state_key as _salvaged_fix_head_state_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_start_state_key as _salvaged_fix_start_state_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckFailureLogResult,
@@ -300,6 +309,20 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+
+
+def _clear_salvaged_fix_state(state: MonitorState, item_id: str) -> None:
+    """Drop ``__salvaged_fix_*`` tip keys after publication resolves the item.
+
+    Tip evidence survives addressed-state clear during push/resolve requeue
+    (``_clear_addressed_state_by_id``). Once the corresponding fix is published
+    and feedback is resolved — or a review-level fix is pushed with nothing left
+    to resolve on the forge — the keys are obsolete and must not accumulate in
+    ``monitor_threads_addressed`` (PRRT_kwDOSJAM6s6Zzwl4).
+    """
+    state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_salvaged_fix_body_hash_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(
