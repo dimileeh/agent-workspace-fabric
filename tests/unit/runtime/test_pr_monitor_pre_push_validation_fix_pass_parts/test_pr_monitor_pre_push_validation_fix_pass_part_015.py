@@ -1,0 +1,269 @@
+"""Coverage edges for call-scan / f-string / control-flow presence helpers."""
+
+from __future__ import annotations
+
+import pytest
+
+_MEMBER_GUARD_SALVAGE = "guard = Guard()\nguard.enable()\n"
+
+
+@pytest.mark.unit
+def test_js_template_interpolation_masks_comments_regex_and_keeps_real_calls() -> None:
+    """``//`` / ``/* */`` / regex inside ``${...}`` must not invent tip-extra calls.
+
+    Real interpolations still supersede; regex-only bodies stay non-executable
+    (PRRT_kwDOSJAM6s6ZtJG8 call-scan edges).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _call_site_names_for_line,
+        _find_js_template_interpolation_end,
+    )
+
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "const x = `${guard.disable() // other.call()}`;\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "const x = `${/* other.call() */ guard.disable()}`;\n",
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "const x = `${/guard.disable()/}`;\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "const x = `${1 / guard.disable() / 2}`;\n",
+    )
+    assert _call_site_names_for_line("const x = `${guard.disable() // other.call()}`") == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line("const x = `${/guard.disable()/}`") == ()
+    assert _call_site_names_for_line("const x = `${1 / guard.disable() / 2}`") == (
+        "guard",
+        "guard.disable",
+    )
+    # Unclosed block comment blanks through end of the interpolation body.
+    assert _find_js_template_interpolation_end("/* unclosed", 0) == len("/* unclosed")
+    assert _find_js_template_interpolation_end("x // c}", 0) == 7
+    assert _find_js_template_interpolation_end("1 / 2}", 0) == 5
+    assert _find_js_template_interpolation_end("a /= b}", 0) == 6
+
+
+@pytest.mark.unit
+def test_python_fstring_field_edges_mask_static_and_keep_nested_calls() -> None:
+    """Nested strings, ``#`` comments, and ``{{`` / ``}}`` stay non-call static text.
+
+    Replacement fields that still contain a real call supersede salvage; identifier
+    prefixes such as ``xf\"...\"`` are not f-strings (PRRT_kwDOSJAM6s6Zt7Go).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _call_site_names_for_line,
+        _find_py_fstring_expr_end,
+        _py_fstring_prefix_len,
+        _skip_py_fstring,
+        _skip_py_triple_quoted_string,
+    )
+
+    assert _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"{{guard.disable()}}"\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"guard.disable()}}"\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"{"""guard.disable()"""}"\n',
+    )
+    assert _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "marker = f\"{'guard.disable()'}\"\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"{guard.disable() # other.call()}"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"{("""x"""); guard.disable()}"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "marker = f\"{s = 'hi\\''; guard.disable()}\"\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + 'marker = f"{s = \\"hi\\"; guard.disable()}"\n',
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "marker = f\"{f'{guard.disable()}'}\"\n",
+    )
+    assert _call_site_names_for_line('marker = f"{"""guard.disable()"""}"') == ()
+    assert _call_site_names_for_line('marker = f"{guard.disable() # other.call()}"') == (
+        "guard",
+        "guard.disable",
+    )
+    # ``xf`` continues an identifier — not an f-string prefix.
+    assert _py_fstring_prefix_len('xf"', 2) == 0
+    assert _py_fstring_prefix_len('af"', 2) == 0
+    assert _py_fstring_prefix_len('Fr"', 2) == 2
+    # Nested skip helpers: escapes, unclosed triples, and prefix without a quote.
+    assert _skip_py_triple_quoted_string('"""ab\\yc"""', 0) == 11
+    assert _skip_py_triple_quoted_string('"""abc', 0) == 6
+    assert _skip_py_fstring("f", 0) == 1
+    assert _skip_py_fstring(r'f"a\nb"', 0) == 7
+    assert _skip_py_fstring(r"f'a\'b'", 0) == 7
+    assert _skip_py_fstring('f"a{{b}}c"', 0) == 10
+    assert _skip_py_fstring('f"a}}b"', 0) == 7
+    assert _skip_py_fstring('f"a}b"', 0) == 6
+    assert _skip_py_fstring("f'{x}'", 0) == 6
+    # Unclosed quote / field exit the skip helpers without an early return.
+    assert _skip_py_fstring('f"abc', 0) == 5
+    assert _skip_py_fstring('f"{x', 0) == 4
+    assert _find_py_fstring_expr_end("x # c}", 0) == 6
+    assert _find_py_fstring_expr_end(r'"a\"b" + y}', 0) == 10
+    assert _find_py_fstring_expr_end(r"'a\'b' + y}", 0) == 10
+    assert _find_py_fstring_expr_end('"""inner""" + y}', 0) == 15
+    assert _find_py_fstring_expr_end("'''inner''' + y}", 0) == 15
+    assert _find_py_fstring_expr_end('f"{inner}" + y}', 0) == 14
+    assert _find_py_fstring_expr_end("f'{inner}' + y}", 0) == 14
+    # Nested braces inside a field deepen then close.
+    assert _find_py_fstring_expr_end("a[{b}] + y}", 0) == 10
+    # Lone closing brace / escape blanking in static f-string text.
+    assert _call_site_names_for_line(r'f"a\nb{guard.disable()}"') == (
+        "guard",
+        "guard.disable",
+    )
+    assert _call_site_names_for_line('f"guard.disable()}"') == ()
+
+
+@pytest.mark.unit
+def test_member_call_continuation_skips_blanks_comments_and_stops_at_semicolon() -> None:
+    """Blank / ``//`` / ``#`` lines join; a prior ``;`` statement does not."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _added_salvage_blob_retained,
+    )
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_calls import (
+        _is_member_call_continuation,
+        _join_member_call_continuation_line,
+    )
+
+    assert _is_member_call_continuation('["disable"]();')
+    assert _is_member_call_continuation('["disable"]?.();')
+    assert not _is_member_call_continuation("[incomplete")
+    assert not _is_member_call_continuation("[logging]")
+
+    assert (
+        _join_member_call_continuation_line(["guard", "", "  .disable();"], 2) == "guard.disable();"
+    )
+    assert (
+        _join_member_call_continuation_line(["guard", "  // note", "  .disable();"], 2)
+        == "guard.disable();"
+    )
+    assert (
+        _join_member_call_continuation_line(["guard", "  # note", "  .disable();"], 2)
+        == "guard.disable();"
+    )
+    assert _join_member_call_continuation_line(["other();", "  .disable();"], 1) == ".disable();"
+    assert _join_member_call_continuation_line(["  .disable();"], 0) == ".disable();"
+    # Non-continuation lines return unchanged; nested continuations join through.
+    assert _join_member_call_continuation_line(["guard.disable();"], 0) == "guard.disable();"
+    assert (
+        _join_member_call_continuation_line(["guard", "  .foo", "  .disable();"], 2)
+        == "guard.foo.disable();"
+    )
+
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "guard\n\n  .disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "guard\n  // note\n  .disable()\n",
+    )
+    assert not _added_salvage_blob_retained(
+        commit_blob=_MEMBER_GUARD_SALVAGE,
+        head_blob=_MEMBER_GUARD_SALVAGE + "guard\n  # note\n  .disable()\n",
+    )
+
+
+@pytest.mark.unit
+def test_control_flow_header_effect_paren_depth_and_brace_tails() -> None:
+    """Paren headers report open depth, awaiting-body, or brace-closed effects."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_context import (
+        _control_flow_header_effect,
+        _prefix_opens_control_flow_over_suffix,
+    )
+
+    assert _control_flow_header_effect("if (a") == (False, 1)
+    assert _control_flow_header_effect("while (x") == (False, 1)
+    assert _control_flow_header_effect("if (false)") == (True, None)
+    assert _control_flow_header_effect("for (;;)") == (True, None)
+    assert _control_flow_header_effect("else if (x)") == (True, None)
+    assert _control_flow_header_effect("catch (e)") == (True, None)
+    assert _control_flow_header_effect("if (a) {") == (False, None)
+    assert _control_flow_header_effect("switch (x) {") == (False, None)
+    assert _control_flow_header_effect("else") == (True, None)
+    # Neither bare nor paren keyword — fall through to the neutral effect.
+    assert _control_flow_header_effect("foobar (x)") == (False, None)
+    assert _control_flow_header_effect("return x") == (False, None)
+    # Multi-line open paren then closer with brace keeps the prefix "open".
+    assert _prefix_opens_control_flow_over_suffix("if (\nfalse\n) {\n") is True
+    assert _prefix_opens_control_flow_over_suffix("if (\nfalse\n)\n") is True
+
+
+@pytest.mark.unit
+def test_binding_span_keeps_interior_blanks_and_drops_trailing_blanks() -> None:
+    """Binding spans continue through blank body lines then trim trailing blanks."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+        _binding_span_at,
+        _binding_span_end_exclusive,
+    )
+
+    lines = [
+        "def enable_guard():",
+        "    setup()",
+        "",
+        "    finish()",
+        "",
+        "",
+        "def other():",
+        "    pass",
+    ]
+    assert _binding_span_end_exclusive(lines, 0) == 4
+    assert _binding_span_at(lines, 0) == (
+        "def enable_guard():",
+        "    setup()",
+        "",
+        "    finish()",
+    )
+
+
+@pytest.mark.unit
+def test_comment_only_lines_yield_no_unset_update_or_setattr_bindings() -> None:
+    """``#`` / ``//`` lines must not bind unset / ``++`` / setattr mutations."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence_assigns import (
+        _del_binding_names,
+        _setattr_mutation_binding_names,
+        _unset_binding_names,
+        _update_expr_binding_names,
+    )
+
+    assert _unset_binding_names("# unset FEATURE_ENABLED") == ()
+    assert _unset_binding_names("// unset FEATURE_ENABLED") == ()
+    assert _update_expr_binding_names("# retryBudget++") == ()
+    assert _update_expr_binding_names("// retryBudget--") == ()
+    assert _setattr_mutation_binding_names('# setattr(guard, "enabled", False)') == ()
+    assert _setattr_mutation_binding_names('// setattr(guard, "enabled", False)') == ()
+    assert _del_binding_names("# del guard.enabled") == ()
+    assert _del_binding_names("// delete guard.enabled") == ()
