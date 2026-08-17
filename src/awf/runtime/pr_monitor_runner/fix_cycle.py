@@ -601,12 +601,17 @@ async def _run_fix_cycle(
         )
 
     # Review-level comments are not GraphQL-resolved; publication is the tip.
-    # Drop obsolete tip keys for those publish-dependent items now. Inline
-    # threads keep salvage until ``resolve_thread`` succeeds below so a
-    # resolve requeue can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
+    # Drop obsolete tip keys for publish-dependent items whose resolution was
+    # already recorded earlier (e.g. false_positive). FIXED review comments keep
+    # salvage until ``_record_pr_feedback_resolution`` succeeds below — clearing
+    # first strands a valid tip as fixed_without_head_advance on restart when
+    # the record call is cancelled or raises (PRRT_kwDOSJAM6s6Z0Hbz). Inline
+    # threads keep salvage until ``resolve_thread`` succeeds so a resolve requeue
+    # can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
     threads_to_resolve_set = set(threads_to_resolve)
+    fixed_review_comment_ids = {comment.comment_id for comment, _ in fixed_review_comments}
     for item_id in dict.fromkeys(publish_dependent_ids):
-        if item_id in threads_to_resolve_set:
+        if item_id in threads_to_resolve_set or item_id in fixed_review_comment_ids:
             continue
         await _clear_published_salvage_durably(
             self,
@@ -625,6 +630,12 @@ async def _run_fix_cycle(
             comment=comment,
             verdict_result=verdict_result,
             operation_id=operation_id,
+        )
+        await _clear_published_salvage_durably(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=comment.comment_id,
         )
 
     # 4) Resolve threads on GitHub. Only inline threads have IDs we can

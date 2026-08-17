@@ -181,7 +181,7 @@ async def test_successful_push_clears_salvage_for_review_comments(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Review-level fixes have no GraphQL resolve — clear tip keys after push."""
+    """Review-level fixes clear tip keys only after resolution is recorded."""
     workspace_id = await seed_monitoring_workspace(factory)
     item_id = "RC_publication_clear_review"
     cmd = FakeCommandRunner()
@@ -214,6 +214,7 @@ async def test_successful_push_clears_salvage_for_review_comments(
     )
     state = MonitorState()
     _plant_salvage(state, item_id)
+    recorded: list[str] = []
 
     async def _address_review_comment_result(**_kwargs: object) -> object:
         from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -221,7 +222,16 @@ async def test_successful_push_clears_salvage_for_review_comments(
         state.mark_addressed(item_id, "fix_committed")
         return VerdictResult(verdict="fix_committed")
 
+    async def _record_pr_feedback_resolution(**kwargs: object) -> None:
+        comment_obj = kwargs["comment"]
+        assert isinstance(comment_obj, ReviewComment)
+        # Salvage must still be present until resolution succeeds
+        # (PRRT_kwDOSJAM6s6Z0Hbz).
+        assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == "b" * 40
+        recorded.append(comment_obj.comment_id)
+
     runner._address_review_comment_result = _address_review_comment_result  # type: ignore[method-assign]
+    runner._record_pr_feedback_resolution = _record_pr_feedback_resolution  # type: ignore[method-assign]
 
     await runner._run_fix_cycle(
         workspace_id=workspace_id,
@@ -237,7 +247,94 @@ async def test_successful_push_clears_salvage_for_review_comments(
     )
 
     assert gh.resolved == []
+    assert recorded == [item_id]
     assert state.threads_addressed_ids.get(item_id) == "fix_committed"
     assert _salvaged_fix_head_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_body_hash_state_key(item_id) not in state.threads_addressed_ids
     assert _salvaged_fix_start_state_key(item_id) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_review_fixed_keeps_salvage_when_resolution_record_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Do not clear review FIXED salvage before resolution is durably recorded.
+
+    Clearing tip keys first, then failing ``_record_pr_feedback_resolution``,
+    strands a valid published fix as ``fixed_without_head_advance`` on restart
+    (PRRT_kwDOSJAM6s6Z0Hbz).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    item_id = "RC_resolution_record_cancel_keep_salvage"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # push
+    cmd.queue_result(returncode=0, stdout="newsha\n")  # rev-parse HEAD
+    adapter = FakeAdapter()
+    comment = ReviewComment(
+        comment_id=item_id,
+        author="reviewer",
+        body_excerpt="keep salvage until resolution lands",
+    )
+    settle = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+    gh = _SuccessfulResolveClient(cmd, settle_status=settle)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    _plant_salvage(state, item_id)
+    persisted_clears: list[str] = []
+
+    async def _address_review_comment_result(**_kwargs: object) -> object:
+        from awf.runtime.pr_monitor_runner.comments import VerdictResult
+
+        state.mark_addressed(item_id, "fix_committed")
+        return VerdictResult(verdict="fix_committed")
+
+    async def _record_pr_feedback_resolution(**_kwargs: object) -> None:
+        raise TimeoutError("resolution provenance write interrupted")
+
+    async def _persist_salvage(
+        _workspace_id: str, _state: MonitorState, *, salvage_item_id: str
+    ) -> None:
+        persisted_clears.append(salvage_item_id)
+
+    runner._address_review_comment_result = _address_review_comment_result  # type: ignore[method-assign]
+    runner._record_pr_feedback_resolution = _record_pr_feedback_resolution  # type: ignore[method-assign]
+    runner._persist_failed_run_salvage_durably = _persist_salvage  # type: ignore[method-assign]
+
+    with pytest.raises(TimeoutError, match="resolution provenance write interrupted"):
+        await runner._run_fix_cycle(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="agent-workspace-fabric"),
+            pr_number=42,
+            pr_head_sha="abc1234567890def",
+            initial_threads=(),
+            initial_reviews=(comment,),
+            state=state,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert item_id not in persisted_clears
+    assert state.threads_addressed_ids.get(_salvaged_fix_head_state_key(item_id)) == "b" * 40
+    assert (
+        state.threads_addressed_ids.get(_salvaged_fix_body_hash_state_key(item_id))
+        == "feedback_body_hash_publication_clear"
+    )
+    assert state.threads_addressed_ids.get(_salvaged_fix_start_state_key(item_id)) == "a" * 40
