@@ -2,7 +2,7 @@
 
 import pytest
 
-from awf.adapters.base import (
+from awf.adapters.base_hosted_identity import (
     _hosted_identity_int,
     _hosted_identity_str,
     _hosted_identity_str_tuple,

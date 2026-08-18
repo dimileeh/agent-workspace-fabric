@@ -105,9 +105,9 @@ async def test_provider_agent_auth_failure_raises_provider_auth_failed(
         workspace_id,
         agent="codex",
         model="gpt-5.5",
-        fallback_agent="gemini",
-        fallback_provider="google",
-        fallback_model="gemini-3.1-pro-preview",
+        fallback_agent="claude_code",
+        fallback_provider="anthropic",
+        fallback_model="claude-3-7-sonnet-20250219",
         max_same_provider_retries=3,
     )
     runner = make_runner(

@@ -36,7 +36,7 @@ async def handle_recovery_pr_handoff_after_validation(
     successful_validation_run_id: str | None,
     successful_validation_workspace_head_sha: str | None,
     repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[Any]],
-    adapter: AgentAdapter,
+    adapter: AgentAdapter | None,
     profile: WorkspaceProfile,
     defaults: AgentDefaults | None,
     compose_project: str,

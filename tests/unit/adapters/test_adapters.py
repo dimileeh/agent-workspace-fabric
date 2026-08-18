@@ -30,7 +30,6 @@ from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_e
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.cursor import CursorAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
-from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -899,7 +898,6 @@ class TestClaudeCodeAdapter:
         (ClaudeCodeAdapter, AgentRuntime.claude_code),
         (CodexAdapter, AgentRuntime.codex),
         (CursorAdapter, AgentRuntime.cursor),
-        (GeminiAdapter, AgentRuntime.gemini),
         (AntigravityAdapter, AgentRuntime.antigravity),
         (OpenCodeAdapter, AgentRuntime.opencode),
         (GrokAdapter, AgentRuntime.grok),
@@ -936,7 +934,6 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
         (ClaudeCodeAdapter, (".claude/worktrees/",)),
         (CodexAdapter, ()),
         (CursorAdapter, ()),
-        (GeminiAdapter, ()),
         (AntigravityAdapter, ()),
         (OpenCodeAdapter, ()),
         (GrokAdapter, ()),
@@ -959,7 +956,6 @@ def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
         ClaudeCodeAdapter,
         CodexAdapter,
         CursorAdapter,
-        GeminiAdapter,
         AntigravityAdapter,
         OpenCodeAdapter,
         GrokAdapter,
@@ -975,7 +971,6 @@ class TestCentralDefaults:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.6-sol"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor].model == "sonnet-4-thinking"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
@@ -1006,7 +1001,6 @@ class TestRegistry:
         codex = get_adapter(AgentRuntime.codex, runner=runner)
         claude = get_adapter(AgentRuntime.claude_code, runner=runner)
         cursor = get_adapter(AgentRuntime.cursor, runner=runner)
-        gemini = get_adapter(AgentRuntime.gemini, runner=runner)
         antigravity = get_adapter(AgentRuntime.antigravity, runner=runner)
         opencode = get_adapter(AgentRuntime.opencode, runner=runner)
         grok = get_adapter(AgentRuntime.grok, runner=runner)
@@ -1014,7 +1008,90 @@ class TestRegistry:
         assert codex.name == AgentRuntime.codex
         assert claude.name == AgentRuntime.claude_code
         assert cursor.name == AgentRuntime.cursor
-        assert gemini.name == AgentRuntime.gemini
+        assert cursor.is_retired is False
         assert antigravity.name == AgentRuntime.antigravity
         assert opencode.name == AgentRuntime.opencode
         assert grok.name == AgentRuntime.grok
+        assert AgentRuntime.gemini not in DEFAULT_AGENT_DEFAULTS
+        from awf.adapters.base import RetiredAgentAdapter
+
+        gemini = get_adapter(AgentRuntime.gemini, runner=runner)
+        assert isinstance(gemini, RetiredAgentAdapter)
+        assert gemini.is_retired is True
+        assert gemini.name == AgentRuntime.gemini
+        assert gemini.name_str == "gemini"
+
+        from awf.adapters.base import AgentDefaults
+
+        defaults = AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh")
+        gemini_bound = get_adapter(AgentRuntime.gemini, runner=runner, defaults=defaults)
+        assert isinstance(gemini_bound, RetiredAgentAdapter)
+        assert gemini_bound.default_model == "gemini-3.1-pro-preview"
+        assert gemini_bound._default_effort == "xhigh"
+
+        assert gemini.get_provider("model") == "unsupported"
+        assert gemini._cli_args(model="model") == []
+
+        unknown = get_adapter("unknown_custom_runtime", runner=runner)
+        assert isinstance(unknown, RetiredAgentAdapter)
+        assert unknown.name == "unknown_custom_runtime"
+        assert unknown.name_str == "unknown_custom_runtime"
+        assert unknown.get_provider(None) == "unsupported"
+        assert unknown._cli_args(model=None) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_retired_agent_adapter_run_preserves_unrecognized_runtime(self) -> None:
+        """RetiredAgentAdapter.run reports the true unrecognized runtime string in AgentRunError."""
+        from pathlib import Path
+
+        from awf.adapters.base import AgentRunError, RetiredAgentAdapter
+
+        runner = FakeCommandRunner()
+        adapter = get_adapter("unknown_custom_runtime", runner=runner)
+        assert isinstance(adapter, RetiredAgentAdapter)
+
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project="test",
+                compose_file=Path("/tmp/compose.yml"),
+                prompt="hello",
+            )
+
+        assert exc_info.value.agent == "unknown_custom_runtime"
+        assert exc_info.value.reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+        assert exc_info.value.details["agent"] == "unknown_custom_runtime"
+        assert (
+            exc_info.value.details["provider_recovery"]["reason_code"]
+            == "UNSUPPORTED_AGENT_RUNTIME"
+        )
+        assert exc_info.value.details["provider_recovery"]["retryable"] is True
+        assert "failure_fingerprint" in exc_info.value.details["provider_recovery"]
+        assert exc_info.value.details["provider_recovery"]["failure_fingerprint"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_run_agent_cli_non_streaming_without_sinks(self) -> None:
+        """_run_agent_cli non-streaming path works cleanly without sinks (workspace_id=None)."""
+
+        class _NonStreamingRunner:
+            async def run(
+                self,
+                args: list[str],
+                *,
+                input_bytes: bytes | None = None,
+                env: dict[str, str] | None = None,
+                timeout: float | None = None,
+            ) -> CommandResult:
+                del args, input_bytes, env, timeout
+                return CommandResult(returncode=0, stdout="cli stdout", stderr="cli stderr")
+
+        adapter = OpenCodeAdapter(runner=_NonStreamingRunner())
+        res = await adapter.run(
+            compose_project="awf_ws_test",
+            compose_file=Path("/tmp/compose.yml"),
+            prompt="hello",
+            workspace_id=None,
+        )
+        assert res.stdout == "cli stdout"
+        assert res.stderr == "cli stderr"

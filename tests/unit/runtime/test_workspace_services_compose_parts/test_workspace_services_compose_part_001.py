@@ -1443,39 +1443,12 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
 def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override(
     tmp_path: Path,
 ) -> None:
-    """A same-name bare reference with an empty worker value stays an empty override."""
-    from awf.profiles.compose import literal_profile_env_from_compose
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-                            "PLAIN_EMPTY": "$PLAIN_EMPTY",
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    worker_env = {"OPENAI_API_KEY": "", "PLAIN_EMPTY": ""}
-
-    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
-    filtered = filter_hosted_env_passthrough_names(
-        ("OPENAI_API_KEY", "PLAIN_EMPTY"),
-        compose_file=compose_file,
-        worker_env=worker_env,
+    """Compatibility wrapper for the focused CI node id. Delegated implementation must retain its tmp_path-only fixture contract; any future fixture changes require updating this wrapper."""
+    from tests.unit.runtime.test_workspace_services_compose_parts.test_workspace_services_compose_part_005 import (
+        test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override as impl,
     )
 
-    assert profile_env["OPENAI_API_KEY"] == ""
-    assert profile_env["PLAIN_EMPTY"] == ""
-    assert "OPENAI_API_KEY" not in filtered
-    assert "PLAIN_EMPTY" not in filtered
+    impl(tmp_path)
 
 
 @pytest.mark.unit

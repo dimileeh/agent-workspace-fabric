@@ -11,6 +11,8 @@ Image config labels (immutable build-ID → digest contract for awf-cloud):
   awf.core.digest           — `sha256:<64-hex>` from core Buildx `--metadata-file`
   awf.agent.runtime.digest  — `sha256:<64-hex>` multi-arch **index** digest from
                               agent-runtime Buildx `--metadata-file`
+  awf.core.console.digest   — `sha256:<64-hex>` from hosted console Buildx
+                              `--metadata-file`
 
 Digests are taken from Buildx push metadata (`containerimage.digest`), never
 from a later mutable-tag inspect/pull. Only the carrier is listed in Cloud
@@ -37,6 +39,7 @@ LABEL_GIT_COMMIT = "awf.git.commit"
 LABEL_SOURCE_REPOSITORY = "awf.source.repository"
 LABEL_CORE_DIGEST = "awf.core.digest"
 LABEL_AGENT_RUNTIME_DIGEST = "awf.agent.runtime.digest"
+LABEL_CORE_CONSOLE_DIGEST = "awf.core.console.digest"
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -63,15 +66,17 @@ class ProvenanceBindings:
     source_repository: str
     core_digest: str
     agent_runtime_digest: str
+    core_console_digest: str
 
     def labels(self) -> dict[str, str]:
-        """Return the five contract labels with exact validated values."""
+        """Return the six contract labels with exact validated values."""
         return {
             LABEL_BUILD_ID: self.build_id,
             LABEL_GIT_COMMIT: self.commit_sha,
             LABEL_SOURCE_REPOSITORY: self.source_repository,
             LABEL_CORE_DIGEST: self.core_digest,
             LABEL_AGENT_RUNTIME_DIGEST: self.agent_runtime_digest,
+            LABEL_CORE_CONSOLE_DIGEST: self.core_console_digest,
         }
 
 
@@ -95,6 +100,7 @@ def bind_provenance(
     source_repository: str,
     core_digest: str,
     agent_runtime_digest: str,
+    core_console_digest: str,
 ) -> ProvenanceBindings:
     """Validate and return provenance bindings for the carrier image labels."""
     return ProvenanceBindings(
@@ -105,6 +111,10 @@ def bind_provenance(
         agent_runtime_digest=_validate_digest(
             agent_runtime_digest,
             field="agent runtime digest",
+        ),
+        core_console_digest=_validate_digest(
+            core_console_digest,
+            field="core console digest",
         ),
     )
 
@@ -161,6 +171,7 @@ def write_bindings_env(path: Path, *, bindings: ProvenanceBindings, carrier_tag:
         f"AWF_SOURCE_REPOSITORY={_shell_single_quote(bindings.source_repository)}",
         f"AWF_CORE_DIGEST={_shell_single_quote(bindings.core_digest)}",
         f"AWF_AGENT_RUNTIME_DIGEST={_shell_single_quote(bindings.agent_runtime_digest)}",
+        f"AWF_CORE_CONSOLE_DIGEST={_shell_single_quote(bindings.core_console_digest)}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -210,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--artifact-repository", required=True)
     prepare.add_argument("--core-metadata", type=Path, required=True)
     prepare.add_argument("--runtime-metadata", type=Path, required=True)
+    prepare.add_argument("--console-metadata", type=Path, required=True)
     prepare.add_argument(
         "--output-env",
         type=Path,
@@ -233,12 +245,14 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     try:
         core_digest = extract_digest_from_metadata(args.core_metadata)
         runtime_digest = extract_digest_from_metadata(args.runtime_metadata)
+        console_digest = extract_digest_from_metadata(args.console_metadata)
         bindings = bind_provenance(
             build_id=args.build_id,
             commit_sha=args.commit_sha,
             source_repository=args.source_repository,
             core_digest=core_digest,
             agent_runtime_digest=runtime_digest,
+            core_console_digest=console_digest,
         )
         tag = carrier_image_ref(
             artifact_repository=args.artifact_repository,
@@ -262,6 +276,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         f"source_repository={bindings.source_repository} "
         f"core_digest={bindings.core_digest} "
         f"agent_runtime_digest={bindings.agent_runtime_digest} "
+        f"core_console_digest={bindings.core_console_digest} "
         f"carrier={tag}",
         file=sys.stderr,
     )

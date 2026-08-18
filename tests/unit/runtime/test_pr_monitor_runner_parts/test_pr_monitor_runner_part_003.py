@@ -203,11 +203,11 @@ async def _configure_provider_monitor_workspace(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
     *,
-    agent: str = "gemini",
-    model: str = "gemini-2.5-pro",
-    fallback_agent: str = "codex",
-    fallback_provider: str = "openai",
-    fallback_model: str = "gpt-5.3-codex",
+    agent: str = "codex",
+    model: str = "gpt-5.3-codex-spark",
+    fallback_agent: str = "claude_code",
+    fallback_provider: str = "anthropic",
+    fallback_model: str = "claude-3-7-sonnet-20250219",
     max_same_provider_retries: int = 1,
 ) -> None:
     async with factory() as session:
@@ -604,9 +604,9 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         workspace_id,
         agent="codex",
         model="gpt-5.3-codex-spark",
-        fallback_agent="gemini",
-        fallback_provider="google",
-        fallback_model="gemini-2.5-pro",
+        fallback_agent="claude_code",
+        fallback_provider="anthropic",
+        fallback_model="claude-3-7-sonnet-20250219",
         max_same_provider_retries=0,
     )
     adapter = FakeAdapter()
@@ -648,9 +648,9 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
     assert suppressed is False
     assert isinstance(state, dict)
     assert state["action"] == "fallback"
-    assert state["target_agent"] == "gemini"
-    assert state["target_provider"] == "google"
-    assert state["target_model"] == "gemini-2.5-pro"
+    assert state["target_agent"] == "claude_code"
+    assert state["target_provider"] == "anthropic"
+    assert state["target_model"] == "claude-3-7-sonnet-20250219"
     assert "not_before" not in state
     assert requested_ids == []
     assert [operation for operation in operations if operation.type == "retry"] == []
@@ -790,7 +790,7 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
     adapter = FakeAdapter()
     adapter.queue(
         returncode=1,
-        stderr="Gemini RESOURCE_EXHAUSTED RetryableQuotaError retry after 120",
+        stderr="Codex RESOURCE_EXHAUSTED RetryableQuotaError retry after 120",
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)

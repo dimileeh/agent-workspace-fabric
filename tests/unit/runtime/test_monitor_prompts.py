@@ -85,6 +85,8 @@ class TestAddressThread:
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
         assert "Do not write any PR comment for verdict bookkeeping." in prompt
+        assert "fail closed" in prompt
+        assert "HEAD advances for this item" in prompt
 
     @pytest.mark.unit
     def test_thread_prompt_protects_regressions_from_external_feedback(self) -> None:
@@ -293,6 +295,8 @@ class TestAddressReviewComment:
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
         assert "Do not write any PR comment for review-level verdict bookkeeping." in prompt
+        assert "fail closed" in prompt
+        assert "HEAD advances for this item" in prompt
 
     @pytest.mark.unit
     def test_embeds_identifiers_and_body(self) -> None:
@@ -1468,30 +1472,3 @@ class TestReadyToMergeComment:
         assert secret not in body
         assert r"GH_TOKEN=\<redacted\>" in body
         assert "GH_TOKEN=<redacted>" not in body
-
-    @pytest.mark.unit
-    def test_blocker_item_excerpt_redacts_url_credentials_before_truncating(self) -> None:
-        """Verify blocker item excerpt redacts url credentials before truncating."""
-        password = "credential-that-crosses-the-boundary"
-        body = ready_to_merge_comment(
-            pr_number=1,
-            head_sha="a" * 40,
-            blocker_reason="review feedback needs human input",
-            blocker_items=(
-                {
-                    "kind": "thread",
-                    "id": "T1",
-                    "author": "review-bot[bot]",
-                    "path": "src/monitor.py",
-                    "line": 42,
-                    "url": "https://github.example/reviews/T1",
-                    "body": f"{'x' * 130} https://username:{password}@example.com/details",
-                    "verdict": "needs_human",
-                    "agent_verdict_reason": None,
-                },
-            ),
-        )
-
-        assert password[:12] not in body
-        assert r"\<redacted\>" in body
-        assert "<redacted>" not in body

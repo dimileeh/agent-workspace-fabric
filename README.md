@@ -95,7 +95,7 @@ Implemented now:
 - SQLAlchemy control-plane models for workspaces, operations, and events.
 - Profile-driven workspace resolution.
 - Per-workspace Docker Compose stack generation.
-- Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode, and Grok adapters.
+- Codex, Claude Code, Cursor, Antigravity, OpenCode, and Grok adapters.
 - Central default model/effort map for agent adapters.
 - AWF-owned Plan -> Execute -> Compare lifecycle policy.
 - Generic phase-based validation.

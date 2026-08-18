@@ -85,10 +85,12 @@ services:
     {% endif %}
 
   {# awf-j2-tojson-allow: loop.index0 -- Jinja-generated numeric identifier used in shell variable names and mount paths. #}
+  {# awf-j2-tojson-allow: snippet | indent(8) -- AWF-generated shell program from clarification_auth_copy_lines(), emitted into a YAML block scalar; tojson would render it as one quoted JSON string instead of script lines. #}
   {% if clarification_enabled %}
   clarification:
     image: {{ agent_runtime_image | tojson }}
     {{ clarification_service_marker | tojson }}: true
+    {{ clarification_runtime_marker | tojson }}: {{ clarification_runtime_signature | tojson }}
     working_dir: /workspace
     {% if clarification_agent_environment or clarification_auth_mounts %}environment:
       {% for k, v in clarification_agent_environment %}{{ k | tojson }}: {{ v | tojson }}
@@ -116,34 +118,7 @@ services:
       - "sh"
       - "-ec"
       - |
-        {% for m in clarification_auth_mounts %}mkdir -p "$(dirname "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}")"
-        if [ -d /run/awf/clarification-auth/{{ loop.index0 }} ]; then
-          mkdir -p "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}"
-          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
-            /home/agent/.codex) credential_files="auth.json" ;;
-            /home/agent/.claude) credential_files=".credentials.json" ;;
-            /home/agent/.config/gcloud) credential_files="application_default_credentials.json" ;;
-            /home/agent/.gemini) credential_files="oauth_creds.json" ;;
-            /home/agent/.config/opencode) credential_files="auth.json" ;;
-            /home/agent/.grok) credential_files="auth.json" ;;
-            /home/agent/.ollama) credential_files="id_ed25519 id_ed25519.pub" ;;
-            /home/agent/.aws) credential_files="credentials config" ;;
-            *)
-              cp -a /run/awf/clarification-auth/{{ loop.index0 }}/. "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/"
-              credential_files=""
-              ;;
-          esac
-          for credential_file in $credential_files; do
-            if [ -f "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ] && [ ! -L "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" ]; then
-              cp -a "/run/awf/clarification-auth/{{ loop.index0 }}/$credential_file" "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}/$credential_file"
-            fi
-          done
-        else
-          case "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" in
-            /home/agent/.claude.json) ;;
-            *) cp -a /run/awf/clarification-auth/{{ loop.index0 }} "$AWF_CLARIFICATION_AUTH_TARGET_{{ loop.index0 }}" ;;
-          esac
-        fi
+        {% for snippet in clarification_auth_copy_snippets %}{{ snippet | indent(8) }}
         {% endfor %}{% if clarification_external_account_subject_token_file_rewrites_json != "[]" %}chmod u+w "$GOOGLE_APPLICATION_CREDENTIALS"
         python - <<'PY'
         import json

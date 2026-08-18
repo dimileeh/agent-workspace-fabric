@@ -9,6 +9,7 @@ Carrier schema (image config labels on
 - awf.core.digest           — sha256:<64-hex> from core Buildx metadata-file
 - awf.agent.runtime.digest  — sha256:<64-hex> multi-arch index from runtime
                               Buildx metadata-file
+- awf.core.console.digest   — sha256:<64-hex> from console Buildx metadata-file
 
 Digests must come from Buildx `--metadata-file` of the push operation, never
 from a later mutable-tag inspect/pull. Top-level Cloud Build `images:` lists
@@ -25,6 +26,7 @@ import pytest
 from scripts.cloudbuild_provenance import (
     LABEL_AGENT_RUNTIME_DIGEST,
     LABEL_BUILD_ID,
+    LABEL_CORE_CONSOLE_DIGEST,
     LABEL_CORE_DIGEST,
     LABEL_GIT_COMMIT,
     LABEL_SOURCE_REPOSITORY,
@@ -47,10 +49,22 @@ _BUILD_ID = "build-abc-123"
 _REPO = "dimileeh/agent-workspace-fabric"
 _CORE_DIGEST = "sha256:" + ("b" * 64)
 _RUNTIME_DIGEST = "sha256:" + ("c" * 64)
+_CONSOLE_DIGEST = "sha256:" + ("d" * 64)
 
 
 def _metadata(digest: str) -> dict[str, object]:
     return {"containerimage.digest": digest}
+
+
+def _valid_bind_kwargs() -> dict[str, str]:
+    return {
+        "build_id": _BUILD_ID,
+        "commit_sha": _COMMIT,
+        "source_repository": _REPO,
+        "core_digest": _CORE_DIGEST,
+        "agent_runtime_digest": _RUNTIME_DIGEST,
+        "core_console_digest": _CONSOLE_DIGEST,
+    }
 
 
 def test_extract_digest_from_metadata_dict() -> None:
@@ -81,20 +95,16 @@ def test_extract_digest_rejects_missing_or_malformed(payload: dict[str, object])
 
 
 def test_bind_provenance_accepts_valid_bindings() -> None:
-    bindings = bind_provenance(
-        build_id=_BUILD_ID,
-        commit_sha=_COMMIT,
-        source_repository=_REPO,
-        core_digest=_CORE_DIGEST,
-        agent_runtime_digest=_RUNTIME_DIGEST,
-    )
+    bindings = bind_provenance(**_valid_bind_kwargs())
     assert bindings.labels() == {
         LABEL_BUILD_ID: _BUILD_ID,
         LABEL_GIT_COMMIT: _COMMIT,
         LABEL_SOURCE_REPOSITORY: _REPO,
         LABEL_CORE_DIGEST: _CORE_DIGEST,
         LABEL_AGENT_RUNTIME_DIGEST: _RUNTIME_DIGEST,
+        LABEL_CORE_CONSOLE_DIGEST: _CONSOLE_DIGEST,
     }
+    assert len(bindings.labels()) == 6
 
 
 @pytest.mark.parametrize(
@@ -121,19 +131,19 @@ def test_bind_provenance_accepts_valid_bindings() -> None:
         ({"core_digest": "awf-core:rc-deadbeef"}, "digest"),
         ({"core_digest": f" {_CORE_DIGEST}"}, "digest"),
         ({"agent_runtime_digest": "sha256:" + ("d" * 63)}, "digest"),
+        ({"core_console_digest": f" {_CONSOLE_DIGEST}"}, "digest"),
+        ({"core_console_digest": f"{_CONSOLE_DIGEST} "}, "digest"),
+        ({"core_console_digest": "sha256:" + ("e" * 63)}, "digest"),
+        ({"core_console_digest": "sha256:" + ("E" * 64)}, "digest"),
+        ({"core_console_digest": "latest"}, "digest"),
+        ({"core_console_digest": ""}, "digest"),
     ],
 )
 def test_bind_provenance_rejects_invalid_bindings(
     kwargs: dict[str, str],
     match: str,
 ) -> None:
-    base = {
-        "build_id": _BUILD_ID,
-        "commit_sha": _COMMIT,
-        "source_repository": _REPO,
-        "core_digest": _CORE_DIGEST,
-        "agent_runtime_digest": _RUNTIME_DIGEST,
-    }
+    base = _valid_bind_kwargs()
     base.update(kwargs)
     with pytest.raises(ProvenanceError, match=match):
         bind_provenance(**base)
@@ -150,8 +160,10 @@ def test_carrier_image_ref_uses_build_id_tag() -> None:
 def test_bind_from_metadata_files_round_trip(tmp_path: Path) -> None:
     core_meta = tmp_path / "core.json"
     runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
     core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(json.dumps(_metadata(_CONSOLE_DIGEST)), encoding="utf-8")
 
     bindings = bind_provenance(
         build_id=_BUILD_ID,
@@ -159,9 +171,11 @@ def test_bind_from_metadata_files_round_trip(tmp_path: Path) -> None:
         source_repository=_REPO,
         core_digest=extract_digest_from_metadata(core_meta),
         agent_runtime_digest=extract_digest_from_metadata(runtime_meta),
+        core_console_digest=extract_digest_from_metadata(console_meta),
     )
     assert bindings.labels()[LABEL_CORE_DIGEST] == _CORE_DIGEST
     assert bindings.labels()[LABEL_AGENT_RUNTIME_DIGEST] == _RUNTIME_DIGEST
+    assert bindings.labels()[LABEL_CORE_CONSOLE_DIGEST] == _CONSOLE_DIGEST
 
 
 def test_helper_module_documents_carrier_schema() -> None:
@@ -173,6 +187,7 @@ def test_helper_module_documents_carrier_schema() -> None:
         LABEL_SOURCE_REPOSITORY,
         LABEL_CORE_DIGEST,
         LABEL_AGENT_RUNTIME_DIGEST,
+        LABEL_CORE_CONSOLE_DIGEST,
         "awf-core-provenance",
         "metadata-file",
     ):
@@ -180,13 +195,7 @@ def test_helper_module_documents_carrier_schema() -> None:
 
 
 def test_carrier_docker_build_argv_embeds_contract_labels() -> None:
-    bindings = bind_provenance(
-        build_id=_BUILD_ID,
-        commit_sha=_COMMIT,
-        source_repository=_REPO,
-        core_digest=_CORE_DIGEST,
-        agent_runtime_digest=_RUNTIME_DIGEST,
-    )
+    bindings = bind_provenance(**_valid_bind_kwargs())
     tag = carrier_image_ref(
         artifact_repository="us-docker.pkg.dev/proj/repo",
         build_id=_BUILD_ID,
@@ -206,6 +215,7 @@ def test_carrier_docker_build_argv_embeds_contract_labels() -> None:
     assert f"{LABEL_GIT_COMMIT}={_COMMIT}" in argv
     assert f"{LABEL_CORE_DIGEST}={_CORE_DIGEST}" in argv
     assert f"{LABEL_AGENT_RUNTIME_DIGEST}={_RUNTIME_DIGEST}" in argv
+    assert f"{LABEL_CORE_CONSOLE_DIGEST}={_CONSOLE_DIGEST}" in argv
     assert argv[-1] == "docker/"
     assert "--push" not in argv
 
@@ -215,18 +225,14 @@ def test_write_bindings_env_and_prepare_cli(
 ) -> None:
     core_meta = tmp_path / "core.json"
     runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
     core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(json.dumps(_metadata(_CONSOLE_DIGEST)), encoding="utf-8")
     out_env = tmp_path / "awf-provenance.env"
     out_script = tmp_path / "awf-provenance-build.sh"
 
-    bindings = bind_provenance(
-        build_id=_BUILD_ID,
-        commit_sha=_COMMIT,
-        source_repository=_REPO,
-        core_digest=_CORE_DIGEST,
-        agent_runtime_digest=_RUNTIME_DIGEST,
-    )
+    bindings = bind_provenance(**_valid_bind_kwargs())
     tag = carrier_image_ref(
         artifact_repository="us-docker.pkg.dev/proj/repo",
         build_id=_BUILD_ID,
@@ -235,6 +241,7 @@ def test_write_bindings_env_and_prepare_cli(
     env_text = out_env.read_text(encoding="utf-8")
     assert f"CARRIER_TAG='{tag}'" in env_text
     assert f"AWF_CORE_DIGEST='{_CORE_DIGEST}'" in env_text
+    assert f"AWF_CORE_CONSOLE_DIGEST='{_CONSOLE_DIGEST}'" in env_text
 
     rc = main(
         [
@@ -251,6 +258,8 @@ def test_write_bindings_env_and_prepare_cli(
             str(core_meta),
             "--runtime-metadata",
             str(runtime_meta),
+            "--console-metadata",
+            str(console_meta),
             "--output-env",
             str(out_env),
             "--output-build-script",
@@ -260,19 +269,23 @@ def test_write_bindings_env_and_prepare_cli(
     assert rc == 0
     captured = capsys.readouterr()
     assert _CORE_DIGEST in captured.err
+    assert _CONSOLE_DIGEST in captured.err
     assert "TOKEN" not in captured.err
     assert "password" not in captured.err.lower()
     script_text = out_script.read_text(encoding="utf-8")
     assert "exec 'docker'" in script_text
     assert "'--load'" in script_text
     assert tag in script_text
+    assert f"{LABEL_CORE_CONSOLE_DIGEST}={_CONSOLE_DIGEST}" in script_text
 
 
 def test_prepare_cli_rejects_bad_metadata(tmp_path: Path) -> None:
     core_meta = tmp_path / "core.json"
     runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
     core_meta.write_text(json.dumps({"containerimage.digest": "latest"}), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(json.dumps(_metadata(_CONSOLE_DIGEST)), encoding="utf-8")
     out_env = tmp_path / "awf-provenance.env"
     out_script = tmp_path / "awf-provenance-build.sh"
 
@@ -291,6 +304,87 @@ def test_prepare_cli_rejects_bad_metadata(tmp_path: Path) -> None:
             str(core_meta),
             "--runtime-metadata",
             str(runtime_meta),
+            "--console-metadata",
+            str(console_meta),
+            "--output-env",
+            str(out_env),
+            "--output-build-script",
+            str(out_script),
+        ]
+    )
+    assert rc == 1
+    assert not out_env.exists()
+    assert not out_script.exists()
+
+
+def test_prepare_cli_rejects_bad_console_metadata(tmp_path: Path) -> None:
+    """Missing/malformed console digest must fail closed with no side effects."""
+    core_meta = tmp_path / "core.json"
+    runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
+    core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
+    runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(
+        json.dumps({"containerimage.digest": f" {_CONSOLE_DIGEST} "}),
+        encoding="utf-8",
+    )
+    out_env = tmp_path / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
+
+    rc = main(
+        [
+            "prepare",
+            "--build-id",
+            _BUILD_ID,
+            "--commit-sha",
+            _COMMIT,
+            "--source-repository",
+            _REPO,
+            "--artifact-repository",
+            "us-docker.pkg.dev/proj/repo",
+            "--core-metadata",
+            str(core_meta),
+            "--runtime-metadata",
+            str(runtime_meta),
+            "--console-metadata",
+            str(console_meta),
+            "--output-env",
+            str(out_env),
+            "--output-build-script",
+            str(out_script),
+        ]
+    )
+    assert rc == 1
+    assert not out_env.exists()
+    assert not out_script.exists()
+
+
+def test_prepare_cli_rejects_missing_console_metadata_file(tmp_path: Path) -> None:
+    core_meta = tmp_path / "core.json"
+    runtime_meta = tmp_path / "runtime.json"
+    core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
+    runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    out_env = tmp_path / "awf-provenance.env"
+    out_script = tmp_path / "awf-provenance-build.sh"
+    missing_console = tmp_path / "missing-console.metadata.json"
+
+    rc = main(
+        [
+            "prepare",
+            "--build-id",
+            _BUILD_ID,
+            "--commit-sha",
+            _COMMIT,
+            "--source-repository",
+            _REPO,
+            "--artifact-repository",
+            "us-docker.pkg.dev/proj/repo",
+            "--core-metadata",
+            str(core_meta),
+            "--runtime-metadata",
+            str(runtime_meta),
+            "--console-metadata",
+            str(missing_console),
             "--output-env",
             str(out_env),
             "--output-build-script",
@@ -308,8 +402,10 @@ def test_prepare_cli_oserror_on_env_write_returns_1(
     """Missing parent dir / unwritable path must exit 1, not traceback."""
     core_meta = tmp_path / "core.json"
     runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
     core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(json.dumps(_metadata(_CONSOLE_DIGEST)), encoding="utf-8")
     missing_parent = tmp_path / "no-such-dir" / "awf-provenance.env"
     out_script = tmp_path / "awf-provenance-build.sh"
 
@@ -328,6 +424,8 @@ def test_prepare_cli_oserror_on_env_write_returns_1(
             str(core_meta),
             "--runtime-metadata",
             str(runtime_meta),
+            "--console-metadata",
+            str(console_meta),
             "--output-env",
             str(missing_parent),
             "--output-build-script",
@@ -342,13 +440,7 @@ def test_prepare_cli_oserror_on_env_write_returns_1(
 
 
 def test_write_carrier_build_script_uses_helper_argv(tmp_path: Path) -> None:
-    bindings = bind_provenance(
-        build_id=_BUILD_ID,
-        commit_sha=_COMMIT,
-        source_repository=_REPO,
-        core_digest=_CORE_DIGEST,
-        agent_runtime_digest=_RUNTIME_DIGEST,
-    )
+    bindings = bind_provenance(**_valid_bind_kwargs())
     tag = carrier_image_ref(
         artifact_repository="us-docker.pkg.dev/proj/repo",
         build_id=_BUILD_ID,
@@ -366,6 +458,7 @@ def test_write_carrier_build_script_uses_helper_argv(tmp_path: Path) -> None:
     assert "docker/awf-core-provenance.Dockerfile" in text
     assert f"{LABEL_BUILD_ID}={_BUILD_ID}" in text
     assert f"{LABEL_CORE_DIGEST}={_CORE_DIGEST}" in text
+    assert f"{LABEL_CORE_CONSOLE_DIGEST}={_CONSOLE_DIGEST}" in text
     assert "'--push'" not in text
     assert "--push" not in text
 
@@ -391,8 +484,10 @@ def test_prepare_cli_rejects_credential_artifact_repo_without_leaking(
     """Credential-bearing artifact repos must fail before tag/log emission."""
     core_meta = tmp_path / "core.json"
     runtime_meta = tmp_path / "runtime.json"
+    console_meta = tmp_path / "console.json"
     core_meta.write_text(json.dumps(_metadata(_CORE_DIGEST)), encoding="utf-8")
     runtime_meta.write_text(json.dumps(_metadata(_RUNTIME_DIGEST)), encoding="utf-8")
+    console_meta.write_text(json.dumps(_metadata(_CONSOLE_DIGEST)), encoding="utf-8")
     out_env = tmp_path / "awf-provenance.env"
     out_script = tmp_path / "awf-provenance-build.sh"
     credential_repo = "https://user:password@registry.example/repo"
@@ -412,6 +507,8 @@ def test_prepare_cli_rejects_credential_artifact_repo_without_leaking(
             str(core_meta),
             "--runtime-metadata",
             str(runtime_meta),
+            "--console-metadata",
+            str(console_meta),
             "--output-env",
             str(out_env),
             "--output-build-script",

@@ -726,10 +726,6 @@ def test_clarification_inputs_prefer_explicit_vertex_credentials_to_adc_fallback
                 ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
             ),
         ),
-        (
-            AgentRuntime.gemini,
-            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
-        ),
     ),
 )
 def test_clarification_stages_external_account_adc_subject_token_mount(
@@ -825,7 +821,8 @@ def test_clarification_selects_most_specific_external_account_adc_mount(tmp_path
         source=str(subject_token), target=subject_token_target, mode="ro"
     )
     environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
     )
 
@@ -833,7 +830,7 @@ def test_clarification_selects_most_specific_external_account_adc_mount(tmp_path
         (parent_mount, adc_mount, subject_token_mount),
         agent_environment=environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/2"),)
 
 
@@ -863,7 +860,8 @@ def test_clarification_stages_external_account_subject_token_for_aliased_adc_pat
     )
     monkeypatch.delenv("AWF_TEST_ADC_PATH", raising=False)
     agent_environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
         (
             "GOOGLE_APPLICATION_CREDENTIALS",
             f"${{AWF_TEST_ADC_PATH:-{adc_target}}}",
@@ -874,7 +872,7 @@ def test_clarification_stages_external_account_subject_token_for_aliased_adc_pat
         (adc_mount, subject_token_mount),
         agent_environment=agent_environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     ) == (
         AuthMount(
             source=str(adc_config),
@@ -891,7 +889,7 @@ def test_clarification_stages_external_account_subject_token_for_aliased_adc_pat
         (adc_mount, subject_token_mount),
         agent_environment=agent_environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/1"),)
 
 
@@ -921,7 +919,8 @@ def test_clarification_rewrites_nested_external_account_subject_token_mount(
         source=str(subject_token), target=subject_token_target, mode="ro"
     )
     environment = (
-        ("GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("CLAUDE_CODE_USE_VERTEX", "1"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
         ("GOOGLE_APPLICATION_CREDENTIALS", adc_target),
     )
 
@@ -929,7 +928,7 @@ def test_clarification_rewrites_nested_external_account_subject_token_mount(
         (subject_token_mount, parent_mount),
         agent_environment=environment,
         mirror_target="/host/awf/git/mirrors/repo.git",
-        agent_runtime=AgentRuntime.gemini,
+        agent_runtime=AgentRuntime.claude_code,
     ) == ((subject_token_target, "/home/agent/.awf/clarification-auth/1"),)
 
 
@@ -969,19 +968,6 @@ def test_clarification_does_not_rewrite_nested_aws_profile_credential_mount(
 @pytest.mark.parametrize(
     ("agent_runtime", "vertex_environment", "environment_id", "expected_aws_environment"),
     (
-        (
-            AgentRuntime.gemini,
-            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
-            "aws1",
-            (
-                ("AWS_ACCESS_KEY_ID", "AKIA_PROFILE_IDENTIFIER"),
-                ("AWS_SECRET_ACCESS_KEY", "static-secret"),
-                ("AWS_SESSION_TOKEN", "static-session-token"),
-                ("AWS_REGION", "us-east-1"),
-                ("AWS_DEFAULT_REGION", "us-west-2"),
-            ),
-        ),
-        (AgentRuntime.gemini, (("GOOGLE_GENAI_USE_VERTEXAI", "1"),), "azure1", ()),
         (
             AgentRuntime.claude_code,
             (
@@ -1066,10 +1052,6 @@ def test_clarification_retains_aws_inputs_only_for_aws_external_account_adc(
                 ("CLAUDE_CODE_USE_VERTEX", "1"),
                 ("ANTHROPIC_VERTEX_PROJECT_ID", "awf-vertex-project"),
             ),
-        ),
-        (
-            AgentRuntime.gemini,
-            (("GOOGLE_GENAI_USE_VERTEXAI", "1"),),
         ),
     ),
 )

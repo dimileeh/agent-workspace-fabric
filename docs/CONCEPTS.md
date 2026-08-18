@@ -42,7 +42,7 @@
         | Coding Agent CLI                   |
         |                                    |
         | codex / claude / cursor            |
-        | gemini (deprecated) / antigravity  |
+        | antigravity                        |
         | opencode / grok                    |
         | edits files                        |
         | commits changes                    |
@@ -146,7 +146,7 @@ instead of relying on an agent-specific interactive plan mode:
 4. Iterate execution while the report says plan gaps remain.
 5. Fail the workspace if the plan is not satisfied within the configured budget.
 
-This works the same way for Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode, Grok,
+This works the same way for Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok,
 and future adapters because the control plane invokes normal non-interactive agent
 runs for each phase and stores the plan/report inside the workspace.
 
@@ -329,6 +329,14 @@ When meaningful bot or human feedback appears, AWF:
 6. Pushes the accumulated fix commits.
 7. Resolves fixed GitHub review threads.
 8. Re-enters normal PR monitoring.
+
+Per-comment CLI output uses an `AWF-VERDICT:` marker. `FIXED` is accepted only
+when that same review item shows a verified local (or hosted) HEAD/commit
+advance; markerless, bare-marker, empty, garbled, or template-placeholder
+output fails closed to `needs_human` (or `agent_failed` on CLI crash) and is
+never guessed as a fix. Explicit `AWF-VERDICT: FALSE POSITIVE` /
+`AWF-VERDICT: DEFER` still resolve without a commit; `NEEDS_HUMAN` blocks
+merge.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
@@ -567,7 +575,7 @@ curl "${AWF_BASE_URL}/release-readiness"
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for
-GitHub, Codex, Claude Code, Cursor, Gemini (deprecated), Antigravity, OpenCode/Ollama, Grok, and Docker. Each
+GitHub, Codex, Claude Code, Cursor, Antigravity, OpenCode/Ollama, Grok, and Docker. Each
 provider reports redacted `credential_sources`, `credential_scope`,
 `isolation`, and structured warnings. Missing optional providers and local
 least-privilege downgrades are warnings by default. Pass `--provider <name>` or

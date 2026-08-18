@@ -717,6 +717,7 @@ class TestPushUsesExplicitRefspec:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(
             factory, branch_name="awf/feature-x", remote_push_branch="awf/feature-x"
@@ -732,7 +733,7 @@ class TestPushUsesExplicitRefspec:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        adapter.queue(stdout="fixed in commit abc")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
         cmd.queue_result(returncode=0, stderr="")  # git push (under inspection)
         cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
@@ -755,6 +756,11 @@ class TestPushUsesExplicitRefspec:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -1010,18 +1016,22 @@ class TestParseVerdict:
             # never the fix_committed default that would clear blocking feedback.
             ("\n", "needs_human"),
             ("   \t  \n", "needs_human"),
-            ("fixed in commit abc1234", "fix_committed"),
-            ("FALSE POSITIVE: existing code is fine", "false_positive"),
-            ("false positive: yep", "false_positive"),
-            ("DEFER: need maintainer input", "defer"),
-            ("DEFER : lowercase also fine", "defer"),
-            # A bare NEEDS_HUMAN: (no AWF-VERDICT: prefix) must be fail-safe —
-            # needs_human, never fix_committed (which would resolve + merge).
+            # Markerless / bare-marker output fails closed (never fix_committed).
+            ("fixed in commit abc1234", "needs_human"),
+            ("FIXED: done", "needs_human"),
+            ("FALSE POSITIVE: existing code is fine", "needs_human"),
+            ("false positive: yep", "needs_human"),
+            ("DEFER: need maintainer input", "needs_human"),
             ("NEEDS_HUMAN: the diff may be wrong", "needs_human"),
             ("NEEDS HUMAN: maintainer must decide", "needs_human"),
             ("Some chatty prose\nNEEDS_HUMAN: ask a human", "needs_human"),
-            ("Some chatty prose\nFALSE POSITIVE: ...", "false_positive"),
-            ("Pushed fix. See commit.", "fix_committed"),
+            ("Some chatty prose\nFALSE POSITIVE: ...", "needs_human"),
+            ("Pushed fix. See commit.", "needs_human"),
+            # Canonical AWF markers still resolve / block as labeled.
+            ("AWF-VERDICT: FALSE POSITIVE: existing code is fine", "false_positive"),
+            ("AWF-VERDICT: DEFER: need maintainer input", "defer"),
+            ("AWF-VERDICT: FIXED: pushed regression", "fix_committed"),
+            ("AWF-VERDICT: NEEDS_HUMAN: ask a human", "needs_human"),
         ],
     )
     def test_parse_verdict_table(self, stdout: str, expected: str) -> None:

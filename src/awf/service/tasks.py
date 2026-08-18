@@ -13,7 +13,7 @@ from awf.api.schemas import (
     TaskListResponse,
     TaskResponse,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus, parse_agent_runtime
 from awf.db.models import MergeCandidate, TaskAttempt, Workspace
 from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
 from awf.service.usage_store import read_latest_usage_snapshots
@@ -82,7 +82,7 @@ def _task_from_attempt(
         base_branch=attempt.base_branch,
         task_class=attempt.task_class,
         owned_paths=list(attempt.owned_paths),
-        agent=AgentRuntime(attempt.agent),
+        agent=parse_agent_runtime(attempt.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
@@ -112,7 +112,7 @@ def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
         candidate_id=candidate.id if candidate is not None else None,
         candidate_status=candidate.status if candidate is not None else None,
         readiness=_readiness_from_candidate(candidate),
-        agent=AgentRuntime(attempt.agent),
+        agent=parse_agent_runtime(attempt.agent),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
         failure_reason=workspace.failure_reason,
@@ -141,7 +141,7 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         base_branch=row.branch_base,
         task_class=row.task_class,
         owned_paths=list(row.owned_paths),
-        agent=AgentRuntime(row.agent),
+        agent=parse_agent_runtime(row.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
@@ -177,6 +177,7 @@ async def build_task_list_response(
         repo_url=repo_url,
         limit=limit,
     )
+
     canonical_attempt_ids = await attempt_repo.list_canonical_ids_for_tasks(
         row.task_id for row in attempt_rows
     )

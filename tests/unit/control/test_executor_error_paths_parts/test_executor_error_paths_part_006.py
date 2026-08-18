@@ -601,6 +601,7 @@ def _parse_utc_datetime(value: str) -> datetime:
 async def _seed_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
     *,
+    agent: str = "codex",
     branch_name: str | None = "awf/x",
     task_kind: str = "feature_branch_pr",
     pr_number: int | None = 42,
@@ -620,7 +621,7 @@ async def _seed_monitoring_pr(
             branch_base="development",
             task_title="monitor-resume",
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=["pytest -q"],
             requires_database=False,
             resolved_profile=resolved_profile,

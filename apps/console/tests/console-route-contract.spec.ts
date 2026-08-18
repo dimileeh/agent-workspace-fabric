@@ -19,8 +19,8 @@ const localMode: Mode = {
 const hostedMode: Mode = {
   name: "hosted",
   homePath: "/workspaces",
-  apiPrefix: "/workspaces/api/awf",
-  operatorPrefix: "/workspaces/api/operator",
+  apiPrefix: "/api/core-console",
+  operatorPrefix: "/api/core-console",
 };
 
 async function mockConsoleApis(page: Page, mode: Mode) {

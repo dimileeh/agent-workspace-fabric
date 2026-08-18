@@ -22,14 +22,21 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
     ErrorResponse,
     WorkspaceAcceptedResponse,
 )
+from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
+from awf.common.profiles import (
+    format_safe_validation_location as _format_safe_validation_location,
+)
+from awf.common.profiles import (
+    format_safe_validation_message as _format_safe_validation_message,
+)
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import config as service_config
@@ -258,6 +265,28 @@ def _error_result(
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
+def _validation_error_message(exc: ValidationError) -> str:
+    """Format a safe, redacted validation error message without model input payloads."""
+    errors = exc.errors(include_input=False, include_url=False)
+    if not errors:
+        return redact_audit_text("Validation error")
+    formatted: list[str] = []
+    for err in errors:
+        loc = err.get("loc", ())
+        loc_str = _format_safe_validation_location(loc)
+        msg = _format_safe_validation_message(err)
+        if loc_str:
+            formatted.append(f"{loc_str}: {msg}")
+        else:
+            formatted.append(msg)
+    return redact_audit_text("; ".join(formatted))
+
+
+def _validation_error_result(exc: ValidationError) -> CallToolResult:
+    """Build an INVALID_REQUEST MCP error with safe, redacted validation details."""
+    return _error_result("INVALID_REQUEST", _validation_error_message(exc))
+
+
 def _required_idempotency_key(idempotency_key: str | None) -> str | None:
     """Return the key if non-empty, otherwise ``None`` to signal a missing required key."""
     if idempotency_key is None:
@@ -280,20 +309,25 @@ def _idempotency_key_error() -> CallToolResult:
 
 def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
     """Extract the accepted-workspace response fields from a workspace object."""
-    workspace_id = ws.id
+    workspace_id = getattr(ws, "workspace_id", None) or getattr(ws, "id", None)
+    status = getattr(ws, "status", None)
+    version = getattr(ws, "version", 1)
+    accepted_at = getattr(ws, "accepted_at", None) or getattr(ws, "created_at", None)
+    coordination_warnings = getattr(ws, "coordination_warnings", None) or []
     warnings = [
         warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
-        for warning in ws.coordination_warnings
+        for warning in coordination_warnings
     ]
+    provider_readiness_preflight = getattr(ws, "provider_readiness_preflight", None)
     return WorkspaceAcceptedResponse(
         workspace_id=workspace_id,
-        status=ws.status,
-        version=ws.version,
+        status=status,
+        version=version,
         status_url=f"/v1/workspaces/{workspace_id}",
         events_url=f"/v1/workspaces/{workspace_id}/events",
-        accepted_at=ws.created_at,
+        accepted_at=accepted_at,
         warnings=warnings,
-        provider_readiness_preflight=ws.provider_readiness_preflight,
+        provider_readiness_preflight=provider_readiness_preflight,
     ).model_dump(mode="json")
 
 

@@ -36,7 +36,7 @@ For first-time users: the current runnable first path is
 """
 _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, cursor, "
-    "antigravity, gemini, opencode, grok, or docker."
+    "antigravity, opencode, grok, or docker."
 )
 
 

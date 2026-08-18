@@ -40,7 +40,13 @@ from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
-from awf.db.enums import AgentRuntime, EgressDecision, FailureReason, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    EgressDecision,
+    FailureReason,
+    WorkspaceStatus,
+    parse_agent_runtime,
+)
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -108,33 +114,22 @@ _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
 
 _MAX_REVOKE_EVENTS: Final = 3
-"""Maximum revoke events before escalation.
-
-When ``_launch_lost_to_terminal_cleanup`` records this many lifetime-total
-``terminal_runtime_release_revoked`` events (orphan container stop failures),
-an additional escalation event is recorded to surface the problem to an
-operator.  The counter is intentionally lifetime-total rather than
-consecutive: a workspace that has needed repeated orphan-stop intervention is
-worth surfacing even if cleanup eventually succeeded between failures.  The
-revoke event itself is always recorded regardless of the cap so that the
-workspace remains effectively unreleased (ports stay blocked) in the
-``terminal_runtime_effectively_released_expr`` check.  Without the revoke
-event, the latest event would remain ``terminal_runtime_released``, falsely
-marking the workspace as released even though orphan containers still hold
-host ports.
-"""
+"""Maximum lifetime-total revoke events before recording an operator escalation event."""
 
 _ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
 """Maximum time to spend stopping orphan containers after launch races cleanup."""
 
 _EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
-"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch."""
 
-Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; the
-string is the end-to-end contract shared with the worker's
-``EXECUTION_CLAIM_FENCED`` constant."""
+_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
+"""Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
+
 
 _log = get_logger(__name__)
+
+
+_parse_agent_runtime = parse_agent_runtime
 
 
 class ServiceStartupDiagnosticsCapturer(Protocol):
@@ -211,8 +206,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
-        agent = AgentRuntime(workspace.agent)
-        defaults = self._config.agent_defaults.get(agent)
+        try:
+            agent: AgentRuntime | None = AgentRuntime(workspace.agent)
+        except ValueError:
+            agent = None
+        defaults = self._config.agent_defaults.get(agent) if agent is not None else None
         task_policy = workspace.task_policy
         raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
         effort = raw_effort.strip() if isinstance(raw_effort, str) else None
@@ -285,6 +283,13 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             expected=WorkspaceStatus.provisioning,
             action="provision",
             reason_code="PROVISIONER_STALE_STATUS",
+        ):
+            return
+
+        if await self._reject_unsupported_agent_runtime(
+            workspace_id=workspace_id,
+            workspace=ws,
+            execution_claim_epoch=execution_claim_epoch,
         ):
             return
 
@@ -371,7 +376,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_runtime=_parse_agent_runtime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
                         clarification_enabled=clarification_enabled,
@@ -612,7 +617,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
-                        agent_runtime=AgentRuntime(ws.agent),
+                        agent_runtime=_parse_agent_runtime(ws.agent),
                         agent_model=effective_agent_model,
                         companions=materialized_companions,
                         clarification_enabled=clarification_enabled,
@@ -1135,6 +1140,38 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             return False
 
+    async def _reject_unsupported_agent_runtime(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        execution_claim_epoch: int | None = None,
+    ) -> bool:
+        """Fail fast unsupported agent runtimes before provisioning; return True if rejected.
+
+        Monitor-only task kinds (sync_feature_pr, sync_release_pr) do not use
+        the coding runtime during provisioning or initial monitor handoff and
+        bypass this gate.
+        """
+        if workspace.task_kind in ("sync_feature_pr", "sync_release_pr"):
+            return False
+        message = _provisioner_helpers.check_unsupported_agent_runtime(workspace.agent)
+        if message is not None:
+            from awf.service.provider_recovery import has_approved_launchable_fallback
+
+            if has_approved_launchable_fallback(workspace.task_policy):
+                return False
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.policy_failure,
+                message=message,
+                from_status=WorkspaceStatus.provisioning,
+                reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+                execution_claim_epoch=execution_claim_epoch,
+            )
+            return True
+        return False
+
     async def _mark_failed(
         self,
         *,
@@ -1458,20 +1495,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         reason_code: str,
     ) -> None:
         """Log and record an event when an action is skipped due to a stale workspace status."""
-        _log.info(
-            "provisioner.skip_stale_status",
-            workspace_id=ws.id,
-            action=action,
-            expected_status=expected.value,
-            status=ws.status,
-        )
-        await repo.add_event(
-            ws,
-            event_type="workspace.stale_action_skipped",
-            reason_code=reason_code,
-            payload={
-                "action": action,
-                "expected_status": expected.value,
-                "actual_status": ws.status,
-            },
+        await _provisioner_helpers.record_stale_action_skip(
+            repo, ws, action=action, expected=expected, reason_code=reason_code
         )

@@ -12,6 +12,7 @@ specific failing check rather than a generic 503.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -619,3 +620,46 @@ async def test_readyz_auto_cleanup_orphans_requires_worker_heartbeat(
     assert orphan_check["cleanup_readiness"]["ready"] is False
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
     assert "Reaping is enabled" not in orphan_check["cleanup_readiness"]["action"]
+
+
+@pytest.mark.unit
+async def test_readyz_cancel_unneeded_task_cancels_pending_task() -> None:
+    task = asyncio.create_task(asyncio.sleep(60))
+
+    await health_route._cancel_unneeded_task(task)
+
+    assert task.cancelled()
+
+
+@pytest.mark.unit
+async def test_docker_check_maps_runner_timeout_to_configured_reason() -> None:
+    class _SlowRunner:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            assert args == ["docker", "compose", "version", "--short"]
+            assert input_bytes is None
+            assert cwd is None
+            await asyncio.sleep(1)
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
+    health_route._CHECK_TIMEOUT_SECONDS = 0.001
+    try:
+        result = await health_route._docker_check(
+            _SlowRunner(),
+            args=["docker", "compose", "version", "--short"],
+            description="docker compose version",
+            fail_reason="DOCKER_COMPOSE_NOT_AVAILABLE",
+            timeout_reason="DOCKER_COMPOSE_TIMEOUT",
+        )
+    finally:
+        health_route._CHECK_TIMEOUT_SECONDS = previous_timeout
+
+    assert result.ok is False
+    assert result.reason == "DOCKER_COMPOSE_TIMEOUT"
+    assert "docker compose version exceeded" in (result.detail or "")

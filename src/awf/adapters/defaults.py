@@ -16,9 +16,6 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # Cursor documents model selection but not a portable effort flag.
         # Use the thinking-capable Sonnet variant as AWF's high-effort default.
         AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_THINKING_MODEL, effort="xhigh"),
-        # Gemini CLI 0.39+ documents Gemini 3.1 Pro Preview as the direct
-        # Pro-class model ID when the account has access.
-        AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
         # Antigravity API-key mode (agy 1.1.13) accepts exactly the slugs in
         # ANTIGRAVITY_API_KEY_MODE_MODELS; gemini-3.1-pro-preview is the
         # Pro-class default. Effort is accepted/recorded but never emitted:
@@ -31,11 +28,20 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     }
 )
 
+HISTORICAL_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
+    {
+        **DEFAULT_AGENT_DEFAULTS,
+        # Retired runtimes retained so historical adoptions resolve implicit effort
+        # and historical workspace projections report last-known defaults.
+        AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
+    }
+)
+
 
 def defaults_with_model_overrides(
     model_overrides: Mapping[AgentRuntime, str] | None,
     *,
-    base: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS,
+    base: Mapping[AgentRuntime, AgentDefaults] = HISTORICAL_AGENT_DEFAULTS,
 ) -> dict[AgentRuntime, AgentDefaults]:
     """Merge legacy model-only overrides with the central defaults.
 

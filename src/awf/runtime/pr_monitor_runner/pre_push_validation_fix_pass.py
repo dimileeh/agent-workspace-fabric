@@ -53,6 +53,48 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _commit_range_touches_path as _commit_range_touches_path,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _commit_trees_differ as _commit_trees_differ,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _git_env_for_merge_safety_object_lookup as _git_env_for_merge_safety_object_lookup,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+    _head_descends_from as _head_descends_from,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _added_salvage_blob_retained as _added_salvage_blob_retained,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _bytes_unsafe_for_text_merge as _bytes_unsafe_for_text_merge,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _commit_changes_present_in_head as _commit_changes_present_in_head,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _git_mode_file_kind as _git_mode_file_kind,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _merge_file_result_matches_head as _merge_file_result_matches_head,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _parse_ls_tree_meta as _parse_ls_tree_meta,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _prefix_leaves_open_disabling_context as _prefix_leaves_open_disabling_context,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _raw_blob_from_cat_file_result as _raw_blob_from_cat_file_result,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _salvage_changed_binding_names as _salvage_changed_binding_names,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_presence import (
+    _tip_extra_can_supersede_modified_salvage as _tip_extra_can_supersede_modified_salvage,
+)
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
     _open_merge_candidate_head_sha,
@@ -116,32 +158,6 @@ async def _protected_scope_violations_for_recovered_commit(
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
     )
-
-
-async def _head_descends_from(
-    self: Any,
-    *,
-    worktree_path: Path,
-    ancestor: str,
-    descendant: str,
-) -> bool:
-    """Return True when ``descendant`` is a descendant of ``ancestor``.
-
-    Uses ``git merge-base --is-ancestor`` which exits 0 when the first ref is an
-    ancestor of the second and non-zero otherwise. Callers only invoke this with
-    distinct SHAs, so a 0 exit means the fix-pass agent advanced HEAD on top of
-    the pre-fix commit rather than moving it sideways or backward.
-    """
-    result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "merge-base",
-            "--is-ancestor",
-            ancestor,
-            descendant,
-        )
-    )
-    return bool(result.ok)
 
 
 async def _reparent_fix_pass_commit(

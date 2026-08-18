@@ -244,7 +244,7 @@ async def retry_workspace_row(
         resolved_profile=source.resolved_profile,
         workspace_id=source.id,
     )
-    retried_task_policy = _retry_task_policy(
+    retried_task_policy, target_agent = _retry_task_policy(
         source,
         owned_path_overlap_coordination_warnings(overlaps),
         planning_scope_context=planning_scope_context,
@@ -266,7 +266,7 @@ async def retry_workspace_row(
     )
     preflight = await workspaces_create._selected_provider_preflight_for_task_async(
         resolved_settings,
-        agent=source.agent,
+        agent=target_agent,
         task_policy=retried_task_policy,
         override=provider_readiness_override,
         override_reason=provider_readiness_override_reason,
@@ -476,7 +476,7 @@ async def retry_workspace_row(
         task_policy=retried_task_policy,
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(source.initial_review_grace_period_seconds),
-        agent=source.agent,
+        agent=target_agent,
         env_profile=source.env_profile,
         profile_ref=source.profile_ref,
         requested_profile=deepcopy(source.requested_profile),
@@ -638,13 +638,87 @@ async def retry_workspace_row(
     )
 
 
+def _prune_and_migrate_retired_agent(
+    policy: dict[str, Any],
+    current_agent: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Prune retired or unsupported fallback entries from a cloned retry policy,
+    and promote a launchable fallback if current_agent is retired.
+
+    Replacing retired slots with None placeholders preserves fallback attempt indexes.
+    If current_agent is retired/unlaunchable and a remaining approved launchable
+    fallback exists (respecting provider_recovery_state and max_fallback_attempts),
+    promotes that fallback as the new primary agent, updates agent_model, and sets
+    its slot in fallbacks to None.
+    """
+    recovery = policy.get("provider_recovery")
+    if not isinstance(recovery, Mapping):
+        return policy, current_agent
+    raw_fallbacks = recovery.get("fallbacks")
+    if not isinstance(raw_fallbacks, Sequence) or isinstance(raw_fallbacks, str):
+        return policy, current_agent
+
+    from awf.service.provider_readiness import is_launchable_agent
+
+    is_primary_launchable = True if current_agent is None else is_launchable_agent(current_agent)
+    promoted_index: int | None = None
+    target_agent = current_agent
+
+    if not is_primary_launchable:
+        from awf.service.provider_recovery import (
+            PROVIDER_RECOVERY_STATE_KEY,
+            _select_fallback_target_with_index,
+            parse_provider_recovery_policy,
+            parse_provider_recovery_state,
+        )
+
+        rec_policy = parse_provider_recovery_policy(policy)
+        rec_state = parse_provider_recovery_state(policy)
+        fallback_target, target_index = _select_fallback_target_with_index(rec_policy, rec_state)
+        if fallback_target is not None:
+            promoted_index = target_index
+            target_agent = fallback_target.agent
+            policy["agent_model"] = fallback_target.model
+
+            raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
+            state_dict = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+            state_dict["fallback_attempt_number"] = target_index + 1
+            state_dict["launched_fallback_attempts"] = rec_state.launched_fallback_attempts + 1
+            state_dict["retry_attempt_number"] = 0
+            policy[PROVIDER_RECOVERY_STATE_KEY] = state_dict
+
+    pruned: list[Any] = []
+    for idx, item in enumerate(raw_fallbacks):
+        if idx == promoted_index:
+            pruned.append(None)
+        elif isinstance(item, Mapping):
+            fb_agent = item.get("agent")
+            if fb_agent is not None and is_launchable_agent(fb_agent):
+                pruned.append(item)
+            else:
+                pruned.append(None)
+        else:
+            pruned.append(None)
+
+    updated_recovery = dict(recovery)
+    updated_recovery["fallbacks"] = pruned
+    policy["provider_recovery"] = updated_recovery
+    return policy, target_agent
+
+
+def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
+    """Prune retired or unsupported fallback entries from a cloned retry policy."""
+    pruned_policy, _ = _prune_and_migrate_retired_agent(policy, current_agent=None)
+    return pruned_policy
+
+
 def _retry_task_policy(
     source: Workspace,
     coordination_warnings: Sequence[Mapping[str, Any]],
     *,
     planning_scope_context: _PlanningScopeRetryContext | None,
-) -> dict[str, Any]:
-    """Build the task policy dict for a retried workspace."""
+) -> tuple[dict[str, Any], str]:
+    """Build the task policy dict and target agent for a retried workspace."""
     policy = task_policy_with_coordination_warnings(
         scheduler_retry_policy_context(
             deepcopy(source.task_policy),
@@ -653,9 +727,15 @@ def _retry_task_policy(
         ),
         coordination_warnings,
     )
-    if planning_scope_context is not None and planning_scope_context.fallback_model is not None:
+    policy, target_agent = _prune_and_migrate_retired_agent(policy, current_agent=source.agent)
+    effective_agent = target_agent or source.agent
+    if (
+        planning_scope_context is not None
+        and planning_scope_context.fallback_model is not None
+        and effective_agent == source.agent
+    ):
         policy["agent_model"] = planning_scope_context.fallback_model["model"]
-    return policy
+    return policy, effective_agent
 
 
 def _planning_scope_recovery_payload(
