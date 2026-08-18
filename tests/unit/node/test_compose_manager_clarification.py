@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from awf.db.enums import AgentRuntime
-from awf.node import compose_manager
-from awf.node.compose_manager import (
-    _legacy_bind_mount,
-    mark_persisted_clarification_model_network_reconciled,
-    upgrade_persisted_clarification_service,
-)
+from awf.node import compose_manager_clarification_upgrade as clarification_upgrade
 from awf.node.compose_manager_clarification import (
     _attach_persisted_clarification_model_network,
     _clarification_model_service_names,
+)
+from awf.node.compose_manager_clarification_upgrade import (
+    _legacy_bind_mount,
+    mark_persisted_clarification_model_network_reconciled,
+    upgrade_persisted_clarification_service,
 )
 
 
@@ -278,7 +281,7 @@ def test_upgrade_persisted_clarification_service_removes_partial_render_on_write
     def _raise_serialization_error(*_args: object, **_kwargs: object) -> str:
         raise yaml.YAMLError("serialization failed")
 
-    monkeypatch.setattr(compose_manager.yaml, "safe_dump", _raise_serialization_error)
+    monkeypatch.setattr(clarification_upgrade.yaml, "safe_dump", _raise_serialization_error)
 
     with pytest.raises(ValueError, match="could not upgrade persisted Compose file"):
         upgrade_persisted_clarification_service(
@@ -316,7 +319,7 @@ def test_mark_persisted_clarification_model_network_reconciled_cleans_partial_wr
     def _raise_serialization_error(*_args: object, **_kwargs: object) -> str:
         raise yaml.YAMLError("serialization failed")
 
-    monkeypatch.setattr(compose_manager.yaml, "safe_dump", _raise_serialization_error)
+    monkeypatch.setattr(clarification_upgrade.yaml, "safe_dump", _raise_serialization_error)
 
     with pytest.raises(
         ValueError, match="could not mark persisted Compose model network reconciled"
@@ -489,6 +492,153 @@ def test_upgrade_persisted_clarification_service_rejects_legacy_service_name_col
         )
 
     assert yaml.safe_load(compose_file.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_rerenders_after_cross_runtime_fallback(
+    tmp_path: Path,
+) -> None:
+    """A monitor-in-place provider fallback re-renders clarification credentials.
+
+    ``create_provider_recovery_attempt_row`` can swap a monitoring workspace's
+    agent runtime without re-rendering its persisted stack, so the clarification
+    container would otherwise stay frozen on the previous runtime's credentials
+    and run the fallback CLI unauthenticated.
+    """
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_fallback",
+                    "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                    "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+                },
+                "volumes": [
+                    f"{tmp_path / 'worktree'}:/workspace",
+                    f"{tmp_path / 'codex'}:/home/agent/.codex:rw",
+                    f"{tmp_path / 'claude'}:/home/agent/.claude:rw",
+                ],
+                "networks": ["awf_net"],
+            },
+        },
+        "networks": {"awf_net": {"name": "awf-ws_fallback-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_fallback",
+            agent_runtime=AgentRuntime.codex,
+            agent_model="gpt-5.6-sol",
+        )
+        == ()
+    )
+    codex_clarification = yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"][
+        "clarification"
+    ]
+    assert codex_clarification["volumes"] == [
+        f"{tmp_path / 'codex'}:/run/awf/clarification-auth/0:ro"
+    ]
+    assert (
+        codex_clarification["x-awf-persisted-clarification-service-runtime"] == "codex|gpt-5.6-sol"
+    )
+
+    # The workspace falls back to a different runtime in place.
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_fallback",
+            agent_runtime=AgentRuntime.claude_code,
+            agent_model="claude-opus-5",
+        )
+        == ()
+    )
+
+    claude_clarification = yaml.safe_load(compose_file.read_text(encoding="utf-8"))["services"][
+        "clarification"
+    ]
+    assert claude_clarification["volumes"] == [
+        f"{tmp_path / 'claude'}:/run/awf/clarification-auth/0:ro"
+    ]
+    assert claude_clarification["environment"]["AWF_CLARIFICATION_AUTH_TARGET_0"] == (
+        "/home/agent/.claude"
+    )
+    assert "OPENAI_API_KEY" not in claude_clarification["environment"]
+    assert (
+        claude_clarification["x-awf-persisted-clarification-service-runtime"]
+        == "claude_code|claude-opus-5"
+    )
+
+    # The refreshed service is stable for the runtime it now targets.
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_fallback",
+            agent_runtime=AgentRuntime.claude_code,
+            agent_model="claude-opus-5",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_rerender_keeps_single_model_network(
+    tmp_path: Path,
+) -> None:
+    """Re-rendering after a model fallback must not duplicate the sidecar route."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "ollama-sidecar": {
+                        "image": "ollama/ollama:latest",
+                        "networks": ["awf_net"],
+                    },
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "working_dir": "/workspace",
+                        "environment": {
+                            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"
+                        },
+                        "networks": ["awf_net"],
+                    },
+                },
+                "networks": {"awf_net": {"name": "awf-ws_legacy-net"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/kimi-k2.6:cloud",
+    ) == ("ollama-sidecar",)
+    mark_persisted_clarification_model_network_reconciled(compose_file=compose_file)
+
+    assert upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.opencode,
+        agent_model="ollama/glm-5.1:cloud",
+    ) == ("ollama-sidecar",)
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert upgraded["services"]["ollama-sidecar"]["networks"] == [
+        "awf_net",
+        "clarification_model_net",
+    ]
+    assert upgraded["services"]["clarification"]["networks"] == [
+        "clarification_egress_net",
+        "clarification_model_net",
+    ]
 
 
 @pytest.mark.unit
@@ -702,3 +852,145 @@ def test_upgrade_persisted_clarification_service_routes_to_selected_model_servic
         )
         is None
     )
+
+
+def test_upgrade_persisted_clarification_service_handles_unrecognized_runtime_string(
+    tmp_path: Path,
+) -> None:
+    """Unrecognized agent runtime strings fallback to AgentRuntime.antigravity without error."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_unrecognized",
+                    "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+                },
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["awf_net"],
+            },
+        },
+        "networks": {"awf_net": {"name": "awf-ws_unrecognized-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_unrecognized",
+            agent_runtime="unrecognized_custom_runtime",
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    assert clarification["environment"]["GEMINI_API_KEY"] == "${GEMINI_API_KEY}"
+
+
+def test_upgrade_persisted_clarification_service_handles_retired_gemini_runtime(
+    tmp_path: Path,
+) -> None:
+    """Retired AgentRuntime.gemini does not raise KeyError during clarification map lookups."""
+    compose_file = tmp_path / "compose.yml"
+    original = {
+        "services": {
+            "agent": {
+                "image": "awf-agent-runtime:latest",
+                "working_dir": "/workspace",
+                "environment": {
+                    "WORKSPACE_ID": "ws_gemini",
+                },
+                "volumes": [f"{tmp_path / 'worktree'}:/workspace"],
+                "networks": ["awf_net"],
+            },
+        },
+        "networks": {"awf_net": {"name": "awf-ws_gemini-net"}},
+    }
+    compose_file.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    assert (
+        upgrade_persisted_clarification_service(
+            compose_file=compose_file,
+            workspace_id="ws_gemini",
+            agent_runtime=AgentRuntime.gemini,
+        )
+        == ()
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    assert "clarification" in upgraded["services"]
+
+
+@pytest.mark.unit
+def test_upgrade_persisted_clarification_service_stages_only_credential_files(
+    tmp_path: Path,
+) -> None:
+    """Legacy migration applies the fresh path's per-target credential allowlist.
+
+    Copying a whole persisted provider home would hand the reason-only
+    clarification container the session history, settings, hooks, and MCP
+    configuration the regular Compose entrypoint deliberately withholds.
+    """
+    claude_home = tmp_path / "claude"
+    (claude_home / "projects").mkdir(parents=True)
+    (claude_home / ".credentials.json").write_text('{"claudeAiOauth": {}}\n', encoding="utf-8")
+    (claude_home / "settings.json").write_text('{"hooks": {}}\n', encoding="utf-8")
+    (claude_home / "projects" / "history.jsonl").write_text("session\n", encoding="utf-8")
+    claude_configuration = tmp_path / "claude.json"
+    claude_configuration.write_text(
+        json.dumps({"primaryApiKey": "sk-test", "mcpServers": {"untrusted": {}}}),
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "awf-agent-runtime:latest",
+                        "environment": {"WORKSPACE_ID": "ws_legacy"},
+                        "volumes": [
+                            f"{claude_home}:/home/agent/.claude:rw",
+                            f"{claude_configuration}:/home/agent/.claude.json:rw",
+                        ],
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    upgrade_persisted_clarification_service(
+        compose_file=compose_file,
+        workspace_id="ws_legacy",
+        agent_runtime=AgentRuntime.claude_code,
+    )
+
+    upgraded = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    clarification = upgraded["services"]["clarification"]
+    clarification_home = tmp_path / "clarification-home" / ".claude"
+    script = clarification["entrypoint"][2]
+    for index, volume in enumerate(clarification["volumes"]):
+        source = volume.split(f":/run/awf/clarification-auth/{index}:")[0]
+        script = script.replace(f"/run/awf/clarification-auth/{index}", source)
+    script = script.replace("/home/agent/.claude", str(clarification_home))
+    environment = os.environ | {
+        name: value.replace("/home/agent/.claude", str(clarification_home))
+        for name, value in clarification["environment"].items()
+        if name.startswith("AWF_CLARIFICATION_AUTH_TARGET_")
+    }
+
+    subprocess.run(["sh", "-ec", script, "--", "true"], check=True, env=environment)
+
+    assert (clarification_home / ".credentials.json").read_text(
+        encoding="utf-8"
+    ) == '{"claudeAiOauth": {}}\n'
+    assert not (clarification_home / "settings.json").exists()
+    assert not (clarification_home / "projects").exists()
+    assert json.loads(
+        (tmp_path / "clarification-home" / ".claude.json").read_text(encoding="utf-8")
+    ) == {"primaryApiKey": "sk-test"}

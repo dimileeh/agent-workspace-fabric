@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from awf.node import git_manager as git_module
 from awf.node.git_manager import GitOperationError, mirror_path_for_worktree
 from awf.service.gc_worktrees import remove_orphan_worktree
 from tests.unit.awf.service.gc_worktree_test_helpers import (
@@ -495,3 +496,54 @@ async def test_remove_orphan_worktree_fails_loudly_when_mirror_context_unresolve
     assert result.error is not None
     assert "could not resolve mirror" in result.error
     assert worktree_path.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "workspace_id",
+    ["ws_legacy:name", "ws_legacy name", "ws_legacy@host"],
+    ids=["colon", "space", "at-sign"],
+)
+async def test_remove_orphan_worktree_reaps_legacy_path_safe_directory_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_id: str,
+) -> None:
+    """A row-less orphan named outside the generated id grammar still reaps.
+
+    ``scan_managed_worktrees`` classifies every directory whose name starts with
+    ``ws_``, so a legacy/synthetic directory reaches ``GitManager``'s worktree-path
+    sink. When the sink rejected it, ``_reap_worktrees`` recorded a failed reap and
+    skipped its filesystem-deletion fallback, so the directory could never be
+    reclaimed. Names that are safe single path components must go through.
+    """
+    work_dir = tmp_path / "service"
+    _make_mirror_with_worktree(tmp_path, work_dir, workspace_id)
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    calls: list[list[str]] = []
+
+    async def _record(
+        self: git_module.GitManager, args: list[str], *, operation: str
+    ) -> git_module.GitResult:
+        calls.append(args)
+        return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_module.GitManager, "_run", _record)
+
+    result = await remove_orphan_worktree(
+        workspace_id=workspace_id,
+        path=worktree_path,
+        work_dir=work_dir,
+    )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        }
+    ]
+    # The real (unmocked) GitManager ran the removal against the exact directory.
+    assert ["worktree", "remove", "--force", str(worktree_path)] == calls[0][-4:]

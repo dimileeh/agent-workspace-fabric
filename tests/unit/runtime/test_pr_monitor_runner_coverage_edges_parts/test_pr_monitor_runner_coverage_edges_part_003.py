@@ -1311,10 +1311,11 @@ async def test_monitor_comment_provider_fallback_records_failed_operation(
 async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requeues(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed locally")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
     workspace_id = await seed_monitoring_workspace(factory)
     thread = ReviewThread(
         thread_id="T_push",
@@ -1335,6 +1336,11 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
 
     terminal = await runner._execute(

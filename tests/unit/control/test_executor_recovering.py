@@ -375,11 +375,11 @@ async def test_enter_recovering_invalid_agent_resolves_no_default_model(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is ProviderFailureDivert.paused
+    assert diverted is ProviderFailureDivert.terminal
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.recovering.value
+        assert ws.status == WorkspaceStatus.running.value
 
 
 @pytest.mark.unit

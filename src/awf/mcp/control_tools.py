@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -37,6 +37,7 @@ from awf.mcp.server import (
     _required_idempotency_key,
     _tool_error,
     _tool_result,
+    _validation_error_result,
     _workspace_error_result,
 )
 from awf.service.controls import WorkspaceControlError
@@ -262,6 +263,8 @@ def register_control_tools(
             )
         except PRMonitorAdoptionError as exc:
             return _workspace_error_result(exc)
+        except ValidationError as exc:
+            return _validation_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_remonitor_workspace")

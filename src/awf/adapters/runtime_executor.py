@@ -114,7 +114,7 @@ class AgentRuntimeExecRequest:
     """
 
     workspace_id: str | None
-    agent_runtime: AgentRuntime
+    agent_runtime: AgentRuntime | str
     cli_args: tuple[str, ...]
     prompt_stdin: bytes
     log_source: str

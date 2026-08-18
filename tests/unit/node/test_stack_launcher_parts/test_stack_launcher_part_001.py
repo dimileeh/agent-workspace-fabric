@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.common.git_auth import bitbucket_agent_git_config_entries
+from awf.db.enums import AgentRuntime
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -379,6 +380,33 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
         for name, _value in spec.clarification_agent_environment
     )
     assert spec.clarification_auth_mounts == ()
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_stamps_clarification_runtime_signature() -> None:
+    """The rendered clarification service records the runtime/model it targets.
+
+    A monitoring workspace can fall back to a different runtime in place; the
+    stamp is what lets the later isolated re-ask notice the persisted
+    clarification container no longer matches the selected runtime.
+    """
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="generic"),
+            agent_runtime=AgentRuntime.claude_code,
+            agent_model="claude-opus-5",
+        )
+    )
+
+    assert compose.specs[0].clarification_runtime_signature == "claude_code|claude-opus-5"
 
 
 @pytest.mark.unit

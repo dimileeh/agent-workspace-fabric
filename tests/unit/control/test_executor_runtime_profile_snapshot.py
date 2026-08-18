@@ -468,6 +468,13 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         ) -> bool:
             return False
 
+        async def _reject_unsupported_agent_runtime(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> bool:
+            return False
+
         async def _block_open_pr_reexecution_without_recovery(
             self,
             *args: object,

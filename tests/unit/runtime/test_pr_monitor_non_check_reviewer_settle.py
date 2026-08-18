@@ -1243,7 +1243,7 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     cmd.queue_result(returncode=0, stdout="merge-sha\n")
 
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1255,6 +1255,12 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
         non_check_reviewer_logins=("greptile-apps",),
         max_outer_iterations=8,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        # No worktree: dirty-commit stub is the item-scoped FIXED evidence.
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty  # type: ignore[method-assign]
 
     with structlog.testing.capture_logs() as captured:
         await runner.run(

@@ -20,7 +20,9 @@ from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRe
 from awf.profiles.compose import (
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
+    filter_hosted_env_passthrough_names,
 )
+from awf.profiles.compose_auth_env import _AGENT_AUTH_SECRET_ENV_VARS, AGENT_AUTH_ENV_VARS
 from tests.unit.runtime.test_workspace_services_compose_parts import (
     test_workspace_services_compose_part_001 as _part_001,
 )
@@ -447,3 +449,75 @@ async def test_rendered_node_next_browser_compose_expresses_browser_validation_s
     }
     assert parsed["volumes"] == {}
     assert parsed["networks"]["awf_net"]["name"] == "awf-ws_node_browser-net"
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override(
+    tmp_path: Path,
+) -> None:
+    """A same-name bare reference with an empty worker value stays an empty override."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            "PLAIN_EMPTY": "$PLAIN_EMPTY",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {"OPENAI_API_KEY": "", "PLAIN_EMPTY": ""}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "PLAIN_EMPTY"),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+
+    assert profile_env["OPENAI_API_KEY"] == ""
+    assert profile_env["PLAIN_EMPTY"] == ""
+    assert "OPENAI_API_KEY" not in filtered
+    assert "PLAIN_EMPTY" not in filtered
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("var_name", "var_val"),
+    [
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/host/service-account.json"),
+        ("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29.obsolete_bearer_token"),
+    ],
+)
+def test_retired_google_auth_not_forwarded_by_legacy_host_auth(var_name: str, var_val: str) -> None:
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={var_name: var_val},
+    )
+
+    assert env == ()
+    assert var_name not in AGENT_AUTH_ENV_VARS
+    assert var_name in _AGENT_AUTH_SECRET_ENV_VARS
+
+
+@pytest.mark.unit
+def test_google_api_key_forwarded_by_legacy_host_auth() -> None:
+    # GOOGLE_API_KEY in AGENT_AUTH_ENV_VARS allows agent_environment_with_legacy_host_auth
+    # to forward Google API key placeholders to Compose agent containers while preserving secret redaction.
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"GOOGLE_API_KEY": "AIzaSyLegacyKey"},
+    )
+
+    assert env == (("GOOGLE_API_KEY", "${GOOGLE_API_KEY}"),)
+    assert "GOOGLE_API_KEY" in AGENT_AUTH_ENV_VARS
+    assert "GOOGLE_API_KEY" in _AGENT_AUTH_SECRET_ENV_VARS

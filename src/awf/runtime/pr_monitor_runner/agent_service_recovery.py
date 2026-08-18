@@ -184,10 +184,12 @@ async def _run_monitor_agent_with_service_recovery(
                         operation_start_head=operation_start_head,
                     )
                     if state is not None:
-                        _record_hosted_terminal_head_sync(
+                        await _record_hosted_terminal_head_sync(
+                            self,
                             state,
                             synced_head_sha=synced_head_sha,
                             operation_start_head=operation_start_head,
+                            worktree_path=self._worktrees_root / workspace_id,
                         )
             recovered = await _recover_monitor_agent_service_after_error(
                 self,
@@ -266,10 +268,12 @@ async def _run_monitor_agent_with_service_recovery(
                 operation_start_head=operation_start_head,
             )
             if state is not None:
-                _record_hosted_terminal_head_sync(
+                await _record_hosted_terminal_head_sync(
+                    self,
                     state,
                     synced_head_sha=synced_head_sha,
                     operation_start_head=operation_start_head,
+                    worktree_path=self._worktrees_root / workspace_id,
                 )
         else:
             append_command_evidence(
@@ -280,15 +284,32 @@ async def _run_monitor_agent_with_service_recovery(
         return cast(AgentRunResult, result)
 
 
-def _record_hosted_terminal_head_sync(
+async def _record_hosted_terminal_head_sync(
+    self: Any,
     state: Any,
     *,
     synced_head_sha: str,
     operation_start_head: str | None,
+    worktree_path: Path,
 ) -> None:
+    """Record hosted terminal sync; mark advanced only on forward ancestry.
+
+    SHA inequality alone accepts lateral/older force-pushes that drop a fix.
+    Require ``synced_head_sha`` to descend from the item start head when the
+    runner can verify ancestry; otherwise fail closed and leave the flag false.
+    """
     state.last_push_sha = synced_head_sha
     start_head = _nonblank_str(operation_start_head)
-    if start_head is not None and synced_head_sha.lower() != start_head.lower():
+    if start_head is None or synced_head_sha.lower() == start_head.lower():
+        return
+    descends = getattr(self, "_head_descends_from", None)
+    if not callable(descends) or not worktree_path.exists():
+        return
+    if await descends(
+        worktree_path=worktree_path,
+        ancestor=start_head,
+        descendant=synced_head_sha,
+    ):
         state.hosted_terminal_head_advanced = True
 
 

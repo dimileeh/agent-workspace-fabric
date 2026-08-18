@@ -45,10 +45,12 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
+    _clear_salvaged_fix_state,
     _defer_reason_state_key,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -74,6 +76,20 @@ from awf.runtime.pr_monitor_runner.types import (
 # them in a later fix-cycle pass is never resolved even if an earlier pass
 # queued it for resolution.
 _RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
+
+
+async def _clear_published_salvage_durably(
+    runner: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    item_id: str,
+) -> None:
+    """Clear and selectively persist obsolete tip keys after publication succeeds."""
+    _clear_salvaged_fix_state(state, item_id)
+    persist = getattr(runner, "_persist_failed_run_salvage_durably", None)
+    if callable(persist):
+        await persist(workspace_id, state, salvage_item_id=item_id)
 
 
 async def _run_fix_cycle(
@@ -155,18 +171,32 @@ async def _run_fix_cycle(
         ]
 
     async def _current_item_operation_start_head() -> str:
+        # Fail closed when the live per-item HEAD cannot be verified. Reusing the
+        # cycle-start SHA after a prior item advanced HEAD would let a later
+        # no-change FIXED inherit that earlier commit as false fix evidence
+        # (PRRT_kwDOSJAM6s6ZoHvG). ``git cat-file -e`` does not distinguish
+        # absence from command failure, so both count as unverifiable. A missing
+        # worktree still falls back to the cycle-start SHA (already established
+        # by ``_repair_operation_start_head_result``) because there is no live
+        # HEAD to probe.
         if not worktree_path.exists():
             return cast(str, operation_start_head)
         current_head = cast(str | None, await self._rev_parse_head(worktree_path))
         if not current_head:
-            return cast(str, operation_start_head)
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                "per-item HEAD unavailable: rev-parse failed",
+            )
         current_head_ok = await self._deps.runner.run(
             git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}"),
             env=git_env_without_object_lookup_overrides(),
         )
         if current_head_ok.ok:
             return current_head
-        return cast(str, operation_start_head)
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "per-item HEAD unavailable: commit object probe failed",
+        )
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
@@ -570,6 +600,26 @@ async def _run_fix_cycle(
             source_head_sha=pushed_head_sha,
         )
 
+    # Review-level comments are not GraphQL-resolved; publication is the tip.
+    # Drop obsolete tip keys for publish-dependent items whose resolution was
+    # already recorded earlier (e.g. false_positive). FIXED review comments keep
+    # salvage until ``_record_pr_feedback_resolution`` succeeds below — clearing
+    # first strands a valid tip as fixed_without_head_advance on restart when
+    # the record call is cancelled or raises (PRRT_kwDOSJAM6s6Z0Hbz). Inline
+    # threads keep salvage until ``resolve_thread`` succeeds so a resolve requeue
+    # can still prove no-change FIXED (PRRT_kwDOSJAM6s6Zzwl4).
+    threads_to_resolve_set = set(threads_to_resolve)
+    fixed_review_comment_ids = {comment.comment_id for comment, _ in fixed_review_comments}
+    for item_id in dict.fromkeys(publish_dependent_ids):
+        if item_id in threads_to_resolve_set or item_id in fixed_review_comment_ids:
+            continue
+        await _clear_published_salvage_durably(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=item_id,
+        )
+
     resolution_head_sha = pushed_head_sha or pr_head_sha
     for comment, verdict_result in fixed_review_comments:
         await self._record_pr_feedback_resolution(
@@ -580,6 +630,12 @@ async def _run_fix_cycle(
             comment=comment,
             verdict_result=verdict_result,
             operation_id=operation_id,
+        )
+        await _clear_published_salvage_durably(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_id=comment.comment_id,
         )
 
     # 4) Resolve threads on GitHub. Only inline threads have IDs we can
@@ -819,6 +875,14 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 state=state,
                 context="resolve_thread",
+            )
+            # Tip evidence survived push/resolve requeue; publication + resolve are
+            # done, so drop obsolete ``__salvaged_fix_*`` keys (PRRT_kwDOSJAM6s6Zzwl4).
+            await _clear_published_salvage_durably(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=tid,
             )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,

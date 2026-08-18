@@ -31,7 +31,6 @@ from awf.common.github_transient import (
     GitHubErrorDisposition,
     github_error_disposition,
 )
-from awf.common.redaction import redact_secrets
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -68,6 +67,15 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key as _outdated_resolve_requeued_key,
 )
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_body_hash_state_key as _salvaged_fix_body_hash_state_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_head_state_key as _salvaged_fix_head_state_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _salvaged_fix_start_state_key as _salvaged_fix_start_state_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckFailureLogResult,
@@ -96,7 +104,6 @@ from awf.runtime.pr_monitor_runner.comments import (
 from awf.runtime.pr_monitor_runner.constants import (
     _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
     _AUTHORIZATION_BEARER_RE,
-    _AWF_VERDICT,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
     _BITBUCKET_TRANSIENT_HTTP_STATUSES,
     _FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX,
@@ -115,6 +122,10 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
+)
+from awf.runtime.pr_monitor_runner.helpers_verdict import *  # noqa: F403
+from awf.runtime.pr_monitor_runner.helpers_verdict import (  # noqa: F401
+    _sanitize_verdict_reason as _sanitize_verdict_reason,
 )
 from awf.runtime.pr_monitor_runner.notify_human_details import (
     _collect_defer_items as _collect_defer_items_impl,
@@ -180,46 +191,6 @@ def _collect_defer_items(
     return _collect_defer_items_impl(status, state)
 
 
-_datetime_iso = _reviewer_settle._datetime_iso
-_non_check_reviewer_activity_settle_decision = (
-    _reviewer_settle._non_check_reviewer_activity_settle_decision
-)
-_non_check_reviewer_activity_signature = _reviewer_settle._non_check_reviewer_activity_signature
-_non_check_reviewer_activity_freeze_elapsed_seconds = (
-    _reviewer_settle._non_check_reviewer_activity_freeze_elapsed_seconds
-)
-_non_check_reviewer_settle_decision = _reviewer_settle._non_check_reviewer_settle_decision
-_non_check_reviewer_settle_skip_visible_key = (
-    _reviewer_settle._non_check_reviewer_settle_skip_visible_key
-)
-_non_check_reviewer_settle_wait_operation_context = (
-    _reviewer_settle._non_check_reviewer_settle_wait_operation_context
-)
-_non_check_reviewer_visibility = _reviewer_settle._non_check_reviewer_visibility
-_non_check_reviewer_visible_aliases = _reviewer_settle._non_check_reviewer_visible_aliases
-_normalize_non_check_reviewer_identity = _reviewer_settle._normalize_non_check_reviewer_identity
-_normalize_non_check_reviewer_logins = _reviewer_settle._normalize_non_check_reviewer_logins
-_reviewer_has_visible_check = _reviewer_settle._reviewer_has_visible_check
-_utc_datetime = _reviewer_settle._utc_datetime
-_visible_check_identities = _reviewer_settle._visible_check_identities
-
-_BARE_VERDICT_LINE = re.compile(
-    r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
-    re.IGNORECASE,
-)
-_VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
-    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
-    re.IGNORECASE,
-)
-_VERDICT_REASON_REDACTION_ONLY = re.compile(
-    rf"^[\s,;:.!?'\"“”‘’]*(?:(?:[A-Za-z][A-Za-z0-9_-]*\s*[:=]\s*)?"
-    rf"[\s,;:.!?'\"“”‘’]*{re.escape(_REDACTION)}[\s,;:.!?'\"“”‘’]*)+$",
-    re.IGNORECASE,
-)
-_CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
-_MAX_VERDICT_REASON_LENGTH = 500
-
-
 async def _record_ignored_monitor_terminal_callback(
     repo: WorkspaceRepository,
     workspace: Workspace,
@@ -249,149 +220,28 @@ def _is_callback_terminal_workspace_status(status: str) -> bool:
     return WorkspaceStateMachine.is_callback_terminal(workspace_status)
 
 
-def _parse_verdict(stdout: str) -> Verdict:
-    """Map the CLI's final message to a structured verdict.
-
-    The prompt templates instruct the CLI to report a structured stdout
-    verdict. Anything else counts as a fix commit (the default happy path).
-    """
-    return _parse_verdict_result(stdout).verdict
-
-
-def _parse_verdict_result(stdout: str) -> VerdictResult:
-    if not stdout.strip():
-        # Empty or whitespace-only agent output is a failure to produce, not a
-        # considered deferral. Treat it as needs_human so it blocks the merge
-        # instead of
-        # triggering the follow-up defer capture (comment + filed issue +
-        # resolve) on a thread the agent never actually addressed (#305).
-        return VerdictResult(verdict="needs_human")
-    # AWF-prefixed verdicts are canonical and must win over bare fallback lines,
-    # even when bare lines appear later in output. When multiple AWF verdicts are
-    # present, the final AWF line wins. If that line omits a reason, preserve an
-    # earlier reason for the same verdict. Sanitized non-blocking placeholders
-    # (for example ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back
-    # only to an earlier reasoned hard block (needs_human/defer) or a bare
-    # blocking fallback so a prompt echo cannot clear a hard block; a genuine
-    # no-reason final verdict is otherwise the agent's last word and must not be
-    # trumped by an earlier non-blocking verdict (e.g. false_positive).
-    # Blocking final verdicts remain authoritative even with no usable reason.
-    awf_verdicts: list[VerdictResult] = []
-    bare_verdicts: list[VerdictResult] = []
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        for verdict_line in _verdict_line_candidates(stripped):
-            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
-            if awf_match is not None:
-                awf_verdicts.append(
-                    _verdict_result_from_match(
-                        label=awf_match.group("label"),
-                        reason=awf_match.group("reason"),
-                    )
-                )
-            bare_match = _BARE_VERDICT_LINE.fullmatch(verdict_line)
-            if bare_match is not None:
-                bare_verdicts.append(
-                    _verdict_result_from_match(
-                        label=bare_match.group("label"),
-                        reason=bare_match.group("reason"),
-                    )
-                )
-    verdicts = awf_verdicts or bare_verdicts
-    if verdicts is awf_verdicts:
-        latest = verdicts[-1]
-        if latest.reason is None:
-            latest_verdict = latest.verdict
-            for parsed in reversed(verdicts[:-1]):
-                if parsed.verdict == latest_verdict and parsed.reason is not None:
-                    return parsed
-            if latest_verdict in {"defer", "needs_human"}:
-                return latest
-            for parsed in reversed(verdicts[:-1]):
-                if parsed.verdict in {"needs_human", "defer"} and parsed.reason is not None:
-                    return parsed
-            bare_blocking = _select_bare_verdict(
-                bare_verdicts,
-                priorities=("needs_human", "defer"),
-            )
-            if bare_blocking is not None:
-                return bare_blocking
-            return latest
-        return latest
-    selected_bare = _select_bare_verdict(
-        bare_verdicts,
-        priorities=("needs_human", "false_positive", "defer", "fix_committed"),
-    )
-    if selected_bare is not None:
-        return selected_bare
-    return VerdictResult(verdict="fix_committed")
-
-
-def _select_bare_verdict(
-    verdicts: Sequence[VerdictResult],
-    *,
-    priorities: Sequence[Verdict],
-) -> VerdictResult | None:
-    for verdict in priorities:
-        selected: VerdictResult | None = None
-        for parsed in reversed(verdicts):
-            if parsed.verdict != verdict:
-                continue
-            if parsed.reason is not None:
-                return parsed
-            if selected is None:
-                selected = parsed
-        if selected is not None:
-            return selected
-    return None
-
-
-def _verdict_line_candidates(stripped: str) -> Iterable[str]:
-    yield stripped
-    code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
-    if code_match is None:
-        return
-    inner = code_match.group("line").strip()
-    if inner:
-        yield inner
-
-
-def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
-    # Canonicalize any run of whitespace/underscores to a single space, so
-    # every separator variant the label regex accepts (NEEDS_HUMAN,
-    # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
-    # normalization must stay equally permissive, or a matched NEEDS_HUMAN
-    # could silently fall through to fix_committed — the unsafe direction (#305).
-    normalized_label = re.sub(r"[\s_]+", " ", label.strip().lower())
-    cleaned_reason = _sanitize_verdict_reason(reason)
-    if normalized_label == "false positive":
-        return VerdictResult(verdict="false_positive", reason=cleaned_reason)
-    if normalized_label == "needs human":
-        return VerdictResult(verdict="needs_human", reason=cleaned_reason)
-    if normalized_label == "defer":
-        return VerdictResult(verdict="defer", reason=cleaned_reason)
-    return VerdictResult(verdict="fix_committed", reason=cleaned_reason)
-
-
-def _sanitize_verdict_reason(reason: str | None) -> str | None:
-    """Redact, bound, and normalize a verdict reason, dropping unusable content."""
-    if reason is None:
-        return None
-    cleaned = redact_secrets(reason).strip()
-    if not cleaned:
-        return None
-    if _VERDICT_REASON_REDACTION_ONLY.fullmatch(cleaned):
-        return None
-    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
-        return None
-    if len(cleaned) > _MAX_VERDICT_REASON_LENGTH:
-        return f"{cleaned[: _MAX_VERDICT_REASON_LENGTH - 1].rstrip()}…"
-    return cleaned
-
-
-def _needs_human_reason_missing(result: VerdictResult) -> bool:
-    """Return whether a blocking needs-human result lacks a usable reason."""
-    return result.verdict == "needs_human" and _sanitize_verdict_reason(result.reason) is None
+_datetime_iso = _reviewer_settle._datetime_iso
+_non_check_reviewer_activity_settle_decision = (
+    _reviewer_settle._non_check_reviewer_activity_settle_decision
+)
+_non_check_reviewer_activity_signature = _reviewer_settle._non_check_reviewer_activity_signature
+_non_check_reviewer_activity_freeze_elapsed_seconds = (
+    _reviewer_settle._non_check_reviewer_activity_freeze_elapsed_seconds
+)
+_non_check_reviewer_settle_decision = _reviewer_settle._non_check_reviewer_settle_decision
+_non_check_reviewer_settle_skip_visible_key = (
+    _reviewer_settle._non_check_reviewer_settle_skip_visible_key
+)
+_non_check_reviewer_settle_wait_operation_context = (
+    _reviewer_settle._non_check_reviewer_settle_wait_operation_context
+)
+_non_check_reviewer_visibility = _reviewer_settle._non_check_reviewer_visibility
+_non_check_reviewer_visible_aliases = _reviewer_settle._non_check_reviewer_visible_aliases
+_normalize_non_check_reviewer_identity = _reviewer_settle._normalize_non_check_reviewer_identity
+_normalize_non_check_reviewer_logins = _reviewer_settle._normalize_non_check_reviewer_logins
+_reviewer_has_visible_check = _reviewer_settle._reviewer_has_visible_check
+_utc_datetime = _reviewer_settle._utc_datetime
+_visible_check_identities = _reviewer_settle._visible_check_identities
 
 
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
@@ -445,12 +295,34 @@ def _mark_review_comment_addressed(
 
 
 def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
+    """Clear verdict/body/reason markers for ``item_id``.
+
+    Preserve ``__salvaged_fix_*`` tip evidence: push failure and transient
+    resolve requeue clear addressed state so the item can be re-invoked, but the
+    committed tip must remain available as no-change FIXED evidence
+    (PRRT_kwDOSJAM6s6ZnvBN). Body-hash mismatch and explicit non-FIXED paths in
+    ``comment_verdict`` still drop salvage when feedback moves on.
+    """
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+
+
+def _clear_salvaged_fix_state(state: MonitorState, item_id: str) -> None:
+    """Drop ``__salvaged_fix_*`` tip keys after publication resolves the item.
+
+    Tip evidence survives addressed-state clear during push/resolve requeue
+    (``_clear_addressed_state_by_id``). Once the corresponding fix is published
+    and feedback is resolved — or a review-level fix is pushed with nothing left
+    to resolve on the forge — the keys are obsolete and must not accumulate in
+    ``monitor_threads_addressed`` (PRRT_kwDOSJAM6s6Zzwl4).
+    """
+    state.threads_addressed_ids.pop(_salvaged_fix_head_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_salvaged_fix_body_hash_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_salvaged_fix_start_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(

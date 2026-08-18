@@ -399,3 +399,199 @@ async def test_isolated_reask_cancellation_waits_for_migration_cleanup(
     with pytest.raises(asyncio.CancelledError):
         await run_task
     assert compose_file.read_bytes() == original_compose_file
+
+
+@pytest.mark.unit
+async def test_isolated_reask_re_raises_cancellation_after_successful_compose_restore_during_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cancellation during upgrade re-raises CancelledError when compose restore succeeds."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+    upgrade_started = Event()
+    release_upgrade = Event()
+
+    def _upgrade_after_cancellation(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+        upgrade_started.set()
+        assert release_upgrade.wait(timeout=1)
+        return ()
+
+    monkeypatch.setattr(
+        adapter_base,
+        "upgrade_persisted_clarification_service",
+        _upgrade_after_cancellation,
+    )
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+    run_task = asyncio.create_task(
+        adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+    )
+
+    await asyncio.wait_for(asyncio.to_thread(upgrade_started.wait), timeout=0.2)
+    run_task.cancel()
+    release_upgrade.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+
+@pytest.mark.unit
+async def test_isolated_reask_cancellation_surfaces_rollback_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When network attachment is cancelled and rollback fails, AgentRunError is raised."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+    async def _cancel_attachment(*args: Any, **kwargs: Any) -> Any:
+        raise asyncio.CancelledError()
+
+    async def _fail_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+        return CommandResult(returncode=1, stdout="", stderr="rollback failed")
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_attach_persisted_clarification_model_network",
+        _cancel_attachment,
+    )
+    monkeypatch.setattr(
+        adapter_base,
+        "_rollback_persisted_clarification_model_network",
+        _fail_rollback,
+    )
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+    with pytest.raises(AgentRunError) as exc:
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+    assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+    assert exc.value.result.stderr == "rollback failed"
+
+
+@pytest.mark.unit
+async def test_isolated_reask_cancellation_surfaces_restore_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When network attachment is cancelled and compose restore fails, AgentRunError is raised."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+    async def _cancel_attachment(*args: Any, **kwargs: Any) -> Any:
+        raise asyncio.CancelledError()
+
+    async def _ok_rollback(*args: Any, **kwargs: Any) -> CommandResult:
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    def _fail_restore(*args: Any, **kwargs: Any) -> None:
+        raise OSError("restore error")
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_attach_persisted_clarification_model_network",
+        _cancel_attachment,
+    )
+    monkeypatch.setattr(
+        adapter_base,
+        "_rollback_persisted_clarification_model_network",
+        _ok_rollback,
+    )
+    monkeypatch.setattr(adapter_base, "_restore_compose_file", _fail_restore)
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+    with pytest.raises(AgentRunError) as exc:
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=tmp_path / "reask",
+        )
+
+    assert exc.value.reason_code == "CLARIFICATION_MODEL_NETWORK_CLEANUP_FAILED"
+    assert exc.value.result.stderr == "OSError: restore error"
+
+
+@pytest.mark.unit
+async def test_isolated_reask_cancellation_when_git_metadata_task_already_done(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When git_metadata_task is already done during cancellation, its result is discarded."""
+    compose_file = _write_legacy_opencode_ollama_compose(tmp_path)
+
+    discarded_tasks: list[asyncio.Task[Any]] = []
+    original_discard = adapter_base._discard_isolated_reask_git_metadata_task_result
+
+    def _record_discard(task: asyncio.Task[Any]) -> None:
+        discarded_tasks.append(task)
+        original_discard(task)
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_discard_isolated_reask_git_metadata_task_result",
+        _record_discard,
+    )
+
+    git_metadata_called = False
+
+    def _fast_done_git_metadata(*args: Any, **kwargs: Any) -> Any:
+        nonlocal git_metadata_called
+        git_metadata_called = True
+        return (None, ())
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_isolated_reask_git_metadata_volume_binds",
+        _fast_done_git_metadata,
+    )
+
+    async def _cancelled_shield(arg: Any) -> Any:
+        res = await arg
+        if git_metadata_called:
+            raise asyncio.CancelledError()
+        return res
+
+    monkeypatch.setattr(adapter_base.asyncio, "shield", _cancelled_shield)
+
+    async def _ok_attachment(*args: Any, **kwargs: Any) -> tuple[Any, CommandResult]:
+        return kwargs["attachment"], CommandResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        adapter_base,
+        "_attach_persisted_clarification_model_network",
+        _ok_attachment,
+    )
+
+    adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+
+    reask_path = tmp_path / "reask"
+    reask_path.mkdir()
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.run(
+            compose_project="awf_ws_legacy",
+            compose_file=compose_file,
+            prompt=_PROMPT,
+            model="ollama/kimi-k2.6:cloud",
+            workspace_id="ws_legacy",
+            isolated_worktree_host_path=reask_path,
+            isolated_worktree_ref="a" * 40,
+            isolated_worktree_source_mirror=tmp_path / "source-mirror",
+        )
+
+    assert len(discarded_tasks) == 1
+    assert discarded_tasks[0].done()

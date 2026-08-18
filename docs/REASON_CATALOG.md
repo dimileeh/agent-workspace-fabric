@@ -21,14 +21,14 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### ANTIGRAVITY_AUTH_MISSING
 **Problem:** No Antigravity auth signal was visible.
 **Likely Cause:** Missing Antigravity API credentials.
-**Operator Fix:** Set ANTIGRAVITY_API_KEY or GEMINI_API_KEY before starting AWF.
+**Operator Fix:** Set GEMINI_API_KEY before starting AWF.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_missing](#antigravity_auth_missing)
 
 ### ANTIGRAVITY_AUTH_REJECTED
 **Problem:** Antigravity rejected the configured API credentials.
 **Likely Cause:** Antigravity API key rejected by the provider.
-**Operator Fix:** Verify ANTIGRAVITY_API_KEY / GEMINI_API_KEY and re-run awf service doctor.
+**Operator Fix:** Verify GEMINI_API_KEY and re-run awf service doctor.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_auth_rejected](#antigravity_auth_rejected)
 
@@ -38,6 +38,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Wait for quota reset or switch providers, then re-check readiness.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#antigravity_quota_exhausted](#antigravity_quota_exhausted)
+
+### ANTIGRAVITY_RUNTIME_CLI_PROBE_ERROR
+**Problem:** An error occurred while probing the Antigravity CLI ('agy') inside the agent runtime container.
+**Likely Cause:** The Antigravity CLI probe command failed or raised an unexpected error.
+**Operator Fix:** Verify the agent-runtime Docker image is accessible and intact, check worker logs, and re-run readiness checks.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#antigravity_runtime_cli_probe_error](#antigravity_runtime_cli_probe_error)
 
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
@@ -290,13 +297,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Use a GitHub or Bitbucket Cloud repository, or track support for the detected forge upstream. Recreate the workspace against a supported remote (github.com or bitbucket.org).
 **Related Command:** `awf workspace create`
 **Docs Link:** [docs/REASON_CATALOG.md#forge_not_supported](#forge_not_supported)
-
-### GEMINI_AUTH_MISSING
-**Problem:** No Gemini auth signal was visible.
-**Likely Cause:** Missing Gemini API credentials.
-**Operator Fix:** Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.
-**Related Command:** `awf service doctor`
-**Docs Link:** [docs/REASON_CATALOG.md#gemini_auth_missing](#gemini_auth_missing)
 
 ### GITHUB_AUTH_UNUSABLE
 **Problem:** GitHub CLI auth is not usable for local service PR operations.
@@ -836,6 +836,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the listed workspaces before running cleanup or recovery.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#stranded_workspaces_present](#stranded_workspaces_present)
+
+### UNSUPPORTED_AGENT_RUNTIME
+**Problem:** The requested agent runtime is not supported by AWF.
+**Likely Cause:** An operation or PR adoption request specified an agent runtime that is not registered or supported in this version of AWF.
+**Operator Fix:** Select a supported agent runtime (e.g. codex, claude_code, cursor, antigravity, opencode, grok) or update the workspace profile configuration.
+**Related Command:** `awf workspace create`
+**Docs Link:** [docs/REASON_CATALOG.md#unsupported_agent_runtime](#unsupported_agent_runtime)
 
 ### WORKER_CONTAINER_EXITED
 **Problem:** AWF worker container has exited.

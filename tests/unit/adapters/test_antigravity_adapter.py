@@ -14,6 +14,8 @@ import structlog
 from awf.adapters.antigravity import AntigravityAdapter
 from awf.adapters.base import AgentRunError
 from awf.common.commands import FakeCommandRunner
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
 from .test_adapters import (
     _COMPOSE_FILE,
@@ -37,6 +39,56 @@ def _render_cli_script(*, model: str | None = "gemini-3.1-pro-preview") -> str:
     return args[2]
 
 
+async def _run_script_with_fake_agy(
+    tmp_path: Path,
+    *,
+    agy_stdout: str,
+    agy_returncode: int = 0,
+) -> tuple[str, str, int | None]:
+    """Run the rendered preamble against a stub agy emitting ``agy_stdout``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    payload = tmp_path / "agy_stdout.txt"
+    payload.write_text(agy_stdout, encoding="utf-8")
+    fake_agy = bin_dir / "agy"
+    fake_agy.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "sys.stdout.write(open(os.environ['AWF_FAKE_AGY_STDOUT'], encoding='utf-8').read())\n"
+        "sys.stdout.flush()\n"
+        f"sys.exit({agy_returncode})\n"
+    )
+    fake_agy.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env.pop("GEMINI_API_KEY", None)
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "HOME": str(home),
+            "AWF_FAKE_AGY_STDOUT": str(payload),
+        }
+    )
+    proc = await asyncio.create_subprocess_exec(
+        "sh",
+        "-c",
+        _render_cli_script(),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(b"prompt\n")
+    await proc.stdin.drain()
+    proc.stdin.close()
+    await proc.stdin.wait_closed()
+    stdout, stderr = await proc.communicate()
+    return stdout.decode(), stderr.decode(), proc.returncode
+
+
 class TestAntigravityAdapter:
     """Antigravity adapter contract tests."""
 
@@ -48,14 +100,12 @@ class TestAntigravityAdapter:
         assert adapter.get_provider("gemini-3.1-pro-preview") == "antigravity"
 
     @pytest.mark.unit
-    def test_hosted_env_passthrough_names_are_antigravity_and_gemini_keys(self) -> None:
-        """Hosted passthrough carries both env keys; no GOOGLE_API_KEY alias."""
+    def test_hosted_env_passthrough_names_is_gemini_key_only(self) -> None:
+        """Hosted passthrough carries GEMINI_API_KEY only; ANTIGRAVITY_API_KEY is retired."""
         adapter = AntigravityAdapter(runner=FakeCommandRunner())
 
-        assert adapter.hosted_env_passthrough_names == (
-            "ANTIGRAVITY_API_KEY",
-            "GEMINI_API_KEY",
-        )
+        assert adapter.hosted_env_passthrough_names == ("GEMINI_API_KEY",)
+        assert "ANTIGRAVITY_API_KEY" not in adapter.hosted_env_passthrough_names
         assert "GOOGLE_API_KEY" not in adapter.hosted_env_passthrough_names
 
     @pytest.mark.unit
@@ -86,7 +136,9 @@ class TestAntigravityAdapter:
         assert "Read and execute the full task prompt" not in script
         # Options before -p; prompt last. Never -p immediately followed by a flag.
         assert re.search(r"(?m)-p\s+--", script) is None
-        assert re.search(r'(?m)exec\s+agy\b.*-p\s+"\$awf_prompt"\s*$', script, re.S)
+        # agy runs under the stream-json decoder; the prompt stays the last pair.
+        assert re.search(r'(?m)exec\s+python3\s+-c\s+.*-p\s+"\$awf_prompt"\s*$', script, re.S)
+        assert '"agy"' in script
         assert "--dangerously-skip-permissions" in script
         assert "--output-format stream-json" in script
         assert "--print-timeout 24h" in script
@@ -475,6 +527,67 @@ class TestAntigravityAdapter:
         assert b"should-not-run" not in stderr
         assert b"100000" in stderr
         assert b"MAX_ARG_STRLEN" in stderr or b"128" in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_events_decode_to_plaintext_verdict_lines(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """stream-json assistant/result text reaches stdout as parseable plaintext.
+
+        A JSON-wrapped ``AWF-VERDICT`` line never full-matches, so an undecoded
+        stream would fail closed to ``garbled_verdict_marker`` on every thread
+        (PRRT_kwDOSJAM6s6Zi2YW).
+        """
+        verdict_line = "AWF-VERDICT: NEEDS_HUMAN: need an operator decision on the retry policy"
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "s-1"},
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": f"Checked it.\n{verdict_line}"}]},
+            },
+            {"type": "result", "subtype": "success", "result": verdict_line},
+        ]
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="".join(json.dumps(event) + "\n" for event in events),
+        )
+
+        assert returncode == 0, stderr
+        assert f"\n{verdict_line}\n" in f"\n{stdout}"
+        assert '{"type"' not in stdout
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="needs_human",
+            reason="need an operator decision on the retry policy",
+        )
+        # Non-text events still stream (idle watchdog) — just not on stdout.
+        assert '"session_id": "s-1"' in stderr
+
+    @pytest.mark.unit
+    async def test_stream_json_decoder_preserves_agy_exit_code(self, tmp_path: Path) -> None:
+        """A failing agy run must not be masked by the decoder."""
+        _stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout=json.dumps({"type": "result", "subtype": "error_max_turns"}) + "\n",
+            agy_returncode=7,
+        )
+
+        assert returncode == 7
+        assert "error_max_turns" in stderr
+
+    @pytest.mark.unit
+    async def test_non_json_agy_output_passes_through_to_stdout(self, tmp_path: Path) -> None:
+        """Plaintext agy output is already verdict-shaped; keep it on stdout."""
+        stdout, stderr, returncode = await _run_script_with_fake_agy(
+            tmp_path,
+            agy_stdout="AWF-VERDICT: FIXED: decoded the stream\n",
+        )
+
+        assert returncode == 0, stderr
+        assert _parse_verdict_result(stdout) == VerdictResult(
+            verdict="fix_committed",
+            reason="decoded the stream",
+        )
 
     @pytest.mark.unit
     async def test_auth_failure_classifies_as_agent_auth_failed(self) -> None:

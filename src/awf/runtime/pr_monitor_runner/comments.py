@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     Verdict,
     VerdictResult,
+    _is_synthetic_needs_human_reason,
     _owned_paths_for_prompt,
     _owned_paths_for_prompt_or_empty,
 )
@@ -756,6 +757,9 @@ async def _address_thread(
         state=state,
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
+        evidence_item_id=thread.thread_id,
+        evidence_body_hash=_review_thread_body_hash(thread),
+        evidence_item_path=getattr(thread, "path", None),
     )
     result = await _enforce_needs_human_reason(
         runner,
@@ -890,6 +894,8 @@ async def _address_review_comment_result(
         state=state,
         task_tag=resolved_task_tag,
         operation_start_head=operation_start_head,
+        evidence_item_id=comment.comment_id,
+        evidence_body_hash=_review_comment_body_hash(comment),
     )
     return await _enforce_needs_human_reason(
         runner,
@@ -1209,6 +1215,10 @@ async def _enforce_needs_human_reason(
 
     needs_human_reason_code = _NEEDS_HUMAN_REASON_MISSING
     try:
+        # Clarification is reason-only: never bind salvage evidence ids. A crashed
+        # reask that advances the disposable checkout would otherwise plant
+        # __salvaged_fix_* keys for discarded isolated commits
+        # (PRRT_kwDOSJAM6s6ZmikP).
         reask_result = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=needs_human_reason_reask_prompt(original_prompt=original_prompt),
@@ -1292,9 +1302,14 @@ async def _enforce_needs_human_reason(
             ) from exc
     else:
         sanitized_reask_reason = _sanitize_verdict_reason(reask_result.reason)
-        reask_needs_human_reason = (
-            sanitized_reask_reason if reask_result.verdict == "needs_human" else None
+        # Fail-closed / FIXED-without-evidence synthetic reasons are not a
+        # human decision; do not treat them as a successful clarification.
+        usable_clarification = (
+            reask_result.verdict == "needs_human"
+            and sanitized_reask_reason is not None
+            and not _is_synthetic_needs_human_reason(sanitized_reask_reason)
         )
+        reask_needs_human_reason = sanitized_reask_reason if usable_clarification else None
         cleanup_error, _isolated_cleanup_failed = await _run_reask_cleanup_cancellation_safe(
             event_name="monitor.needs_human_reason_reask_cleanup_failed_after_success",
             needs_human_reason=reask_needs_human_reason,
@@ -1313,9 +1328,7 @@ async def _enforce_needs_human_reason(
                 # Hosted clarification has no local isolation fallback. Its
                 # executor failed before a reason could be collected.
                 needs_human_reason_code = _NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE
-            if reask_result.verdict == "needs_human" and not _needs_human_reason_missing(
-                reask_result
-            ):
+            if usable_clarification:
                 return reask_result
     await _record_needs_human_reason_missing(
         runner,
@@ -1387,6 +1400,10 @@ async def _invoke_cli_for_verdict_result(
     isolated_worktree_ref: str | None = None,
     isolated_worktree_source_mirror: Path | None = None,
     read_only: bool = False,
+    require_fix_evidence: bool = True,
+    evidence_item_id: str | None = None,
+    evidence_body_hash: str | None = None,
+    evidence_item_path: str | None = None,
 ) -> VerdictResult:
     """Invoke the extracted verdict operation through the legacy module seam."""
     _sync_comment_verdict_dependencies()
@@ -1405,6 +1422,10 @@ async def _invoke_cli_for_verdict_result(
         isolated_worktree_ref=isolated_worktree_ref,
         isolated_worktree_source_mirror=isolated_worktree_source_mirror,
         read_only=read_only,
+        require_fix_evidence=require_fix_evidence,
+        evidence_item_id=evidence_item_id,
+        evidence_body_hash=evidence_body_hash,
+        evidence_item_path=evidence_item_path,
     )
 
 

@@ -539,6 +539,7 @@ async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets
         hosted_adc_target,
     ):
         assert target in targets
+    assert "/home/agent/.config/gcloud" not in targets
     assert core_adc_target not in targets
     placeholder_sources = [
         mount.source for mount in auth_mounts if mount.target != str(layout.mirror_path)
@@ -556,6 +557,33 @@ async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets
         "OPENAI_API_KEY",
         "/home/agent/.config/gh",
     ]
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_excludes_ambient_gcloud_mount() -> None:
+    """Hosted render-only stacks do not auto-mount ambient gcloud config directory."""
+    compose = _RecordingCompose()
+    auth_mount_resolver = _FailingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = _layout()
+    profile = WorkspaceProfile.model_validate({"name": "hosted"})
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    auth_mounts = compose.render_specs[0].auth_mounts
+    targets = tuple(mount.target for mount in auth_mounts)
+    assert "/home/agent/.config/gcloud" not in targets
 
 
 @pytest.mark.unit

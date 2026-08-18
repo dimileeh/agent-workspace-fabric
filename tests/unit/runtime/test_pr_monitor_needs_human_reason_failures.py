@@ -35,6 +35,79 @@ class _LocalCommandRunner:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "synthetic_reason",
+    (
+        "empty_verdict_output",
+        "unrecognized_or_markerless_verdict",
+        "garbled_verdict_marker",
+        "fixed_placeholder_echo",
+        "verdict_placeholder_echo",
+        "fixed_without_head_advance",
+    ),
+)
+async def test_needs_human_reason_reask_rejects_fail_closed_synthetic_reasons(
+    synthetic_reason: str,
+    tmp_path: Path,
+) -> None:
+    """Fail-closed re-ask reasons must not overwrite a reasonless blocker.
+
+    Regression for review thread PRRT_kwDOSJAM6s6ZlCCR: empty/markerless/
+    FIXED-without-evidence clarification output attaches a synthetic reason that
+    previously looked like a successful NEEDS_HUMAN clarification.
+    """
+    audit_events: list[dict[str, object]] = []
+    original_result = VerdictResult(verdict="needs_human")
+
+    async def _invoke_cli_for_verdict_result(**_kwargs: object) -> VerdictResult:
+        """Return a fail-closed needs_human verdict from the clarification re-ask."""
+        return VerdictResult(verdict="needs_human", reason=synthetic_reason)
+
+    async def _record_pr_monitor_audit_event(**kwargs: object) -> None:
+        """Record the missing-reason diagnostic for this test."""
+        audit_events.append(kwargs)
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        """Return the synthetic primary-worktree revision."""
+        return "a" * 40
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _invoke_cli_for_verdict_result=_invoke_cli_for_verdict_result,
+        _record_pr_monitor_audit_event=_record_pr_monitor_audit_event,
+        _rev_parse_head=_rev_parse_head,
+    )
+
+    result = await comments._enforce_needs_human_reason(
+        runner,
+        result=original_result,
+        original_prompt="original review task",
+        workspace_id="ws_1",
+        pr_number=1,
+        item_id="thread_1",
+        item_kind="thread",
+        item_author=None,
+        item_path=None,
+        item_line=None,
+        commit_message="fix: address thread_1",
+        compose_project="project",
+        compose_file=Path("compose.yml"),
+        state=None,
+        task_tag=None,
+        operation_start_head="a" * 40,
+        base_branch="main",
+        remote_branch="awf/ws_1",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result == original_result
+    assert result.reason is None
+    assert audit_events[0]["reason_code"] == "NEEDS_HUMAN_REASON_MISSING"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "provider_error",
     (
         ProviderRecoveryAuthError("provider authentication failed"),

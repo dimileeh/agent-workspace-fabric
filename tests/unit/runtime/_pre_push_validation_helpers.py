@@ -237,35 +237,51 @@ def _mark_git_worktree(worktree: Path) -> None:
     A fake gitdir pointer causes git to exit 128, which the guard correctly
     interprets as ``VALIDATION_WORKTREE_STATUS_FAILED``. Real tests therefore need
     a real temp repo with at least one commit so HEAD resolves.
+
+    Fixture git init/commit must ignore host or test-poisoned object-lookup env
+    (``GIT_OBJECT_DIRECTORY``, alternates, replace refs, grafts). Callers that
+    assert merge-safety helpers strip those variables often set them before the
+    function under test; inheriting them here can abort ``git commit`` on CI.
     """
+    import os
     import subprocess
+
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
 
     worktree.mkdir(parents=True, exist_ok=True)
     repo_dir = worktree.with_name(f"{worktree.name}-repo")
     repo_dir.mkdir(parents=True, exist_ok=True)
+    git_env = git_env_without_object_lookup_overrides()
+    git_env.pop("GIT_REPLACE_REF_BASE", None)
+    git_env["GIT_GRAFT_FILE"] = os.devnull
+    git_env["GIT_NO_REPLACE_OBJECTS"] = "1"
     subprocess.run(
         ["git", "init", str(repo_dir)],
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     )
     subprocess.run(
         ["git", "-C", str(repo_dir), "config", "user.email", "agent@example.com"],
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     )
     subprocess.run(
         ["git", "-C", str(repo_dir), "config", "user.name", "AWF Agent"],
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     )
     subprocess.run(
         ["git", "-C", str(repo_dir), "commit", "--allow-empty", "-m", "init"],
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     )
     (worktree / ".git").write_text(f"gitdir: {repo_dir / '.git'}\n", encoding="utf-8")
 

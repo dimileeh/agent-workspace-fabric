@@ -87,6 +87,13 @@ _COMMENT_VERDICT_GUIDANCE = (
     "or logic bug, or a clearly correct improvement; FALSE POSITIVE only with "
     "concrete evidence; DEFER for valid but out-of-scope follow-ups; NEEDS_HUMAN "
     "for a design or taste call you cannot make yourself.\n"
+    "  - FIXED is a claim that requires a real commit for THIS review item: "
+    "edit, stage, and commit before printing `AWF-VERDICT: FIXED: …`. AWF "
+    "accepts FIXED only when HEAD advances for this item; FIXED with no change "
+    "stays unresolved.\n"
+    "  - Markerless, empty, garbled, or template-placeholder echoes "
+    "(for example printing the prompt's `<one-sentence summary>` literally) "
+    "fail closed — AWF does not guess FIXED from unmarked stdout.\n"
     "  - Keep any fix minimal: change only what THIS comment requires; do not "
     "refactor unrelated code or expand the PR.\n"
 )
