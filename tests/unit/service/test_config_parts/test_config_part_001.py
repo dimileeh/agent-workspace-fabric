@@ -714,17 +714,23 @@ def test_common_settings_alias_detection_handles_choices_paths_and_unknown_alias
     assert common_config._settings_alias_is_present(  # noqa: SLF001
         AliasChoices("AWF_DATABASE_URL", "DATABASE_URL"),
         {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"},
+        case_sensitive=True,
     )
     assert common_config._settings_alias_is_present(  # noqa: SLF001
         AliasPath("AWF_NESTED", "DATABASE_URL"),
         {"AWF_NESTED": {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"}},
+        case_sensitive=True,
     )
 
     class UnknownAlias:
         choices = "not-a-choice-list"
         path = ()
 
-    assert not common_config._settings_alias_is_present(UnknownAlias(), {})  # noqa: SLF001
+    assert not common_config._settings_alias_is_present(  # noqa: SLF001
+        UnknownAlias(),
+        {},
+        case_sensitive=True,
+    )
 
 
 @pytest.mark.unit
@@ -845,6 +851,21 @@ def test_service_settings_explicit_base_database_url_ignores_custom_environ_host
 
     settings = resolve_service_settings(
         Settings(_env_file=None, database_url=explicit_url),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_preserves_uppercase_constructor_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, DATABASE_URL=explicit_url),
         environ={"AWF_POSTGRES_HOST_PORT": "15433"},
     )
 
