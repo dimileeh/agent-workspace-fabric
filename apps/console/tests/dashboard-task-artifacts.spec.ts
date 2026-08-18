@@ -76,6 +76,7 @@ async function mockDashboard(page: Page) {
   // placeholder once the banner is dismissed.
   const dlFailRefetch = baseWorkspace("ws_dlfail_refetch", "Download Error Refetch");
   let overviewCalls = 0;
+  let refetchFailInitialOverviewCalls: number | null = null;
 
   await page.route("/api/awf/workspaces/overview*", async (route) => {
     overviewCalls += 1;
@@ -110,7 +111,11 @@ async function mockDashboard(page: Page) {
   // the fetch, the list endpoint starts failing. The section must surface the
   // error and stop asserting presence (no Plan/Validation buttons).
   await page.route("/api/awf/workspaces/ws_refetchfail/artifacts*", async (route) => {
-    if (overviewCalls >= 2) {
+    // Anchor the successful fetch to the overview generation current when the
+    // modal opens. Next dev mode may run the startup overview effect more than
+    // once, but only an overview call after this request is a later poll.
+    refetchFailInitialOverviewCalls ??= overviewCalls;
+    if (overviewCalls > refetchFailInitialOverviewCalls) {
       await route.fulfill({
         status: 500,
         json: { detail: { message: "Unable to load artifacts." } },
@@ -393,8 +398,9 @@ test("drops the artifact buttons when a later refetch fails", async ({ page }) =
   const section = page.getByTestId("task-artifacts");
   await expect(section).toBeVisible();
 
-  // First fetch succeeds, so the buttons surface from authoritative presence.
-  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+  // Initial artifact presence is effect-driven and the failure transition is
+  // tied to overview polling, so use the sibling scenario's poll-aware window.
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible({ timeout: 15_000 });
   await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
 
   // A later overview poll re-drives the fetch, which now fails. The error must
