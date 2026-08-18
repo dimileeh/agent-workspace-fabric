@@ -11,9 +11,7 @@ from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     fix_ci_prompt,
-    operator_hint_prompt,
     ready_to_merge_comment,
-    sync_base_conflict_prompt,
 )
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread, ReviewThreadComment
 
@@ -87,6 +85,8 @@ class TestAddressThread:
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
         assert "Do not write any PR comment for verdict bookkeeping." in prompt
+        assert "fail closed" in prompt
+        assert "HEAD advances for this item" in prompt
 
     @pytest.mark.unit
     def test_thread_prompt_protects_regressions_from_external_feedback(self) -> None:
@@ -295,6 +295,8 @@ class TestAddressReviewComment:
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
         assert "Do not write any PR comment for review-level verdict bookkeeping." in prompt
+        assert "fail closed" in prompt
+        assert "HEAD advances for this item" in prompt
 
     @pytest.mark.unit
     def test_embeds_identifiers_and_body(self) -> None:
@@ -460,115 +462,6 @@ class TestAddressReviewComment:
         assert "- created_at:" not in prompt
         assert "- url:" not in prompt
         assert "AWF-EVIDENCE> plain review-level feedback" in prompt
-
-
-class TestSyncBaseConflictPrompt:
-    @pytest.mark.unit
-    def test_names_base_and_lists_conflicting_files(self) -> None:
-        prompt = sync_base_conflict_prompt(
-            pr_number=7,
-            repo_slug="a/b",
-            base_branch="development",
-            conflicting_files=("src/x.ts", "src/y.ts"),
-        )
-        assert "#7" in prompt
-        assert "a/b" in prompt
-        assert "`development`" in prompt
-        assert "src/x.ts" in prompt
-        assert "src/y.ts" in prompt
-
-    @pytest.mark.unit
-    def test_empty_conflicting_files_tells_agent_to_use_git_status(self) -> None:
-        prompt = sync_base_conflict_prompt(
-            pr_number=1, repo_slug="a/b", base_branch="main", conflicting_files=()
-        )
-        assert "run git status" in prompt
-
-    @pytest.mark.unit
-    def test_includes_trusted_workspace_runtime_context(self) -> None:
-        prompt = sync_base_conflict_prompt(
-            pr_number=1,
-            repo_slug="a/b",
-            base_branch="main",
-            conflicting_files=("src/app.py",),
-            workspace_runtime_context="Workspace runtime context\n- Sidecar services are running.",
-        )
-
-        assert "Workspace runtime context" in prompt
-        assert "Sidecar services are running" in prompt
-        assert (
-            "AWF just ran `git merge origin/main` and it stopped on conflicts in these files:"
-            in prompt
-        )
-        assert (
-            "AWF just ran `git merge origin/main` and it stopped on conflicts in these files:\n\n"
-            "  - src/app.py\n\n"
-            "Workspace runtime context\n"
-            "- Sidecar services are running.\n\n"
-            "Resolve each conflict" in prompt
-        )
-
-
-class TestOperatorHintPrompt:
-    @pytest.mark.unit
-    def test_operator_hint_is_injected_as_untrusted_repair_evidence(self) -> None:
-        prompt = operator_hint_prompt(
-            pr_number=307,
-            repo_slug="dimileeh/awf",
-            reason="the docs CTA URL 404s; correct URL is https://example.test/docs",
-            operation_id="op_rehint",
-            workspace_runtime_context="Workspace runtime context\n- Service `postgres`: use postgres:5432.",
-        )
-
-        assert (
-            "An operator manually provided guidance for this PR with the following hint:" in prompt
-        )
-        assert "Address what the hint says, commit any code changes locally" in prompt
-        assert "push a fix commit" not in prompt
-        assert "reply to any relevant unresolved review threads" in prompt
-        assert "op_rehint" in prompt
-        assert "Workspace runtime context" in prompt
-        assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
-        assert "source_kind: operator_hint" in prompt
-        assert (
-            "AWF-EVIDENCE> the docs CTA URL 404s; correct URL is https://example.test/docs"
-        ) in prompt
-        assert "Do NOT push" in prompt
-
-    @pytest.mark.unit
-    def test_directive_is_rendered_as_the_repair_evidence(self) -> None:
-        prompt = operator_hint_prompt(
-            pr_number=443,
-            repo_slug="dimileeh/awf",
-            reason="operator guidance recorded",
-            directive="implement the forge-neutral fix, do not defer",
-            operation_id="op_guide",
-        )
-
-        assert ("AWF-EVIDENCE> implement the forge-neutral fix, do not defer") in prompt
-        # The audit reason is not the agent instruction when a directive is set.
-        assert "AWF-EVIDENCE> operator guidance recorded" not in prompt
-
-    @pytest.mark.unit
-    def test_directive_absent_falls_back_to_reason(self) -> None:
-        prompt = operator_hint_prompt(
-            pr_number=443,
-            repo_slug="dimileeh/awf",
-            reason="reply to the relevant unresolved review thread",
-        )
-
-        assert "AWF-EVIDENCE> reply to the relevant unresolved review thread" in prompt
-
-    @pytest.mark.unit
-    def test_prescribes_fixed_verdict_for_successful_code_or_no_code_hints(self) -> None:
-        prompt = operator_hint_prompt(
-            pr_number=329,
-            repo_slug="dimileeh/awf",
-            reason="reply to the relevant unresolved review thread without code changes",
-        )
-
-        assert "AWF-VERDICT: FIXED:" in prompt
-        assert "code changes or only no-code" in prompt
 
 
 class TestFixCiPrompt:
@@ -894,102 +787,688 @@ class TestReadyToMergeComment:
         assert "review was skipped" in body
         assert "All 5 AWF gates are green" not in body
 
-
-class TestReasoningGuidance:
-    """Deliberate-decision, coverage, and scope-discipline guidance (#304 follow-up).
-
-    The four-verdict tree already existed; these assert the *reasoning framework*
-    that tells the agent how to choose, how to fix coverage failures the
-    disciplined way, and to keep each fix scoped.
-    """
-
     @pytest.mark.unit
-    def test_thread_prompt_includes_comment_verdict_reasoning(self) -> None:
-        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
-        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
-        assert "Verify the claim against the actual code first" in prompt
-        assert "real defect or reviewer breadth-conservatism" in prompt
-        assert "do not refactor unrelated code or expand the PR" in prompt
-
-    @pytest.mark.unit
-    def test_review_comment_prompt_includes_comment_verdict_reasoning(self) -> None:
-        comment = ReviewComment(comment_id="C", body_excerpt="x")
-        prompt = address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=comment)
-        assert "Verify the claim against the actual code first" in prompt
-        assert "do not refactor unrelated code or expand the PR" in prompt
-
-    @pytest.mark.unit
-    def test_fix_ci_prompt_includes_coverage_reasoning(self) -> None:
-        failures = (CheckFailure(name="coverage-gate", conclusion="FAILURE", log_excerpt="x"),)
-        prompt = fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=failures)
-        assert "diagnose the root cause before writing" in prompt
-        assert "assert BEHAVIOR" in prompt
-        assert "coverage-theater" in prompt
-        assert "# pragma: no cover" in prompt
-        assert "exact threshold" in prompt
-        # The exclusion-over-theater nuance: a justified exclusion is correct
-        # for genuinely non-behavioral code, not a hollow test.
-        assert "a justified " in prompt
-        assert "non-behavioral" in prompt
-        assert "Protocol stub" in prompt
-
-
-class TestCommitTaskTagFooter:
-    """Monitor prompts must instruct the agent to tag the commits it authors.
-
-    For a tagged workspace the agent commits its own monitor fix (the worktree
-    is clean, so AWF's ``_commit_dirty_worktree`` fallback never runs and never
-    tags it). Without the prompt instruction the pushed monitor commit stays
-    untagged and loses its Jira link (PRRT_kwDOSJAM6s6I9Tng).
-    """
-
-    _TAG = "PROJ-123"
-
-    def _tagged_prompts(self, tag: str | None) -> list[str]:
-        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
-        comment = ReviewComment(
-            comment_id="c1", author="r", body="b", body_excerpt="b", state="COMMENTED"
+    def test_blocker_reason_neutralizes_untrusted_mentions(self) -> None:
+        """Verify blocker reason neutralizes untrusted mentions."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="ask @acme/security to approve",
         )
-        failures = (CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="x"),)
-        return [
-            address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread, task_tag=tag),
-            address_review_comment_prompt(
-                pr_number=1, repo_slug="a/b", comment=comment, task_tag=tag
+
+        assert "ask &#64;acme/security to approve" in body
+        assert "ask @acme/security to approve" not in body
+
+    @pytest.mark.unit
+    def test_blocker_reason_truncates_long_agent_reason(self) -> None:
+        """Verify blocker reason truncates long agent reason."""
+        long_reason = "z" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason=long_reason,
+        )
+
+        assert f"because {'z' * 160}…" in body
+        assert "z" * 161 not in body
+
+    @pytest.mark.unit
+    def test_preserves_full_workflow_push_reason_without_blocker_items(self) -> None:
+        """Verify an itemless workflow failure keeps its complete diagnostic safely."""
+        workflow_failure = (
+            "remote: **workflow update rejected**\n"
+            f"{('push diagnostic detail ' * 10).strip()}\n"
+            "Action: grant workflow scope, then retry the push."
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason=workflow_failure,
+            preserve_full_blocker_reason=True,
+        )
+
+        assert r"remote: \*\*workflow update rejected\*\*" in body
+        assert ("push diagnostic detail " * 10).strip() in body
+        assert "Action: grant workflow scope, then retry the push." in body
+
+    @pytest.mark.unit
+    def test_preserves_full_workflow_push_reason_with_blocker_items(self) -> None:
+        """Verify review details do not truncate a preserved push diagnostic."""
+        workflow_failure = (
+            "remote: **workflow update rejected**\n"
+            f"{('push diagnostic detail ' * 10).strip()}\n"
+            "Action: grant workflow scope, then retry the push."
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason=workflow_failure,
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "Review feedback that was fixed locally.",
+                    "verdict": "fixed",
+                    "agent_verdict_reason": "The requested change is complete.",
+                },
             ),
-            operator_hint_prompt(pr_number=1, repo_slug="a/b", reason="do x", task_tag=tag),
-            sync_base_conflict_prompt(
-                pr_number=1, repo_slug="a/b", base_branch="main", conflicting_files=(), task_tag=tag
+            preserve_full_blocker_reason=True,
+        )
+
+        assert r"remote: \*\*workflow update rejected\*\*" in body
+        assert ("push diagnostic detail " * 10).strip() in body
+        assert "Action: grant workflow scope, then retry the push." in body
+
+    @pytest.mark.unit
+    def test_blocker_items_render_location_verdict_excerpt_and_honest_missing_reason(self) -> None:
+        """Verify blocker items render location verdict excerpt and honest missing reason."""
+        long_body = "x" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": long_body,
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose whether this remains blocking.",
+                },
+                {
+                    "kind": "thread",
+                    "id": "T2",
+                    "author": "review-bot[bot]",
+                    "path": "src/other.py",
+                    "line": 7,
+                    "url": "https://github.example/reviews/T2",
+                    "body": "A decision is required.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
             ),
-            fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=failures, task_tag=tag),
-        ]
+        )
+
+        assert "Agent escalated - needs your decision (2):" in body
+        assert "[src/monitor.py:42](https://github.example/reviews/T1)" in body
+        assert "[needs_human]" in body
+        assert "x" * 160 in body
+        assert "x" * 161 not in body
+        assert "-> reason: Choose whether this remains blocking." in body
+        assert "[src/other.py:7](https://github.example/reviews/T2)" in body
+        assert "-> ⚠ no reason given by agent" in body
 
     @pytest.mark.unit
-    def test_every_committing_prompt_instructs_tag_prefix_when_tag_present(self) -> None:
-        for prompt in self._tagged_prompts(self._TAG):
-            assert f"task tag `{self._TAG}`" in prompt
-            assert "links to its tracking issue" in prompt
-            assert "do not add it again" in prompt
+    @pytest.mark.parametrize(
+        ("agent_reason", "expected_agent_reason_text"),
+        (
+            (None, ""),
+            (
+                "The agent separately requested a release-policy decision.",
+                "; agent verdict reason: The agent separately requested a release-policy decision.",
+            ),
+        ),
+    )
+    def test_blocker_items_render_outdated_awf_status_without_agent_escalation(
+        self, agent_reason: str | None, expected_agent_reason_text: str
+    ) -> None:
+        """Verify retrying an outdated resolution is attributed to AWF, not an agent."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="AWF could not yet resolve this outdated thread and will retry before merging",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T-outdated",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T-outdated",
+                    "body": "The original finding.",
+                    "verdict": "awaiting_retry",
+                    "agent_verdict_reason": agent_reason,
+                    "awf_blocker_reason": (
+                        "AWF could not yet resolve this outdated thread and will retry before merging"
+                    ),
+                },
+            ),
+        )
+
+        assert "Outdated feedback awaiting AWF resolution (1):" in body
+        assert "Agent escalated - needs your decision (0):" in body
+        assert "[awaiting_retry]" in body
+        assert "-> AWF status: AWF could not yet resolve this outdated thread" in body
+        assert expected_agent_reason_text in body
+        assert "no reason given by agent" not in body
 
     @pytest.mark.unit
-    def test_every_committing_prompt_brackets_entity_task_tag(self) -> None:
-        # Aira entity keys link only via the bracketed `[AIRA-T299] …` commit
-        # form; the agent authors these monitor commits itself, so it must be
-        # told the bracketed prefix, not the bare key (PRRT_kwDOSJAM6s6OHCyD).
-        for prompt in self._tagged_prompts("AIRA-T299"):
-            assert "task tag `[AIRA-T299]`" in prompt
-            assert "`[AIRA-T299] fix: …`" in prompt
-            assert "task tag `AIRA-T299`" not in prompt
+    def test_blocker_item_truncates_long_agent_verdict_reason(self) -> None:
+        """Verify blocker item truncates long agent verdict reason."""
+        long_reason = "y" * 200
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": long_reason,
+                },
+            ),
+        )
+
+        assert f"-> reason: {'y' * 160}…" in body
+        assert "y" * 161 not in body
 
     @pytest.mark.unit
-    def test_no_tag_instruction_when_tag_absent(self) -> None:
-        for prompt in self._tagged_prompts(None):
-            assert "task tag" not in prompt
-            assert "links to its tracking issue" not in prompt
-            # The plain do-not-push footer is still present.
-            assert "Do NOT push" in prompt
+    def test_blocker_items_render_path_without_line_anchor(self) -> None:
+        """Verify blocker items render path without line anchor."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": None,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose whether this remains blocking.",
+                },
+            ),
+        )
+
+        assert "[src/monitor.py](https://github.example/reviews/T1)" in body
 
     @pytest.mark.unit
-    def test_tag_instruction_defaults_off_for_backward_compatibility(self) -> None:
-        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
-        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
-        assert "task tag" not in prompt
+    def test_blocker_items_cap_combined_groups_at_eight(self) -> None:
+        """Verify blocker items cap combined groups at eight."""
+        blocker_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T{number}",
+                "body": f"body {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+            }
+            for number in range(9)
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=blocker_items,
+        )
+
+        assert body.count("-> ⚠ no reason given by agent") == 8
+        assert "(+1 more)" in body
+        assert "body 8" not in body
+
+    @pytest.mark.unit
+    def test_blocker_items_use_group_labels_and_deterministic_location_ordering(self) -> None:
+        """Verify blocker items use group labels and deterministic location ordering."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-z",
+                    "author": "zoe",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-z",
+                    "body": "review-level z",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "thread",
+                    "id": "T-b",
+                    "author": "review-bot[bot]",
+                    "path": "src/b.py",
+                    "line": 1,
+                    "url": "https://github.example/reviews/T-b",
+                    "body": "bot b",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "review",
+                    "id": "R-a",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-a",
+                    "body": "review-level a",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+                {
+                    "kind": "thread",
+                    "id": "T-a",
+                    "author": "review-bot[bot]",
+                    "path": "src/a.py",
+                    "line": 2,
+                    "url": "https://github.example/reviews/T-a",
+                    "body": "bot a",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Agent escalated - needs your decision (2):" in body
+        assert "Human feedback deferred by agent (2):" in body
+        assert body.index("bot a") < body.index("bot b")
+        assert body.index("review-level a") < body.index("review-level z")
+        assert "[alice](https://github.example/reviews/R-a)" in body
+
+    @pytest.mark.unit
+    def test_blocker_items_render_human_needs_human_as_an_escalation(self) -> None:
+        """Verify blocker items render human needs human as an escalation."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-escalated",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-escalated",
+                    "body": "A decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose the preferred behavior.",
+                },
+                {
+                    "kind": "review",
+                    "id": "R-deferred",
+                    "author": "bob",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-deferred",
+                    "body": "Track this separately.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": "Needs a tracked follow-up.",
+                },
+            ),
+        )
+
+        assert "Human feedback escalated - needs your decision (1):" in body
+        assert "Human feedback deferred by agent (1):" in body
+        assert body.index("A decision is required.") < body.index("Track this separately.")
+
+    @pytest.mark.unit
+    def test_blocker_items_render_effective_changes_reviews_separately_from_deferrals(self) -> None:
+        """Verify blocker items render effective changes reviews separately from deferrals."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="a merge-blocking changes-requested review remains unresolved",
+            blocker_items=(
+                {
+                    "kind": "review",
+                    "id": "R-deferred",
+                    "author": "alice",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-deferred",
+                    "body": "Track this separately.",
+                    "verdict": "defer",
+                    "agent_verdict_reason": "Needs a tracked follow-up.",
+                },
+                {
+                    "kind": "review",
+                    "id": "R-blocking",
+                    "author": "bob",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-blocking",
+                    "body": "Changes are still required.",
+                    "verdict": "changes_requested",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Human feedback deferred by agent (1):" in body
+        assert "Merge-blocking changes-requested reviews (1):" in body
+        assert "[changes_requested]" in body
+        assert "Changes are still required. -> ⚠ no reason given by agent" not in body
+
+    @pytest.mark.unit
+    def test_blocker_items_prioritize_changes_requested_reviews_within_cap(self) -> None:
+        """Verify blocker items prioritize changes requested reviews within cap."""
+        deferred_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T-deferred-{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/deferred_{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T-deferred-{number}",
+                "body": f"deferred blocker {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        blocking_review = {
+            "kind": "review",
+            "id": "R-blocking",
+            "author": "blocking reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-blocking",
+            "body": "Changes are still required.",
+            "verdict": "changes_requested",
+            "agent_verdict_reason": None,
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="a merge-blocking changes-requested review remains unresolved",
+            blocker_items=(*deferred_items, blocking_review),
+        )
+
+        assert "blocking reviewer" in body
+        assert "[blocking reviewer](https://github.example/reviews/R-blocking)" in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
+    def test_blocker_items_reserve_a_slot_for_triaged_feedback(self) -> None:
+        """Keep a triaged reason visible beside eight merge-blocking reviews."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        human_deferred_feedback = {
+            "kind": "review",
+            "id": "R-deferred",
+            "author": "alice",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-deferred",
+            "body": "Track this separately.",
+            "verdict": "defer",
+            "agent_verdict_reason": "Needs a tracked follow-up.",
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, human_deferred_feedback),
+        )
+
+        assert body.count("[changes_requested]") == 7
+        assert "Track this separately." in body
+        assert "-> reason: Needs a tracked follow-up." in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("current_item", "current_body"),
+        (
+            (
+                {
+                    "kind": "review",
+                    "id": "R-current",
+                    "author": "current reviewer",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-current",
+                    "body": "Current changes are required.",
+                    "verdict": "changes_requested",
+                    "agent_verdict_reason": None,
+                },
+                "Current changes are required.",
+            ),
+            (
+                {
+                    "kind": "review",
+                    "id": "R-current",
+                    "author": "current reviewer",
+                    "path": None,
+                    "line": None,
+                    "url": "https://github.example/reviews/R-current",
+                    "body": "A current human decision is required.",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": "Choose the intended behavior.",
+                },
+                "A current human decision is required.",
+            ),
+        ),
+    )
+    def test_blocker_items_reserve_a_slot_after_outdated_feedback(
+        self,
+        current_item: dict[str, object],
+        current_body: str,
+    ) -> None:
+        """Keep current feedback visible after eight outdated AWF blockers."""
+        outdated_items = tuple(
+            {
+                "kind": "thread",
+                "id": f"T-outdated-{number}",
+                "author": "review-bot[bot]",
+                "path": f"src/outdated_{number}.py",
+                "line": number,
+                "url": f"https://github.example/reviews/T-outdated-{number}",
+                "body": f"outdated feedback {number}",
+                "verdict": "needs_human",
+                "agent_verdict_reason": None,
+                "awf_blocker_reason": "AWF is retrying this outdated thread.",
+            }
+            for number in range(8)
+        )
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*outdated_items, current_item),
+        )
+
+        assert sum(f"outdated feedback {number}" in body for number in range(8)) == 7
+        assert current_body in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("needs_human", "defer"))
+    def test_blocker_items_reserve_a_slot_for_triaged_merge_blocking_feedback(
+        self,
+        verdict: str,
+    ) -> None:
+        """Keep triage visible when its review independently blocks merging."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        triaged_blocking_feedback = {
+            "kind": "review",
+            "id": "R-triaged-blocking",
+            "author": "triaged reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-triaged-blocking",
+            "body": "A human decision is required.",
+            "verdict": verdict,
+            "agent_verdict_reason": "Choose the intended merge policy.",
+            "is_merge_blocking": True,
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, triaged_blocking_feedback),
+        )
+
+        assert body.count("[changes_requested]") == 7
+        assert "A human decision is required." in body
+        assert f"[{verdict}]" in body
+        assert "-> reason: Choose the intended merge policy." in body
+        assert "(+1 more)" in body
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("separate_verdict", ("needs_human", "defer"))
+    def test_blocker_items_reserve_a_slot_for_separate_triage(
+        self,
+        separate_verdict: str,
+    ) -> None:
+        """Keep a separate triage visible beside a triaged blocking review."""
+        blocking_reviews = tuple(
+            {
+                "kind": "review",
+                "id": f"R-blocking-{number}",
+                "author": f"blocking reviewer {number}",
+                "path": None,
+                "line": None,
+                "url": f"https://github.example/reviews/R-blocking-{number}",
+                "body": f"Changes are still required {number}.",
+                "verdict": "changes_requested",
+                "agent_verdict_reason": None,
+            }
+            for number in range(8)
+        )
+        triaged_blocking_feedback = {
+            "kind": "review",
+            "id": "R-triaged-blocking",
+            "author": "triaged reviewer",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-triaged-blocking",
+            "body": "A human decision is required.",
+            "verdict": "needs_human",
+            "agent_verdict_reason": "Choose the intended merge policy.",
+            "is_merge_blocking": True,
+        }
+        separate_triage = {
+            "kind": "review",
+            "id": "R-separate-triage",
+            "author": "alice",
+            "path": None,
+            "line": None,
+            "url": "https://github.example/reviews/R-separate-triage",
+            "body": "This requires separate attention.",
+            "verdict": separate_verdict,
+            "agent_verdict_reason": "Keep this escalation visible.",
+        }
+
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(*blocking_reviews, triaged_blocking_feedback, separate_triage),
+        )
+
+        assert body.count("[changes_requested]") == 6
+        assert "A human decision is required." in body
+        assert "This requires separate attention." in body
+        assert "-> reason: Keep this escalation visible." in body
+        assert "(+2 more)" in body
+
+    @pytest.mark.unit
+    def test_blocker_items_honor_collected_thread_classification(self) -> None:
+        """Verify blocker items honor collected thread classification."""
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T-mixed",
+                    "author": "review-bot[bot]",
+                    "is_bot": False,
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T-mixed",
+                    "body": "a human replied to the bot thread",
+                    "verdict": "defer",
+                    "agent_verdict_reason": None,
+                },
+            ),
+        )
+
+        assert "Agent escalated - needs your decision (0):" in body
+        assert "Human feedback deferred by agent (1):" in body
+
+    @pytest.mark.unit
+    def test_blocker_item_section_redacts_agent_reason_secrets(self) -> None:
+        """Verify blocker item section redacts agent reason secrets."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCD"
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="review feedback needs human input",
+            blocker_items=(
+                {
+                    "kind": "thread",
+                    "id": "T1",
+                    "author": "review-bot[bot]",
+                    "path": "src/monitor.py",
+                    "line": 42,
+                    "url": "https://github.example/reviews/T1",
+                    "body": "needs a decision",
+                    "verdict": "needs_human",
+                    "agent_verdict_reason": f"Approve using GH_TOKEN={secret}",
+                },
+            ),
+        )
+
+        assert secret not in body
+        assert r"GH_TOKEN=\<redacted\>" in body
+        assert "GH_TOKEN=<redacted>" not in body

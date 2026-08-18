@@ -319,7 +319,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
-    assert "`workflow` scope for .github/workflows/publish.yml" in body
+    assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
 
 
 @pytest.mark.unit
@@ -517,8 +517,8 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="FALSE POSITIVE: no code change needed")
-    adapter.queue(stdout="FALSE POSITIVE: second review is also stale")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: no code change needed")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: second review is also stale")
     workspace_id = "ws_review_burst"
     first_review = ReviewComment(comment_id="1", body_excerpt="first", author="reviewer")
     second_review = review_node(cid=2, author="reviewer", body="second")
@@ -639,10 +639,18 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
 async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Agent resolution replies must not re-queue a thread already FIXED with evidence.
+
+    Fail-closed contract: markerless prose is never ``fix_committed``. This
+    regression uses an explicit ``AWF-VERDICT: FIXED`` plus attributable
+    same-item commit evidence so the thread resolves once and the agent's
+    own resolution reply does not trigger a second address pass.
+    """
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed in commit cafebabe")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit cafebabe")
     changed_thread = {
         "id": "T_same",
         "isResolved": False,
@@ -658,7 +666,7 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
                 },
                 {
                     "databaseId": 102,
-                    "bodyText": "fixed in commit cafebabe",
+                    "bodyText": "AWF-VERDICT: FIXED: fixed in commit cafebabe",
                     "author": {"login": "dimileeh"},
                     "viewerDidAuthor": True,
                 },
@@ -675,6 +683,11 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
     initial_thread = ReviewThread(
         thread_id="T_same",
@@ -725,7 +738,9 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_agent_failed"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
+    cmd.queue_result(returncode=0, stdout="")  # dirty status
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # end head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -743,15 +758,25 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     )
 
     assert verdict == "agent_failed"
-    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert any(
+        call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
-async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committed(
+async def test_invoke_cli_for_verdict_reports_hosted_synced_nonzero_exit_as_agent_failed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Hosted terminal-head sync must not resolve FIXED after a nonzero CLI exit.
+
+    Fail-closed contract: syncing a forward terminal SHA and seeing
+    ``AWF-VERDICT: FIXED`` in stdout still yields ``agent_failed`` when the
+    hosted adapter raised ``AgentRunError`` (bounded ``AGENT_CLI_FAILED`` /
+    nonzero returncode). Sync state may advance for recovery evidence, but the
+    thread must not be treated as ``fix_committed``.
+    """
     cmd = FakeCommandRunner()
     operation_start_head = "a" * 40
     terminal_head_sha = "b" * 40
@@ -770,7 +795,9 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
     )
     workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")  # merge-base --is-ancestor (hosted sync record)
+    cmd.queue_result(returncode=0, stdout="")  # dirty status
+    cmd.queue_result(returncode=0, stdout=terminal_head_sha + "\n")  # end head rev-parse
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -802,12 +829,18 @@ async def test_invoke_cli_for_verdict_reports_hosted_synced_head_as_fix_committe
         operation_start_head=operation_start_head,
     )
 
-    assert result.verdict == "fix_committed"
-    assert result.reason == "hosted repair committed"
+    assert result.verdict == "agent_failed"
+    # Nonzero hosted failure must not carry the FIXED reason through as resolution.
+    assert result.reason is None
+    assert result.verdict != "fix_committed"
+    # Hosted terminal-head synchronization / advance evidence is still recorded.
     assert state.last_push_sha == terminal_head_sha
     assert state.hosted_terminal_head_advanced
     assert sync_calls
-    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert sync_calls[0]["operation_start_head"] == operation_start_head
+    assert any(
+        call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"] for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
@@ -821,6 +854,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_post_commit_ownership"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="a" * 40 + "\n")  # start head rev-parse
     cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
     cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
@@ -865,7 +899,9 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         "dirty_worktree_pre_commit",
         "dirty_worktree_post_commit_succeeded",
     ]
-    assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
+    # Sink may raise after commit; comment_verdict then rev-parses HEAD for
+    # salvage retention before re-raising (PRRT_kwDOSJAM6s6ZmirT).
+    assert any(call.args[-3:] == ["commit", "-m", "fix: review"] for call in cmd.calls)
 
 
 @pytest.mark.unit

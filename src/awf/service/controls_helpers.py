@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -533,13 +533,13 @@ def _cleanup_steps_from_mapping(
 
 def _cleanup_status(value: object) -> WorkspaceCleanupStatus:
     if value in {"succeeded", "partial", "skipped"}:
-        return cast(WorkspaceCleanupStatus, value)
+        return value
     return "partial"
 
 
 def _cleanup_step_status(value: object) -> WorkspaceCleanupStepStatus:
     if value in {"succeeded", "failed", "skipped"}:
-        return cast(WorkspaceCleanupStepStatus, value)
+        return value
     return "failed"
 
 

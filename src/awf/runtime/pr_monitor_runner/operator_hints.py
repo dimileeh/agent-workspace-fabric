@@ -263,6 +263,8 @@ async def _run_operator_hint_cycle(
                 state=state,
                 task_tag=task_tag,
                 operation_start_head=operation_start_head,
+                # Prompt allows FIXED for GitHub-side / no-code directives.
+                require_fix_evidence=False,
             )
         except ProtectedScopeDiffError as exc:
             push_result = cast(

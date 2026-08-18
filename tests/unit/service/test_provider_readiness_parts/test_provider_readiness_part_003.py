@@ -151,8 +151,6 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
     (home / ".claude.json").write_text('{"oauth":"claude_json_secret"}')
-    (home / ".gemini").mkdir()
-    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
     (home / ".config" / "opencode").mkdir(parents=True)
     (home / ".config" / "opencode" / "opencode.json").write_text("opencode_file_secret")
     (home / ".ollama").mkdir()
@@ -165,7 +163,7 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
         http_get=_ollama_ok,
     )
 
-    for name in ("claude_code", "gemini", "opencode"):
+    for name in ("claude_code", "opencode"):
         provider = payload["providers"][name]
         assert provider["ok"] is True
         assert provider["credential_scope"] == "isolated_workspace"
@@ -175,7 +173,6 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
     for secret in (
         "claude_file_secret",
         "claude_json_secret",
-        "gemini_file_secret",
         "opencode_file_secret",
         "ollama_file_secret",
     ):
@@ -205,7 +202,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         http_get=_ollama_ok,
     )
 
-    for name in ("github", "codex", "claude_code", "cursor", "gemini", "opencode", "grok"):
+    for name in ("github", "codex", "claude_code", "cursor", "antigravity", "opencode", "grok"):
         provider = payload["providers"][name]
         assert provider["ok"] is True
         assert provider["credential_scope"] == "static_env_token"

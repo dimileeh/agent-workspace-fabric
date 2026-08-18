@@ -1,21 +1,7 @@
 """Cloud-neutral runtime execution seam tests.
 
-These guard the adapter dispatch between the default tracked
-``docker compose exec`` path (when ``runtime_executor is None``) and an
-injected ``AgentRuntimeExecutor`` (hosted path). They assert:
-
-- Default Compose command construction is unchanged (regression guard).
-- The injected executor is called for ``adapter.run`` and receives the
-  prompt via ``prompt_stdin`` (bytes), not argv; ``cli_args`` excludes the
-  prompt; ``env_passthrough_names`` carries names only, no values.
-- Hosted result maps to ``AgentRunResult``; non-zero raises
-  ``AgentRunError`` with the same provider-failure classification reason
-  codes (timeout → ``AGENT_TIMEOUT``, auth → ``AGENT_AUTH_FAILED``).
-- Secret values are never present in the request, argv, stdin, or captured
-  logs.
-- Usage sampling is skipped on the hosted path (the hosted executor owns
-  its own runtime; sampling via ``docker compose exec`` is invalid there),
-  while log-store streaming still runs.
+Guards adapter dispatch between default tracked compose exec and injected AgentRuntimeExecutor,
+verifying command construction, prompt delivery via stdin, result mapping, secret masking, and log streaming.
 """
 
 from __future__ import annotations
@@ -24,6 +10,7 @@ import asyncio
 import inspect
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import structlog
@@ -229,6 +216,40 @@ class TestRuntimeExecutorSeam:
         )
 
         assert executor.calls[0].git_preparation is preparation
+
+    @pytest.mark.unit
+    async def test_injected_executor_receives_read_only_contract(self) -> None:
+        """Hosted clarification explicitly requires an immutable checkout."""
+        executor = _RecordingExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_read_only",
+            read_only=True,
+        )
+
+        assert executor.calls[0].read_only is True
+
+    @pytest.mark.unit
+    async def test_read_only_contract_rejects_non_hosted_adapter(self) -> None:
+        """Local Compose execution cannot silently weaken the hosted contract."""
+        adapter = CodexAdapter(runner=FakeCommandRunner(), default_model="gpt-5")
+
+        with pytest.raises(ValueError, match="require a hosted runtime executor"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_read_only",
+                read_only=True,
+            )
 
     @pytest.mark.unit
     async def test_injected_executor_receives_compose_context(self, tmp_path: Path) -> None:
@@ -818,6 +839,51 @@ class TestRuntimeExecutorSeam:
         assert exc.value.reason_code == "AGENT_CLI_FAILED"
 
     @pytest.mark.unit
+    async def test_hosted_cancellation_when_execute_task_already_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancellation when execute_task is already done discards result directly."""
+        discarded_tasks: list[asyncio.Task[AgentRuntimeExecResult]] = []
+        original_discard = base_module._discard_hosted_execute_task_result
+
+        def _record_discard(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+            discarded_tasks.append(task)
+            original_discard(task)
+
+        monkeypatch.setattr(base_module, "_discard_hosted_execute_task_result", _record_discard)
+
+        async def _cancelled_wait(
+            tasks: set[asyncio.Task[AgentRuntimeExecResult]], timeout: float | None = None
+        ) -> tuple[
+            set[asyncio.Task[AgentRuntimeExecResult]], set[asyncio.Task[AgentRuntimeExecResult]]
+        ]:
+            del timeout
+            await asyncio.gather(*tasks)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(base_module.asyncio, "wait", _cancelled_wait)
+
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(returncode=0, stdout="done", stderr="")
+        )
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancel_fast_done",
+            )
+
+        assert len(discarded_tasks) == 1
+        assert discarded_tasks[0].done()
+
+    @pytest.mark.unit
     async def test_hosted_path_streams_to_log_store(self) -> None:
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(returncode=0, stdout="line1\nline2\n", stderr="warn\n")
@@ -1197,6 +1263,39 @@ class TestRuntimeExecutorSeam:
         assert len(log_store.open_calls) == 1
         assert log_store.sinks.closed is True
 
+    @pytest.mark.unit
+    async def test_hosted_request_construction_failure_closes_sinks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When build_hosted_exec_request fails, open sinks must still be closed."""
+
+        async def _failing_build_request(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("helper failure during request construction")
+
+        monkeypatch.setattr("awf.adapters.base.build_hosted_exec_request", _failing_build_request)
+
+        class _DummyExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                raise NotImplementedError
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=_DummyExecutor(),
+        )
+
+        with pytest.raises(RuntimeError, match="helper failure during request construction"):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_request_build_failed",
+            )
+
+        assert len(log_store.open_calls) == 1
+        assert log_store.sinks.closed is True
+
 
 class TestAgentAdapterBaseDefaults:
     """Base ``AgentAdapter`` property defaults that concrete adapters inherit.
@@ -1262,3 +1361,128 @@ class TestAgentAdapterBaseDefaults:
         # The profile_env field defaults to empty; an unreadable/absent compose
         # yields no literal profile values (fail-closed).
         assert request.profile_env == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_classify_hosted_result_terminal_head_sha_without_provider_failure(self) -> None:
+        """classify_hosted_result attaches terminal_head_sha to details when provider_failure is None."""
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(
+                returncode=1,
+                stdout="some error",
+                stderr="generic exit 1",
+                terminal_head_sha="sha_123456",
+            )
+        )
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=executor)
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_head_sha",
+            )
+        assert exc_info.value.details == {"terminal_head_sha": "sha_123456"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_base_hosted_streaming_without_sinks(self) -> None:
+        """Hosted streaming callback runs safely when sinks is None."""
+        executor = _StreamingExecutor()
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=executor)
+        res = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id=None,
+        )
+        assert res.stdout == "partial-1\npartial-2\n"
+        assert res.stderr == "warn-1\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_base_hosted_raises_agent_run_error_directly(self) -> None:
+        """When runtime_executor.execute raises AgentRunError, it is re-raised as-is."""
+
+        class _ErrorExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                from awf.common.commands import CommandResult
+
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(returncode=1, stdout="", stderr="custom exec error"),
+                    reason_code="CUSTOM_EXEC_ERROR",
+                )
+
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=_ErrorExecutor())
+        with pytest.raises(AgentRunError) as exc_info:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_exec_err",
+            )
+        assert exc_info.value.reason_code == "CUSTOM_EXEC_ERROR"
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_base_hosted_cancel_when_execute_task_already_done(self) -> None:
+        """When task cancellation occurs after execute_task is already done, result is discarded."""
+
+        class _FastDoneExecutor:
+            def __init__(self) -> None:
+                self.outer_task: asyncio.Task[Any] | None = None
+
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if self.outer_task:
+                    self.outer_task.cancel()
+                return AgentRuntimeExecResult(returncode=0, stdout="done", stderr="")
+
+        executor = _FastDoneExecutor()
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=executor)
+
+        with patch("awf.adapters.base._discard_hosted_execute_task_result") as mock_discard:
+            run_task = asyncio.create_task(
+                adapter.run(
+                    compose_project=_COMPOSE_PROJECT,
+                    compose_file=_COMPOSE_FILE,
+                    prompt=_PROMPT,
+                    workspace_id="ws_done_cancel",
+                )
+            )
+            executor.outer_task = run_task
+
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            mock_discard.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.unit
+    async def test_base_hosted_cancel_during_timeout_drain(self) -> None:
+        """When outer task cancellation occurs while draining a timed-out execute_task."""
+
+        class _SlowCancelExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                try:
+                    await asyncio.sleep(100)
+                except asyncio.CancelledError:
+                    await asyncio.sleep(100)
+                return AgentRuntimeExecResult(returncode=0, stdout="", stderr="")
+
+        executor = _SlowCancelExecutor()
+        adapter = CodexAdapter(runner=FakeCommandRunner(), runtime_executor=executor)
+        adapter._agent_wall_timeout_seconds = 0.01
+
+        run_task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_drain_cancel",
+            )
+        )
+        await asyncio.sleep(0.05)
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task

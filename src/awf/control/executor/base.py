@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from awf.adapters.base import AgentDefaults
-from awf.adapters.defaults import defaults_with_model_overrides
+from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
@@ -220,4 +220,4 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             self._config.default_models,
             base=self._config.agent_defaults,
         )
-        return defaults.get(agent)
+        return defaults.get(agent) or HISTORICAL_AGENT_DEFAULTS.get(agent)

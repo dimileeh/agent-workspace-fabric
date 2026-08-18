@@ -3,7 +3,7 @@
 Extracted from ``provider_readiness`` to keep each first-party module under the
 maintainability line limit. Each ``_check_*`` helper inspects the credential and
 runtime-CLI signals for a single non-OpenCode provider (GitHub, Codex, Claude,
-Cursor, Gemini) and returns a ``_provider_result`` payload. They sit alongside the
+Cursor, Antigravity) and returns a ``_provider_result`` payload. They sit alongside the
 ``_check_docker_provider``/``_check_grok``/``_check_opencode`` helpers in
 ``provider_readiness_helpers`` conceptually, but depend on credential helpers,
 constants, and redaction helpers reachable through ``provider_readiness`` — all
@@ -475,39 +475,20 @@ def _check_cursor_readiness(
     return result
 
 
-def _check_gemini(
+def _check_antigravity(
     *,
     environ: Mapping[str, str],
-    host_home: Path,
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
-    file_sources = _existing_credential_sources(
-        ((host_home / ".gemini", "~/.gemini"),),
-        credential_scope="isolated_workspace",
-        isolation="per_workspace_copy",
-    )
-    if file_sources:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_FILE_AUTH_PRESENT",
-            message="Gemini auth files are visible to the local service.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _GEMINI_ENV_KEYS)
+    """Check whether Antigravity API-key auth is visible to the service."""
+    signal = _first_present_env(environ, ("GEMINI_API_KEY",))
     if signal is not None:
         return _provider_result(
             ok=True,
             strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Gemini auth is visible through service environment variables.",
+            reason="ANTIGRAVITY_ENV_AUTH_PRESENT",
+            message="Antigravity auth is visible through service environment variables.",
             signals=[signal],
             secrets=secrets,
             credential_sources=[
@@ -523,52 +504,83 @@ def _check_gemini(
             warnings=[
                 _security_warning(
                     "STATIC_TOKEN_FALLBACK",
-                    f"Gemini auth is supplied by static service environment variable {signal}.",
+                    f"Antigravity auth is supplied by static service environment variable {signal}.",
                 )
             ],
         )
 
-    credentials = environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials and Path(credentials).expanduser().is_file():
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Google application credentials are visible to the local service.",
-            signals=["GOOGLE_APPLICATION_CREDENTIALS"],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="path",
-                    signal="GOOGLE_APPLICATION_CREDENTIALS",
-                    credential_scope="read_only_host_path",
-                    isolation="read_only_bind",
-                )
-            ],
-            credential_scope="read_only_host_path",
-            isolation="read_only_bind",
-            warnings=[],
-        )
-
-    message = (
-        "No Gemini auth signal was visible. Set GEMINI_API_KEY, GOOGLE_API_KEY, "
-        "GOOGLE_APPLICATION_CREDENTIALS, or mount ~/.gemini."
-    )
-    if credentials:
-        message = (
-            "GOOGLE_APPLICATION_CREDENTIALS is set but the file is not visible to "
-            "the local service. Mount the file or use GEMINI_API_KEY/GOOGLE_API_KEY."
-        )
     return _provider_result(
         ok=False,
         strict=strict,
-        reason="GEMINI_AUTH_MISSING",
-        message=message,
-        signals=["GOOGLE_APPLICATION_CREDENTIALS"] if credentials else None,
+        reason="ANTIGRAVITY_AUTH_MISSING",
+        message="No Antigravity auth signal was visible. Set GEMINI_API_KEY.",
         secrets=secrets,
         credential_scope="not_observed",
         isolation="none",
     )
+
+
+def _check_antigravity_readiness(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    """Combine Antigravity env auth with the runtime CLI availability probe."""
+    antigravity_result = _check_antigravity(environ=environ, strict=strict, secrets=secrets)
+    if antigravity_result.get("ok") is not True:
+        return antigravity_result
+
+    probe = _probe_agent_runtime_cli(
+        settings,
+        executable="agy",
+        provider="antigravity",
+        environ=environ,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    runtime_cli_probe = _runtime_cli_probe_payload(probe)
+    if probe.get("status") == "ok":
+        antigravity_result["runtime_cli_probe"] = runtime_cli_probe
+        return antigravity_result
+
+    reason = str(probe.get("reason_code") or "ANTIGRAVITY_RUNTIME_CLI_NOT_FOUND")
+    message = str(probe.get("message") or "Antigravity auth was found but agy is unavailable.")
+    result = _provider_result(
+        ok=False,
+        strict=strict,
+        reason=reason,
+        message=message,
+        detail=str(probe.get("detail") or "") or None,
+        signals=[
+            *[
+                signal
+                for signal in antigravity_result.get("signals", [])
+                if isinstance(signal, str)
+            ],
+            "agy",
+        ],
+        secrets=secrets,
+        credential_sources=_credential_sources(antigravity_result),
+        credential_scope=str(antigravity_result.get("credential_scope") or "static_env_token"),
+        isolation=str(antigravity_result.get("isolation") or "service_env"),
+        warnings=[
+            *[
+                warning
+                for warning in antigravity_result.get("warnings", [])
+                if isinstance(warning, Mapping)
+            ],
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity="error" if strict else "warning",
+            ),
+        ],
+    )
+    result["runtime_cli_probe"] = runtime_cli_probe
+    return result
 
 
 # Imported at module end to mirror the established mutual-import ordering: the
@@ -581,7 +593,6 @@ from awf.service.provider_readiness import (  # noqa: E402
     _CLAUDE_ENV_KEYS,
     _CODEX_ENV_KEYS,
     _CURSOR_ENV_KEYS,
-    _GEMINI_ENV_KEYS,
     _GITHUB_TIMEOUT_SECONDS,
     SubprocessRun,
     _credential_sources,
@@ -589,7 +600,6 @@ from awf.service.provider_readiness import (  # noqa: E402
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _codex_file_sources,
     _credential_source,
-    _existing_credential_sources,
     _first_present_env,
     _github_token,
     _probe_agent_runtime_cli,

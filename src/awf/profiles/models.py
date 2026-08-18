@@ -23,6 +23,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -43,6 +44,11 @@ class DockerMode(StrEnum):
 # the host the agent reaches via ``DOCKER_HOST=tcp://docker:2375``, so a
 # profile-declared service of the same name would shadow the managed daemon.
 _MANAGED_DIND_SERVICE_NAME = "docker"
+
+# Compose service name AWF reserves for the managed clarification agent. Stack
+# launches always include this service, so user-declared services with this name
+# would duplicate the rendered Compose key.
+MANAGED_CLARIFICATION_SERVICE_NAME = "clarification"
 
 
 class EndpointVisibility(StrEnum):
@@ -126,7 +132,7 @@ class ProfileRuntime(BaseModel):
                 raise ValueError("runtime.toolchains language keys must be strings")
             language = raw_language.strip().lower()
             if not _TOOLCHAIN_LANGUAGE_PATTERN.fullmatch(language):
-                raise ValueError(f"invalid toolchain language identifier: {raw_language!r}")
+                raise ValueError("invalid toolchain language identifier")
             if language in normalized:
                 raise ValueError(f"duplicate toolchain language: {language}")
             if isinstance(raw_versions, str) or not isinstance(raw_versions, (list, tuple)):
@@ -149,7 +155,7 @@ class ProfileRuntime(BaseModel):
                     raise ValueError(f"runtime.toolchains[{language!r}] versions must be strings")
                 version = raw_version.strip()
                 if not _TOOLCHAIN_VERSION_PATTERN.fullmatch(version):
-                    raise ValueError(f"invalid toolchain version for {language!r}: {raw_version!r}")
+                    raise ValueError(f"invalid toolchain version for {language!r}")
                 if version in seen:
                     continue
                 versions.append(version)
@@ -176,7 +182,7 @@ class ProfileRuntime(BaseModel):
                 raise ValueError("runtime.browsers entries must be strings")
             browser = raw_browser.lower()
             if browser not in _ALLOWED_RUNTIME_BROWSERS:
-                raise ValueError(f"invalid runtime browser: {raw_browser!r}")
+                raise ValueError("invalid runtime browser")
             if browser in seen:
                 continue
             browsers.append(browser)
@@ -936,15 +942,26 @@ class WorkspaceProfile(BaseModel):
     ports: dict[str, str] = Field(default_factory=dict)
     app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
 
+    @classmethod
+    def model_validate_persisted(cls, value: object) -> WorkspaceProfile:
+        """Validate a stored snapshot while allowing grandfathered service names.
+
+        ``clarification`` became reserved after resolved profiles were already
+        persisted. Only database snapshot consumers use this entry point; new
+        profile requests continue to use the normal strict validation path.
+        """
+        return cls.model_validate(value, context={"allow_legacy_clarification_service": True})
+
     @model_validator(mode="after")
-    def _validate_service_names(self) -> WorkspaceProfile:
+    def _validate_service_names(self, info: ValidationInfo) -> WorkspaceProfile:
         """Reject ambiguous service names before they reach Compose rendering.
 
         Each service becomes a top-level key in the generated Compose file, so two
         entries sharing a name would emit duplicate keys (Compose rejects the file
-        or one definition silently shadows the other). In ``dind`` mode AWF also
-        prepends its own managed ``docker`` daemon; a profile-declared ``docker``
-        service would collide with it and leave the agent's
+        or one definition silently shadows the other). AWF also reserves
+        ``clarification`` for its managed clarification agent. In ``dind`` mode
+        AWF prepends its own managed ``docker`` daemon; a profile-declared
+        ``docker`` service would collide with it and leave the agent's
         ``DOCKER_HOST=tcp://docker:2375`` pointing at the wrong container.
         """
         seen: set[str] = set()
@@ -952,6 +969,15 @@ class WorkspaceProfile(BaseModel):
             if service.name in seen:
                 raise ValueError(f"duplicate service name: {service.name}")
             seen.add(service.name)
+        allows_legacy_clarification_service = (
+            isinstance(info.context, Mapping)
+            and info.context.get("allow_legacy_clarification_service") is True
+        )
+        if MANAGED_CLARIFICATION_SERVICE_NAME in seen and not allows_legacy_clarification_service:
+            raise ValueError(
+                f"service name {MANAGED_CLARIFICATION_SERVICE_NAME!r} is reserved for the "
+                "managed clarification service"
+            )
         if self.docker.mode == DockerMode.dind and _MANAGED_DIND_SERVICE_NAME in seen:
             raise ValueError(
                 f"service name {_MANAGED_DIND_SERVICE_NAME!r} is reserved for the "

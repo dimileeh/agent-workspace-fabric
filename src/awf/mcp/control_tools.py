@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -30,12 +30,14 @@ from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import (
     AgentRuntime,
+    TaskClass,
 )
 from awf.mcp.server import (
     _idempotency_key_error,
     _required_idempotency_key,
     _tool_error,
     _tool_result,
+    _validation_error_result,
     _workspace_error_result,
 )
 from awf.service.controls import WorkspaceControlError
@@ -216,6 +218,18 @@ def register_control_tools(
                 "accepted. Entity keys appear bracketed on AWF monitor commits."
             ),
         ),
+        external_id: str | None = Field(
+            default=None,
+            max_length=128,
+            description=(
+                "Optional external task id persisted on the adopted workspace and "
+                "task for join/policy parity with workspace create."
+            ),
+        ),
+        task_class: TaskClass | None = Field(
+            default=None,
+            description="Optional task class for scheduling and policy parity.",
+        ),
         reason: str | None = Field(
             default=None,
             max_length=512,
@@ -242,11 +256,15 @@ def register_control_tools(
                     task_title=task_title,
                     task_prompt=task_prompt,
                     task_tag=task_tag,
+                    external_id=external_id,
+                    task_class=task_class,
                     reason=reason,
                 )
             )
         except PRMonitorAdoptionError as exc:
             return _workspace_error_result(exc)
+        except ValidationError as exc:
+            return _validation_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_remonitor_workspace")

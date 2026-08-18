@@ -93,7 +93,6 @@ _HOSTED_FILE_AUTH_MOUNT_TARGETS = frozenset(
         "/home/agent/.config/gh",
         "/home/agent/.config/gcloud",
         "/home/agent/.config/opencode",
-        "/home/agent/.gemini",
         "/home/agent/.gitconfig",
         "/home/agent/.grok",
         "/home/agent/.ollama",
@@ -929,8 +928,6 @@ def _hosted_google_application_credentials_mount_targets(
         ):
             source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
             target = worker_env.get(source_name, "") if source_name is not None else ""
-        elif resolution is not _ComposeEnvResolution.LITERAL:
-            return frozenset()
     if not target or not Path(target).is_absolute():
         return frozenset()
     return frozenset({target})

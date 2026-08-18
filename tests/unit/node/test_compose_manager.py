@@ -7,19 +7,22 @@ compose YAML is syntactically valid and contains all the expected wiring.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from awf.node.compose_manager import (
+    AuthMount,
     CompanionService,
     ComposeManager,
     ComposeProjectPaths,
     ComposeService,
     WorkspaceComposeSpec,
 )
-from awf.profiles.registry import docker_compose_profile
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -87,6 +90,580 @@ class TestRender:
         assert volumes == [f"{spec.worktree_host_path}:/workspace"]
 
     @pytest.mark.unit
+    def test_renders_clarification_service_without_shared_git_access(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification runs retain coding auth but never inherit Git access."""
+        shared_mirror = tmp_path / "mirrors" / "repo.git"
+        codex_auth = tmp_path / "auth" / "codex"
+        spec = _spec(
+            tmp_path,
+            agent_environment=(
+                ("OPENAI_API_KEY", "${OPENAI_API_KEY}"),
+                ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+                ("GIT_ASKPASS", "/run/awf/secrets/bb-askpass.sh"),
+            ),
+            clarification_enabled=True,
+            clarification_agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+            services=(
+                ComposeService(
+                    name="postgres",
+                    image="postgres:16-alpine",
+                ),
+            ),
+            auth_mounts=(
+                AuthMount(source=str(shared_mirror), target=str(shared_mirror), mode="rw"),
+                AuthMount(source=str(codex_auth), target="/home/agent/.codex", mode="rw"),
+                AuthMount(
+                    source=str(tmp_path / "gitconfig"),
+                    target="/home/agent/.gitconfig",
+                    mode="ro",
+                ),
+            ),
+            clarification_auth_mounts=(
+                AuthMount(source=str(codex_auth), target="/home/agent/.codex", mode="rw"),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        clarification = parsed["services"]["clarification"]
+
+        assert clarification["x-awf-persisted-clarification-service-managed"] is True
+        assert clarification["profiles"] == ["awf-clarification"]
+        assert clarification["networks"] == ["clarification_egress_net"]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+        assert clarification["extra_hosts"] == ["host.docker.internal:host-gateway"]
+        assert clarification["environment"] == {
+            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+            "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/.codex",
+        }
+        assert clarification["volumes"] == [f"{codex_auth}:/run/awf/clarification-auth/0:ro"]
+        assert str(shared_mirror) not in "\n".join(clarification["volumes"])
+        assert "/home/agent/.gitconfig" not in "\n".join(clarification["volumes"])
+        assert "/home/agent/.codex" not in "\n".join(clarification["volumes"])
+        assert clarification["entrypoint"][:2] == ["sh", "-ec"]
+        assert "clarification_auth_target_0=" not in clarification["entrypoint"][2]
+        assert 'credential_files="auth.json"' in clarification["entrypoint"][2]
+        assert "for credential_file in $credential_files; do" in clarification["entrypoint"][2]
+        assert clarification["entrypoint"][-1] == "--"
+        assert parsed["networks"]["clarification_egress_net"] == {
+            "name": "awf-ws_test123-clarification-egress-net"
+        }
+
+    @pytest.mark.unit
+    def test_renders_clarification_runtime_signature(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """The rendered clarification service records the runtime/model it targets.
+
+        An in-place provider fallback never re-renders the stack, so the stamp is
+        what lets a later isolated re-ask detect that the persisted clarification
+        credentials belong to the runtime the workspace has moved off.
+        """
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_runtime_signature="codex|gpt-5.6-sol",
+                )
+            ).compose_file.read_text()
+        )
+
+        assert (
+            parsed["services"]["clarification"]["x-awf-persisted-clarification-service-runtime"]
+            == "codex|gpt-5.6-sol"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("provider_target", "credential_file", "untrusted_paths"),
+        (
+            pytest.param(
+                "/home/agent/.codex",
+                "auth.json",
+                ("config.toml", "rules/untrusted.md"),
+                id="codex",
+            ),
+            pytest.param(
+                "/home/agent/.claude",
+                ".credentials.json",
+                ("settings.json", "hooks/untrusted.sh"),
+                id="claude",
+            ),
+        ),
+    )
+    def test_clarification_copies_only_auth_not_runtime_configuration(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        provider_target: str,
+        credential_file: str,
+        untrusted_paths: tuple[str, ...],
+    ) -> None:
+        """Clarification excludes state the preceding agent can configure."""
+        provider_auth = tmp_path / "auth" / provider_target.removeprefix("/home/agent/")
+        provider_auth.mkdir(parents=True)
+        (provider_auth / credential_file).write_text('{"token": "test"}\n', encoding="utf-8")
+        for untrusted_path in untrusted_paths:
+            path = provider_auth / untrusted_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("untrusted runtime configuration\n", encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(provider_auth),
+                            target=provider_target,
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_home = tmp_path / "clarification-home" / provider_target.rsplit("/", 1)[-1]
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(provider_auth))
+            .replace(provider_target, str(clarification_home))
+        )
+        environment = os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_home)}
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=environment,
+        )
+
+        assert (clarification_home / credential_file).read_text(
+            encoding="utf-8"
+        ) == '{"token": "test"}\n'
+        assert all(
+            not (clarification_home / untrusted_path).exists() for untrusted_path in untrusted_paths
+        )
+
+    @pytest.mark.unit
+    def test_clarification_copies_aws_credentials_and_config(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """AWS staging keeps profile/role-chain definitions alongside the keys.
+
+        ``~/.aws/config`` carries profile definitions (``source_profile`` role
+        chains, ``credential_process``) that the staged-auth rewrite machinery
+        expects to find; copying only ``credentials`` strands those setups.
+        """
+        provider_auth = tmp_path / "auth" / ".aws"
+        provider_auth.mkdir(parents=True)
+        (provider_auth / "credentials").write_text("[default]\n", encoding="utf-8")
+        (provider_auth / "config").write_text("[profile role-chain]\n", encoding="utf-8")
+        (provider_auth / "cli" / "cache").mkdir(parents=True)
+        (provider_auth / "cli" / "cache" / "session.json").write_text("{}\n", encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(provider_auth),
+                            target="/home/agent/.aws",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_home = tmp_path / "clarification-home" / ".aws"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(provider_auth))
+            .replace("/home/agent/.aws", str(clarification_home))
+        )
+        environment = os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_home)}
+
+        subprocess.run(["sh", "-ec", entrypoint, "--", "true"], check=True, env=environment)
+
+        assert (clarification_home / "credentials").read_text(encoding="utf-8") == "[default]\n"
+        assert (clarification_home / "config").read_text(
+            encoding="utf-8"
+        ) == "[profile role-chain]\n"
+        assert not (clarification_home / "cli").exists()
+
+    @pytest.mark.unit
+    def test_clarification_copies_ollama_config_and_keys(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Ollama staging keeps ``config.json`` alongside the signing keys.
+
+        ``ServiceAuthMountResolver`` stages ``~/.ollama/config.json`` and
+        provider readiness treats it as valid file authentication, so copying
+        only the key pair strands that supported credential layout.
+        """
+        provider_auth = tmp_path / "auth" / ".ollama"
+        provider_auth.mkdir(parents=True)
+        (provider_auth / "config.json").write_text('{"token": "test"}\n', encoding="utf-8")
+        (provider_auth / "id_ed25519").write_text("private-key\n", encoding="utf-8")
+        (provider_auth / "id_ed25519.pub").write_text("public-key\n", encoding="utf-8")
+        (provider_auth / "models" / "blobs").mkdir(parents=True)
+        (provider_auth / "models" / "blobs" / "sha256-untrusted").write_text(
+            "untrusted model payload\n", encoding="utf-8"
+        )
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(provider_auth),
+                            target="/home/agent/.ollama",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_home = tmp_path / "clarification-home" / ".ollama"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(provider_auth))
+            .replace("/home/agent/.ollama", str(clarification_home))
+        )
+        environment = os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_home)}
+
+        subprocess.run(["sh", "-ec", entrypoint, "--", "true"], check=True, env=environment)
+
+        assert (clarification_home / "config.json").read_text(
+            encoding="utf-8"
+        ) == '{"token": "test"}\n'
+        assert (clarification_home / "id_ed25519").read_text(encoding="utf-8") == "private-key\n"
+        assert (clarification_home / "id_ed25519.pub").read_text(encoding="utf-8") == "public-key\n"
+        assert not (clarification_home / "models").exists()
+
+    @pytest.mark.unit
+    def test_clarification_omits_claude_legacy_configuration_file(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification does not inherit Claude's MCP and hook configuration file."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text('{"mcpServers": {"untrusted": {}}}\n', encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert not clarification_configuration.exists()
+
+    @pytest.mark.unit
+    def test_clarification_preserves_claude_configuration_credentials(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification inherits Claude credential fields but no MCP or hook config."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text(
+            json.dumps(
+                {
+                    "primaryApiKey": "sk-ant-test",
+                    "oauthAccount": {"accountUuid": "account-uuid"},
+                    "customApiKeyResponses": {"approved": ["hash"], "rejected": []},
+                    "mcpServers": {"untrusted": {}},
+                    "hooks": {"PreToolUse": [{"command": "untrusted"}]},
+                    "projects": {"/workspace": {"history": ["prompt"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert json.loads(clarification_configuration.read_text(encoding="utf-8")) == {
+            "primaryApiKey": "sk-ant-test",
+            "oauthAccount": {"accountUuid": "account-uuid"},
+            "customApiKeyResponses": {"approved": ["hash"], "rejected": []},
+        }
+        assert clarification_configuration.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.unit
+    def test_clarification_tolerates_unparsable_claude_configuration(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malformed ``~/.claude.json`` degrades to no file instead of failing startup."""
+        claude_configuration = tmp_path / "auth" / ".claude.json"
+        claude_configuration.parent.mkdir()
+        claude_configuration.write_text("not json", encoding="utf-8")
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(claude_configuration),
+                            target="/home/agent/.claude.json",
+                            mode="rw",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification_configuration = tmp_path / "clarification-home" / ".claude.json"
+        entrypoint = (
+            parsed["services"]["clarification"]["entrypoint"][2]
+            .replace("/run/awf/clarification-auth/0", str(claude_configuration))
+            .replace("/home/agent/.claude.json", str(clarification_configuration))
+        )
+
+        subprocess.run(
+            ["sh", "-ec", entrypoint, "--", "true"],
+            check=True,
+            env=os.environ | {"AWF_CLARIFICATION_AUTH_TARGET_0": str(clarification_configuration)},
+        )
+
+        assert not clarification_configuration.exists()
+
+    @pytest.mark.unit
+    def test_clarification_reaches_only_selected_profile_model_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS model endpoint gets a dedicated clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama-sidecar:11434"),
+                        ("OLLAMA_HOST", "http://not-selected-sidecar:11434"),
+                    ),
+                    services=(
+                        ComposeService(name="ollama-sidecar", image="ollama/ollama:latest"),
+                        ComposeService(
+                            name="not-selected-sidecar",
+                            image="ollama/ollama:latest",
+                        ),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["ollama-sidecar"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["not-selected-sidecar"]["networks"] == ["awf_net"]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+        assert parsed["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_test123-clarification-model-net",
+            "internal": True,
+        }
+        assert parsed["x-awf-persisted-clarification-model-network-reconciled"] is True
+
+    @pytest.mark.unit
+    def test_clarification_reaches_selected_profile_proxy_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS proxy gets a dedicated clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(("HTTPS_PROXY", "http://proxy:3128"),),
+                    services=(
+                        ComposeService(name="proxy", image="squid:latest"),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["proxy"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+
+    @pytest.mark.unit
+    def test_clarification_reaches_selected_container_credential_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A service-DNS container-credential URI gets the clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        (
+                            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                            "http://credential-broker:8080/credentials",
+                        ),
+                    ),
+                    services=(
+                        ComposeService(
+                            name="credential-broker", image="example/credential-broker:latest"
+                        ),
+                        ComposeService(name="postgres", image="postgres:16-alpine"),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["credential-broker"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["postgres"]["networks"] == ["awf_net"]
+
+    @pytest.mark.unit
+    def test_clarification_reaches_selected_companion_model_service(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A companion-backed model endpoint gets the clarification route."""
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_agent_environment=(
+                        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama-companion:11434"),
+                    ),
+                    companions=(
+                        CompanionService(
+                            name="ollama-companion",
+                            image="ollama/ollama:latest",
+                            build_context=str(tmp_path / "ollama-companion"),
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["clarification"]["networks"] == [
+            "clarification_egress_net",
+            "clarification_model_net",
+        ]
+        assert parsed["services"]["ollama-companion"]["networks"] == [
+            "awf_net",
+            "clarification_model_net",
+        ]
+        assert parsed["networks"]["clarification_model_net"] == {
+            "name": "awf-ws_test123-clarification-model-net",
+            "internal": True,
+        }
+
+    @pytest.mark.unit
+    def test_clarification_auth_target_is_not_rendered_as_shell_source(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Auth target metacharacters remain Compose data, not shell source."""
+        hostile_target = "/home/agent/$(id)-${HOME}-`whoami`"
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    clarification_auth_mounts=(
+                        AuthMount(
+                            source=str(tmp_path / "credentials"),
+                            target=hostile_target,
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+        clarification = parsed["services"]["clarification"]
+
+        assert clarification["environment"] == {
+            "AWF_CLARIFICATION_AUTH_TARGET_0": "/home/agent/$$(id)-$${HOME}-`whoami`"
+        }
+        assert hostile_target not in clarification["entrypoint"][2]
+        assert '"$AWF_CLARIFICATION_AUTH_TARGET_0"' in clarification["entrypoint"][2]
+
+    @pytest.mark.unit
+    def test_clarification_omits_empty_environment(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Clarification does not render a null environment without provider config."""
+        parsed = yaml.safe_load(
+            manager.render(_spec(tmp_path, clarification_enabled=True)).compose_file.read_text()
+        )
+
+        assert "environment" not in parsed["services"]["clarification"]
+
+    @pytest.mark.unit
     def test_agent_can_reach_host_gateway_for_host_services(
         self,
         manager: ComposeManager,
@@ -121,15 +698,22 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
-        """Offline egress renders an internal network without host gateway access."""
+        """Offline egress renders internal networks without host gateway access."""
         parsed = yaml.safe_load(
             manager.render(
-                _spec(tmp_path, network_internal=True, host_gateway_enabled=False)
+                _spec(
+                    tmp_path,
+                    clarification_enabled=True,
+                    network_internal=True,
+                    host_gateway_enabled=False,
+                )
             ).compose_file.read_text()
         )
 
         assert parsed["networks"]["awf_net"]["internal"] is True
+        assert parsed["networks"]["clarification_egress_net"]["internal"] is True
         assert "extra_hosts" not in parsed["services"]["agent"]
+        assert "extra_hosts" not in parsed["services"]["clarification"]
 
     @pytest.mark.unit
     def test_offline_egress_policy_keeps_agent_and_services_on_awf_network(
@@ -665,13 +1249,22 @@ class TestRender:
     def test_resource_limits_applied_when_set(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
-        """Explicit CPU and memory limits render into deploy resources."""
-        spec = _spec(tmp_path, cpu_limit="4", memory_limit="8g")
+        """Explicit CPU and memory limits apply to agent services."""
+        spec = _spec(
+            tmp_path,
+            clarification_enabled=True,
+            cpu_limit="4",
+            memory_limit="8g",
+        )
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == {
+        expected_limits = {
             "cpus": "4",
             "memory": "8g",
         }
+        assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == expected_limits
+        assert (
+            parsed["services"]["clarification"]["deploy"]["resources"]["limits"] == expected_limits
+        )
 
     @pytest.mark.unit
     def test_resource_limits_apply_default_pair_when_only_one_limit_is_set(
@@ -877,69 +1470,3 @@ class TestRender:
         )
 
         assert names == ["cache_data"]
-
-    @pytest.mark.unit
-    def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
-        """DinD mode injects the managed Docker daemon service."""
-        profile = docker_compose_profile()
-        spec = _spec(
-            tmp_path,
-            docker_mode=profile.docker.mode.value,
-            agent_environment=tuple(profile.runtime.environment.items()),
-        )
-        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        assert parsed["services"]["docker"]["image"] == "docker:27-dind"
-        assert parsed["services"]["docker"]["privileged"] is True
-        assert parsed["services"]["docker"]["environment"]["DOCKER_TLS_CERTDIR"] == ""
-        assert parsed["services"]["docker"]["healthcheck"]["test"] == [
-            "CMD-SHELL",
-            "docker info >/dev/null 2>&1",
-        ]
-        assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
-        assert parsed["services"]["agent"]["depends_on"] == {
-            "docker": {"condition": "service_healthy"}
-        }
-        assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
-
-    @pytest.mark.unit
-    def test_dind_daemon_uses_configured_dind_image(
-        self, manager: ComposeManager, tmp_path: Path
-    ) -> None:
-        """DinD mode uses the configured daemon image."""
-        spec = _spec(
-            tmp_path,
-            docker_mode="dind",
-            dind_image="ghcr.io/example/dind:buildx",
-        )
-        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        assert parsed["services"]["docker"]["image"] == "ghcr.io/example/dind:buildx"
-
-    @pytest.mark.unit
-    def test_dind_mode_sets_default_agent_docker_host(
-        self, manager: ComposeManager, tmp_path: Path
-    ) -> None:
-        """DinD mode supplies the default agent Docker host."""
-        parsed = yaml.safe_load(
-            manager.render(_spec(tmp_path, docker_mode="dind")).compose_file.read_text()
-        )
-
-        assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
-
-    @pytest.mark.unit
-    def test_explicit_agent_docker_host_is_preserved(
-        self, manager: ComposeManager, tmp_path: Path
-    ) -> None:
-        """Explicit agent Docker host values override the DinD default."""
-        parsed = yaml.safe_load(
-            manager.render(
-                _spec(
-                    tmp_path,
-                    docker_mode="dind",
-                    agent_environment=(("DOCKER_HOST", "tcp://custom-docker:2375"),),
-                )
-            ).compose_file.read_text()
-        )
-
-        assert (
-            parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://custom-docker:2375"
-        )

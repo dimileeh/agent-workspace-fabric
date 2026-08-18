@@ -121,6 +121,11 @@ async def create_workspace_row(
     * A ``dict`` — use the caller-supplied pre-computed snapshot.
     """
     _assert_supported_direct_create_task_kind(payload.task.kind)
+    _assert_supported_agent_runtime(payload.task.agent)
+    if payload.task.provider_recovery is not None:
+        for fallback in payload.task.provider_recovery.fallbacks:
+            _assert_supported_agent_runtime(fallback.agent)
+
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
@@ -1294,6 +1299,23 @@ def _assert_supported_direct_create_task_kind(task_kind: str) -> None:
             f"unsupported task kind {task_kind!r} for direct workspace creation; "
             f"supported kinds are: {supported}."
         )
+
+
+def _assert_supported_agent_runtime(agent: AgentRuntime | str) -> None:
+    """Ensure the requested agent runtime is launchable and supported.
+
+    Rejects retired or unsupported runtimes before provider readiness checks.
+    """
+    from awf.service.provider_readiness import _LAUNCH_PROVIDER_BY_AGENT
+    from awf.service.workspaces import WorkspaceUnsupportedAgentRuntimeError
+
+    try:
+        runtime = AgentRuntime(agent.value if isinstance(agent, AgentRuntime) else str(agent))
+    except ValueError:
+        runtime = None
+
+    if runtime is None or runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+        raise WorkspaceUnsupportedAgentRuntimeError(agent)
 
 
 def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:

@@ -114,7 +114,7 @@ class AgentRuntimeExecRequest:
     """
 
     workspace_id: str | None
-    agent_runtime: AgentRuntime
+    agent_runtime: AgentRuntime | str
     cli_args: tuple[str, ...]
     prompt_stdin: bytes
     log_source: str
@@ -136,6 +136,7 @@ class AgentRuntimeExecRequest:
     owned_paths: tuple[str, ...] = ()
     expected_head_sha: str | None = None
     git_preparation: AgentRuntimeGitPreparation | None = None
+    read_only: bool = False
     on_stdout: StreamCallback | None = None
     on_stderr: StreamCallback | None = None
     profile: WorkspaceProfile | None = None
@@ -179,6 +180,12 @@ class AgentRuntimeExecutor(Protocol):
     ``request.profile_env`` carries literal profile-owned env values the
     executor injects directly (not worker-resolved); those are non-secret
     profile configuration (e.g. ``OLLAMA_HOST``) and may be set on the job env.
+
+    Read-only clarification contract: when ``request.read_only`` is true, the
+    executor MUST run the agent against an isolated, immutable checkout pinned
+    to ``request.expected_head_sha`` and reject the request if it cannot do so.
+    It must not grant push-capable Git credentials or otherwise let the run
+    advance the PR head.
 
     Streaming contract: when the caller supplies ``request.on_stdout`` /
     ``request.on_stderr`` callbacks, implementations SHOULD invoke them with

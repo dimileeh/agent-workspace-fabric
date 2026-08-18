@@ -44,6 +44,7 @@ NON_RETRYABLE_PROVIDER_FAILURE = "NON_RETRYABLE_PROVIDER_FAILURE"
 PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED = "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 PROVIDER_RECOVERY_STALE_SOURCE = "PROVIDER_RECOVERY_STALE_SOURCE"
 PROVIDER_RECOVERY_EXPECTED_SOURCE = "recoverable_provider_failure"
+UNSUPPORTED_AGENT_RUNTIME = "UNSUPPORTED_AGENT_RUNTIME"
 
 PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
     {
@@ -54,6 +55,7 @@ PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
         PROVIDER_RECOVERY_NO_LOOP_REASON,
         NON_RETRYABLE_PROVIDER_FAILURE,
         PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED,
+        UNSUPPORTED_AGENT_RUNTIME,
     }
 )
 
@@ -75,7 +77,8 @@ class FallbackTarget:
 
 @dataclass(frozen=True)
 class ProviderRecoveryPolicy:
-    fallbacks: tuple[FallbackTarget, ...] = ()
+    fallbacks: tuple[FallbackTarget | None, ...] = ()
+    has_explicit_fallbacks: bool = False
     max_fallback_attempts: int = 0
     max_same_provider_retries: int = 1
     cooldown_seconds: int = 300
@@ -84,12 +87,17 @@ class ProviderRecoveryPolicy:
     circuit_breaker_failure_threshold: int = 2
     circuit_breaker_cooldown_seconds: int = 900
 
+    def __post_init__(self) -> None:
+        if self.fallbacks and not self.has_explicit_fallbacks:
+            object.__setattr__(self, "has_explicit_fallbacks", True)
+
 
 @dataclass(frozen=True)
 class ProviderRecoveryState:
     failure_fingerprints: tuple[str, ...] = ()
     fallback_attempt_number: int = 0
     retry_attempt_number: int = 0
+    launched_fallback_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -104,6 +112,7 @@ class ProviderRecoveryDecision:
     terminal_reason: str | None
     fallback_attempt_number: int
     retry_attempt_number: int
+    launched_fallback_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -118,14 +127,7 @@ class ProviderRecoveryAttemptResult:
 
 @dataclass(frozen=True)
 class ProviderInPlaceRecoveryDecision:
-    """A retryable provider failure that should pause the SAME workspace into
-    ``recovering`` and re-run the agent in place after the cooldown (#612),
-    rather than fail-and-relaunch a fresh workspace.
-
-    ``not_before`` is the provider cooldown deadline; ``retry_attempt_number`` is
-    the budget-consuming count to persist so a second failure on the resumed run
-    correctly sees the budget spent; ``metadata`` is the classified provider
-    failure metadata to persist for observability / loop detection."""
+    """A retryable provider failure that pauses the workspace into recovering (#612)."""
 
     not_before: datetime
     reason_code: str
@@ -166,9 +168,7 @@ def provider_recovery_metadata_from_failure(
         False
         if auth_failure
         else (
-            bool(policy.fallbacks)
-            and state.fallback_attempt_number < policy.max_fallback_attempts
-            and bool(metadata.get("retryable"))
+            _select_fallback_target(policy, state) is not None and bool(metadata.get("retryable"))
         )
     )
     metadata["recommended_action"] = _metadata_recommended_action(metadata)
@@ -196,12 +196,25 @@ def decide_provider_recovery(
     )
     model = _metadata_str(metadata, "model") or current_model
 
+    from awf.service.provider_readiness import is_launchable_agent
+
+    is_launchable = is_launchable_agent(current_agent)
+
     if _is_auth_failure_metadata(metadata):
-        return _terminal_decision(PROVIDER_AUTH_FAILED, state=state)
+        return _terminal_decision(
+            PROVIDER_AUTH_FAILED if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
     if not bool(metadata.get("retryable")):
-        return _terminal_decision("NON_RETRYABLE_PROVIDER_FAILURE", state=state)
+        return _terminal_decision(
+            NON_RETRYABLE_PROVIDER_FAILURE if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
     if fingerprint is not None and fingerprint in state.failure_fingerprints:
-        return _terminal_decision(PROVIDER_RECOVERY_NO_LOOP_REASON, state=state)
+        return _terminal_decision(
+            PROVIDER_RECOVERY_NO_LOOP_REASON if is_launchable else UNSUPPORTED_AGENT_RUNTIME,
+            state=state,
+        )
 
     default_fallback_target = _default_capacity_fallback_target(
         metadata,
@@ -226,9 +239,10 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number + 1,
             retry_attempt_number=0,
+            launched_fallback_attempts=state.launched_fallback_attempts + 1,
         )
 
-    if state.retry_attempt_number < policy.max_same_provider_retries:
+    if is_launchable and state.retry_attempt_number < policy.max_same_provider_retries:
         delay = _retry_delay_seconds(metadata, policy, state)
         return ProviderRecoveryDecision(
             action="retry",
@@ -241,9 +255,10 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number,
             retry_attempt_number=state.retry_attempt_number + 1,
+            launched_fallback_attempts=state.launched_fallback_attempts,
         )
 
-    fallback_target = _select_fallback_target(policy, state)
+    fallback_target, target_index = _select_fallback_target_with_index(policy, state)
     if fallback_target is not None:
         return ProviderRecoveryDecision(
             action="fallback",
@@ -254,9 +269,13 @@ def decide_provider_recovery(
             target_model=fallback_target.model,
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
-            fallback_attempt_number=state.fallback_attempt_number + 1,
+            fallback_attempt_number=target_index + 1,
             retry_attempt_number=0,
+            launched_fallback_attempts=state.launched_fallback_attempts + 1,
         )
+
+    if not is_launchable:
+        return _terminal_decision(UNSUPPORTED_AGENT_RUNTIME, state=state)
 
     return _terminal_decision("PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED", state=state)
 
@@ -284,9 +303,9 @@ def _default_capacity_fallback_target(
     current_model: str | None,
     default_model: str | None,
 ) -> FallbackTarget | None:
-    if policy.fallbacks:
+    if policy.has_explicit_fallbacks:
         return None
-    if state.fallback_attempt_number > 0:
+    if state.launched_fallback_attempts > 0:
         return None
     if current_agent != AgentRuntime.codex.value:
         return None
@@ -340,21 +359,7 @@ def should_recover_in_place(
     now: datetime,
     effective_default_model: str | None = None,
 ) -> ProviderInPlaceRecoveryDecision | None:
-    """Decide whether an agent-run failure should divert into in-place ``recovering``.
-
-    Single-sources the classify + budget logic the fail-and-relaunch path uses:
-    reconstructs the SAME provider-failure metadata
-    (``provider_recovery_metadata_from_failure``) and runs the SAME decision
-    (``decide_provider_recovery``). Returns a decision ONLY when the result is an
-    in-place retry — ``action == "retry"`` AND the target stays the current agent
-    (a fallback to a different agent/model is not an in-place resume and keeps
-    today's fresh-relaunch path). Returns ``None`` for a non-provider failure
-    (no metadata), a terminal/budget-exhausted decision, an auth failure, a loop
-    fingerprint, or a fallback — the caller then falls through to ``_mark_failed``
-    (and the existing downstream ``_prepare_provider_recovery`` policy is
-    unchanged for those branches). T7: lifting this UP to the executor fork lets
-    the divert land in ``recovering`` BEFORE the terminal teardown fires, with no
-    duplicated classification."""
+    """Decide whether an agent-run failure should divert into in-place recovering."""
     metadata = provider_recovery_metadata_from_failure(
         reason_code=reason_code,
         message=message,
@@ -426,6 +431,7 @@ def in_place_recovery_task_policy(
         # already-exhausted fallback attempt.
         "fallback_attempt_number": state.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": state.launched_fallback_attempts,
         "not_before": decision.not_before.isoformat(),
         "recommended_action": _metadata_str(decision.metadata, "recommended_action"),
     }
@@ -696,6 +702,7 @@ async def create_provider_recovery_attempt_row(
         reason_code=decision.reason_code,
         payload=event_payload,
     )
+
     await repo.add_event(
         retried,
         event_type="workspace.provider_recovery_created",
@@ -772,13 +779,20 @@ def parse_provider_recovery_policy(
 ) -> ProviderRecoveryPolicy:
     raw = task_policy.get(PROVIDER_RECOVERY_POLICY_KEY) if task_policy else None
     policy = raw if isinstance(raw, Mapping) else {}
-    fallbacks = tuple(_fallback_targets(policy.get("fallbacks")))
+    raw_fallbacks = policy.get("fallbacks")
+    has_explicit_fallbacks = (
+        "fallbacks" in policy
+        and isinstance(raw_fallbacks, Sequence)
+        and not isinstance(raw_fallbacks, str)
+    )
+    fallbacks = tuple(_fallback_targets(raw_fallbacks))
     max_fallback_attempts = _nonnegative_int(
         policy.get("max_fallback_attempts"),
         default=len(fallbacks),
     )
     return ProviderRecoveryPolicy(
         fallbacks=fallbacks,
+        has_explicit_fallbacks=has_explicit_fallbacks,
         max_fallback_attempts=max_fallback_attempts,
         max_same_provider_retries=_nonnegative_int(
             policy.get("max_same_provider_retries"),
@@ -812,50 +826,50 @@ def parse_provider_recovery_state(
         if isinstance(fingerprints, Sequence) and not isinstance(fingerprints, str)
         else ()
     )
+    fallback_attempt_number = _nonnegative_int(state.get("fallback_attempt_number"), default=0)
+    raw_launched = state.get("launched_fallback_attempts")
+    if raw_launched is not None:
+        launched_fallback_attempts = _nonnegative_int(raw_launched, default=0)
+    else:
+        # Reconstruct launched_fallback_attempts for legacy state written before the field existed.
+        launched_fallback_attempts = fallback_attempt_number
+
     return ProviderRecoveryState(
         failure_fingerprints=fingerprint_values,
-        fallback_attempt_number=_nonnegative_int(
-            state.get("fallback_attempt_number"),
-            default=0,
-        ),
-        retry_attempt_number=_nonnegative_int(
-            state.get("retry_attempt_number"),
-            default=0,
-        ),
+        fallback_attempt_number=fallback_attempt_number,
+        retry_attempt_number=_nonnegative_int(state.get("retry_attempt_number"), default=0),
+        launched_fallback_attempts=launched_fallback_attempts,
     )
 
 
 def provider_for_agent_model(agent: str, model: str | None) -> str | None:
-    if agent == "cursor":
-        return "cursor"
+    # Env-key-only runtimes keep a stable provider identity independent of model IDs.
+    if agent in {"cursor", "antigravity"}:
+        return agent
     inferred = infer_provider(model=model)
-    if inferred is not None:
-        return inferred
-    return {
-        "codex": "openai",
-        "gemini": "google",
-        "claude_code": "anthropic",
-        "opencode": "opencode",
-        "grok": "xai",
-    }.get(agent)
+    return (
+        inferred
+        if inferred is not None
+        else {
+            "codex": "openai",
+            "claude_code": "anthropic",
+            "opencode": "opencode",
+            "grok": "xai",
+        }.get(agent)
+    )
 
 
 def provider_cooldown_not_before(
     task_policy: Mapping[str, Any] | None,
 ) -> datetime | None:
     raw = task_policy.get(PROVIDER_RECOVERY_STATE_KEY) if task_policy else None
-    if not isinstance(raw, Mapping):
-        return None
-    value = raw.get("not_before")
-    if not isinstance(value, str):
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("not_before"), str):
         return None
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(raw["not_before"])
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _classification_metadata(
@@ -893,12 +907,40 @@ def _select_fallback_target(
     policy: ProviderRecoveryPolicy,
     state: ProviderRecoveryState,
 ) -> FallbackTarget | None:
-    if state.fallback_attempt_number >= policy.max_fallback_attempts:
-        return None
+    target, _ = _select_fallback_target_with_index(policy, state)
+    return target
+
+
+def has_approved_launchable_fallback(
+    task_policy: Mapping[str, Any] | None,
+) -> bool:
+    """Return True if task_policy has an approved launchable provider recovery fallback."""
+    if not task_policy:
+        return False
+    policy = parse_provider_recovery_policy(task_policy)
+    state = parse_provider_recovery_state(task_policy)
+    target = _select_fallback_target(policy, state)
+    if target is None or not target.agent:
+        return False
+    from awf.service.provider_readiness import is_launchable_agent
+
+    return is_launchable_agent(target.agent)
+
+
+def _select_fallback_target_with_index(
+    policy: ProviderRecoveryPolicy,
+    state: ProviderRecoveryState,
+) -> tuple[FallbackTarget | None, int]:
+    if state.launched_fallback_attempts >= policy.max_fallback_attempts:
+        return None, len(policy.fallbacks)
+
     index = state.fallback_attempt_number
-    if index >= len(policy.fallbacks):
-        return None
-    return policy.fallbacks[index]
+    while index < len(policy.fallbacks):
+        target = policy.fallbacks[index]
+        if target is not None:
+            return target, index
+        index += 1
+    return None, len(policy.fallbacks)
 
 
 def _retry_delay_seconds(
@@ -948,6 +990,7 @@ def _terminal_decision(
         terminal_reason=terminal_reason,
         fallback_attempt_number=state.fallback_attempt_number,
         retry_attempt_number=state.retry_attempt_number,
+        launched_fallback_attempts=state.launched_fallback_attempts,
     )
 
 
@@ -1021,6 +1064,7 @@ async def _record_monitor_in_place_recovery(
             "provider_recovery": provider_payload,
         },
     )
+
     await session.flush()
     return ProviderRecoveryAttemptResult(
         source_workspace_id=source.id,
@@ -1062,11 +1106,16 @@ def _recovery_task_policy(
         "failure_fingerprints": fingerprints,
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": decision.launched_fallback_attempts,
         "action": decision.action,
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
-        "recommended_action": _metadata_str(metadata, "recommended_action"),
+        "recommended_action": (
+            None
+            if decision.reason_code == UNSUPPORTED_AGENT_RUNTIME
+            else _metadata_str(metadata, "recommended_action")
+        ),
     }
     state_not_before = decision.not_before if not_before is None else not_before
     if state_not_before is not None:
@@ -1107,8 +1156,11 @@ def _decision_payload(
         "target_model": decision.target_model,
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
+        "launched_fallback_attempts": decision.launched_fallback_attempts,
         "terminal_reason": decision.terminal_reason,
     }
+    if decision.reason_code == UNSUPPORTED_AGENT_RUNTIME:
+        payload.pop("recommended_action", None)
     state_not_before = decision.not_before if not_before is None else not_before
     if state_not_before is not None:
         payload["not_before"] = state_not_before.isoformat()
@@ -1143,12 +1195,7 @@ def _latest_failed_state_event(workspace: Workspace) -> Any | None:
     for event in reversed(getattr(workspace, "events", []) or []):
         if (
             getattr(event, "event_type", None) == "workspace.state_changed"
-            and getattr(
-                event,
-                "new_state",
-                None,
-            )
-            == "failed"
+            and getattr(event, "new_state", None) == "failed"
         ):
             return event
     return None
@@ -1171,16 +1218,26 @@ def _has_existing_provider_recovery_event(
     return False
 
 
-def _fallback_targets(raw: object) -> list[FallbackTarget]:
+def _fallback_targets(raw: object) -> list[FallbackTarget | None]:
     if not isinstance(raw, Sequence) or isinstance(raw, str):
         return []
-    targets: list[FallbackTarget] = []
+    targets: list[FallbackTarget | None] = []
+    from awf.service.provider_readiness import is_launchable_agent
+
     for item in raw:
+        if item is None:
+            targets.append(None)
+            continue
         if not isinstance(item, Mapping):
+            targets.append(None)
             continue
         agent = _mapping_str(item, "agent")
         model = _mapping_str(item, "model")
         if agent is None or model is None:
+            targets.append(None)
+            continue
+        if not is_launchable_agent(agent):
+            targets.append(None)
             continue
         provider = _mapping_str(item, "provider") or provider_for_agent_model(agent, model)
         targets.append(FallbackTarget(agent=agent, provider=provider, model=model))
@@ -1251,6 +1308,7 @@ class ProviderRecoveryStateView:
     source_attempt_id: str | None
     recommended_action: str | None
     terminal: bool | None
+    launched_fallback_attempts: int | None = None
 
 
 def provider_recovery_state_for_workspace(
@@ -1310,41 +1368,58 @@ def _parse_not_before(not_before_str: str | None) -> tuple[datetime | None, date
         return None, None
 
 
-def _provider_recovery_state_from_task_policy(
-    recovery_state: Mapping[str, Any],
-) -> ProviderRecoveryStateView | None:
-    action = _validate_recovery_action(_mapping_str(recovery_state, "action"))
-    reason_code = _mapping_str(recovery_state, "decision_reason_code") or _mapping_str(
-        recovery_state, "source_reason_code"
+def _build_provider_recovery_state_view(
+    recovery: Mapping[str, Any],
+    payload: Mapping[str, Any] | None = None,
+    default_reason_code: str | None = None,
+) -> ProviderRecoveryStateView:
+    payload_map = payload or {}
+    action = _validate_recovery_action(_mapping_str(recovery, "action"))
+    reason_code = (
+        _mapping_str(recovery, "decision_reason_code")
+        or _mapping_str(recovery, "source_reason_code")
+        or _mapping_str(recovery, "reason_code")
+        or default_reason_code
     )
-    source_provider = _mapping_str(recovery_state, "source_provider")
-    source_model = _mapping_str(recovery_state, "source_model")
+    source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(
+        recovery, "provider"
+    )
+    source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     retry_attempt_number = (
-        _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0)
-        if "retry_attempt_number" in recovery_state
+        _nonnegative_int(recovery["retry_attempt_number"], default=0)
+        if recovery.get("retry_attempt_number") is not None
         else None
     )
     fallback_attempt_number = (
-        _nonnegative_int(recovery_state.get("fallback_attempt_number"), default=0)
-        if "fallback_attempt_number" in recovery_state
+        _nonnegative_int(recovery["fallback_attempt_number"], default=0)
+        if recovery.get("fallback_attempt_number") is not None
         else None
     )
-    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery_state, "not_before"))
-    target_agent = _mapping_str(recovery_state, "target_agent")
-    target_provider = _mapping_str(recovery_state, "target_provider")
-    target_model = _mapping_str(recovery_state, "target_model")
-    fallback_target: FallbackTarget | None = None
-    if action == "fallback" and target_agent is not None and target_model is not None:
-        fallback_target = FallbackTarget(
-            agent=target_agent,
-            provider=target_provider,
-            model=target_model,
-        )
-    source_workspace_id = _mapping_str(recovery_state, "source_workspace_id")
-    source_attempt_id = _mapping_str(recovery_state, "source_attempt_id")
-    recommended_action = _mapping_str(
-        recovery_state, "recommended_action"
-    ) or _recommended_action_for_action(action)
+    launched_fallback_attempts = (
+        _nonnegative_int(recovery["launched_fallback_attempts"], default=0)
+        if recovery.get("launched_fallback_attempts") is not None
+        else None
+    )
+    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
+    target_agent = _mapping_str(recovery, "target_agent")
+    target_provider = _mapping_str(recovery, "target_provider")
+    target_model = _mapping_str(recovery, "target_model")
+    fallback_target = (
+        FallbackTarget(agent=target_agent, provider=target_provider, model=target_model)
+        if action == "fallback" and target_agent and target_model
+        else None
+    )
+    source_workspace_id = _mapping_str(recovery, "source_workspace_id") or _mapping_str(
+        payload_map, "source_workspace_id"
+    )
+    source_attempt_id = _mapping_str(recovery, "source_attempt_id") or _mapping_str(
+        payload_map, "source_attempt_id"
+    )
+    recommended_action = (
+        _mapping_str(recovery, "recommended_action") or _recommended_action_for_action(action)
+        if reason_code != UNSUPPORTED_AGENT_RUNTIME
+        else None
+    )
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
         action=action,
@@ -1360,7 +1435,14 @@ def _provider_recovery_state_from_task_policy(
         source_attempt_id=source_attempt_id,
         recommended_action=recommended_action,
         terminal=terminal,
+        launched_fallback_attempts=launched_fallback_attempts,
     )
+
+
+def _provider_recovery_state_from_task_policy(
+    recovery_state: Mapping[str, Any],
+) -> ProviderRecoveryStateView | None:
+    return _build_provider_recovery_state_view(recovery_state)
 
 
 def _provider_recovery_state_from_events(
@@ -1389,57 +1471,9 @@ def _provider_recovery_state_from_events(
     recovery = payload.get("provider_recovery")
     if not isinstance(recovery, Mapping):
         recovery = payload
-    action = _validate_recovery_action(_mapping_str(recovery, "action"))
-    reason_code = (
-        _mapping_str(recovery, "decision_reason_code")
-        or _mapping_str(recovery, "reason_code")
-        or (getattr(latest_event, "reason_code", None) or None)
-    )
-    source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(
-        recovery, "provider"
-    )
-    source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
-    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
-    target_agent = _mapping_str(recovery, "target_agent")
-    target_provider = _mapping_str(recovery, "target_provider")
-    target_model = _mapping_str(recovery, "target_model")
-    fallback_target: FallbackTarget | None = None
-    if action == "fallback" and target_agent is not None and target_model is not None:
-        fallback_target = FallbackTarget(
-            agent=target_agent,
-            provider=target_provider,
-            model=target_model,
-        )
-    source_workspace_id = _mapping_str(payload, "source_workspace_id")
-    source_attempt_id = _mapping_str(payload, "source_attempt_id")
-    retry_attempt_number = (
-        _nonnegative_int(recovery.get("retry_attempt_number"), default=0)
-        if "retry_attempt_number" in recovery
-        else None
-    )
-    fallback_attempt_number = (
-        _nonnegative_int(recovery.get("fallback_attempt_number"), default=0)
-        if "fallback_attempt_number" in recovery
-        else None
-    )
-    recommended_action = _mapping_str(
-        recovery, "recommended_action"
-    ) or _recommended_action_for_action(action)
-    terminal = action == "terminal" if action is not None else None
-    return ProviderRecoveryStateView(
-        action=action,
-        reason_code=reason_code,
-        source_provider=source_provider,
-        source_model=source_model,
-        retry_attempt_number=retry_attempt_number,
-        fallback_attempt_number=fallback_attempt_number,
-        cooldown_until=cooldown_until,
-        next_eligible_at=next_eligible_at,
-        fallback_target=fallback_target,
-        source_workspace_id=source_workspace_id,
-        source_attempt_id=source_attempt_id,
-        recommended_action=recommended_action,
-        terminal=terminal,
+    default_reason = getattr(latest_event, "reason_code", None) or None
+    return _build_provider_recovery_state_view(
+        recovery, payload=payload, default_reason_code=default_reason
     )
 
 
@@ -1451,40 +1485,12 @@ def _merge_recovery_views(
         return event_view
     if event_view is None:
         return policy_view
-    return ProviderRecoveryStateView(
-        action=policy_view.action if policy_view.action is not None else event_view.action,
-        reason_code=policy_view.reason_code
-        if policy_view.reason_code is not None
-        else event_view.reason_code,
-        source_provider=policy_view.source_provider
-        if policy_view.source_provider is not None
-        else event_view.source_provider,
-        source_model=policy_view.source_model
-        if policy_view.source_model is not None
-        else event_view.source_model,
-        retry_attempt_number=policy_view.retry_attempt_number
-        if policy_view.retry_attempt_number is not None
-        else event_view.retry_attempt_number,
-        fallback_attempt_number=policy_view.fallback_attempt_number
-        if policy_view.fallback_attempt_number is not None
-        else event_view.fallback_attempt_number,
-        cooldown_until=policy_view.cooldown_until
-        if policy_view.cooldown_until is not None
-        else event_view.cooldown_until,
-        next_eligible_at=policy_view.next_eligible_at
-        if policy_view.next_eligible_at is not None
-        else event_view.next_eligible_at,
-        fallback_target=policy_view.fallback_target
-        if policy_view.fallback_target is not None
-        else event_view.fallback_target,
-        source_workspace_id=policy_view.source_workspace_id
-        if policy_view.source_workspace_id is not None
-        else event_view.source_workspace_id,
-        source_attempt_id=policy_view.source_attempt_id
-        if policy_view.source_attempt_id is not None
-        else event_view.source_attempt_id,
-        recommended_action=policy_view.recommended_action
-        if policy_view.recommended_action is not None
-        else event_view.recommended_action,
-        terminal=policy_view.terminal if policy_view.terminal is not None else event_view.terminal,
-    )
+    merged = {
+        name: (
+            getattr(policy_view, name)
+            if getattr(policy_view, name) is not None
+            else getattr(event_view, name)
+        )
+        for name in ProviderRecoveryStateView.__dataclass_fields__
+    }
+    return ProviderRecoveryStateView(**merged)

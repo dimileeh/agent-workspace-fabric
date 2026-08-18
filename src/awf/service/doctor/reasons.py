@@ -7,6 +7,12 @@ from dataclasses import dataclass
 
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
+from awf.service.doctor.reasons_helpers import (
+    get_salvage_and_monitor_reasons,
+)
+from awf.service.doctor.reasons_helpers import (
+    reason_catalog_link as _reason_catalog_link,
+)
 
 
 @dataclass(frozen=True)
@@ -18,11 +24,6 @@ class _ReasonText:
     likely_cause: str
     related_command: str
     docs_link: str
-
-
-def _reason_catalog_link(reason_code: str) -> str:
-    """Return the local reason catalog anchor for a stable reason code."""
-    return f"docs/REASON_CATALOG.md#{reason_code.lower()}"
 
 
 def reason_text_for_code(reason_code: str) -> _ReasonText | None:
@@ -123,6 +124,24 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
+    ),
+    "NEEDS_HUMAN_REASON_MISSING": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        "The initial NEEDS_HUMAN verdict and one bounded follow-up both omitted a usable reason.",
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_MISSING"),
+    ),
+    "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE": _ReasonText(
+        "A review-repair agent requested human input without saying what to decide, and AWF could not safely run its clarification follow-up.",
+        "Read the unresolved review item and make the decision, then remonitor the workspace.",
+        (
+            "AWF could not complete the read-only clarification follow-up because the "
+            "hosted executor rejected or failed the isolated run, or the local worktree "
+            "could not be prepared as an isolated checkout."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"),
     ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
@@ -771,8 +790,8 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "",
         "",
     ),
-    "GEMINI_AUTH_OK": _ReasonText(
-        "Gemini auth is usable for agent workspaces.",
+    "ANTIGRAVITY_AUTH_OK": _ReasonText(
+        "Antigravity auth is usable for agent workspaces.",
         "No action required.",
         "",
         "",
@@ -1062,12 +1081,33 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#cursor_auth_missing",
     ),
-    "GEMINI_AUTH_MISSING": _ReasonText(
-        "No Gemini auth signal was visible.",
-        "Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.",
-        "Missing Gemini API credentials.",
+    "ANTIGRAVITY_AUTH_MISSING": _ReasonText(
+        "No Antigravity auth signal was visible.",
+        "Set GEMINI_API_KEY before starting AWF.",
+        "Missing Antigravity API credentials.",
         "awf service doctor",
-        "docs/REASON_CATALOG.md#gemini_auth_missing",
+        "docs/REASON_CATALOG.md#antigravity_auth_missing",
+    ),
+    "ANTIGRAVITY_AUTH_REJECTED": _ReasonText(
+        "Antigravity rejected the configured API credentials.",
+        "Verify GEMINI_API_KEY and re-run awf service doctor.",
+        "Antigravity API key rejected by the provider.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_auth_rejected",
+    ),
+    "ANTIGRAVITY_QUOTA_EXHAUSTED": _ReasonText(
+        "Antigravity quota or rate limit is exhausted.",
+        "Wait for quota reset or switch providers, then re-check readiness.",
+        "Antigravity provider quota exhausted.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_quota_exhausted",
+    ),
+    "ANTIGRAVITY_RUNTIME_CLI_PROBE_ERROR": _ReasonText(
+        "An error occurred while probing the Antigravity CLI ('agy') inside the agent runtime container.",
+        "Verify the agent-runtime Docker image is accessible and intact, check worker logs, and re-run readiness checks.",
+        "The Antigravity CLI probe command failed or raised an unexpected error.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#antigravity_runtime_cli_probe_error",
     ),
     "OPENCODE_OLLAMA_AUTH_MISSING": _ReasonText(
         "No OpenCode/Ollama auth signal was visible.",
@@ -1104,6 +1144,19 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "The grok executable is missing or not executable.",
         "awf service doctor",
         "https://docs.x.ai/build/cli",
+    ),
+    "UNSUPPORTED_AGENT_RUNTIME": _ReasonText(
+        "The requested agent runtime is not supported by AWF.",
+        (
+            "Select a supported agent runtime (e.g. codex, claude_code, cursor, "
+            "antigravity, opencode, grok) or update the workspace profile configuration."
+        ),
+        (
+            "An operation or PR adoption request specified an agent runtime that is "
+            "not registered or supported in this version of AWF."
+        ),
+        "awf workspace create",
+        _reason_catalog_link("UNSUPPORTED_AGENT_RUNTIME"),
     ),
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",
@@ -1322,88 +1375,8 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "uv run --python 3.12 --extra dev pre-commit run --all-files",
         "docs/REASON_CATALOG.md#post_agent_commit_precommit_failed",
     ),
-    "POST_AGENT_FORMAT_REPAIR_FAILED": _ReasonText(
-        (
-            "AWF detected a repairable post-agent pre-commit failure but the "
-            "repair pipeline itself exited non-zero before the retry commit could run."
-        ),
-        "Inspect the workspace logs for the repair sub-step stderr, fix the toolchain or git state, and remonitor.",
-        (
-            "The workspace image is missing `uv` or dev extras, the pinned Python "
-            "version is unavailable, `ruff` crashed on flagged paths, or the "
-            "post-repair `git add` failed. The corresponding "
-            "``workspace.post_agent_commit_repair`` event records "
-            '``retry_outcome="error"``.'
-        ),
-        "awf workspace logs <workspace_id>",
-        "docs/REASON_CATALOG.md#post_agent_format_repair_failed",
-    ),
-    "POST_AGENT_GIT_ADD_FAILED": _ReasonText(
-        (
-            "``git add -A`` failed during post-agent salvage (e.g. exit 128 with "
-            "``fatal: not a git repository``)."
-        ),
-        "Inspect the worktree, recover any salvageable files manually, and recreate the workspace.",
-        (
-            "The agent damaged the worktree's git metadata or removed ``.git``; "
-            "no commit could be attempted to capture work."
-        ),
-        "awf workspace logs <workspace_id>",
-        "docs/REASON_CATALOG.md#post_agent_git_add_failed",
-    ),
-    "PROVIDER_AUTH_FAILED": _ReasonText(
-        (
-            "A workspace agent or PR monitor could not run because the selected "
-            "LLM provider authentication failed."
-        ),
-        (
-            "Refresh the provider credentials, restart or rebuild the AWF "
-            "service/runtime if credentials are mounted into containers, then "
-            "remonitor or reschedule the workspace."
-        ),
-        (
-            "The provider token is expired, reused, missing inside the workspace "
-            "runtime, or rejected by the provider CLI/API."
-        ),
-        "awf service doctor",
-        "docs/REASON_CATALOG.md#provider_auth_failed",
-    ),
-    "OLLAMA_MODEL_PULL_FAILED": _ReasonText(
-        (
-            "AWF could not make the requested OpenCode/Ollama model available: the "
-            "host daemon failed to pull it before the agent run."
-        ),
-        (
-            "Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), "
-            "confirm the model name and registry reachability, then recreate or "
-            "remonitor the workspace once the model can be pulled."
-        ),
-        (
-            "The requested model is not present in the daemon's `/api/tags`, is not "
-            "an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` "
-            "reported an error, timed out, or left the model still missing — for "
-            "example a misspelled model name or an unreachable model registry."
-        ),
-        "awf workspace logs <workspace_id>",
-        _reason_catalog_link("OLLAMA_MODEL_PULL_FAILED"),
-    ),
-    "MONITOR_RECOVERY_SUPERSEDED": _ReasonText(
-        (
-            "AWF cancelled a PR-monitor recovery operation because another worker "
-            "claimed the monitor lease and started a replacement recovery operation."
-        ),
-        (
-            "No action is usually required if another recovery operation is already "
-            "running. If the workspace is stuck without an active monitor, remonitor it."
-        ),
-        (
-            "This worker lost the monitoring_pr claim to another worker that registered "
-            "a replacement remonitor recovery operation before this worker could finalize."
-        ),
-        "awf workspace show <workspace_id>",
-        _reason_catalog_link("MONITOR_RECOVERY_SUPERSEDED"),
-    ),
 }
+_REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
 
 
 def _reason_text(
@@ -1416,37 +1389,40 @@ def _reason_text(
     """Return catalog text or fallback diagnostic guidance for a reason."""
     text = _REASON_TEXT.get(reason)
     if text is None:
-        if status == "ok":
-            return _ReasonText(f"{label} check passed.", "No action required.", "", "", "")
-        if status == "skipped":
-            return _ReasonText(
-                f"{label} check was skipped.",
-                "Fix prerequisite checks first.",
-                "Prerequisites failed.",
-                "awf service doctor",
-                "",
+        msg = (
+            f"{label} check passed."
+            if status == "ok"
+            else (
+                f"{label} check was skipped."
+                if status == "skipped"
+                else f"{label} check reported {status}."
             )
-        return _ReasonText(
-            f"{label} check reported {status}.",
-            "Inspect the diagnostic detail and the matching service status check.",
-            "An unknown diagnostic check failed.",
-            "awf service doctor",
-            "",
         )
-    if reason == "API_UNREACHABLE" and context and context.get("url"):
-        return _ReasonText(
-            f"AWF API is not reachable at {context['url']}.",
-            text.action,
-            text.likely_cause,
-            text.related_command,
-            text.docs_link,
+        act = (
+            "No action required."
+            if status == "ok"
+            else (
+                "Fix prerequisite checks first."
+                if status == "skipped"
+                else "Inspect diagnostic detail and matching check."
+            )
         )
-    if reason == "PORT_OPEN" and context and context.get("endpoint"):
-        return _ReasonText(
-            f"{context['endpoint']} is accepting connections.",
-            text.action,
-            text.likely_cause,
-            text.related_command,
-            text.docs_link,
+        cause = (
+            ""
+            if status == "ok"
+            else ("Prerequisites failed." if status == "skipped" else "An unknown check failed.")
         )
+        cmd = "" if status == "ok" else "awf service doctor"
+        return _ReasonText(msg, act, cause, cmd, "")
+    if context and reason in ("API_UNREACHABLE", "PORT_OPEN"):
+        val = context.get("url" if reason == "API_UNREACHABLE" else "endpoint")
+        if val:
+            summary = (
+                f"AWF API is not reachable at {val}."
+                if reason == "API_UNREACHABLE"
+                else f"{val} is accepting connections."
+            )
+            return _ReasonText(
+                summary, text.action, text.likely_cause, text.related_command, text.docs_link
+            )
     return text

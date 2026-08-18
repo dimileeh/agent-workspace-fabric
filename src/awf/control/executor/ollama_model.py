@@ -18,10 +18,14 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
-from awf.adapters.opencode import OPENCODE_OLLAMA_CLOUD_MODELS
+from awf.adapters.opencode import (
+    OPENCODE_OLLAMA_CLOUD_MODELS,
+    _qualified_model,
+)
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
+    _agent_runtime_or_none,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -93,7 +97,7 @@ async def _ensure_ollama_model_or_mark_failed(
     non-OpenCode runtimes.
     """
 
-    agent = AgentRuntime(ws.agent)
+    agent = _agent_runtime_or_none(ws.agent)
     if agent is not AgentRuntime.opencode:
         return True
 
@@ -108,7 +112,7 @@ async def _ensure_ollama_model_or_mark_failed(
     # Without the final fallback this step would treat a model-less workspace as
     # ``MODEL_NOT_SELECTED`` and fail it, even though the adapter would still run
     # using that cloud default — so probe/pull what the agent will actually launch.
-    model = (
+    model = _qualified_model(
         _agent_run_model_for_workspace(ws)
         or (adapter_defaults.model if adapter_defaults is not None else None)
         or OPENCODE_OLLAMA_CLOUD_MODELS[0]

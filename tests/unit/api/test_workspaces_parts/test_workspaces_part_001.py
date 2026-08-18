@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -797,13 +798,15 @@ async def test_adopt_pr_route_maps_service_errors_to_json_response(
         _FailingAdoptionService,
     )
 
+    session = SimpleNamespace(rollback=AsyncMock())
     response = await workspaces_route.adopt_pull_request_monitor(
         PullRequestMonitorAdoptionRequest(repo_slug="x/y", pr_number=42),
         request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
         settings=Settings(_env_file=None, work_dir=str(tmp_path / "awf-state")),
-        session=object(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
+    session.rollback.assert_awaited_once()
     assert isinstance(response, JSONResponse)
     assert response.status_code == 409
     assert json.loads(response.body) == {
@@ -811,3 +814,50 @@ async def test_adopt_pr_route_maps_service_errors_to_json_response(
         "message": "PR is closed.",
         "detail": {"repo_slug": "x/y", "pr_number": 42},
     }
+
+
+@pytest.mark.unit
+async def test_adopt_pr_route_rolls_back_task_external_id_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Conflict after partial adoption must not be committed by get_db_session."""
+
+    class _ConflictAdoptionService:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def adopt(self, _payload: PullRequestMonitorAdoptionRequest) -> object:
+            raise workspaces_route.PRMonitorAdoptionError(
+                error_code="TASK_EXTERNAL_ID_CONFLICT",
+                message=(
+                    "External task ID is already associated with a different "
+                    "repo/base/task-class/owned-path scope; use a unique external "
+                    "task ID for this backlog slice or retry the original scope."
+                ),
+                status_code=409,
+                detail={"external_id": "[redacted]"},
+            )
+
+    monkeypatch.setattr(
+        workspaces_route,
+        "PullRequestMonitorAdoptionService",
+        _ConflictAdoptionService,
+    )
+
+    session = SimpleNamespace(rollback=AsyncMock())
+    response = await workspaces_route.adopt_pull_request_monitor(
+        PullRequestMonitorAdoptionRequest(
+            repo_slug="x/y",
+            pr_number=42,
+            external_id="shared-external-id",
+        ),
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        settings=Settings(_env_file=None, work_dir=str(tmp_path / "awf-state")),
+        session=session,  # type: ignore[arg-type]
+    )
+
+    session.rollback.assert_awaited_once()
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 409
+    assert json.loads(response.body)["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"

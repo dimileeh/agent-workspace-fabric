@@ -767,7 +767,7 @@ def register_metrics_tools(
             description=(
                 "Optional list of provider names to restrict readiness checks to "
                 "(e.g. 'github', 'codex', 'claude_code', 'cursor', "
-                "'gemini', 'opencode', 'grok', 'docker'). When set, "
+                "'antigravity', 'opencode', 'grok', 'docker'). When set, "
                 "only these providers affect the overall readiness outcome."
             ),
         ),

@@ -212,14 +212,16 @@ _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_aw
 
 _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_conformance_satisfied"
 
-# Fail-safe fallback for a bare ``NEEDS_HUMAN:`` (no ``AWF-VERDICT:`` prefix).
-# Without it, such output would fall through to ``fix_committed`` and the thread
-# would be resolved/merged — the exact unsafe direction #305 guards against.
+# Canonical per-comment CLI verdict marker. Bare ``FIXED:`` / ``FALSE POSITIVE:``
+# / ``DEFER:`` / ``NEEDS_HUMAN:`` lines (no ``AWF-VERDICT:`` prefix) fail closed
+# at parse time; bare blockers are only consulted as fallback when an AWF FIXED
+# line has no usable reason.
+_AWF_VERDICT_MARKER = re.compile(r"\bAWF-VERDICT\s*:", re.IGNORECASE)
+
 _AWF_VERDICT = re.compile(
     r"\bAWF-VERDICT\s*:\s*"
     # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also
-    # matches the primary regex and its reason is extracted cleanly instead of
-    # falling through to the bare fallback (which garbles the reason).
+    # matches and its reason is extracted cleanly.
     r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)"
     r"\s*:\s*(?P<reason>[^\n\r]*)",
     re.IGNORECASE,
@@ -272,6 +274,10 @@ _HEAD_OBJECT_MISSING_RECOVERED_REASON = "HEAD_OBJECT_MISSING_RECOVERED"
 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON = "HEAD_OBJECT_MISSING_UNRECOVERABLE"
 
 _MIRROR_HOOKS_PATH_POISONED_REASON = "MIRROR_HOOKS_PATH_POISONED"
+
+_NEEDS_HUMAN_REASON_MISSING = "NEEDS_HUMAN_REASON_MISSING"
+
+_NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE = "NEEDS_HUMAN_REASON_CLARIFICATION_UNAVAILABLE"
 
 _PR_MONITOR_REASON_CODES_BY_STALE_REASON = {
     "validation_insufficient_tier": "VALIDATION_INSUFFICIENT_TIER",

@@ -16,17 +16,18 @@ from typing import Any, Literal, Protocol, TypedDict, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.api.schemas import (
     StaleReasonListResponse,
     StaleReasonResponse,
     WorkspaceEventResponse,
+    WorkspaceOverviewBatchResponse,
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
 )
 from awf.common.logging import get_logger
-from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_agent_runtime
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
@@ -262,7 +263,7 @@ async def list_workspace_overview_response(
     session: AsyncSession,
     *,
     workspace_status: WorkspaceStatus | None = None,
-    agent: AgentRuntime | None = None,
+    agent: AgentRuntime | str | None = None,
     repo_url: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
@@ -287,6 +288,27 @@ async def list_workspace_overview_response(
         has_more=has_more,
         limit=limit,
         cursor=cursor,
+    )
+
+
+async def batch_workspace_overview_response(
+    session: AsyncSession,
+    *,
+    workspace_ids: Sequence[str],
+) -> WorkspaceOverviewBatchResponse:
+    """Project overview items for known IDs in request order; list absences separately."""
+    rows = await WorkspaceRepository(session).list_by_ids(workspace_ids)
+    by_id = {ws.id: ws for ws in rows}
+    found_ids = [workspace_id for workspace_id in workspace_ids if workspace_id in by_id]
+    missing_workspace_ids = [
+        workspace_id for workspace_id in workspace_ids if workspace_id not in by_id
+    ]
+    snapshots = await asyncio.to_thread(read_latest_usage_snapshots, found_ids)
+    with prefetched_usage_snapshots(snapshots):
+        items = [_workspace_overview_item(by_id[workspace_id]) for workspace_id in found_ids]
+    return WorkspaceOverviewBatchResponse(
+        items=items,
+        missing_workspace_ids=missing_workspace_ids,
     )
 
 
@@ -385,7 +407,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         branch_name=ws.branch_name,
         task_class=ws.task_class,
         owned_paths=list(ws.owned_paths),
-        agent=AgentRuntime(ws.agent),
+        agent=parse_agent_runtime(ws.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
@@ -490,7 +512,7 @@ def effective_agent_identity(
     task_policy: Mapping[str, object] | None,
 ) -> AgentIdentity:
     runtime = _coerce_agent_runtime(agent)
-    defaults = DEFAULT_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
+    defaults = HISTORICAL_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
     explicit_model = _nonblank_policy_string(task_policy, "agent_model")
     explicit_effort = _nonblank_policy_string(task_policy, "agent_effort")
 
@@ -1041,6 +1063,9 @@ def recovery_payload(
                 "source_model": summary.provider_recovery.source_model,
                 "retry_attempt_number": summary.provider_recovery.retry_attempt_number,
                 "fallback_attempt_number": summary.provider_recovery.fallback_attempt_number,
+                "launched_fallback_attempts": getattr(
+                    summary.provider_recovery, "launched_fallback_attempts", None
+                ),
                 "fallback_target": (
                     {
                         "agent": summary.provider_recovery.fallback_target.agent,

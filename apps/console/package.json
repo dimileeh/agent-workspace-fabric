@@ -23,17 +23,18 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.0",
-    "@types/node": "^26.1.0",
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
-    "eslint": "^9.39.1",
-    "eslint-config-next": "^16.2.9",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.2.10",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3"
   },
   "overrides": {
-    "postcss": "8.5.10"
+    "postcss": "^8.5.23",
+    "sharp": "^0.35.0"
   }
 }

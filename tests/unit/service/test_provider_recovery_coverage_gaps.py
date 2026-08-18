@@ -28,6 +28,7 @@ from awf.service.provider_recovery import (
     _record_provider_circuit_breaker,
     _retry_task_for_source,
     _select_fallback_target,
+    _select_fallback_target_with_index,
     _source_suppression_not_before,
     create_provider_recovery_attempt_row,
     decide_provider_recovery,
@@ -118,10 +119,10 @@ def test_metadata_skips_evidence_when_message_empty() -> None:
 
 def test_decision_terminal_when_metadata_marked_non_retryable() -> None:
     decision = decide_provider_recovery(
-        {"retryable": False, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": False, "provider": "openai", "model": "gpt-5.5"},
         task_policy={},
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -141,13 +142,13 @@ def test_decision_terminal_when_metadata_marked_non_retryable() -> None:
 
 def test_decision_terminal_when_attempts_exhausted() -> None:
     decision = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
                 "max_same_provider_retries": 1,
                 "max_fallback_attempts": 1,
                 "fallbacks": [
-                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                    {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
                 ],
             },
             "provider_recovery_state": {
@@ -155,8 +156,8 @@ def test_decision_terminal_when_attempts_exhausted() -> None:
                 "retry_attempt_number": 1,
             },
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -166,7 +167,7 @@ def test_decision_terminal_when_attempts_exhausted() -> None:
 
 def test_decision_terminal_when_no_fallbacks_configured_and_retries_exhausted() -> None:
     decision = decide_provider_recovery(
-        {"retryable": True, "provider": "google", "model": "gemini-2.5-pro"},
+        {"retryable": True, "provider": "openai", "model": "gpt-5.5"},
         task_policy={
             "provider_recovery": {
                 "max_same_provider_retries": 1,
@@ -174,8 +175,8 @@ def test_decision_terminal_when_no_fallbacks_configured_and_retries_exhausted() 
             },
             "provider_recovery_state": {"retry_attempt_number": 1},
         },
-        current_agent="gemini",
-        current_model="gemini-2.5-pro",
+        current_agent="codex",
+        current_model="gpt-5.5",
         now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
     )
 
@@ -267,7 +268,9 @@ def test_provider_for_agent_model_falls_back_to_known_agent_provider() -> None:
     assert provider_for_agent_model("cursor", None) == "cursor"
     assert provider_for_agent_model("cursor", "sonnet-4-thinking") == "cursor"
     assert provider_for_agent_model("cursor", "gpt-5") == "cursor"
-    assert provider_for_agent_model("gemini", None) == "google"
+    assert provider_for_agent_model("antigravity", None) == "antigravity"
+    assert provider_for_agent_model("antigravity", "gemini-3.1-pro-high") == "antigravity"
+    assert provider_for_agent_model("gemini", None) is None
     assert provider_for_agent_model("claude_code", None) == "anthropic"
     assert provider_for_agent_model("opencode", None) == "opencode"
     assert provider_for_agent_model("grok", None) == "xai"
@@ -338,8 +341,12 @@ def test_parse_provider_recovery_policy_skips_invalid_fallback_entries() -> None
             },
         },
     )
-    assert len(parsed.fallbacks) == 1
-    only = parsed.fallbacks[0]
+    assert len(parsed.fallbacks) == 4
+    assert parsed.fallbacks[0] is None
+    assert parsed.fallbacks[1] is None
+    assert parsed.fallbacks[2] is None
+    only = parsed.fallbacks[3]
+    assert only is not None
     assert only.agent == "codex"
     assert only.model == "gpt-5"
     assert only.provider == "openai"
@@ -469,6 +476,41 @@ def test_select_fallback_target_returns_indexed_target() -> None:
     state = ProviderRecoveryState(fallback_attempt_number=0)
 
     assert _select_fallback_target(policy, state) is target
+
+
+def test_select_fallback_target_skips_retired_targets_at_or_after_cursor_for_free() -> None:
+    target = FallbackTarget(agent="codex", provider="openai", model="gpt-5")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target),
+        max_fallback_attempts=1,
+    )
+    state = ProviderRecoveryState(fallback_attempt_number=0)
+
+    assert _select_fallback_target(policy, state) is target
+
+
+def test_select_fallback_target_does_not_overcount_budget_after_free_skip_of_retired_slot() -> None:
+    target_a = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+    target_b = FallbackTarget(agent="claude_code", provider="anthropic", model="claude-3-5-sonnet")
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target_a, target_b),
+        max_fallback_attempts=2,
+    )
+    # Step 1: initial selection skips retired None slot at index 0 and selects target_a (index 1)
+    state0 = ProviderRecoveryState(fallback_attempt_number=0, launched_fallback_attempts=0)
+    target1, idx1 = _select_fallback_target_with_index(policy, state0)
+    assert target1 == target_a
+    assert idx1 == 1
+
+    # Step 2: after target_a is selected, stored fallback_attempt_number is target_index + 1 == 2, launched == 1
+    state1 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1, launched_fallback_attempts=1)
+    target2, idx2 = _select_fallback_target_with_index(policy, state1)
+    assert target2 == target_b
+    assert idx2 == 2
+
+    # Step 3: after target_b is selected, launched_fallback_attempts == 2 (exceeds budget)
+    state2 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1, launched_fallback_attempts=2)
+    assert _select_fallback_target(policy, state2) is None
 
 
 def test_source_suppression_returns_decision_not_before_when_set() -> None:
@@ -676,8 +718,8 @@ async def test_create_attempt_returns_none_when_no_recovery_metadata(
         task={
             "title": "Untouched workspace",
             "prompt": "Plain prompt with no failure event.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
         },
@@ -718,8 +760,8 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
         task={
             "title": "Exhausted workspace",
             "prompt": "Already burnt through the policy budget.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
             "provider_recovery": {
@@ -811,8 +853,8 @@ async def test_retry_task_for_source_creates_task_when_attempt_missing(
         task={
             "title": "Workspace without attempt",
             "prompt": "We will simulate the no-attempt branch.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
         },
@@ -867,8 +909,8 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         task={
             "title": "Already-recovered workspace",
             "prompt": "Will short-circuit on duplicate recovery event.",
-            "agent": "gemini",
-            "model": "gemini-2.5-pro",
+            "agent": "codex",
+            "model": "gpt-5.5",
             "task_class": "test_task",
             "owned_paths": ["src/**"],
             "provider_recovery": {
@@ -954,3 +996,261 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         )
     # No new requested events were added past the seeded one
     assert len(requested_events) == 1
+
+
+def test_explicit_fallbacks_with_retired_targets_suppresses_implicit_codex_default_fallback() -> (
+    None
+):
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+            ],
+        }
+    }
+    policy = parse_provider_recovery_policy(task_policy)
+    assert policy.has_explicit_fallbacks is True
+    assert policy.fallbacks == (None,)
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        effective_default_model="gpt-4o-mini",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.action == "terminal"
+    assert decision.target_model is None
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_explicit_empty_fallbacks_list_suppresses_implicit_fallback() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "fallbacks": [],
+        }
+    }
+    policy = parse_provider_recovery_policy(task_policy)
+    assert policy.has_explicit_fallbacks is True
+    assert policy.fallbacks == ()
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        effective_default_model="gpt-4o-mini",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.action == "terminal"
+    assert decision.target_model is None
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_select_fallback_target_preserves_historical_positional_cursors() -> None:
+    target_codex = FallbackTarget(agent="codex", provider="openai", model="gpt-4")
+    target_claude = FallbackTarget(
+        agent="claude_code", provider="anthropic", model="claude-3-5-sonnet"
+    )
+    policy = ProviderRecoveryPolicy(
+        fallbacks=(None, target_codex, target_claude),
+        max_fallback_attempts=3,
+    )
+    # Historical workspace created after Gemini ran has fallback_attempt_number == 1 (cursor = 1).
+    # Gemini retired -> None at index 0. Calling selection with cursor = 1 must select Codex (index 1), NOT skip to Claude.
+    state1 = ProviderRecoveryState(fallback_attempt_number=1)
+    target1, idx1 = _select_fallback_target_with_index(policy, state1)
+    assert target1 == target_codex
+    assert idx1 == 1
+
+    # After Codex runs, fallback_attempt_number becomes target_index + 1 == 2.
+    state2 = ProviderRecoveryState(fallback_attempt_number=idx1 + 1)
+    target2, idx2 = _select_fallback_target_with_index(policy, state2)
+    assert target2 == target_claude
+    assert idx2 == 2
+
+    # After Claude Code runs, fallback_attempt_number becomes 3 (out of bounds).
+    state3 = ProviderRecoveryState(fallback_attempt_number=idx2 + 1)
+    assert _select_fallback_target(policy, state3) is None
+
+
+def test_parse_provider_recovery_state_counts_retired_targets_in_legacy_state() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "max_fallback_attempts": 2,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+                {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 1,
+        },
+    }
+
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 1
+    assert state.launched_fallback_attempts == 1
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4o",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "fallback"
+    assert decision.target_agent == "codex"
+    assert decision.launched_fallback_attempts == 2
+
+    task_policy_after_codex_failure = {
+        "provider_recovery": task_policy["provider_recovery"],
+        "provider_recovery_state": {
+            "fallback_attempt_number": decision.fallback_attempt_number,
+            "launched_fallback_attempts": decision.launched_fallback_attempts,
+        },
+    }
+    decision2 = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4",
+        },
+        task_policy=task_policy_after_codex_failure,
+        current_agent="codex",
+        current_model="gpt-4",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision2.action == "terminal"
+    assert decision2.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_parse_provider_recovery_state_counts_active_targets_in_legacy_state() -> None:
+    task_policy = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 1,
+        },
+    }
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 1
+    assert state.launched_fallback_attempts == 1
+
+    task_policy_zero = {
+        "provider_recovery": {
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 0,
+        },
+    }
+    state_zero = parse_provider_recovery_state(task_policy_zero)
+    assert state_zero.fallback_attempt_number == 0
+    assert state_zero.launched_fallback_attempts == 0
+
+
+def test_parse_provider_recovery_state_legacy_state_with_multiple_attempts_and_pruned_targets() -> (
+    None
+):
+    task_policy = {
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "max_fallback_attempts": 2,
+            "fallbacks": [
+                {"agent": "gemini", "model": "gemini-1.5-pro"},
+                {"agent": "codex", "provider": "openai", "model": "gpt-4"},
+                {"agent": "claude_code", "provider": "anthropic", "model": "claude-3-7-sonnet"},
+            ],
+        },
+        "provider_recovery_state": {
+            "fallback_attempt_number": 2,
+        },
+    }
+
+    state = parse_provider_recovery_state(task_policy)
+    assert state.fallback_attempt_number == 2
+    assert state.launched_fallback_attempts == 2
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "provider": "openai",
+            "model": "gpt-4",
+        },
+        task_policy=task_policy,
+        current_agent="codex",
+        current_model="gpt-4",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "terminal"
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_has_existing_provider_recovery_event_matches_retired_runtime_fingerprint() -> None:
+    import asyncio
+    from pathlib import Path
+
+    from awf.adapters.base import AgentRunError, RetiredAgentAdapter
+    from awf.common.commands import FakeCommandRunner
+
+    adapter = RetiredAgentAdapter(runtime="gemini", runner=FakeCommandRunner())
+    with pytest.raises(AgentRunError) as exc_info:
+        asyncio.run(
+            adapter.run(
+                compose_project="ws_test",
+                compose_file=Path("/tmp/compose.yml"),
+                prompt="fix issue",
+            )
+        )
+
+    err = exc_info.value
+    metadata = err.details["provider_recovery"]
+    assert "failure_fingerprint" in metadata
+    fingerprint = metadata["failure_fingerprint"]
+    assert fingerprint
+
+    workspace = SimpleNamespace(
+        events=[
+            _build_event(
+                event_type="workspace.provider_recovery_requested",
+                payload={"provider_recovery": {"failure_fingerprint": fingerprint}},
+            ),
+        ],
+    )
+
+    assert _has_existing_provider_recovery_event(workspace, metadata) is True

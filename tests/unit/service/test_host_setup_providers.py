@@ -203,7 +203,7 @@ def test_registry_env_ref_vars_mirror_readiness() -> None:
         "codex": readiness._CODEX_ENV_KEYS,
         "claude_code": readiness._CLAUDE_ENV_KEYS,
         "cursor": readiness._CURSOR_ENV_KEYS,
-        "gemini": readiness._GEMINI_ENV_KEYS,
+        "antigravity": readiness._ANTIGRAVITY_ENV_KEYS,
         "opencode": readiness._OPENCODE_ENV_KEYS,
         "grok": readiness._XAI_ENV_KEYS,
     }
@@ -1216,3 +1216,275 @@ def test_all_unknown_selection_does_no_targeted_work(tmp_path: Path) -> None:
         entry for entry in captured if entry.get("event") == "host_setup.unknown_providers_ignored"
     ]
     assert warnings and warnings[0]["providers"] == ["typo_provider", "another_typo"]
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_migrated_to_antigravity_during_setup(tmp_path: Path) -> None:
+    """Legacy providers.gemini entry is pruned and migrated to antigravity."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"GEMINI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    ag_config = updated_config.providers["antigravity"]
+    assert ag_config.credential_ref == "env://GEMINI_API_KEY"
+    assert ag_config.backend == "env_ref"
+    assert ag_config.status == "ready"
+
+    ag_result = summary.result_for("antigravity")
+    assert ag_result is not None
+    assert ag_result.status == "ready"
+    assert ag_result.credential_ref == "env://GEMINI_API_KEY"
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_dropped_when_antigravity_exists(tmp_path: Path) -> None:
+    """Legacy gemini entry is dropped if antigravity already exists in config."""
+    existing_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            ),
+            "antigravity": ProviderConfig(
+                credential_ref="keyring://antigravity_key",
+                backend="keyring",
+                source="keyring",
+                status="ready",
+            ),
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=existing_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(returncode=1),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].credential_ref == "keyring://antigravity_key"
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_pruned_during_targeted_recheck(tmp_path: Path) -> None:
+    """Targeted recheck prunes retired gemini key while updating targeted provider."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].status == "unavailable"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_unselected_antigravity_config_preserved_during_targeted_recheck(tmp_path: Path) -> None:
+    """Targeted recheck of another provider preserves existing ready antigravity config.
+
+    Regression test for PR #814 review thread PRRT_kwDOSJAM6s6Zmj4U: when a targeted
+    recheck selects another provider (e.g. codex) and GEMINI_API_KEY is not in
+    environ, an existing valid, ready env://GEMINI_API_KEY antigravity entry must
+    not be downgraded to unavailable.
+    """
+    existing_config = HostSetupConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=existing_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].status == "ready"
+    assert updated_config.providers["antigravity"].credential_ref == "env://GEMINI_API_KEY"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_retired_gemini_entry_migrated_and_ready_during_targeted_recheck(tmp_path: Path) -> None:
+    """Targeted recheck migrates retired gemini key and preserves ready status when env var is present."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GEMINI_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN, "GEMINI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].status == "ready"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_retired_gemini_incompatible_env_ref_degraded_during_targeted_recheck(
+    tmp_path: Path,
+) -> None:
+    """Targeted recheck degrades legacy gemini entry with incompatible env ref (e.g. GOOGLE_API_KEY)."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="env://GOOGLE_API_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN, "GOOGLE_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].credential_ref == "env://GOOGLE_API_KEY"
+    assert updated_config.providers["antigravity"].status == "unavailable"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_retired_gemini_file_auth_degraded_during_targeted_recheck(
+    tmp_path: Path,
+) -> None:
+    """Targeted recheck degrades legacy file-backed gemini entry when migrating to antigravity."""
+    legacy_config = HostSetupConfig(
+        providers={
+            "gemini": ProviderConfig(
+                credential_ref="plain-file://~/.gemini/credentials.json",
+                backend="plain_file",
+                source="file",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=["codex"],
+        config=legacy_config,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={"OPENAI_API_KEY": _FAKE_TOKEN},
+        run_subprocess=_SubprocessSpy(returncode=0),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert summary.mode == "targeted_recheck"
+    assert "gemini" not in updated_config.providers
+    assert "antigravity" in updated_config.providers
+    assert updated_config.providers["antigravity"].backend == "plain_file"
+    assert updated_config.providers["antigravity"].source == "file"
+    assert updated_config.providers["antigravity"].status == "unavailable"
+    assert "codex" in updated_config.providers
+    assert updated_config.providers["codex"].status == "ready"
+
+
+@pytest.mark.unit
+def test_unknown_retired_provider_pruned_from_config(tmp_path: Path) -> None:
+    """Unregistered/unknown provider keys are pruned from persisted config."""
+    config_with_unknown = HostSetupConfig(
+        providers={
+            "legacy_unknown": ProviderConfig(
+                credential_ref="env://UNKNOWN_KEY",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        }
+    )
+    summary, updated_config = orchestrate_provider_setup(
+        _settings(tmp_path),
+        selected_providers=[],
+        config=config_with_unknown,
+        allow_plain_secrets=False,
+        non_interactive=True,
+        environ={},
+        run_subprocess=_SubprocessSpy(returncode=1),
+        http_get=_HttpSpy(healthy=False),
+    )
+
+    assert "legacy_unknown" not in updated_config.providers

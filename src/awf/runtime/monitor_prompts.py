@@ -18,18 +18,28 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from urllib.parse import quote
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
+from awf.common.redaction import REDACTION_MARKER, redact_secrets
 from awf.common.task_tag import task_tag_commit_prefix
-from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread, _is_bot_author
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 _FOOTER = (
     "\n\nDo NOT push — AWF handles the push once this fix cycle settles.\n"
     "Commit locally using conventional commits; each thread/comment fix is "
     "its own commit so the diff is easy to review."
+)
+
+_MARKDOWN_INLINE_ESCAPES = str.maketrans(
+    {
+        **{character: f"\\{character}" for character in r"\\`*_{}[]<>()#!|~"},
+        "@": "&#64;",
+    }
 )
 
 
@@ -77,6 +87,13 @@ _COMMENT_VERDICT_GUIDANCE = (
     "or logic bug, or a clearly correct improvement; FALSE POSITIVE only with "
     "concrete evidence; DEFER for valid but out-of-scope follow-ups; NEEDS_HUMAN "
     "for a design or taste call you cannot make yourself.\n"
+    "  - FIXED is a claim that requires a real commit for THIS review item: "
+    "edit, stage, and commit before printing `AWF-VERDICT: FIXED: …`. AWF "
+    "accepts FIXED only when HEAD advances for this item; FIXED with no change "
+    "stays unresolved.\n"
+    "  - Markerless, empty, garbled, or template-placeholder echoes "
+    "(for example printing the prompt's `<one-sentence summary>` literally) "
+    "fail closed — AWF does not guess FIXED from unmarked stdout.\n"
     "  - Keep any fix minimal: change only what THIS comment requires; do not "
     "refactor unrelated code or expand the PR.\n"
 )
@@ -422,8 +439,31 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
     return f"\n\n{section}"
 
 
+def needs_human_reason_reask_prompt(*, original_prompt: str) -> str:
+    """Ask once for the human decision omitted from a NEEDS_HUMAN verdict.
+
+    The re-ask is a new agent invocation, so include the original review task
+    with its item identity and quoted evidence rather than assuming prior
+    process context survives.
+    """
+    return (
+        "You returned NEEDS_HUMAN without saying what you need. The original review task "
+        "is included below so you can identify the decision that was omitted.\n\n"
+        "### Original review task\n\n"
+        f"{original_prompt}\n\n"
+        "This is a clarification only: do not inspect or alter files, and do not make a "
+        "commit. Print AWF-VERDICT: NEEDS_HUMAN: <one sentence: exactly what a human "
+        "must decide>"
+    )
+
+
 def ready_to_merge_comment(
-    *, pr_number: int, head_sha: str, blocker_reason: str | None = None
+    *,
+    pr_number: int,
+    head_sha: str,
+    blocker_reason: str | None = None,
+    blocker_items: Sequence[Mapping[str, object]] = (),
+    preserve_full_blocker_reason: bool = False,
 ) -> str:
     """Body used when AWF stops for human action.
 
@@ -433,12 +473,19 @@ def ready_to_merge_comment(
     gates are green.
     """
     if blocker_reason:
-        return (
+        reason = redact_secrets(blocker_reason)
+        if not preserve_full_blocker_reason:
+            reason = _truncate_blocker_reason(reason)
+        safe_blocker_reason = _redact_and_escape_markdown_inline(reason)
+        body = (
             f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
-            f"AWF did not auto-merge because {blocker_reason}.\n\n"
+            f"AWF did not auto-merge because {safe_blocker_reason}.\n\n"
             "After the blocker is cleared or a new commit lands, AWF will re-verify "
             "the PR before taking any merge action."
         )
+        if not blocker_items:
+            return body
+        return f"{body}\n\n{_render_blocker_items(blocker_items)}"
     return (
         f"✅ PR #{pr_number} is ready to merge at commit `{head_sha[:10]}`.\n\n"
         "All 5 AWF gates are green:\n"
@@ -451,6 +498,186 @@ def ready_to_merge_comment(
         "If new commits land here, AWF will re-verify all 5 gates and re-post "
         "this message on the new head SHA."
     )
+
+
+def _render_blocker_items(blocker_items: Sequence[Mapping[str, object]]) -> str:
+    """Render rich, untrusted human-action context for a public PR comment."""
+    outdated_items: list[Mapping[str, object]] = []
+    bot_items: list[Mapping[str, object]] = []
+    human_escalation_items: list[Mapping[str, object]] = []
+    human_items: list[Mapping[str, object]] = []
+    blocking_review_items: list[Mapping[str, object]] = []
+    for item in blocker_items:
+        if _item_text(item, "awf_blocker_reason"):
+            outdated_items.append(item)
+            continue
+        if (
+            item.get("is_merge_blocking") is True
+            or _item_text(item, "verdict") == "changes_requested"
+        ):
+            # Effective changes-requested reviews block merge independently of
+            # agent triage. Preserve any triage verdict and reason, but group
+            # the item with merge blockers.
+            blocking_review_items.append(item)
+            continue
+        is_bot = item.get("is_bot")
+        if not isinstance(is_bot, bool):
+            is_bot = _is_bot_author(_item_text(item, "author"))
+        if is_bot:
+            target = bot_items
+        elif _item_text(item, "verdict") == "needs_human":
+            target = human_escalation_items
+        else:
+            target = human_items
+        target.append(item)
+    display_cap = 8
+    # Preserve one current item before outdated AWF-resolution status consumes
+    # every visible slot. A current changes-requested review or triage item is
+    # more actionable for the human than another retry-status entry.
+    current_item_reservation = min(
+        1,
+        len(blocking_review_items)
+        + len(bot_items)
+        + len(human_escalation_items)
+        + len(human_items),
+    )
+    outdated_display_limit = display_cap - current_item_reservation
+    # Preserve an actionable triage excerpt alongside a full set of
+    # changes-requested reviews. Triaged merge blockers are sorted first below,
+    # while this reservation preserves separately rendered escalation feedback.
+    triaged_item_reservation = min(
+        1, len(bot_items) + len(human_escalation_items) + len(human_items)
+    )
+    blocking_review_display_limit = display_cap - triaged_item_reservation
+    displayed = 0
+    lines: list[str] = []
+    for label, items, display_limit, prioritize_triage in (
+        (
+            "Outdated feedback awaiting AWF resolution",
+            outdated_items,
+            outdated_display_limit,
+            False,
+        ),
+        (
+            "Merge-blocking changes-requested reviews",
+            blocking_review_items,
+            blocking_review_display_limit,
+            True,
+        ),
+        ("Agent escalated - needs your decision", bot_items, display_cap, False),
+        (
+            "Human feedback escalated - needs your decision",
+            human_escalation_items,
+            display_cap,
+            False,
+        ),
+        ("Human feedback deferred by agent", human_items, display_cap, False),
+    ):
+        lines.append(f"{label} ({len(items)}):")
+        if prioritize_triage:
+            ordered_items = sorted(
+                items,
+                key=lambda item: (
+                    _item_text(item, "verdict") not in {"defer", "needs_human"},
+                    _blocker_item_sort_key(item),
+                ),
+            )
+        else:
+            ordered_items = sorted(items, key=_blocker_item_sort_key)
+        for item in ordered_items:
+            if displayed >= display_limit:
+                continue
+            lines.append(_render_blocker_item(item))
+            displayed += 1
+    remaining = len(blocker_items) - displayed
+    if remaining:
+        lines.append(f"(+{remaining} more)")
+    return redact_secrets("\n".join(lines)).replace(
+        REDACTION_MARKER, _escape_markdown_inline(REDACTION_MARKER)
+    )
+
+
+def _blocker_item_sort_key(item: Mapping[str, object]) -> tuple[bool, str, int, str]:
+    """Order located blocker items before unlocated feedback deterministically."""
+    path = _item_text(item, "path")
+    line = item.get("line")
+    line_number = line if isinstance(line, int) else 0
+    return (not bool(path), path or "", line_number, _item_text(item, "author").casefold())
+
+
+def _render_blocker_item(item: Mapping[str, object]) -> str:
+    """Render one sanitized blocker item as a Markdown list entry."""
+    author = _redact_and_escape_markdown_inline(_item_text(item, "author") or "unknown author")
+    path = _redact_and_escape_markdown_inline(_item_text(item, "path"))
+    line = item.get("line")
+    line_text = _redact_and_escape_markdown_inline(str(line)) if line is not None else ""
+    location = f"{path}:{line_text}" if path and line is not None else path or author
+    url = _item_text(item, "url")
+    location_text = (
+        f"[{location}]({_escape_markdown_link_destination(redact_secrets(url))})"
+        if url
+        else location
+    )
+    verdict = _redact_and_escape_markdown_inline(_item_text(item, "verdict"))
+    excerpt = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "body")))
+    )
+    reason = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "agent_verdict_reason")))
+    )
+    awf_blocker_reason = _redact_and_escape_markdown_inline(
+        _truncate_blocker_excerpt(redact_secrets(_item_text(item, "awf_blocker_reason")))
+    )
+    if verdict == "changes_requested":
+        return f"- {location_text} [{verdict}] {excerpt}"
+    if awf_blocker_reason:
+        agent_reason_text = f"; agent verdict reason: {reason}" if reason else ""
+        return (
+            f"- {location_text} [{verdict}] {excerpt} "
+            f"-> AWF status: {awf_blocker_reason}{agent_reason_text}"
+        )
+    reason_text = f"-> reason: {reason}" if reason else "-> ⚠ no reason given by agent"
+    return f"- {location_text} [{verdict}] {excerpt} {reason_text}"
+
+
+def _item_text(item: Mapping[str, object], key: str) -> str:
+    """Return a string item field, treating other values as absent."""
+    value = item.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _escape_markdown_inline(value: str) -> str:
+    """Render untrusted text as one literal Markdown inline span."""
+    escaped = " ".join(value.splitlines()).translate(_MARKDOWN_INLINE_ESCAPES)
+    return re.sub(r"(?<=\w)\\_(?=\w)", "_", escaped)
+
+
+def _redact_and_escape_markdown_inline(value: str) -> str:
+    """Remove secrets before escaping untrusted text for public Markdown."""
+    redacted = redact_secrets(value)
+    return _escape_markdown_inline(REDACTION_MARKER).join(
+        _escape_markdown_inline(part) for part in redacted.split(REDACTION_MARKER)
+    )
+
+
+def _escape_markdown_link_destination(url: str) -> str:
+    """Encode untrusted URL characters that could terminate a Markdown link."""
+    return quote(url, safe=":/?&=#%+~,-._@!$'*,;")
+
+
+def _truncate_blocker_reason(reason: str) -> str:
+    """Retain complete actionable details for structured merge blockers."""
+    detailed_prefixes = (
+        "MERGE_METHOD_MISMATCH:",
+        "GitHub rejected the workflow-file push because",
+    )
+    limit = 500 if reason.startswith(detailed_prefixes) else 160
+    return _truncate_blocker_excerpt(reason, limit=limit)
+
+
+def _truncate_blocker_excerpt(excerpt: str, *, limit: int = 160) -> str:
+    """Keep the public notification compact even if collection data expands."""
+    return excerpt if len(excerpt) <= limit else f"{excerpt[:limit]}…"
 
 
 def _thread_metadata(

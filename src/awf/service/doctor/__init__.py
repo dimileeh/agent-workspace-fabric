@@ -53,7 +53,7 @@ _PROVIDER_LABELS = {
     "codex": "Codex Credentials",
     "claude_code": "Claude Code Credentials",
     "cursor": "Cursor Credentials",
-    "gemini": "Gemini Credentials",
+    "antigravity": "Antigravity Credentials",
     "opencode": "OpenCode Credentials",
     "grok": "Grok Build Credentials",
 }

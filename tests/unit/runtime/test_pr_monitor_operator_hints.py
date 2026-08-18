@@ -1101,7 +1101,8 @@ async def test_operator_hint_repair_marks_successful_noop_push_as_processed(
     async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
         return ("abc1234567890def", None)
 
-    async def _fixed_without_commit(**_kwargs: object) -> VerdictResult:
+    async def _fixed_without_commit(**kwargs: object) -> VerdictResult:
+        assert kwargs.get("require_fix_evidence") is False
         return VerdictResult(
             verdict="fix_committed",
             reason="operator hint handled without a code change",

@@ -579,6 +579,7 @@ class TestAddressComments:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
 
@@ -594,8 +595,8 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
-        # CLI addresses the thread (implicit "fixed in commit X").
-        adapter.queue(stdout="fixed in commit abc")
+        # CLI addresses the thread with a canonical FIXED verdict.
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         # After settle, re-fetch — no new threads.
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
         cmd.queue_result(returncode=0, stderr="")  # git push
@@ -619,6 +620,11 @@ class TestAddressComments:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
@@ -642,6 +648,7 @@ class TestAddressComments:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(
             factory,
@@ -675,7 +682,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
-        adapter.queue(stdout="fixed in commit abc")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed in commit abc")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
         cmd.queue_result(returncode=0, stderr="")  # git push
         cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
@@ -697,6 +704,11 @@ class TestAddressComments:
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
+
+        async def _commit_dirty(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
 
         await runner.run(
             workspace_id=ws_id,
@@ -732,7 +744,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
-        adapter.queue(stdout="FALSE POSITIVE: the existing code is correct")
+        adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: the existing code is correct")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push noop
         # Even on "false_positive" verdict, the runner resolves the thread

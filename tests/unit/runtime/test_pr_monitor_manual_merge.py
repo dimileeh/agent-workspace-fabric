@@ -305,21 +305,18 @@ async def test_manual_ready_handoff_persists_fallback_attention_reason(
 
 
 @pytest.mark.unit
-async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_thread(
+async def test_blocking_outdated_thread_gets_human_notification(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """A reasonless ``NotifyHuman`` that is NOT ready keeps the generic reason (#659).
+    """An outdated ``needs_human`` thread must not produce a ready handoff.
 
-    An outdated inline thread downgraded to ``needs_human`` still blocks the merge
-    (``decide`` gate 7) so ``decide()`` returns a message-less ``NotifyHuman()``,
-    but ``_notify_human_reason`` returns ``None`` (it consults the non-outdated
-    feeds only) and this is not a manual-ready handoff. The fallback must keep the
-    safe generic wait reason here rather than falsely advertising "ready to merge"
-    — the console reason must not over-claim readiness for a still-blocked PR.
+    The decision core blocks the merge at gate 7. Its notification must include
+    an actionable human reason and rendered blocker rather than the green
+    manual-merge template.
     """
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     runner = make_runner(
@@ -372,7 +369,16 @@ async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_
     assert terminal is False
     _, reason, ws_status = await _read_attention(factory, ws_id)
     assert ws_status == WorkspaceStatus.monitoring_pr.value
-    assert reason == "PR monitor is waiting for human attention."
+    assert reason == "AWF could not resolve this outdated thread and needs human input"
+    comment_calls = _calls(cmd, _is_pr_comment)
+    assert len(comment_calls) == 1
+    body = comment_calls[0][comment_calls[0].index("--body") + 1]
+    assert "needs human attention" in body
+    assert "src/app.py:10" in body
+    assert "Outdated feedback awaiting AWF resolution (1):" in body
+    assert "-> AWF status: AWF could not resolve this outdated thread" in body
+    assert "no reason given by agent" not in body
+    assert "All 5 AWF gates are green" not in body
 
 
 @pytest.mark.unit
@@ -992,6 +998,7 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     thread = thread_node(tid="T_manual_fix", author="human-reviewer")
@@ -999,7 +1006,7 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
-    adapter.queue(stdout="fixed it")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: addressed manual-merge review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
@@ -1016,6 +1023,11 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
         worktrees_root=tmp_path / "worktrees",
         auto_merge=False,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     with structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,
@@ -1043,6 +1055,7 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     policy_comment = issue_comment_node(
@@ -1055,13 +1068,13 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(comments=[policy_comment]))
-    adapter.queue(stdout="FALSE POSITIVE: trigger-review checklist status only")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review checklist status only")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
-    adapter.queue(stdout="fixed later comment")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: addressed later human review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
@@ -1078,6 +1091,11 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
         worktrees_root=tmp_path / "worktrees",
         auto_merge=False,
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     with structlog.testing.capture_logs() as captured:
         await runner.run(
             workspace_id=ws_id,

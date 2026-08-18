@@ -810,20 +810,21 @@ class TestCreateWorkspacePolicyMetadata:
     async def test_exposes_default_effective_agent_identity_on_workspace_surfaces(
         self,
         client: AsyncClient,
+        engine: AsyncEngine,
     ) -> None:
-        payload = _v2_body(title="default gemini model")
-        payload["task"] = {
-            **payload["task"],  # type: ignore[index]
-            "agent": "gemini",
-        }
-        payload["preflight"] = {
-            "provider_readiness_override": True,
-            "provider_readiness_override_reason": "identity projection test",
-        }
-
-        create = await client.post("/v1/workspaces", json=payload)
-        assert create.status_code == 202
-        workspace_id = create.json()["workspace_id"]
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.create(
+                repo_url="git@github.com:dimileeh/aira-agent.git",
+                branch_base="development",
+                task_title="default antigravity model",
+                task_prompt="Add a one-line docstring to src/aira_agent/api/main.py.",
+                agent="antigravity",
+                test_commands=["pytest -q"],
+            )
+            await session.commit()
+            workspace_id = ws.id
 
         detail = await client.get(f"/v1/workspaces/{workspace_id}")
         listed = await client.get("/v1/workspaces")
@@ -845,6 +846,40 @@ class TestCreateWorkspacePolicyMetadata:
             _assert_usage_unavailable(row)
 
     @pytest.mark.unit
+    async def test_rejects_unsupported_runtime_creation_even_with_readiness_override(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(title="retired gemini runtime rejection")
+        payload["task"] = {
+            **payload["task"],  # type: ignore[index]
+            "agent": "gemini",
+        }
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "identity projection test",
+        }
+
+        create = await client.post("/v1/workspaces", json=payload)
+        assert create.status_code == 409
+        assert create.json()["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    async def test_fallback_unsupported_agent_runtime_rejection(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(title="fallback gemini runtime rejection")
+        payload["task"] = {
+            **payload["task"],  # type: ignore[index]
+            "provider_recovery": {"fallbacks": [{"agent": "gemini", "model": "gemini-1.5-pro"}]},
+        }
+
+        create = await client.post("/v1/workspaces", json=payload)
+        assert create.status_code == 409
+        assert create.json()["error_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
     async def test_legacy_v1_workspace_exposes_default_effective_identity(
         self,
         client: AsyncClient,
@@ -856,8 +891,8 @@ class TestCreateWorkspacePolicyMetadata:
 
         assert detail.status_code == 200
         assert overview.status_code == 200
-        _assert_effective_identity(detail.json(), model="claude-opus-4-8")
-        _assert_effective_identity(overview.json()["items"][0], model="claude-opus-4-8")
+        _assert_effective_identity(detail.json(), model="claude-opus-5")
+        _assert_effective_identity(overview.json()["items"][0], model="claude-opus-5")
 
     @pytest.mark.unit
     async def test_v2_idempotency_replay_ignores_defaulted_identity_projection(

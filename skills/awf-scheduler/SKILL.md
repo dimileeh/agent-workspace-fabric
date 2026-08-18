@@ -223,14 +223,16 @@ convention — pg16 wants `/var/lib/postgresql/data`, pg18 wants
 You do **not** pass auth bind mounts — AWF resolves and prepares auth
 per-workspace (`src/awf/node/auth_mounts.py`):
 
-- **rw provider auth** (codex, claude, gemini, opencode, grok, ollama) is
+- **rw provider auth** (codex, claude, opencode, grok, ollama) is
   **seeded from your host into per-workspace isolated dirs** under
   `${AWF_HOST_WORK_DIR:-~/.awf/service}/auth/<workspace_id>/<tool>/` — not bind-
   mounted live from `~`. (Claude uses an overlayfs scheme plus the single-file
   `/home/agent/.claude.json` mount it needs to find its own config on token
   refresh.)
-- **ro auth**: `~/.config/gh`, `~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, plus
-  `GOOGLE_APPLICATION_CREDENTIALS` if set. Cursor is env-key-only (no mount).
+- **ro auth**: `~/.config/gh`, `~/.gitconfig`, `~/.ssh`. Google ADC/gcloud
+  credentials are profile-declared, never auto-mounted (via profile secret
+  leases, §6). Cursor and Antigravity are env-key-only (no mount; Antigravity uses
+  `GEMINI_API_KEY`).
 - For anything non-default, use **profile secret leases** (§6), not raw mounts.
 
 The container user is `agent` (UID 1000); AWF chowns the per-workspace auth dirs
@@ -256,7 +258,7 @@ AWF inherits whatever those are authenticated as.
   `$VAR` work; the first failing command stops the sequence.
 - **Agent runtime ships**: Python 3.12, Node 22, git, jq, ripgrep, tini, Docker
   CLI + Compose + Buildx, GitHub CLI, alembic/pytest/uv, **six coding CLIs**
-  (Codex, Claude Code, Cursor, Gemini, OpenCode, Grok), and the system libs
+  (Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok), and the system libs
   Playwright's chromium needs. The **browser binaries are NOT pre-installed** —
   add `npx playwright install chromium` as a validation command (~30 s). Do
   **NOT** use `--with-deps`: it tries to `su root` + `apt install`, and the
@@ -286,7 +288,7 @@ agent on the initial diff):
 ```bash
 awf workspace adopt-pr \
   --pr-url https://github.com/owner/repo/pull/123 \
-  --agent claude_code --model claude-opus-4-8 --effort high \
+  --agent claude_code --effort high \
   --auto-merge \
   --owned-path '.github/workflows/**' --owned-path 'pyproject.toml'
 ```
@@ -325,14 +327,19 @@ the feature branch before merge.
 ### Per-comment verdict grammar the CLI produces
 
 When the monitor hands a thread to the CLI, it expects one of these markers
-(canonical form is the `AWF-VERDICT:` prefix):
+(canonical form is the `AWF-VERDICT:` prefix). Markerless, empty, garbled, or
+template-placeholder echoes **fail closed** — AWF never guesses FIXED from
+unmarked stdout. `FIXED` is only accepted when that same review item shows a
+verified local (or hosted) HEAD/commit advance:
 
 | Marker | Meaning | What AWF does |
 |---|---|---|
-| `AWF-VERDICT: FIXED: <summary>` (or any output without a recognized marker) | CLI committed the fix locally | pushes after the burst settles, then resolves the thread |
+| `AWF-VERDICT: FIXED: <summary>` **and** a committed change for this item | CLI committed the fix for this thread | pushes after the burst settles, then resolves the thread |
+| `AWF-VERDICT: FIXED: …` with **no** HEAD advance for this item | Claim without evidence | stays unresolved (`needs_human`); does not resolve |
+| Empty / markerless / bare-marker / garbled / placeholder-echo output | No usable `AWF-VERDICT:` line | stays unresolved (`needs_human` or `agent_failed` on CLI crash) — never treated as FIXED / FALSE POSITIVE / DEFER |
 | `AWF-VERDICT: FALSE POSITIVE: <reason>` | CLI disagrees, replies inline | resolves with the reply posted |
 | `AWF-VERDICT: DEFER: <what to track>` | needs follow-up, not blocking | captures a tracking note, resolves |
-| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** (also the sink for empty/garbled output) — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
+| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
 
 The CLI also posts the reply on GitHub itself; AWF's resolve happens after the
 reply is visible.
@@ -436,7 +443,7 @@ Common failure modes + fixes:
 | Companion never `service_healthy` | Wrong health URL | Curl the real service's health route on the host; fix `healthcheck_cmd` |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or didn't commit) | Widen prompt scope; check `git log base..HEAD` in the worktree |
 | `failed to parse compose.yml` | Hand-rolled compose with mixed quoting | The template uses `tojson`; declare via the profile, don't hand-roll |
-| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/gemini/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
+| CLI crashes "Read-only file system" | A provider auth dir landed ro | Provider auth (codex/claude/opencode/…) must be writable; AWF handles this — if you see it, you're on a custom mount |
 
 ## 12 — Cleanup
 

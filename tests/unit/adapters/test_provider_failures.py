@@ -13,6 +13,59 @@ from awf.adapters.provider_failures import (
 )
 
 
+def test_classifies_antigravity_agy_auth_required_marker() -> None:
+    """agy 1.1.13 OAuth-only stderr classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Error: authentication required. Run 'agy' to log in, then retry.",
+        provider="antigravity",
+        model="gemini-3.1-pro-preview",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "antigravity"
+    assert classification.retryable is True
+
+
+def test_classifies_agy_auth_required_without_provider_metadata() -> None:
+    """Command-result path (provider=None, model=None) still classifies agy auth."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="Error: authentication required. Run 'agy' to log in, then retry.",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.retryable is True
+
+
+def test_classifies_antigravity_missing_gemini_api_key_marker() -> None:
+    """agy 1.1.13 missing GEMINI_API_KEY stderr classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr=(
+            'modelProvider is set to "gemini" in settings.json, but the '
+            "GEMINI_API_KEY environment variable is not set."
+        ),
+        provider="antigravity",
+        model="gemini-3.1-pro-preview",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "antigravity"
+    assert classification.retryable is True
+
+
 def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None:
     classification = classify_provider_failure(
         reason_code=None,
@@ -30,6 +83,24 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     assert classification.retryable is True
     assert "AIzaSyProviderSecret" not in classification.failure_fingerprint
     assert "<redacted>" in classification.failure_fingerprint
+
+
+def test_classifies_google_api_key_auth_failure() -> None:
+    """Missing or invalid GOOGLE_API_KEY classifies as AGENT_AUTH_FAILED."""
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="GOOGLE_API_KEY environment variable is not set",
+        provider=None,
+        model="google/gemini-2.5-flash",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_AUTH_FAILED
+    assert classification.failure_type == "auth"
+    assert classification.provider == "google"
+    assert classification.model == "google/gemini-2.5-flash"
+    assert classification.retryable is True
 
 
 def test_classifies_cursor_auth_failure_and_redacts_secret_fingerprint() -> None:
@@ -263,3 +334,50 @@ def test_lint_rule_ids_containing_401_are_not_auth_failures() -> None:
     )
 
     assert classification is None
+
+
+def test_classifies_capacity_failure() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="server overloaded, try again later",
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+    )
+    assert classification is not None
+    assert classification.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert classification.failure_type == "capacity"
+
+
+def test_classifies_service_unhealthy_on_timeout() -> None:
+    from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
+
+    classification = classify_provider_failure(
+        reason_code=AGENT_TIMEOUT,
+        stdout="",
+        stderr="timeout",
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+        service_healthy=False,
+    )
+    assert classification is not None
+    assert classification.reason_code == AGENT_SERVICE_UNHEALTHY
+    assert classification.failure_type == "runtime_unhealthy"
+
+
+def test_classifies_unsupported_agent_runtime() -> None:
+    from awf.adapters.provider_failures import UNSUPPORTED_AGENT_RUNTIME
+
+    classification = classify_provider_failure(
+        reason_code=UNSUPPORTED_AGENT_RUNTIME,
+        stdout="",
+        stderr="agent runtime 'gemini' is not supported",
+        provider="unsupported",
+        model=None,
+    )
+    assert classification is not None
+    assert classification.reason_code == UNSUPPORTED_AGENT_RUNTIME
+    assert classification.failure_type == "unsupported_runtime"
+    assert classification.retryable is True
+    assert classification.cooldown_seconds == 0
+    assert classification.fallback_allowed is True

@@ -352,17 +352,6 @@ def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
     return "none"
 
 
-def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
-    return {
-        "codex": "CODEX",
-        "claude_code": "CLAUDE",
-        "cursor": "CURSOR",
-        "gemini": "GEMINI",
-        "opencode": "OPENCODE",
-        "grok": "GROK",
-    }.get(provider, "PROVIDER")
-
-
 def _probe_agent_runtime_cli(
     settings: ServiceSettings,
     *,
@@ -880,7 +869,7 @@ def overlay_profile_ollama_base_url(
     if not isinstance(profile_snapshot, Mapping):
         return result
     try:
-        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+        profile = WorkspaceProfile.model_validate_persisted(dict(profile_snapshot))
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
@@ -1020,7 +1009,7 @@ def overlay_profile_provider_credentials(
     if not isinstance(profile_snapshot, Mapping):
         return result
     try:
-        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+        profile = WorkspaceProfile.model_validate_persisted(dict(profile_snapshot))
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
@@ -1460,6 +1449,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     HttpStreamResponseLike,
     ProviderName,
     SubprocessRun,
+    _agent_runtime_cli_reason_prefix,
     _opencode_model_targets_non_ollama_provider,
 )
 

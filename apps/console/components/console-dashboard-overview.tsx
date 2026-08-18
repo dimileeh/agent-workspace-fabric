@@ -309,6 +309,7 @@ export function WorkspaceFilters({
   agentFilters,
   modelFilters,
   availableModels,
+  availableAgents,
   repoFilter,
   searchText,
   sortKey,
@@ -327,6 +328,7 @@ export function WorkspaceFilters({
   agentFilters: string[];
   modelFilters: string[];
   availableModels: string[];
+  availableAgents?: string[];
   repoFilter: string;
   searchText: string;
   sortKey: WorkspaceSortKey;
@@ -344,7 +346,17 @@ export function WorkspaceFilters({
   const statusOptions = Array.from(
     new Set([...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]),
   );
-  const agentOptions = ["codex", "claude_code", "gemini", "opencode"];
+  const defaultAgents = [
+    "codex",
+    "claude_code",
+    "cursor",
+    "antigravity",
+    "opencode",
+    "grok",
+  ];
+  const agentOptions = Array.from(
+    new Set([...defaultAgents, ...agentFilters, ...(availableAgents ?? [])]),
+  ).filter(Boolean);
   const modelOptions = Array.from(new Set([...modelFilters, ...availableModels])).filter(Boolean);
   const activeFilters = workspaceFilterSummary({
     agentFilters,

@@ -404,3 +404,231 @@ class TestFailureHandlingEdgesPart006:
                 excluding_workspace_id=None,
             )
             assert conflicts == []
+
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_unsupported_agent_runtime_marks_workspace_failed_before_git_work(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        agent: str,
+    ) -> None:
+        """A claimed workspace with an unsupported agent runtime must fail fast before provisioning."""
+
+        class _FailingGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError(
+                    "add_worktree must not be called for unsupported agent runtimes"
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_FailingGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent=agent,
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_message is not None
+            assert f"agent runtime {agent!r} is not supported" in reloaded.failure_message
+            assert reloaded.compose_project_name is None
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE
+            ]
+            assert failed_events[-1].reason_code == "UNSUPPORTED_AGENT_RUNTIME"
+
+    @pytest.mark.unit
+    async def test_provisioning_allows_unsupported_agent_runtime_with_approved_fallback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        """A workspace with a retired agent runtime (like gemini) that has an approved launchable fallback
+        must not be rejected during provisioning so it can reach execution and dispatch fallback recovery.
+        """
+        git_called = False
+
+        class _MockGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                nonlocal git_called
+                git_called = True
+                from awf.node.git_manager import WorktreeLayout
+
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="awf/test",
+                )
+
+            async def head_sha(self, *args: Any, **kwargs: Any) -> str:
+                return "sha"
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_MockGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        task_policy = {
+            "provider_recovery": {
+                "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+            }
+        }
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="gemini",
+                test_commands=[],
+                task_policy=task_policy,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert git_called is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_provisioning_allows_unknown_agent_runtime_string_with_approved_fallback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        """A workspace with an unknown string agent runtime that has an approved launchable fallback
+        must not crash during provisioning and must reach ready status so fallback recovery can dispatch.
+        """
+        git_called = False
+
+        class _MockGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                nonlocal git_called
+                git_called = True
+                from awf.node.git_manager import WorktreeLayout
+
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="awf/test",
+                )
+
+            async def head_sha(self, *args: Any, **kwargs: Any) -> str:
+                return "sha"
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_MockGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        task_policy = {
+            "provider_recovery": {
+                "fallbacks": [{"agent": "antigravity", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+            }
+        }
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="unknown_custom_agent",
+                test_commands=[],
+                task_policy=task_policy,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert git_called is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_kind", ["sync_feature_pr", "sync_release_pr"])
+    @pytest.mark.parametrize("agent", ["gemini", "unsupported_agent"])
+    async def test_provisioning_allows_unsupported_agent_runtime_for_monitor_only_task_kinds(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        task_kind: str,
+        agent: str,
+    ) -> None:
+        """Monitor-only task kinds (sync_feature_pr, sync_release_pr) do not use
+        the coding runtime during provisioning and must bypass the runtime gate.
+        """
+        git_called = False
+
+        class _MockGitManager:
+            async def add_worktree(self, *args: Any, **kwargs: Any) -> Any:
+                nonlocal git_called
+                git_called = True
+                from awf.node.git_manager import WorktreeLayout
+
+                return WorktreeLayout(
+                    mirror_path=origin_repo,
+                    worktree_path=origin_repo,
+                    branch_name="awf/test",
+                )
+
+            async def head_sha(self, *args: Any, **kwargs: Any) -> str:
+                return "sha"
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=_MockGitManager(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        task_policy: dict[str, Any] = {}
+        if task_kind == "sync_feature_pr":
+            task_policy["pr_adoption"] = {
+                "head_ref": "feature-branch",
+                "pr_number": 42,
+            }
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent=agent,
+                test_commands=[],
+                task_kind=task_kind,
+                task_policy=task_policy,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert git_called is True
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value

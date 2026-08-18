@@ -37,6 +37,22 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+# Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
+# containment check, not an id-format check: orphan GC classifies *every*
+# on-disk ``ws_…`` directory (``service/orphans.py`` and
+# ``service/orphan_resources.py`` both scan on ``name.startswith("ws_")``), so
+# any grammar narrower than "safe single path component" makes legacy/synthetic
+# directories permanently un-reapable — the sink raises
+# ``GIT_WORKSPACE_ID_INVALID`` and the reaper records a failed reap instead of
+# falling back to filesystem deletion. So we admit every character that cannot
+# escape the worktree root (including ``.``/``-``, which companion ids
+# ``{workspace_id}__companion__{ServiceName}`` legitimately carry) and reject
+# only what can: the ``/`` and ``\`` path separators and null bytes. The
+# required ``ws_`` prefix means the id can never be empty, a bare ``.`` or
+# ``..`` component, or start with ``.``; the leading ``(?!.*\.\.)`` lookahead
+# (``DOTALL`` so an embedded newline cannot hide the sequence from ``.*``)
+# still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
+_WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
@@ -474,6 +490,26 @@ class GitManager:
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the managed worktree path for ``workspace_id``."""
+        return self._worktree_path_for(workspace_id)
+
+    def _worktree_path_for(self, workspace_id: str) -> Path:
+        """Validate a caller-supplied workspace id and return its worktree path.
+
+        Single sink for ``self._worktrees_dir / workspace_id``. Rejects ids that
+        could escape the worktree root (``..``, ``/``, ``\\``, a leading ``.``,
+        null bytes, empty) so the value handed to destructive git commands is
+        always a safe single path component; every other character is accepted so
+        orphan GC can reap any ``ws_…`` directory its scanners classify, whatever
+        produced the name. Never silently sanitizes a bad id — it rejects it.
+        """
+        if not _WORKSPACE_ID_RE.fullmatch(workspace_id):
+            raise GitOperationError(
+                operation="worktree.path",
+                returncode=1,
+                stdout="",
+                stderr=f"invalid workspace id for worktree path: {workspace_id!r}",
+                reason_code="GIT_WORKSPACE_ID_INVALID",
+            )
         return self._worktrees_dir / workspace_id
 
     async def ensure_mirror(self, repo_url: str) -> Path:
@@ -617,10 +653,12 @@ class GitManager:
         serialization is cheap enough for the MVP; Phase 1.5 can revisit with
         per-worktree locks if throughput becomes a concern.
         """
+        # Validate the id before any clone/fetch so a traversal-prone id fails
+        # fast, before ``ensure_mirror`` does network/disk work.
+        worktree_path = self._worktree_path_for(workspace_id)
         mirror_path = await self.ensure_mirror(repo_url)
         self._worktrees_dir.mkdir(parents=True, exist_ok=True)
 
-        worktree_path = self._worktrees_dir / workspace_id
         if worktree_path.exists():
             raise GitOperationError(
                 operation="worktree.add",
@@ -717,7 +755,7 @@ class GitManager:
 
     async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
         """Remove a worktree using an already-resolved mirror path."""
-        worktree_path = self._worktrees_dir / workspace_id
+        worktree_path = self._worktree_path_for(workspace_id)
 
         lock = self._lock_for_mirror(mirror_path)
         async with lock:
@@ -783,7 +821,7 @@ class GitManager:
         Used for event metadata + base-commit recording. The workspace ID
         uniquely identifies the worktree path, so we don't need repo_url here.
         """
-        worktree_path = self._worktrees_dir / workspace_id
+        worktree_path = self._worktree_path_for(workspace_id)
         result = await self._run(
             ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
             operation="worktree.head",
@@ -953,15 +991,21 @@ def repair_agent_writable_worktree(
     uid: int = AGENT_RUNTIME_UID,
     gid: int = AGENT_RUNTIME_GID,
     linked_git_dir: Path | None = None,
+    *,
+    repair_shared_git_metadata: bool = True,
 ) -> None:
     """Repair linked-worktree Git ownership for the agent-runtime user.
 
     The mirror object DB is intentionally repaired in directories-only mode:
     loose object files and pack files may be immutable through Docker Desktop
     on macOS, while fanout directories must be writable on Linux so the agent
-    can add new objects.
+    can add new objects. Callers that create an isolated worktree while another
+    agent still has shared-mirror access can repair only that worktree.
     """
     if os.geteuid() != 0:
+        return
+    if not repair_shared_git_metadata:
+        _chown_targets((_ChownTarget(worktree_path, recursive=True),), uid, gid)
         return
     mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
     if mirror is None:

@@ -52,6 +52,8 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
     WorkspaceEventListResponse,
     WorkspaceEventResponse,
+    WorkspaceOverviewBatchRequest,
+    WorkspaceOverviewBatchResponse,
     WorkspaceOverviewListResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
@@ -89,6 +91,7 @@ from awf.service.workspace_observability import (
     _decode_overview_cursor,
     _encode_overview_cursor,
     _WorkspaceOverviewCursor,
+    batch_workspace_overview_response,
     list_workspace_overview_response,
     list_workspace_stale_reasons_response,
 )
@@ -98,6 +101,7 @@ from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceRetryNotFoundError,
+    WorkspaceUnsupportedAgentRuntimeError,
     _egress_audit_response,
     create_workspace_row_checked,
     owned_path_overlap_warnings,
@@ -131,6 +135,7 @@ __all__ = [
     "get_workspace",
     "list_workspace_events",
     "list_workspace_overview",
+    "batch_workspace_overview",
     "list_workspace_stale_reasons",
     "list_workspaces",
     "retry_workspace",
@@ -362,6 +367,9 @@ async def create_workspace(
     except WorkspaceProviderReadinessBlockedError as exc:
         await session.rollback()
         return _provider_readiness_blocked_response(exc)
+    except WorkspaceUnsupportedAgentRuntimeError as exc:
+        await session.rollback()
+        return _workspace_conflict_error_response(exc)
 
     if idempotency_key is not None:
         replay_key_cache.remember(
@@ -555,7 +563,7 @@ def _provider_readiness_blocked_response(
 @router.get("/overview", response_model=WorkspaceOverviewListResponse)
 async def list_workspace_overview(
     workspace_status: Annotated[WorkspaceStatus | None, Query(alias="status")] = None,
-    agent: Annotated[AgentRuntime | None, Query()] = None,
+    agent: Annotated[AgentRuntime | str | None, Query()] = None,
     repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     cursor: Annotated[str | None, Query(max_length=128)] = None,
@@ -579,6 +587,18 @@ async def list_workspace_overview(
                 "message": "Invalid workspace overview cursor.",
             },
         ) from exc
+
+
+@router.post("/overview/batch", response_model=WorkspaceOverviewBatchResponse)
+async def batch_workspace_overview(
+    payload: WorkspaceOverviewBatchRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceOverviewBatchResponse:
+    """Project overview records for a bounded set of known workspace IDs."""
+    return await batch_workspace_overview_response(
+        session,
+        workspace_ids=payload.workspace_ids,
+    )
 
 
 @router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)
@@ -681,6 +701,10 @@ async def adopt_pull_request_monitor(
             settings=settings,
         ).adopt(payload)
     except PRMonitorAdoptionError as exc:
+        # Mirror workspace-create conflict handling: returning JSONResponse must
+        # not let get_db_session commit partial adoption mutations (workspace
+        # insert and/or superseded prior adoption) after a wrapped conflict.
+        await session.rollback()
         return JSONResponse(
             status_code=exc.status_code,
             content=ErrorResponse(
@@ -835,7 +859,7 @@ async def list_workspaces(
     workspace_status: Annotated[
         WorkspaceStatus | list[WorkspaceStatus] | None, Query(alias="status")
     ] = None,
-    agent: Annotated[AgentRuntime | None, Query()] = None,
+    agent: Annotated[AgentRuntime | str | None, Query()] = None,
     repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
@@ -857,7 +881,7 @@ async def _list_workspace_responses(
     session: AsyncSession,
     *,
     workspace_status: list[WorkspaceStatus] | WorkspaceStatus | None = None,
-    agent: AgentRuntime | None = None,
+    agent: AgentRuntime | str | None = None,
     repo_url: str | None = None,
     limit: int = 50,
 ) -> list[WorkspaceResponse]:

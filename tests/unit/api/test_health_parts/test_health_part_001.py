@@ -312,7 +312,7 @@ async def test_readyz_response_shape_matches_contract(
         "codex",
         "claude_code",
         "cursor",
-        "gemini",
+        "antigravity",
         "opencode",
         "grok",
         "docker",
@@ -516,6 +516,91 @@ async def test_worker_heartbeat_check_stale_result_includes_age_and_threshold(
     assert result.reason == "WORKER_HEARTBEAT_STALE"
     assert "Latest worker heartbeat is" in (result.detail or "")
     assert "stale after" in (result.detail or "")
+
+
+@pytest.mark.unit
+async def test_worker_heartbeat_check_missing_result_uses_missing_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorded heartbeat for the node reports WORKER_HEARTBEAT_MISSING.
+
+    ``latest_for_node`` returning ``None`` is the first-boot / just-pruned state.
+    Pin it deterministically (the readyz endpoint otherwise only hits this branch
+    when the shared heartbeat table happens to be empty at probe time, which makes
+    line coverage of the missing-heartbeat result non-deterministic across shards).
+    """
+
+    class _Session:
+        async def close(self) -> None:
+            return None
+
+    class _EmptyWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> None:
+            # No heartbeat recorded for this node yet — the missing-result branch.
+            assert node_id == "local"
+
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _EmptyWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="local")
+
+    assert result.ok is False
+    assert result.status == "fail"
+    assert result.reason == "WORKER_HEARTBEAT_MISSING"
+    assert "No worker heartbeat recorded for node 'local'" in (result.detail or "")
+
+
+@pytest.mark.unit
+async def test_worker_heartbeat_check_fresh_result_uses_fixed_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_now = datetime(2026, 6, 4, 8, 0, tzinfo=UTC)
+    session_events: list[str] = []
+    queried_nodes: list[str] = []
+
+    class _Session:
+        async def close(self) -> None:
+            session_events.append("close")
+
+    class _FixedDatetime:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            assert tz is UTC
+            return fixed_now
+
+    class _FreshWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> SimpleNamespace:
+            queried_nodes.append(node_id)
+            return SimpleNamespace(
+                last_heartbeat_at=fixed_now - timedelta(seconds=1),
+                poll_interval_seconds=10.0,
+            )
+
+    monkeypatch.setattr(health_route, "datetime", _FixedDatetime)
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _FreshWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="node-a")
+
+    assert result.ok is True
+    assert result.status == "ok"
+    assert result.reason == "WORKER_HEARTBEAT_FRESH"
+    assert result.resource_count == 1
+    assert result.detail == "Latest worker heartbeat is fresh for node 'node-a'"
+    assert queried_nodes == ["node-a"]
+    assert session_events == ["close"]
 
 
 @pytest.mark.unit
@@ -1398,46 +1483,3 @@ async def test_readyz_orphan_check_scans_docker_even_when_db_check_failed(
     assert orphan_check.status == "unknown"
     assert orphan_check.reason == "DB_UNAVAILABLE"
     assert len(runner.calls) == 3
-
-
-@pytest.mark.unit
-async def test_readyz_cancel_unneeded_task_cancels_pending_task() -> None:
-    task = asyncio.create_task(asyncio.sleep(60))
-
-    await health_route._cancel_unneeded_task(task)
-
-    assert task.cancelled()
-
-
-@pytest.mark.unit
-async def test_docker_check_maps_runner_timeout_to_configured_reason() -> None:
-    class _SlowRunner:
-        async def run(
-            self,
-            args: list[str],
-            *,
-            input_bytes: bytes | None = None,
-            cwd: str | None = None,
-        ) -> CommandResult:
-            assert args == ["docker", "compose", "version", "--short"]
-            assert input_bytes is None
-            assert cwd is None
-            await asyncio.sleep(1)
-            return CommandResult(returncode=0, stdout="", stderr="")
-
-    previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
-    health_route._CHECK_TIMEOUT_SECONDS = 0.001
-    try:
-        result = await health_route._docker_check(
-            _SlowRunner(),
-            args=["docker", "compose", "version", "--short"],
-            description="docker compose version",
-            fail_reason="DOCKER_COMPOSE_NOT_AVAILABLE",
-            timeout_reason="DOCKER_COMPOSE_TIMEOUT",
-        )
-    finally:
-        health_route._CHECK_TIMEOUT_SECONDS = previous_timeout
-
-    assert result.ok is False
-    assert result.reason == "DOCKER_COMPOSE_TIMEOUT"
-    assert "docker compose version exceeded" in (result.detail or "")

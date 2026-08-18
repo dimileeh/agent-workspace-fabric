@@ -309,7 +309,16 @@ def run_system_checks(
 # --- Provider validation / interactive guard ------------------------------
 
 KNOWN_SETUP_PROVIDERS: frozenset[str] = frozenset(
-    {"github", "codex", "claude_code", "cursor", "gemini", "opencode", "grok", "awf_cloud"}
+    {
+        "github",
+        "codex",
+        "claude_code",
+        "cursor",
+        "antigravity",
+        "opencode",
+        "grok",
+        "awf_cloud",
+    }
 )
 _PROVIDER_ALIASES: Mapping[str, str] = {
     "openai": "codex",
@@ -317,7 +326,9 @@ _PROVIDER_ALIASES: Mapping[str, str] = {
     "claudecode": "claude_code",
     "anthropic": "claude_code",
     "ollama": "opencode",
-    "google": "gemini",
+    "google": "antigravity",
+    "gemini": "antigravity",
+    "agy": "antigravity",
     # xAI is the brand behind Grok Build and the credential key (``xai``) the
     # adapters/recovery surfaces use, so accept it as the Grok selector alias.
     "xai": "grok",

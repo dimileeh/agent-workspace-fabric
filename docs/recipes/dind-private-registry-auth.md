@@ -94,7 +94,7 @@ resolver calls `source.exists()` on the `ref` path *before* the agent container 
 created (`src/awf/node/secret_mounts.py`, run from `src/awf/service/worker.py`). In
 the bundled `docker/compose/local-service.yml` stack the `api`/`worker` containers
 only bind-mount a **fixed allowlist** of host auth paths — `~/.config/gh`,
-`~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, `~/.codex`, `~/.claude`, `~/.gemini`,
+`~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, `~/.codex`, `~/.claude`,
 `~/.config/opencode`, `~/.grok`, `~/.ollama` — and **`~/.docker` is not one of them.**
 So a `ref:` written as the literal absolute path the [`ref` restrictions](#ref-restrictions-read-before-copying)
 require — e.g. `/home/youruser/.docker/config.json` — resolves to a path the worker

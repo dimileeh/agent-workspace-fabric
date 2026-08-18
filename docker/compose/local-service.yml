@@ -8,7 +8,6 @@ x-awf-auth-volumes:
   - &awf-codex-auth ${AWF_HOST_HOME:-${HOME}}/.codex:${AWF_HOST_HOME:-${HOME}}/.codex:ro
   - &awf-claude-dir-auth ${AWF_HOST_HOME:-${HOME}}/.claude:${AWF_HOST_HOME:-${HOME}}/.claude:ro
   - &awf-claude-file-auth ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
-  - &awf-gemini-auth ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
   - &awf-opencode-auth ${AWF_HOST_HOME:-${HOME}}/.config/opencode:${AWF_HOST_HOME:-${HOME}}/.config/opencode:ro
   - &awf-grok-auth ${AWF_HOST_HOME:-${HOME}}/.grok:${AWF_HOST_HOME:-${HOME}}/.grok:ro
   - &awf-ollama-auth ${AWF_HOST_HOME:-${HOME}}/.ollama:${AWF_HOST_HOME:-${HOME}}/.ollama:ro
@@ -70,13 +69,7 @@ x-awf-service: &awf-service
     - CLAUDE_CODE_USE_VERTEX=${CLAUDE_CODE_USE_VERTEX:-}
     - CURSOR_API_KEY=${CURSOR_API_KEY:-}
     - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-    - GEMINI_API_KEY_AUTH_MECHANISM=${GEMINI_API_KEY_AUTH_MECHANISM:-}
     - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-    - GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-}
-    - GOOGLE_GENAI_USE_GCA=${GOOGLE_GENAI_USE_GCA:-}
-    - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
-    - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-}
-    - GOOGLE_CLOUD_ACCESS_TOKEN=${GOOGLE_CLOUD_ACCESS_TOKEN:-}
     - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
     - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
@@ -180,7 +173,6 @@ services:
       - *awf-codex-auth
       - *awf-claude-dir-auth
       - *awf-claude-file-auth
-      - *awf-gemini-auth
       - *awf-opencode-auth
       - *awf-grok-auth
       - *awf-ollama-auth
@@ -225,7 +217,6 @@ services:
       - *awf-codex-auth
       - *awf-claude-dir-auth
       - *awf-claude-file-auth
-      - *awf-gemini-auth
       - *awf-opencode-auth
       - *awf-grok-auth
       - *awf-ollama-auth
@@ -237,6 +228,10 @@ services:
       dockerfile: apps/console/Dockerfile
       args:
         NEXT_PUBLIC_AWF_CONSOLE_POLL_MS: ${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}
+        NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH: ${NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH:-}
+        NEXT_PUBLIC_AWF_CONSOLE_API_BASE: ${NEXT_PUBLIC_AWF_CONSOLE_API_BASE:-/api/awf}
+        NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE: ${NEXT_PUBLIC_AWF_CONSOLE_OPERATOR_BASE:-/api/operator}
+        NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS: ${NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS:-}
     image: awf-console:local
     depends_on:
       api:

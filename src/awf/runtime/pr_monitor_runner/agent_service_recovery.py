@@ -92,7 +92,12 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    isolated_worktree_host_path: Path | None = None,
+    isolated_worktree_ref: str | None = None,
+    isolated_worktree_source_mirror: Path | None = None,
+    read_only: bool = False,
 ) -> AgentRunResult:
+    """Run the monitor agent while recovering from agent-service failures."""
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted
@@ -133,16 +138,34 @@ async def _run_monitor_agent_with_service_recovery(
                 }
                 if git_preparation is not None:
                     hosted_run_kwargs["git_preparation"] = git_preparation
+                if read_only:
+                    hosted_run_kwargs["read_only"] = True
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
-                result = await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source=log_source,
-                )
+                local_run_kwargs: dict[str, Any] = {
+                    "compose_project": compose_project,
+                    "compose_file": compose_file,
+                    "prompt": prompt,
+                    "workspace_id": workspace_id,
+                    "log_source": log_source,
+                }
+                profile = getattr(self, "_workspace_profile", None)
+                if profile is not None:
+                    local_run_kwargs["profile"] = profile
+                if isolated_worktree_host_path is not None:
+                    local_run_kwargs["isolated_worktree_host_path"] = isolated_worktree_host_path
+                if isolated_worktree_ref is not None:
+                    local_run_kwargs["isolated_worktree_ref"] = isolated_worktree_ref
+                if isolated_worktree_source_mirror is not None:
+                    local_run_kwargs["isolated_worktree_source_mirror"] = (
+                        isolated_worktree_source_mirror
+                    )
+                result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
+            if isolated_worktree_host_path is not None or read_only:
+                # A clarification re-ask gets exactly one isolated invocation;
+                # never restart the persistent service and re-run it.
+                raise
             if self._deps.adapter.is_hosted:
                 terminal_head_sha = _nonblank_str(exc.details.get("terminal_head_sha"))
                 if terminal_head_sha is not None:
@@ -161,10 +184,12 @@ async def _run_monitor_agent_with_service_recovery(
                         operation_start_head=operation_start_head,
                     )
                     if state is not None:
-                        _record_hosted_terminal_head_sync(
+                        await _record_hosted_terminal_head_sync(
+                            self,
                             state,
                             synced_head_sha=synced_head_sha,
                             operation_start_head=operation_start_head,
+                            worktree_path=self._worktrees_root / workspace_id,
                         )
             recovered = await _recover_monitor_agent_service_after_error(
                 self,
@@ -193,6 +218,10 @@ async def _run_monitor_agent_with_service_recovery(
             )
             continue
         except ComposeExecCleanupError as exc:
+            if isolated_worktree_host_path is not None or read_only:
+                # A clarification run must not trigger a persistent-agent
+                # recovery retry after cleanup failure.
+                raise
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
@@ -214,7 +243,7 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
-        if self._deps.adapter.is_hosted:
+        if self._deps.adapter.is_hosted and not read_only:
             if not result.terminal_head_sha:
                 raise AgentRunError(
                     agent=self._deps.adapter.name,
@@ -239,10 +268,12 @@ async def _run_monitor_agent_with_service_recovery(
                 operation_start_head=operation_start_head,
             )
             if state is not None:
-                _record_hosted_terminal_head_sync(
+                await _record_hosted_terminal_head_sync(
+                    self,
                     state,
                     synced_head_sha=synced_head_sha,
                     operation_start_head=operation_start_head,
+                    worktree_path=self._worktrees_root / workspace_id,
                 )
         else:
             append_command_evidence(
@@ -253,15 +284,32 @@ async def _run_monitor_agent_with_service_recovery(
         return cast(AgentRunResult, result)
 
 
-def _record_hosted_terminal_head_sync(
+async def _record_hosted_terminal_head_sync(
+    self: Any,
     state: Any,
     *,
     synced_head_sha: str,
     operation_start_head: str | None,
+    worktree_path: Path,
 ) -> None:
+    """Record hosted terminal sync; mark advanced only on forward ancestry.
+
+    SHA inequality alone accepts lateral/older force-pushes that drop a fix.
+    Require ``synced_head_sha`` to descend from the item start head when the
+    runner can verify ancestry; otherwise fail closed and leave the flag false.
+    """
     state.last_push_sha = synced_head_sha
     start_head = _nonblank_str(operation_start_head)
-    if start_head is not None and synced_head_sha.lower() != start_head.lower():
+    if start_head is None or synced_head_sha.lower() == start_head.lower():
+        return
+    descends = getattr(self, "_head_descends_from", None)
+    if not callable(descends) or not worktree_path.exists():
+        return
+    if await descends(
+        worktree_path=worktree_path,
+        ancestor=start_head,
+        descendant=synced_head_sha,
+    ):
         state.hosted_terminal_head_advanced = True
 
 
@@ -909,7 +957,7 @@ async def _monitor_agent_service_restart_timeout_seconds(
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None or not workspace.resolved_profile:
                 return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
-            profile = WorkspaceProfile.model_validate(workspace.resolved_profile)
+            profile = WorkspaceProfile.model_validate_persisted(workspace.resolved_profile)
             task_policy = (
                 workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
             )

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
+from awf.adapters.defaults import defaults_with_model_overrides
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.forge import ForgeClient, concrete_forge_for_repo, make_forge_client
 from awf.common.git_auth import add_git_config_entries as _add_git_config_entries
@@ -228,6 +229,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         secret_lease_resolver=secret_lease_resolver,
         companion_image_builder=companion_image_builder,
     )
+    executor_config = ExecutorConfig(
+        worktrees_root=work_dir / "git" / "worktrees",
+        # Matches ComposeManager(work_dir=work_dir): render path is
+        # <work_dir>/compose/<workspace_id>/compose.yml. The executor first
+        # uses Workspace.compose_file_path persisted by the provisioner, so
+        # this is only a legacy-row fallback.
+        compose_projects_root=work_dir / "compose",
+        agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
+        agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
+        planning_max_iterations_default=settings.planning_max_iterations_default,
+    )
     node_id = effective_service_node_id(settings)
     provisioner = Provisioner(
         session_factory=session_factory,
@@ -238,6 +250,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
             service_startup_log_tail_lines=settings.service_startup_log_tail_lines,
+            agent_defaults=defaults_with_model_overrides(
+                executor_config.default_models,
+                base=executor_config.agent_defaults,
+            ),
         ),
     )
 
@@ -332,17 +348,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         compose=compose,
         validation=validation,
         pr_creator=pr_creator,
-        config=ExecutorConfig(
-            worktrees_root=work_dir / "git" / "worktrees",
-            # Matches ComposeManager(work_dir=work_dir): render path is
-            # <work_dir>/compose/<workspace_id>/compose.yml. The executor
-            # first uses Workspace.compose_file_path persisted by the
-            # provisioner, so this is only a legacy-row fallback.
-            compose_projects_root=work_dir / "compose",
-            agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
-            agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
-            planning_max_iterations_default=settings.planning_max_iterations_default,
-        ),
+        config=executor_config,
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,

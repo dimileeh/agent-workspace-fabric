@@ -16,6 +16,9 @@ from awf.runtime.pr_monitor_runner import operations as _operations
 from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import outdated_resolution as _outdated_resolution
 from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass as _pre_push_validation_fix_pass,
+)
 from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
@@ -71,6 +74,7 @@ class RunnerDelegatesMixin:
     _load_state = _lifecycle._load_state
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
+    _persist_failed_run_salvage_durably = _lifecycle._persist_failed_run_salvage_durably
     _set_workspace_attention = _merge_attention._set_workspace_attention
     _set_workspace_attention_with_merge_block_marker = (
         _merge_attention._set_workspace_attention_with_merge_block_marker
@@ -107,6 +111,10 @@ class RunnerDelegatesMixin:
     _run_pre_push_validation_with_fix_passes = (
         _pre_push_validation._run_pre_push_validation_with_fix_passes
     )
+    _head_descends_from = _pre_push_validation_fix_pass._head_descends_from
+    _commit_trees_differ = _pre_push_validation_fix_pass._commit_trees_differ
+    _commit_range_touches_path = _pre_push_validation_fix_pass._commit_range_touches_path
+    _commit_changes_present_in_head = _pre_push_validation_fix_pass._commit_changes_present_in_head
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log

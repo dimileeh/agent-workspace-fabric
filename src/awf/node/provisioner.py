@@ -17,6 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,9 @@ from typing import Any, Final, Protocol, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentDefaults
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
@@ -35,8 +39,14 @@ from awf.common.auto_merge import (
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.common.workspace_policy import pr_adoption_is_hosted
-from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
+from awf.common.workspace_policy import agent_model_from_task_policy, pr_adoption_is_hosted
+from awf.db.enums import (
+    AgentRuntime,
+    EgressDecision,
+    FailureReason,
+    WorkspaceStatus,
+    parse_agent_runtime,
+)
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -66,7 +76,7 @@ from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import MANAGED_CLARIFICATION_SERVICE_NAME, WorkspaceProfile
 from awf.profiles.resolver import (
     ProfileResolutionError,
     resolve_workspace_profile,
@@ -104,33 +114,22 @@ _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
 
 _MAX_REVOKE_EVENTS: Final = 3
-"""Maximum revoke events before escalation.
-
-When ``_launch_lost_to_terminal_cleanup`` records this many lifetime-total
-``terminal_runtime_release_revoked`` events (orphan container stop failures),
-an additional escalation event is recorded to surface the problem to an
-operator.  The counter is intentionally lifetime-total rather than
-consecutive: a workspace that has needed repeated orphan-stop intervention is
-worth surfacing even if cleanup eventually succeeded between failures.  The
-revoke event itself is always recorded regardless of the cap so that the
-workspace remains effectively unreleased (ports stay blocked) in the
-``terminal_runtime_effectively_released_expr`` check.  Without the revoke
-event, the latest event would remain ``terminal_runtime_released``, falsely
-marking the workspace as released even though orphan containers still hold
-host ports.
-"""
+"""Maximum lifetime-total revoke events before recording an operator escalation event."""
 
 _ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
 """Maximum time to spend stopping orphan containers after launch races cleanup."""
 
 _EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
-"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch."""
 
-Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; the
-string is the end-to-end contract shared with the worker's
-``EXECUTION_CLAIM_FENCED`` constant."""
+_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
+"""Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
+
 
 _log = get_logger(__name__)
+
+
+_parse_agent_runtime = parse_agent_runtime
 
 
 class ServiceStartupDiagnosticsCapturer(Protocol):
@@ -164,6 +163,9 @@ class ProvisionerConfig:
 
     service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
     """How many companion log lines to capture on a service-startup failure (must be > 0)."""
+
+    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
+    """Resolved agent defaults shared with the executor's runtime configuration."""
 
     def __post_init__(self) -> None:
         """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
@@ -201,6 +203,23 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+
+    def _effective_agent_model(self, workspace: Workspace) -> str | None:
+        """Resolve the stack model with the executor's default-selection rules."""
+        try:
+            agent: AgentRuntime | None = AgentRuntime(workspace.agent)
+        except ValueError:
+            agent = None
+        defaults = self._config.agent_defaults.get(agent) if agent is not None else None
+        task_policy = workspace.task_policy
+        raw_effort = task_policy.get("agent_effort") if isinstance(task_policy, Mapping) else None
+        effort = raw_effort.strip() if isinstance(raw_effort, str) else None
+        return selected_runtime_model_for_defaults(
+            agent=agent,
+            explicit_model=agent_model_from_task_policy(task_policy),
+            default_model=defaults.model if defaults is not None else None,
+            effort=effort or (defaults.effort if defaults is not None else None),
+        )
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -267,6 +286,13 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         ):
             return
 
+        if await self._reject_unsupported_agent_runtime(
+            workspace_id=workspace_id,
+            workspace=ws,
+            execution_claim_epoch=execution_claim_epoch,
+        ):
+            return
+
         # 2. Do the git work outside a DB transaction (it's slow).
         branch_name = _provision_local_branch_name(
             ws,
@@ -305,7 +331,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 )
                 profile = profile_resolution.profile
             else:
-                profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+                profile = WorkspaceProfile.model_validate_persisted(ws.resolved_profile)
             resolved_profile_dict = (
                 profile_resolution.profile.model_dump(mode="json", by_alias=True)
                 if profile_resolution is not None
@@ -315,12 +341,20 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
             hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
+            effective_agent_model = self._effective_agent_model(ws)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
             companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
+            clarification_enabled = all(
+                service.name != MANAGED_CLARIFICATION_SERVICE_NAME for service in profile.services
+            ) and all(
+                companion.name != MANAGED_CLARIFICATION_SERVICE_NAME
+                for companion in companion_specs
+            )
+            if self._stack_launcher is not None:
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,
@@ -328,6 +362,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                     ),
                     companions=companion_specs,
                     docker_mode=profile.docker.mode,
+                    clarification_enabled=clarification_enabled,
                 )
                 companion_graph_prevalidated = True
             if self._stack_launcher is not None and hosted_pr_adoption:
@@ -341,7 +376,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=_parse_agent_runtime(ws.agent),
+                        agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
@@ -579,7 +617,10 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        agent_runtime=_parse_agent_runtime(ws.agent),
+                        agent_model=effective_agent_model,
                         companions=materialized_companions,
+                        clarification_enabled=clarification_enabled,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
                     )
@@ -1099,6 +1140,38 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             return False
 
+    async def _reject_unsupported_agent_runtime(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        execution_claim_epoch: int | None = None,
+    ) -> bool:
+        """Fail fast unsupported agent runtimes before provisioning; return True if rejected.
+
+        Monitor-only task kinds (sync_feature_pr, sync_release_pr) do not use
+        the coding runtime during provisioning or initial monitor handoff and
+        bypass this gate.
+        """
+        if workspace.task_kind in ("sync_feature_pr", "sync_release_pr"):
+            return False
+        message = _provisioner_helpers.check_unsupported_agent_runtime(workspace.agent)
+        if message is not None:
+            from awf.service.provider_recovery import has_approved_launchable_fallback
+
+            if has_approved_launchable_fallback(workspace.task_policy):
+                return False
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.policy_failure,
+                message=message,
+                from_status=WorkspaceStatus.provisioning,
+                reason_code=_UNSUPPORTED_AGENT_RUNTIME_REASON_CODE,
+                execution_claim_epoch=execution_claim_epoch,
+            )
+            return True
+        return False
+
     async def _mark_failed(
         self,
         *,
@@ -1422,20 +1495,6 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         reason_code: str,
     ) -> None:
         """Log and record an event when an action is skipped due to a stale workspace status."""
-        _log.info(
-            "provisioner.skip_stale_status",
-            workspace_id=ws.id,
-            action=action,
-            expected_status=expected.value,
-            status=ws.status,
-        )
-        await repo.add_event(
-            ws,
-            event_type="workspace.stale_action_skipped",
-            reason_code=reason_code,
-            payload={
-                "action": action,
-                "expected_status": expected.value,
-                "actual_status": ws.status,
-            },
+        await _provisioner_helpers.record_stale_action_skip(
+            repo, ws, action=action, expected=expected, reason_code=reason_code
         )

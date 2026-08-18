@@ -87,7 +87,7 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
-        adapter.queue(stdout="DEFER: advisory nit, skipping")
+        adapter.queue(stdout="AWF-VERDICT: DEFER: advisory nit, skipping")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge.
@@ -145,7 +145,7 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
-        adapter.queue(stdout="DEFER: advisory nit, skipping")
+        adapter.queue(stdout="AWF-VERDICT: DEFER: advisory nit, skipping")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge dispatched, but
@@ -203,7 +203,7 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
-        adapter.queue(stdout="DEFER: needs maintainer input")
+        adapter.queue(stdout="AWF-VERDICT: DEFER: needs maintainer input")
         cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Outer iter 2: human-defer → gate blocks → NotifyHuman.

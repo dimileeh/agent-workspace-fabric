@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -151,16 +151,82 @@ PROVIDER_REGISTRY: tuple[ProviderSpec, ...] = (
         env_ref_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     ),
     ProviderSpec(name="opencode", readiness_provider="opencode", env_ref_vars=("OLLAMA_API_KEY",)),
-    ProviderSpec(
-        name="gemini",
-        readiness_provider="gemini",
-        env_ref_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_ACCESS_TOKEN"),
-    ),
     ProviderSpec(name="cursor", readiness_provider="cursor", env_ref_vars=("CURSOR_API_KEY",)),
+    ProviderSpec(
+        name="antigravity",
+        readiness_provider="antigravity",
+        env_ref_vars=("GEMINI_API_KEY",),
+    ),
     ProviderSpec(name="grok", readiness_provider="grok", env_ref_vars=("XAI_API_KEY",)),
 )
 
 _SPEC_BY_NAME: Mapping[str, ProviderSpec] = {spec.name: spec for spec in PROVIDER_REGISTRY}
+
+_RETIRED_PROVIDER_MIGRATIONS: Mapping[str, str] = {
+    "gemini": "antigravity",
+}
+
+
+def _prune_and_migrate_provider_config(
+    providers: Mapping[str, ProviderConfig],
+    environ: Mapping[str, str] | None = None,
+    *,
+    is_targeted: bool = False,
+    target_names: Container[str] | None = None,
+) -> dict[str, ProviderConfig]:
+    """Prune retired providers and migrate legacy provider entries to canonical names."""
+    result = dict(providers)
+    for legacy_name, target_name in _RETIRED_PROVIDER_MIGRATIONS.items():
+        migrated_legacy_cfg: ProviderConfig | None = None
+        if legacy_name in result:
+            legacy_cfg = result.pop(legacy_name)
+            if target_name not in result:
+                result[target_name] = legacy_cfg
+                migrated_legacy_cfg = legacy_cfg
+        if target_name in result:
+            spec = _SPEC_BY_NAME.get(target_name)
+            if spec is not None:
+                target_cfg = result[target_name]
+                if target_cfg.backend == "env_ref":
+                    valid_refs = {f"env://{var}" for var in spec.env_ref_vars}
+                    should_check_degradation = (
+                        not is_targeted
+                        or (target_names is not None and target_name in target_names)
+                        or migrated_legacy_cfg is not None
+                    )
+                    if target_cfg.credential_ref not in valid_refs or (
+                        should_check_degradation
+                        and environ is not None
+                        and _as_setup_status(target_cfg.status) == "ready"
+                        and _first_present(environ, spec.env_ref_vars) is None
+                    ):
+                        target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
+                        result[target_name] = target_cfg
+                elif migrated_legacy_cfg is not None:
+                    target_cfg = target_cfg.model_copy(update={"status": "unavailable"})
+                    result[target_name] = target_cfg
+    if not is_targeted:
+        for name in list(result):
+            if name not in _SPEC_BY_NAME:
+                result.pop(name, None)
+    return result
+
+
+def _resolve_existing_provider_config(
+    providers: Mapping[str, ProviderConfig],
+    name: str,
+) -> ProviderConfig | None:
+    """Return existing ProviderConfig for `name`, checking legacy alias keys if needed."""
+    existing = providers.get(name)
+    if existing is not None:
+        return existing
+    legacy_alias = next(
+        (legacy for legacy, target in _RETIRED_PROVIDER_MIGRATIONS.items() if target == name),
+        None,
+    )
+    if legacy_alias is not None:
+        return providers.get(legacy_alias)
+    return None
 
 
 class ProviderSetupResult(BaseModel):
@@ -277,17 +343,20 @@ def orchestrate_provider_setup(
         keyring=keyring_backend, env=env_backend, plain_file=plain_file_backend
     )
 
-    providers_config = dict(config.providers)
+    providers_config = _prune_and_migrate_provider_config(
+        config.providers, environ=env, is_targeted=is_targeted, target_names=target_names
+    )
     results: list[ProviderSetupResult] = []
     # Iterate registry order (not selection order) for a deterministic summary.
     for spec in PROVIDER_REGISTRY:
         if spec.name not in target_names:
             continue
+        current_config = config.model_copy(update={"providers": providers_config})
         result, provider_config = _orchestrate_one(
             spec,
             settings=settings,
             environ=env,
-            config=config,
+            config=current_config,
             allow_plain_secrets=allow_plain_secrets,
             non_interactive=non_interactive,
             capabilities=capabilities,
@@ -513,7 +582,7 @@ def _orchestrate_agent_provider(
     else:
         env_var = _first_present(environ, spec.env_ref_vars)
         if env_var is None:
-            existing = config.providers.get(spec.name)
+            existing = _resolve_existing_provider_config(config.providers, spec.name)
             if existing is not None and existing.source != "file":
                 # The provider was configured by a prior run (e.g. keyring or
                 # plain_file) but no fresh secret/env is available to re-probe.
@@ -618,8 +687,7 @@ def _orchestrate_file_backed_provider(
 
     Reached when there is no captured secret and no service-visible env ref, and
     either no prior config or a prior *file-backed* (``source="file"``) entry.
-    Providers such as Codex (``~/.codex``), Claude Code (``~/.claude``), Gemini
-    (``~/.gemini``/``GOOGLE_APPLICATION_CREDENTIALS``), and OpenCode
+    Providers such as Codex (``~/.codex``), Claude Code (``~/.claude``), and OpenCode
     (``~/.config/opencode``/``~/.ollama``) can still be ready via mounted auth
     files that ``awf start`` copies per workspace. Run the same bounded readiness
     probe ``_orchestrate_agent_provider`` uses for an env ref; if it reports

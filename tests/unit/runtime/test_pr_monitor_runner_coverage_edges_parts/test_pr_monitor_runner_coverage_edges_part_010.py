@@ -47,11 +47,12 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_without_terminating(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify workflow-scope comment repair failures leave fixes retryable."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed locally")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
     workspace_id = await seed_monitoring_workspace(factory)
     thread = ReviewThread(
         thread_id="T_workflow_scope",
@@ -75,6 +76,11 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_withou
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
 
     terminal = await runner._execute(
@@ -105,7 +111,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_withou
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
     assert "GitHub rejected the workflow-file push" in body
-    assert "`workflow` scope for .github/workflows/publish.yml" in body
+    assert r"\`workflow\` scope for .github/workflows/publish.yml" in body
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
@@ -142,11 +148,12 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_withou
 async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_fix_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Notification failures must not mask retryable workflow-scope push state."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed locally")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
     workspace_id = await seed_monitoring_workspace(factory)
     thread = ReviewThread(
         thread_id="T_workflow_scope",
@@ -171,6 +178,11 @@ async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
 
     terminal = await runner._execute(
@@ -238,6 +250,7 @@ _WORKFLOW_SCOPE_REJECTION = (
 async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A workflow-scope comment-repair wait surfaces a first-class attention signal.
 
@@ -249,7 +262,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
     """
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="fixed locally")
+    adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
     workspace_id = await seed_monitoring_workspace(factory)
     thread = ReviewThread(
         thread_id="T_workflow_scope",
@@ -267,6 +280,11 @@ async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
 
     terminal = await runner._execute(
@@ -301,6 +319,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
 async def test_monitor_comment_repair_workflow_scope_attention_survives_requeue(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repeated workflow-scope requeues keep one stable awaiting-human episode.
 
@@ -328,6 +347,11 @@ async def test_monitor_comment_repair_workflow_scope_attention_survives_requeue(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+
+    async def _commit_dirty(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
     state = MonitorState()
     action = AddressComments(threads=(thread,), review_comments=())
 
@@ -335,7 +359,7 @@ async def test_monitor_comment_repair_workflow_scope_attention_survives_requeue(
         # Each poll re-runs the fix cycle (the thread is never marked addressed)
         # and re-hits the workflow-scope push rejection; the inter-poll comment
         # call falls through to the empty-queue default.
-        adapter.queue(stdout="fixed locally")
+        adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
         cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=1, stderr=_WORKFLOW_SCOPE_REJECTION)
         await runner._execute(

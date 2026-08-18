@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.runtime import agent_scratch
 from awf.runtime.agent_scratch import (
     AWF_SCRATCH_BLOCK_END,
     AWF_SCRATCH_BLOCK_START,
@@ -207,6 +209,49 @@ async def test_empty_scratch_paths_is_noop(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_scratch_directory_opening_creates_relative_paths_and_rejects_parent_escape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scratch exclusion metadata stays beneath its selected relative directory."""
+    monkeypatch.chdir(tmp_path)
+    directory_fd = agent_scratch._open_scratch_directory(Path("metadata/info"))  # noqa: SLF001
+    try:
+        assert (tmp_path / "metadata" / "info").is_dir()
+    finally:
+        os.close(directory_fd)
+
+    with pytest.raises(OSError, match="unsafe Git scratch exclude directory path"):
+        agent_scratch._open_scratch_directory(Path("metadata/../outside"))  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_scratch_exclude_rewrite_fails_when_no_bytes_are_written(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A short write cannot be mistaken for a complete managed exclusion block."""
+    exclude = tmp_path / "info" / "exclude"
+    exclude.parent.mkdir()
+    exclude.write_text("", encoding="utf-8")
+    monkeypatch.setattr(agent_scratch.os, "write", lambda _fd, _data: 0)
+
+    with pytest.raises(OSError, match="could not write Git scratch exclude"):
+        agent_scratch._rewrite_scratch_exclude(exclude, _SCRATCH)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_extract_managed_patterns_ignores_blank_lines_inside_block() -> None:
+    """Blank lines do not become accidental Git exclusion patterns."""
+    assert (
+        agent_scratch._extract_managed_patterns(  # noqa: SLF001
+            f"{AWF_SCRATCH_BLOCK_START}\n\n{AWF_SCRATCH_BLOCK_END}\n"
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
 async def test_rev_parse_failure_is_handled_gracefully(tmp_path: Path) -> None:
     """A failed rev-parse returns False and writes nothing."""
     worktree = tmp_path / "worktree"
@@ -245,10 +290,11 @@ async def test_empty_rev_parse_output_is_handled_gracefully(tmp_path: Path) -> N
 
 @pytest.mark.unit
 async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> None:
-    """An absolute info/exclude path (linked worktree) is used verbatim."""
+    """A linked-worktree exclude path within its validated mirror is applied."""
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    exclude = tmp_path / "common" / "info" / "exclude"
+    mirror = tmp_path / "common"
+    exclude = mirror / "info" / "exclude"
     exclude.parent.mkdir(parents=True)
 
     async def run_git(args: list[str]) -> CommandResult:
@@ -256,7 +302,10 @@ async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> No
         return CommandResult(returncode=0, stdout=f"{exclude}\n", stderr="")
 
     applied = await apply_agent_scratch_excludes(
-        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+        run_git=run_git,
+        worktree_path=worktree,
+        scratch_paths=_SCRATCH,
+        validated_mirror_path=mirror,
     )
 
     assert applied is True
@@ -265,6 +314,32 @@ async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> No
     assert ".claude/worktrees/" in content
     # The path was absolute, so nothing was written under the worktree itself.
     assert not (worktree / "info").exists()
+
+
+@pytest.mark.unit
+async def test_absolute_rev_parse_path_outside_validated_mirror_is_refused(tmp_path: Path) -> None:
+    """A changed commondir cannot redirect a pinned re-ask exclude write."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    validated_mirror = tmp_path / "validated-mirror.git"
+    redirected_exclude = tmp_path / "other-mirror.git" / "info" / "exclude"
+    redirected_exclude.parent.mkdir(parents=True)
+    redirected_exclude.write_text("must stay intact\n", encoding="utf-8")
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["rev-parse", "--git-path", "info/exclude"]
+        return CommandResult(returncode=0, stdout=f"{redirected_exclude}\n", stderr="")
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git,
+        worktree_path=worktree,
+        scratch_paths=_SCRATCH,
+        validated_mirror_path=validated_mirror,
+    )
+
+    assert applied is False
+    assert redirected_exclude.read_text(encoding="utf-8") == "must stay intact\n"
+    assert not (validated_mirror / "info" / "exclude").exists()
 
 
 @pytest.mark.unit
@@ -298,10 +373,10 @@ async def test_exclude_write_oserror_is_handled_gracefully(
     worktree = _init_real_worktree(tmp_path)
     run_git = _real_run_git(worktree)
 
-    def _boom(self: Path, *args: object, **kwargs: object) -> int:
+    def _boom(*_args: object, **_kwargs: object) -> int:
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_text", _boom)
+    monkeypatch.setattr(agent_scratch.os, "write", _boom)
 
     applied = await apply_agent_scratch_excludes(
         run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
@@ -329,3 +404,109 @@ async def test_non_utf8_exclude_is_handled_gracefully(tmp_path: Path) -> None:
     )
 
     assert applied is False
+
+
+@pytest.mark.unit
+async def test_oversized_exclude_is_handled_without_rewriting(tmp_path: Path) -> None:
+    """A large regular exclude file cannot exhaust the monitor process."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    original = b"x" * (agent_scratch._MAX_SCRATCH_EXCLUDE_BYTES + 1)  # noqa: SLF001
+    exclude.write_bytes(original)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert exclude.read_bytes() == original
+
+
+@pytest.mark.unit
+async def test_exclude_growth_during_read_is_handled_without_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that grows after ``fstat`` cannot bypass the read cap."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    original = b"x" * agent_scratch._MAX_SCRATCH_EXCLUDE_BYTES  # noqa: SLF001
+    exclude.write_bytes(original)
+    real_read = agent_scratch.os.read
+    appended = False
+
+    def _read_after_growth(fd: int, size: int) -> bytes:
+        nonlocal appended
+        if size == 1 and not appended:
+            appended = True
+            os.write(fd, b"x")
+            os.lseek(fd, -1, os.SEEK_CUR)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(agent_scratch.os, "read", _read_after_growth)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert exclude.read_bytes() == original + b"x"
+
+
+@pytest.mark.unit
+async def test_exclude_symlink_is_refused_without_truncating_its_target(tmp_path: Path) -> None:
+    """An agent cannot redirect the control-plane write through ``info/exclude``."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    target = tmp_path / "host-file"
+    target.write_text("must stay intact\n", encoding="utf-8")
+    exclude.unlink()
+    exclude.symlink_to(target)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert target.read_text(encoding="utf-8") == "must stay intact\n"
+
+
+@pytest.mark.unit
+async def test_exclude_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    """A FIFO substituted for ``info/exclude`` cannot hang the worker."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    exclude.unlink()
+    os.mkfifo(exclude)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+
+
+@pytest.mark.unit
+async def test_exclude_info_directory_symlink_is_refused(tmp_path: Path) -> None:
+    """An agent cannot redirect the control-plane write through ``info`` itself."""
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    info_dir = exclude.parent
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_exclude = outside_dir / "exclude"
+    outside_exclude.write_text("must stay intact\n", encoding="utf-8")
+    exclude.unlink()
+    info_dir.rmdir()
+    info_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False
+    assert outside_exclude.read_text(encoding="utf-8") == "must stay intact\n"

@@ -24,14 +24,27 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from awf.common.audit import redact_audit_value
 from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.node.compose_diagnostics import (
+    _capture_error_detail_raw,
+    _compose_service_name,
+    _container_health_summary,
+    _container_healthcheck_test,
+    _container_is_unhealthy,
+    _redacted_diagnostics,
+)
+from awf.node.compose_errors import ComposeOperationError as ComposeOperationError
+from awf.node.compose_manager_clarification import (
+    _PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+    _PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
+    _clarification_model_service_names,
+)
 
 _log = get_logger(__name__)
 
@@ -55,38 +68,6 @@ DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES = 200
 
 SERVICE_STARTUP_DIAGNOSTICS_SCHEMA = "service_startup_diagnostics.v1"
 """Schema marker for the persisted ``SERVICE_STARTUP_FAILURE`` diagnostics payload."""
-
-_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES = 5
-"""How many trailing ``.State.Health.Log`` entries to persist per companion."""
-
-
-class ComposeOperationError(Exception):
-    """Raised when a ``docker compose`` command exits non-zero.
-
-    Carries stdout/stderr plus a structured reason code so the provisioner can
-    convert it to a workspace failure without regex-parsing error messages.
-    """
-
-    def __init__(
-        self,
-        *,
-        operation: str,
-        returncode: int,
-        stdout: str,
-        stderr: str,
-        reason_code: str = "COMPOSE_COMMAND_FAILED",
-    ) -> None:
-        """Capture the failed compose operation and its diagnostic streams."""
-        self.operation = operation
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.reason_code = reason_code
-        super().__init__(
-            f"docker compose {operation} failed "
-            f"(exit={returncode}, reason={reason_code}): "
-            f"{stderr.strip() or stdout.strip() or '<no output>'}"
-        )
 
 
 @dataclass(frozen=True)
@@ -225,6 +206,15 @@ class WorkspaceComposeSpec:
     cpu_limit: str | None = None
     memory_limit: str | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_enabled: bool = False
+    clarification_runtime_signature: str = ""
+    """Runtime/model identity stamped on clarification so fallbacks re-render it."""
+    clarification_agent_environment: tuple[tuple[str, str], ...] = ()
+    clarification_auth_mounts: tuple[AuthMount, ...] = ()
+    clarification_auth_credential_files: tuple[tuple[str, ...], ...] = ()
+    """Per clarification mount, the credential files discovered inside a directory mount."""
+    clarification_external_account_subject_token_file_rewrites: tuple[tuple[str, str], ...] = ()
+    clarification_aws_profile_path_rewrites: tuple[tuple[str, str], ...] = ()
     git_name: str | None = None
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
@@ -346,6 +336,14 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
+        clarification_model_services = (
+            _clarification_model_service_names(
+                spec.clarification_agent_environment,
+                service_names=(str(service["name"]) for service in services),
+            )
+            if spec.clarification_enabled
+            else ()
+        )
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services
@@ -359,6 +357,11 @@ class ComposeManager:
         if spec.docker_mode == "dind" and "DOCKER_HOST" not in {k for k, _ in agent_env}:
             agent_env.append(("DOCKER_HOST", "tcp://docker:2375"))
 
+        # Import lazily: the auth helpers import this module for ``AuthMount``.
+        # The rendered entrypoint shares the staging snippet with the legacy
+        # migration so the credential allowlist stays identical on both paths.
+        from awf.node.stack_launcher_auth_helpers import clarification_auth_copy_lines
+
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
             worktree_host_path=str(spec.worktree_host_path),
@@ -371,6 +374,35 @@ class ComposeManager:
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
+            clarification_enabled=spec.clarification_enabled,
+            clarification_service_marker=_PERSISTED_CLARIFICATION_SERVICE_MANAGED,
+            clarification_runtime_marker=_PERSISTED_CLARIFICATION_SERVICE_RUNTIME,
+            clarification_runtime_signature=spec.clarification_runtime_signature,
+            clarification_model_services=clarification_model_services,
+            clarification_agent_environment=spec.clarification_agent_environment,
+            clarification_auth_mounts=[
+                {"source": m.source, "target": m.target, "mode": m.mode}
+                for m in spec.clarification_auth_mounts
+            ],
+            clarification_auth_copy_snippets=[
+                "\n".join(
+                    clarification_auth_copy_lines(
+                        index,
+                        contained_credential_files=(
+                            spec.clarification_auth_credential_files[index]
+                            if index < len(spec.clarification_auth_credential_files)
+                            else ()
+                        ),
+                    )
+                )
+                for index, _ in enumerate(spec.clarification_auth_mounts)
+            ],
+            clarification_external_account_subject_token_file_rewrites_json=json.dumps(
+                spec.clarification_external_account_subject_token_file_rewrites
+            ).replace("$", "$$"),
+            clarification_aws_profile_path_rewrites_json=json.dumps(
+                spec.clarification_aws_profile_path_rewrites
+            ).replace("$", "$$"),
             git_name=spec.git_name,
             git_email=spec.git_email,
             agent_environment=agent_env,
@@ -1148,87 +1180,3 @@ class ComposeManager:
         if postgres_password is None:
             return value
         return value.replace("${AWF_POSTGRES_PASSWORD}", postgres_password)
-
-
-def _redacted_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
-    """Redact every captured string in the diagnostics payload before persistence."""
-    return cast("dict[str, Any]", redact_audit_value(payload))
-
-
-def _capture_error_detail_raw(exc: ComposeOperationError) -> str:
-    """Summarize a docker capture failure for a diagnostics marker.
-
-    WARNING: the returned string is UNREDACTED — it embeds ``exc.stderr``/
-    ``exc.stdout``, which can contain credential material from docker output. It
-    MUST pass through ``redact_audit_value`` (via ``_redacted_diagnostics``)
-    before being persisted, returned to a caller, or logged directly. Every
-    current caller stores it in a payload that is redacted unconditionally before
-    return; new callers must preserve that contract.
-    """
-    detail = exc.stderr.strip() or exc.stdout.strip() or "<no output>"
-    return f"{exc.reason_code}: {detail}"
-
-
-def _container_is_unhealthy(container: Any) -> bool:
-    """Return whether an inspected container is worth capturing diagnostics for.
-
-    A container is interesting when its healthcheck is not ``healthy`` (failed,
-    starting, or still probing) or — absent a healthcheck — when it has exited
-    with a non-zero code.
-
-    Docker/Podman report the literal ``"none"`` (``types.NoHealthcheck``) status
-    for containers without a healthcheck; that is treated like an absent
-    ``Health`` block so running sidecars (e.g. the agent) are not flagged just
-    because a different companion failed startup.
-    """
-    if not isinstance(container, Mapping):
-        return False
-    state = container.get("State")
-    if not isinstance(state, Mapping):
-        return False
-    health = state.get("Health")
-    if isinstance(health, Mapping):
-        status = health.get("Status")
-        if isinstance(status, str) and status != "none":
-            return status != "healthy"
-    exit_code = state.get("ExitCode") or 0
-    return state.get("Status") == "exited" and exit_code != 0
-
-
-def _compose_service_name(container: Mapping[str, Any]) -> str | None:
-    """Return the compose service label for a container, if present."""
-    config = container.get("Config")
-    labels = config.get("Labels") if isinstance(config, Mapping) else None
-    if not isinstance(labels, Mapping):
-        return None
-    name = labels.get("com.docker.compose.service")
-    return name if isinstance(name, str) and name else None
-
-
-def _container_health_summary(container: Mapping[str, Any]) -> dict[str, Any]:
-    """Summarize state + the trailing ``.State.Health.Log`` entries for a container."""
-    state = container.get("State")
-    state_map = state if isinstance(state, Mapping) else {}
-    health = state_map.get("Health")
-    health_map = health if isinstance(health, Mapping) else {}
-    raw_log = health_map.get("Log")
-    health_log: list[dict[str, Any]] = []
-    if isinstance(raw_log, list):
-        for entry in raw_log[-_SERVICE_STARTUP_HEALTH_LOG_TAIL_ENTRIES:]:
-            if not isinstance(entry, Mapping):
-                continue
-            health_log.append({"ExitCode": entry.get("ExitCode"), "Output": entry.get("Output")})
-    return {
-        "status": state_map.get("Status"),
-        "exit_code": state_map.get("ExitCode"),
-        "health_status": health_map.get("Status"),
-        "health_log": health_log,
-    }
-
-
-def _container_healthcheck_test(container: Mapping[str, Any]) -> list[Any] | None:
-    """Return the rendered healthcheck ``Test`` array as parsed by compose, if any."""
-    config = container.get("Config")
-    healthcheck = config.get("Healthcheck") if isinstance(config, Mapping) else None
-    test = healthcheck.get("Test") if isinstance(healthcheck, Mapping) else None
-    return test if isinstance(test, list) else None

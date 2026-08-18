@@ -1,5 +1,5 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Cursor, Gemini, OpenCode, Grok). Built multi-arch
+# the coding CLIs (Codex, Claude Code, Cursor, Antigravity, OpenCode, Grok). Built multi-arch
 # for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
 # --platform=...``.
 #
@@ -145,17 +145,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.144.1
-# 2.1.154+ is required for Claude Opus 4.8 (the default model in defaults.py);
-# older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
+ARG CODEX_VERSION=0.147.0
+# 2.1.226+ is required for Claude Opus 5 (the default model in defaults.py);
+# older CLIs reject `--model claude-opus-5`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.206
-ARG GEMINI_VERSION=0.50.0
+ARG CLAUDE_CODE_VERSION=2.1.226
 ARG OPENCODE_VERSION=1.17.18
 ARG GROK_VERSION=0.2.94
 ARG CURSOR_VERSION=2026.07.20-8cc9c0b
 ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4
 ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb
+# Antigravity CLI (agy). Pinned by GitHub release asset + sha256 per arch.
+# Operator must verify the arm64 sha before merge; CI validates linux/amd64 only.
+ARG ANTIGRAVITY_VERSION=1.1.13
+ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9
+ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
@@ -205,6 +209,42 @@ RUN set -eux; \
     chmod +x /usr/local/bin/cursor-agent; \
     test -x /usr/local/bin/cursor-agent
 
+# Install a pinned Antigravity CLI (agy) release after verifying its
+# architecture-specific checksum. The release tarball ships ``antigravity``;
+# expose it as ``agy`` at /usr/local/bin to match the adapter contract.
+RUN set -eux; \
+    agy_dpkg_arch="$(dpkg --print-architecture)"; \
+    case "$agy_dpkg_arch" in \
+      amd64) agy_asset="agy_cli_linux_x64.tar.gz"; expected_hash="${ANTIGRAVITY_AMD64_SHA256}" ;; \
+      arm64) agy_asset="agy_cli_linux_arm64.tar.gz"; expected_hash="${ANTIGRAVITY_ARM64_SHA256}" ;; \
+      *) echo "Unsupported Antigravity CLI architecture: $agy_dpkg_arch" >&2; exit 1 ;; \
+    esac; \
+    if [ -z "$expected_hash" ]; then \
+      echo "Antigravity CLI checksum is not pinned for ${ANTIGRAVITY_VERSION}/${agy_asset}" >&2; \
+      exit 1; \
+    fi; \
+    agy_archive="/tmp/${agy_asset}"; \
+    trap 'rm -f "$agy_archive"' EXIT; \
+    curl --fail --show-error --silent --location \
+      --retry 5 \
+      --retry-delay 2 \
+      --retry-all-errors \
+      --connect-timeout 20 \
+      --max-time 300 \
+      --output "$agy_archive" \
+      "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_VERSION}/${agy_asset}"; \
+    actual_hash="$(sha256sum "$agy_archive")"; \
+    actual_hash="${actual_hash%% *}"; \
+    if [ "$actual_hash" != "$expected_hash" ]; then \
+      echo "Antigravity CLI checksum mismatch for ${agy_asset}: expected ${expected_hash}, got ${actual_hash}" >&2; \
+      exit 1; \
+    fi; \
+    tar -xzf "$agy_archive" -C /tmp antigravity; \
+    install -m 0755 /tmp/antigravity /usr/local/bin/agy; \
+    rm -f /tmp/antigravity; \
+    test -x /usr/local/bin/agy; \
+    agy --version
+
 RUN set -eux; \
     max_attempts=3; \
     attempt=1; \
@@ -212,7 +252,6 @@ RUN set -eux; \
       if npm install -g --no-fund --no-audit \
         @openai/codex@${CODEX_VERSION} \
         @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
-        @google/gemini-cli@${GEMINI_VERSION} \
         opencode-ai@${OPENCODE_VERSION} \
         @xai-official/grok@${GROK_VERSION} \
         ccusage@${CCUSAGE_VERSION}; then \
@@ -228,28 +267,15 @@ RUN set -eux; \
     done; \
     npm cache clean --force; \
     codex --version; \
-    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
+    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
-    gemini --version; \
-    gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null; \
     opencode --version || true; \
     grok --version; \
     grok -p "" --always-approve --no-alt-screen --no-auto-update --output-format plain --model grok-build --help >/dev/null; \
+    agy --version; \
+    agy --help >/dev/null; \
     ccusage --version
-
-# Gemini CLI 0.50.0 only enables its ripgrep-backed search tool when a bundled
-# platform-specific rg binary exists; it does not fall back to the system rg on
-# PATH. Link the Debian ripgrep package into the bundled layout so Gemini uses
-# its file-aware RipGrepTool instead of the directory-only GrepTool fallback.
-RUN set -eux; \
-    gemini_entrypoint="$(readlink -f "$(command -v gemini)")"; \
-    gemini_bundle_dir="$(dirname "$gemini_entrypoint")"; \
-    rg_platform="$(node -p 'process.platform')"; \
-    rg_arch="$(node -p 'process.arch')"; \
-    mkdir -p "$gemini_bundle_dir/vendor/ripgrep"; \
-    ln -sf "$(command -v rg)" "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"; \
-    test -x "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"
 
 # Neutral ccusage config consumed via ``--config`` by AWF's usage collector
 # (src/awf/service/usage_collection.py). The per-workspace auth copy seeds
@@ -279,7 +305,10 @@ WORKDIR /workspace
 RUN set -eux; \
     command -v cursor-agent; \
     test -x /usr/local/bin/cursor-agent; \
-    cursor-agent --version
+    cursor-agent --version; \
+    command -v agy; \
+    test -x /usr/local/bin/agy; \
+    agy --version
 
 # tini reaps zombies when the CLI forks subprocesses (common in test runs).
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -101,6 +101,7 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetrySourceRuntimeNotReleasedError,
     WorkspaceService,
+    WorkspaceUnsupportedAgentRuntimeError,
 )
 
 if TYPE_CHECKING:
@@ -473,6 +474,8 @@ def register_workspace_tools(
         except WorkspaceCreateHostPortConflictError as exc:
             return _workspace_error_result(exc)
         except WorkspaceCreateDuplicateHostPortError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceUnsupportedAgentRuntimeError as exc:
             return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
@@ -847,7 +850,7 @@ def register_workspace_tools(
     @mcp.tool(name="awf_list_workspace_overview")
     async def awf_list_workspace_overview(
         status: WorkspaceStatus | None = Field(default=None),
-        agent: AgentRuntime | None = Field(default=None),
+        agent: AgentRuntime | str | None = Field(default=None),
         repo_url: str | None = Field(default=None, min_length=1, max_length=512),
         limit: int = Field(default=50, ge=1, le=500),
         cursor: str | None = Field(default=None, max_length=128),

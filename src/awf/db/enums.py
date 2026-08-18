@@ -246,7 +246,10 @@ class AgentRuntime(StrEnum):
     """Anthropic Claude Code — ``claude`` in non-interactive mode with ``--dangerously-skip-permissions``."""
 
     gemini = "gemini"
-    """Google Gemini CLI — ``gemini --yolo``."""
+    # Retired runtime, retained only so historical rows parse; not launchable.
+
+    antigravity = "antigravity"
+    """Google Antigravity CLI — ``agy -p`` with ``--dangerously-skip-permissions`` (successor to personal gemini-cli)."""
 
     cursor = "cursor"
     """Cursor CLI — ``cursor-agent -p --force`` for non-interactive workspace edits."""
@@ -256,6 +259,16 @@ class AgentRuntime(StrEnum):
 
     grok = "grok"
     """xAI Grok Build CLI — ``grok -p`` with headless auto-approval flags."""
+
+
+def parse_agent_runtime(agent: str | AgentRuntime) -> AgentRuntime | str:
+    """Parse a raw string or enum value into an AgentRuntime if valid, else return the raw string."""
+    if isinstance(agent, AgentRuntime):
+        return agent
+    try:
+        return AgentRuntime(agent)
+    except ValueError:
+        return agent
 
 
 class EgressDecision(StrEnum):

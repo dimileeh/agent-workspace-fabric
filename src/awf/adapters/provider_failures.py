@@ -19,6 +19,7 @@ AGENT_PROVIDER_CAPACITY_EXHAUSTED = "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
 AGENT_TIMEOUT = "AGENT_TIMEOUT"
 AGENT_IDLE_TIMEOUT = "AGENT_IDLE_TIMEOUT"
 AGENT_SERVICE_UNHEALTHY = "AGENT_SERVICE_UNHEALTHY"
+UNSUPPORTED_AGENT_RUNTIME = "UNSUPPORTED_AGENT_RUNTIME"
 
 ProviderFailureType = Literal[
     "auth",
@@ -28,6 +29,7 @@ ProviderFailureType = Literal[
     "timeout",
     "idle_timeout",
     "runtime_unhealthy",
+    "unsupported_runtime",
 ]
 FailureScope = Literal["provider", "infra"]
 
@@ -44,10 +46,12 @@ _AUTH_FAILURE_MARKERS = (
     "cursor api key",
     "cursor auth",
     "cursor authentication",
+    # agy 1.1.13 observed stderr (OAuth-only default / missing GEMINI_API_KEY).
+    # Dead antigravity_api_key markers dropped — agy never prints that name.
+    "authentication required. run 'agy' to log in",
+    "gemini_api_key environment variable is not set",
     "gemini_api_key",
     "google_api_key",
-    "google_genai_use_vertexai",
-    "google_genai_use_gca",
     "ollama api key",
     "ollama cloud authentication",
     "opencode auth",
@@ -171,6 +175,8 @@ def classify_provider_failure(
         failure_type = "timeout"
     elif normalized_reason == AGENT_IDLE_TIMEOUT:
         failure_type = "idle_timeout"
+    elif normalized_reason == UNSUPPORTED_AGENT_RUNTIME:
+        failure_type = "unsupported_runtime"
     elif any(marker in normalized for marker in _AUTH_FAILURE_MARKERS):
         failure_type = "auth"
     elif any(marker in normalized for marker in _USAGE_LIMIT_MARKERS):
@@ -280,6 +286,8 @@ def _reason_code_for_type(failure_type: ProviderFailureType) -> str:
         return AGENT_TIMEOUT
     if failure_type == "idle_timeout":
         return AGENT_IDLE_TIMEOUT
+    if failure_type == "unsupported_runtime":
+        return UNSUPPORTED_AGENT_RUNTIME
     return AGENT_PROVIDER_CAPACITY_EXHAUSTED
 
 
@@ -298,12 +306,16 @@ def _default_cooldown_seconds(failure_type: ProviderFailureType) -> int:
         return 900
     if failure_type in {"timeout", "idle_timeout"}:
         return 120
+    if failure_type == "unsupported_runtime":
+        return 0
     return 300
 
 
 def _recommended_action(failure_type: ProviderFailureType) -> str:
     if failure_type == "auth":
         return "Refresh provider credentials or dispatch an approved fallback provider."
+    if failure_type == "unsupported_runtime":
+        return "Dispatch an approved fallback agent runtime."
     return "Retry after provider cooldown or dispatch an approved fallback model."
 
 
