@@ -193,6 +193,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         stack_launcher: WorkspaceStackLauncher | None = None,
         service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
         before_provision: Callable[[], Awaitable[None]] | None = None,
+        after_provision: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
@@ -201,6 +202,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
         self._before_provision = before_provision
+        self._after_provision = after_provision
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
@@ -231,7 +233,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             if ws is None:
                 return  # Workspace disappeared or wasn't requested; nothing to do.
 
-        await self._provision_claimed_workspace(workspace_id, ws)
+        await self._run_claimed_provision(workspace_id, ws)
 
     async def provision_claimed(
         self, workspace_id: str, execution_claim_epoch: int | None = None
@@ -260,9 +262,29 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
-        await self._provision_claimed_workspace(
+        await self._run_claimed_provision(
             workspace_id, ws, execution_claim_epoch=execution_claim_epoch
         )
+
+    async def _run_claimed_provision(
+        self,
+        workspace_id: str,
+        ws: Workspace,
+        *,
+        execution_claim_epoch: int | None = None,
+    ) -> None:
+        """Run provisioning between paired service-resource lifecycle hooks."""
+
+        hook_started = self._before_provision is not None
+        try:
+            await self._provision_claimed_workspace(
+                workspace_id,
+                ws,
+                execution_claim_epoch=execution_claim_epoch,
+            )
+        finally:
+            if hook_started and self._after_provision is not None:
+                await self._after_provision()
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""

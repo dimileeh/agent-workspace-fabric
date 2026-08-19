@@ -224,9 +224,13 @@ class TestSuccess:
 
         launcher = _RecordingStackLauncher()
         refresh_calls: list[None] = []
+        release_calls: list[None] = []
 
         async def _refresh_service_auth() -> None:
             refresh_calls.append(None)
+
+        async def _release_service_auth() -> None:
+            release_calls.append(None)
 
         original_add_worktree = git_manager.add_worktree
 
@@ -241,6 +245,7 @@ class TestSuccess:
             stack_launcher=launcher,
             config=ProvisionerConfig(node_id="test-node-01"),
             before_provision=_refresh_service_auth,
+            after_provision=_release_service_auth,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
@@ -259,6 +264,7 @@ class TestSuccess:
 
         assert len(launcher.requests) == 1
         assert refresh_calls == [None]
+        assert release_calls == [None]
         request = launcher.requests[0]
         assert request.workspace_id == ws_id
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
@@ -274,6 +280,32 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_after_provision_hook_runs_when_claimed_pipeline_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provisioner = object.__new__(Provisioner)
+        release_calls: list[None] = []
+
+        async def _before_provision() -> None:
+            pass
+
+        async def _after_provision() -> None:
+            release_calls.append(None)
+
+        async def _raise_from_pipeline(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("provision failed")
+
+        provisioner._before_provision = _before_provision  # noqa: SLF001
+        provisioner._after_provision = _after_provision  # noqa: SLF001
+        monkeypatch.setattr(provisioner, "_provision_claimed_workspace", _raise_from_pipeline)
+
+        with pytest.raises(RuntimeError, match="provision failed"):
+            await provisioner._run_claimed_provision("ws_failure", Workspace())  # noqa: SLF001
+
+        assert release_calls == [None]
 
     @pytest.mark.unit
     async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(

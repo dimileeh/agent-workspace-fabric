@@ -662,6 +662,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             config: object,
             service_diagnostics: object = None,
             before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -754,6 +755,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             config: object,
             service_diagnostics: object = None,
             before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -1018,6 +1020,7 @@ def _stub_worker_runtime_dependencies(
             config: object,
             service_diagnostics: object = None,
             before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             """Test helper for  init  ."""
             pass
@@ -1197,8 +1200,15 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
             self.sources.append(source)
 
     class _RecordingProvisioner:
-        def __init__(self, *, before_provision: Any, **_kwargs: object) -> None:
+        def __init__(
+            self,
+            *,
+            before_provision: Any,
+            after_provision: Any,
+            **_kwargs: object,
+        ) -> None:
             created["before_provision"] = before_provision
+            created["after_provision"] = after_provision
 
     def _materialize(**_kwargs: object) -> Path:
         snapshot = next(snapshots)
@@ -1213,6 +1223,22 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     monkeypatch.setattr(worker_mod, "Provisioner", _RecordingProvisioner)
     monkeypatch.setattr(worker_mod, "_materialize_service_gitconfig", _materialize)
     monkeypatch.setattr(worker_mod, "_apply_service_git_environment", applied_envs.append)
+    released_protections: list[frozenset[Path | None]] = []
+    released_roots: list[Path] = []
+
+    def _record_released_leases(
+        *,
+        snapshots_root: Path,
+        protected_configs: tuple[Path | None, ...],
+    ) -> None:
+        released_roots.append(snapshots_root)
+        released_protections.append(frozenset(protected_configs))
+
+    monkeypatch.setattr(
+        worker_mod,
+        "_release_superseded_service_gitconfig_leases",
+        _record_released_leases,
+    )
 
     settings = _settings(tmp_path)
     live_gitconfig = Path(settings.host_home) / ".gitconfig"
@@ -1221,8 +1247,24 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     runtime = worker_mod.build_worker_runtime(settings)
     assert runtime is not None
 
-    asyncio.run(created["before_provision"]())
-    asyncio.run(created["before_provision"]())
+    async def exercise_overlapping_provisions() -> None:
+        first_started = asyncio.Event()
+        finish_first = asyncio.Event()
+
+        async def first_provision() -> None:
+            await created["before_provision"]()
+            first_started.set()
+            await finish_first.wait()
+            await created["after_provision"]()
+
+        first = asyncio.create_task(first_provision())
+        await first_started.wait()
+        await created["before_provision"]()
+        await created["after_provision"]()
+        finish_first.set()
+        await first
+
+    asyncio.run(exercise_overlapping_provisions())
 
     expected_paths = [
         str(tmp_path / "snapshot-old"),
@@ -1234,6 +1276,13 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
         tmp_path / "snapshot-new",
     ]
     assert [env["GIT_CONFIG_GLOBAL"] for env in applied_envs] == expected_paths
+    assert released_protections == [
+        frozenset({tmp_path / "snapshot-old"}),
+        frozenset({tmp_path / "snapshot-old", tmp_path / "snapshot-new"}),
+        frozenset({tmp_path / "snapshot-old", tmp_path / "snapshot-new"}),
+        frozenset({tmp_path / "snapshot-new"}),
+    ]
+    assert released_roots == [Path(settings.work_dir) / "service-auth" / "gitconfig-snapshots"] * 4
 
 
 @pytest.mark.unit

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -393,6 +393,30 @@ def _hold_worker_bundle_lease(bundle_root: Path) -> None:
     _ACTIVE_BUNDLE_LEASES[bundle_root] = lease
 
 
+def release_superseded_service_gitconfig_leases(
+    *,
+    snapshots_root: Path,
+    protected_configs: Iterable[Path | None],
+) -> None:
+    """Release worker leases not needed by current or in-flight consumers."""
+
+    protected_roots = {config.parent.parent for config in protected_configs if config is not None}
+    for bundle_root, lease in tuple(_ACTIVE_BUNDLE_LEASES.items()):
+        if bundle_root.parent != snapshots_root:
+            continue
+        if bundle_root in protected_roots:
+            continue
+        if _ACTIVE_BUNDLE_LEASES.get(bundle_root) is not lease:
+            continue  # pragma: no cover - defensive against future concurrent callers
+        del _ACTIVE_BUNDLE_LEASES[bundle_root]
+        try:
+            with suppress(OSError):
+                fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
+        finally:
+            with suppress(OSError):
+                lease.close()
+
+
 @contextmanager
 def _snapshot_coordination_lock(snapshots_root: Path) -> Iterator[None]:
     lock_path = snapshots_root / _SNAPSHOT_COORDINATION_LOCK_NAME
@@ -516,4 +540,7 @@ def _make_bundle_readable(
             os.fsync(file_obj.fileno())
 
 
-__all__ = ["materialize_service_gitconfig"]
+__all__ = [
+    "materialize_service_gitconfig",
+    "release_superseded_service_gitconfig_leases",
+]

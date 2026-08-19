@@ -709,6 +709,42 @@ def test_service_gitconfig_snapshot_retains_bundle_registered_to_worker(
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_releases_only_superseded_worker_leases(
+    tmp_path: Path,
+) -> None:
+    snapshots_root = tmp_path / "gitconfig-snapshots"
+    bundles = [snapshots_root / f"{index:064x}" for index in range(3)]
+    for bundle in bundles:
+        bundle.mkdir(parents=True)
+        lease_path = bundle / "worker.lock"
+        lease_path.touch()
+        gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES[bundle] = lease_path.open("r+b")
+    other_root_bundle = tmp_path / "other-snapshots" / ("f" * 64)
+    other_root_bundle.mkdir(parents=True)
+    other_lease_path = other_root_bundle / "worker.lock"
+    other_lease_path.touch()
+    other_lease = other_lease_path.open("r+b")
+    gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES[other_root_bundle] = other_lease
+
+    superseded_lease = gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES[bundles[0]]
+    gitconfig_snapshot_mod.release_superseded_service_gitconfig_leases(
+        snapshots_root=snapshots_root,
+        protected_configs=(
+            bundles[1] / "home" / ".gitconfig",
+            bundles[2] / "home" / ".gitconfig",
+            None,
+        ),
+    )
+
+    assert superseded_lease.closed
+    assert not other_lease.closed
+    assert set(gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES) == {
+        *bundles[1:],
+        other_root_bundle,
+    }
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_retains_prelease_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

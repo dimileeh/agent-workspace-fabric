@@ -74,6 +74,9 @@ from awf.service.gc_terminal_passes import (
 from awf.service.gitconfig_snapshot import (
     materialize_service_gitconfig as _materialize_service_gitconfig,
 )
+from awf.service.gitconfig_snapshot import (
+    release_superseded_service_gitconfig_leases as _release_superseded_service_gitconfig_leases,
+)
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     OrphanReapResult,
@@ -241,10 +244,24 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     )
 
     snapshot_refresh_lock = asyncio.Lock()
+    current_gitconfig_snapshot = gitconfig_snapshot
+    provisioning_gitconfig_snapshots: dict[asyncio.Task[Any], Path | None] = {}
+
+    def _release_superseded_gitconfig_leases() -> None:
+        _release_superseded_service_gitconfig_leases(
+            snapshots_root=work_dir / "service-auth" / "gitconfig-snapshots",
+            protected_configs=(
+                current_gitconfig_snapshot,
+                *provisioning_gitconfig_snapshots.values(),
+            ),
+        )
 
     async def _refresh_service_gitconfig() -> None:
         """Refresh Git config for worker Git and subsequently launched agents."""
+        nonlocal current_gitconfig_snapshot
         async with snapshot_refresh_lock:
+            provision_task = asyncio.current_task()
+            assert provision_task is not None
             try:
                 refreshed_snapshot = await asyncio.to_thread(
                     _materialize_service_gitconfig,
@@ -259,6 +276,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                     error=str(exc),
                     fallback="current_gitconfig",
                 )
+                provisioning_gitconfig_snapshots[provision_task] = current_gitconfig_snapshot
+                _release_superseded_gitconfig_leases()
                 return
             refreshed_git_env = _service_git_environment(
                 host_home,
@@ -268,6 +287,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             _apply_service_git_environment(refreshed_git_env)
             git.replace_env(refreshed_git_env)
             auth_mount_resolver.replace_gitconfig_source(refreshed_snapshot)
+            current_gitconfig_snapshot = refreshed_snapshot
+            provisioning_gitconfig_snapshots[provision_task] = refreshed_snapshot
+            _release_superseded_gitconfig_leases()
+
+    async def _release_service_gitconfig() -> None:
+        """Release a completed provision's superseded Git-config bundle pin."""
+        async with snapshot_refresh_lock:
+            provision_task = asyncio.current_task()
+            if provision_task is not None:
+                provisioning_gitconfig_snapshots.pop(provision_task, None)
+            _release_superseded_gitconfig_leases()
 
     secret_lease_resolver = LocalSecretLeaseMountResolver(
         host_home=host_home,
@@ -300,6 +330,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         stack_launcher=stack_launcher,
         service_diagnostics=compose,
         before_provision=_refresh_service_gitconfig,
+        after_provision=_release_service_gitconfig,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
