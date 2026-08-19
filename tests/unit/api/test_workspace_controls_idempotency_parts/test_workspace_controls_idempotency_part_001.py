@@ -1146,6 +1146,43 @@ async def test_remonitor_rejects_prelaunch_failed_workspace_without_runtime_meta
 
 
 @pytest.mark.unit
+async def test_remonitor_rejects_monitoring_workspace_without_retry_recommendation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach incomplete PR monitor"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "remonitor-monitoring-metadata",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": "Workspace remonitor requires a provisioned monitor runtime.",
+        "detail": {
+            "status": WorkspaceStatus.monitoring_pr.value,
+            "missing": ["compose_project_name", "compose_file_path"],
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+
+
+@pytest.mark.unit
 async def test_remonitor_hosted_failed_workspace_does_not_require_compose_metadata(
     client: AsyncClient,
     engine: AsyncEngine,
