@@ -882,10 +882,16 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "docs/REASON_CATALOG.md#pr_already_closed",
     ),
     "PR_ALREADY_MERGED": _ReasonText(
-        "The PR selected for monitor adoption is already merged.",
-        "No monitor adoption is needed; use workspace cleanup or status commands instead.",
-        "There is no open PR monitor work left for AWF to own.",
-        "awf workspace adopt-pr",
+        "AWF refused to adopt or retry work for a pull request that is already merged.",
+        (
+            "Do not adopt or retry the merged pull request. Use workspace cleanup or status "
+            "commands, or create a new workspace for follow-up work."
+        ),
+        (
+            "The selected adoption PR or the source workspace's existing PR merged before "
+            "AWF could adopt or retry it, so there is no open PR work left to own."
+        ),
+        "awf workspace show <workspace_id>",
         "docs/REASON_CATALOG.md#pr_already_merged",
     ),
     "PR_METADATA_FETCH_FAILED": _ReasonText(

@@ -698,10 +698,10 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_closed](#pr_already_closed)
 
 ### PR_ALREADY_MERGED
-**Problem:** The PR selected for monitor adoption is already merged.
-**Likely Cause:** There is no open PR monitor work left for AWF to own.
-**Operator Fix:** No monitor adoption is needed; use workspace cleanup or status commands instead.
-**Related Command:** `awf workspace adopt-pr`
+**Problem:** AWF refused to adopt or retry work for a pull request that is already merged.
+**Likely Cause:** The selected adoption PR or the source workspace's existing PR merged before AWF could adopt or retry it, so there is no open PR work left to own.
+**Operator Fix:** Do not adopt or retry the merged pull request. Use workspace cleanup or status commands, or create a new workspace for follow-up work.
+**Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
 ### PR_CREATE_FORGE_NOT_SUPPORTED
