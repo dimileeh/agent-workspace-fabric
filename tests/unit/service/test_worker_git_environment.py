@@ -214,6 +214,57 @@ def test_service_gitconfig_snapshot_preserves_external_relative_include(
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_external_symlink_alias_origins(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    aliases = tmp_path / "aliases"
+    shared = tmp_path / "shared"
+    host_home.mkdir()
+    shared.mkdir()
+    (host_home / ".gitconfig").write_text(
+        "[include]\n"
+        "  path = ../aliases/active/base.inc\n"
+        "[include]\n"
+        "  path = ../aliases/inactive/base.inc\n",
+    )
+    (shared / "base.inc").write_text("[include]\n  path = identity.inc\n")
+    for name in ("active", "inactive"):
+        alias = aliases / name
+        alias.mkdir(parents=True)
+        (alias / "base.inc").symlink_to(shared / "base.inc")
+        (alias / "identity.inc").write_text(
+            f"[user]\n  email = {name}@example.com\n",
+        )
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(snapshot),
+            "--includes",
+            "--get-all",
+            "user.email",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "active@example.com",
+        "inactive@example.com",
+    ]
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_preserves_symlinked_relative_include_path(
     tmp_path: Path,
 ) -> None:

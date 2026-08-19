@@ -168,7 +168,10 @@ def _snapshot_relative_path(path: Path, *, source_home: Path) -> Path:
         relative = None
     if relative is not None and resolved.is_relative_to(source_home.resolve()):
         return relative
-    digest = hashlib.sha256(os.fsencode(resolved)).hexdigest()
+    # Distinct external symlink aliases need distinct destinations because Git
+    # resolves their nested relative includes from each alias's lexical parent.
+    lexical_path = Path(os.path.abspath(path))  # noqa: PTH100 - preserve symlink alias
+    digest = hashlib.sha256(os.fsencode(lexical_path)).hexdigest()
     return Path(_EXTERNAL_INCLUDES_DIR) / digest
 
 
