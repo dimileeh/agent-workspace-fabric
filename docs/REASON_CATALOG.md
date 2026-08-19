@@ -928,6 +928,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace guide`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_policy_downgrade_required](#workspace_guide_policy_downgrade_required)
 
+### WORKSPACE_REMONITOR_METADATA_MISSING
+**Problem:** AWF refused to restart PR monitoring because the workspace lacks persisted PR identity or local runtime metadata.
+**Likely Cause:** The workspace failed before provisioning or was created by an older AWF version without one or more required fields: PR number, recoverable remote branch, Compose project, or Compose file. Hosted PR adoption does not require local Compose metadata.
+**Operator Fix:** Retry the workspace so AWF can reprovision its runtime and reattach the existing PR, then use Remonitor if another monitor restart is needed.
+**Related Command:** `awf workspace retry <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_remonitor_metadata_missing](#workspace_remonitor_metadata_missing)
+
 ### WORKSPACE_STATE_NOT_GUIDABLE
 **Problem:** Workspace is not in a state eligible for operator guidance.
 **Likely Cause:** The workspace is not in `monitoring_pr`; operator guidance can only steer the PR monitor while it owns an open pull request.

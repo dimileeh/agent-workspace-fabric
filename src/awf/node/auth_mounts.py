@@ -76,6 +76,7 @@ from awf.node.compose_manager import AuthMount
 _CONTAINER_HOME = "/home/agent"
 _GH_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gh"
 _GITCONFIG_TARGET = f"{_CONTAINER_HOME}/.gitconfig"
+_SNAPSHOT_AGENT_GITCONFIG_NAME = "agent.gitconfig"
 _SSH_TARGET = f"{_CONTAINER_HOME}/.ssh"
 _CODEX_TARGET = f"{_CONTAINER_HOME}/.codex"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
@@ -106,6 +107,7 @@ class ServiceAuthMountResolver:
 
     host_home: Path
     work_dir: Path
+    gitconfig_source: Path | None = None
     host_env: Mapping[str, str] | None = None
     workspace_owner_uid: int | None = None
     workspace_owner_gid: int | None = None
@@ -121,6 +123,7 @@ class ServiceAuthMountResolver:
         return resolve_service_auth_mounts(
             host_home=self.host_home,
             work_dir=self.work_dir,
+            gitconfig_source=self.gitconfig_source,
             workspace_id=workspace_id,
             host_env=self.host_env,
             suppressed_targets=suppressed_targets,
@@ -136,6 +139,7 @@ def resolve_service_auth_mounts(
     host_home: Path,
     work_dir: Path,
     workspace_id: str,
+    gitconfig_source: Path | None = None,
     host_env: Mapping[str, str] | None = None,  # noqa: ARG001
     suppressed_targets: Collection[str] = (),
     suppressed_providers: Collection[str] = (),
@@ -163,6 +167,7 @@ def resolve_service_auth_mounts(
     )
     base_mounts = _build_host_auth_mounts(
         normalized_home,
+        gitconfig_source=gitconfig_source,
         suppressed_targets=suppressed_target_set,
     )
     return _workspace_auth_mounts(
@@ -180,18 +185,41 @@ def resolve_service_auth_mounts(
 def _build_host_auth_mounts(
     host_home: Path,
     *,
+    gitconfig_source: Path | None = None,
     suppressed_targets: Collection[str] = (),
 ) -> list[AuthMount]:
+    resolved_gitconfig_source = gitconfig_source or host_home / ".gitconfig"
     ro_mounts = [
         (host_home / ".config" / "gh", _GH_CONFIG_TARGET, "ro"),
-        (host_home / ".gitconfig", _GITCONFIG_TARGET, "ro"),
         (host_home / ".ssh", _SSH_TARGET, "ro"),
     ]
-    return [
+    mounts = [
         AuthMount(source=str(src), target=target, mode=mode)
         for src, target, mode in ro_mounts
         if target not in suppressed_targets and src.exists()
     ]
+    if _GITCONFIG_TARGET in suppressed_targets or not resolved_gitconfig_source.exists():
+        return mounts
+
+    bundle_root = resolved_gitconfig_source.parent.parent
+    agent_gitconfig = bundle_root / _SNAPSHOT_AGENT_GITCONFIG_NAME
+    if agent_gitconfig.is_file():
+        mounts.append(
+            AuthMount(
+                source=str(agent_gitconfig),
+                target=_GITCONFIG_TARGET,
+                mode="ro",
+            )
+        )
+    else:
+        mounts.append(
+            AuthMount(
+                source=str(resolved_gitconfig_source),
+                target=_GITCONFIG_TARGET,
+                mode="ro",
+            )
+        )
+    return mounts
 
 
 def _workspace_auth_mounts(

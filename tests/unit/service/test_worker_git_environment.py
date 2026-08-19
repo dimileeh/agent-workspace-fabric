@@ -7,12 +7,441 @@ the pure HOME/SSH/credential-helper env builder -- in isolation.
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
 from awf.common.git_auth import bitbucket_git_config_entries
+from awf.service import gitconfig_snapshot as gitconfig_snapshot_mod
 from awf.service import worker as worker_mod
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_survives_host_atomic_replacement(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    host_home.mkdir()
+    source = host_home / ".gitconfig"
+    source.write_text("[user]\n  name = Original\n")
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+
+    assert snapshot.parent.parent.parent == work_dir / "service-auth" / "gitconfig-snapshots"
+    assert snapshot.name == ".gitconfig"
+    assert snapshot.read_text() == "[user]\n  name = Original\n"
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+    assert snapshot.parent.parent in gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES
+
+    replacement = host_home / ".gitconfig.next"
+    replacement.write_text("[user]\n  name = Replacement\n")
+    replacement.replace(source)
+    source.unlink()
+
+    env = worker_mod._service_git_environment(host_home, gitconfig_path=snapshot)
+
+    assert env["GIT_CONFIG_GLOBAL"] == str(snapshot)
+    assert snapshot.read_text() == "[user]\n  name = Original\n"
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_reuses_immutable_content_addressed_inode(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    host_home.mkdir()
+    source = host_home / ".gitconfig"
+    source.write_text("[user]\n  name = Original\n")
+
+    first = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+    assert first is not None
+    first_inode = first.stat().st_ino
+
+    second = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+
+    assert second == first
+    assert second.stat().st_ino == first_inode
+
+    source.write_text("[user]\n  name = Replacement\n")
+    replacement = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+
+    assert replacement is not None
+    assert replacement != first
+    assert replacement.read_text() == "[user]\n  name = Replacement\n"
+    assert first.read_text() == "[user]\n  name = Original\n"
+    assert first.stat().st_ino == first_inode
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_adds_lease_to_prelease_bundle(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = Original\n")
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+    assert snapshot is not None
+    bundle_root = snapshot.parent.parent
+    held_lease = gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES.pop(bundle_root)
+    held_lease.close()
+    (bundle_root / "worker.lock").unlink()
+
+    reused = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+    )
+
+    assert reused == snapshot
+    assert (bundle_root / "worker.lock").stat().st_mode & 0o777 == 0o600
+    assert bundle_root in gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_relative_include_origin(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[include]\n  path = identity.inc\n")
+    (host_home / "identity.inc").write_text("[user]\n  email = agent@example.com\n")
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    result = subprocess.run(
+        ["git", "config", "--file", str(snapshot), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "agent@example.com"
+
+    agent_config = snapshot.parent.parent / "agent.gitconfig"
+    assert agent_config.read_text() == "[include]\n  path = identity.inc\n"
+    agent_result = subprocess.run(
+        ["git", "config", "--file", str(agent_config), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert agent_result.returncode == 1
+    assert agent_result.stdout == ""
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_is_absent_without_host_config(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+
+    assert (
+        worker_mod._materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_reaps_only_unreferenced_stale_bundles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    snapshots_root.mkdir(parents=True)
+    bundles = [snapshots_root / f"{index:064x}" for index in range(12)]
+    for bundle in bundles:
+        bundle.mkdir()
+        (bundle / "worker.lock").touch()
+
+    current = bundles[-1]
+    compose_referenced = bundles[0]
+    container_referenced = bundles[1]
+    compose_file = work_dir / "compose" / "ws_active" / "compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text(f"source: {compose_referenced}/agent.gitconfig\n")
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset({container_referenced / "agent.gitconfig"}),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+    assert current.is_dir()
+    assert compose_referenced.is_dir()
+    assert container_referenced.is_dir()
+    assert not bundles[2].exists()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_skips_cleanup_when_docker_state_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    stale = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    stale.mkdir(parents=True)
+    current.mkdir()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: None,
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+    assert stale.is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_discovers_container_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            subprocess.CompletedProcess(
+                args=["docker", "container", "ls", "--quiet"],
+                returncode=0,
+                stdout="container-id\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["docker", "container", "inspect", "container-id"],
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Mounts": [{"Source": "/work/bundle/agent.gitconfig"}],
+                            "Config": {"Env": ["OTHER=value"]},
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    sources = gitconfig_snapshot_mod._running_container_mount_sources()
+
+    assert sources == frozenset({Path("/work/bundle/agent.gitconfig")})
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_cleanup_error_does_not_break_worker_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    snapshots_root.mkdir(parents=True)
+    bundles = [snapshots_root / f"{index:064x}" for index in range(9)]
+    for bundle in bundles:
+        bundle.mkdir()
+        (bundle / "worker.lock").touch()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod.shutil,
+        "rmtree",
+        lambda _path: (_ for _ in ()).throw(OSError("concurrent cleanup")),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=bundles[-1],
+        now=10**10,
+    )
+
+    assert bundles[0].is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_retains_bundle_with_live_worker_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    snapshots_root.mkdir(parents=True)
+    bundles = [snapshots_root / f"{index:064x}" for index in range(9)]
+    for bundle in bundles:
+        bundle.mkdir()
+        (bundle / "worker.lock").touch()
+    leased = bundles[0]
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+
+    with (leased / "worker.lock").open("r+b") as lease:
+        fcntl.flock(lease.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+            snapshots_root=snapshots_root,
+            work_dir=work_dir,
+            protected_root=bundles[-1],
+            now=10**10,
+        )
+
+    assert leased.is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_cleanup_tolerates_disappearing_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    snapshots_root.mkdir(parents=True)
+    disappearing = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    disappearing.mkdir()
+    current.mkdir()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+    original_stat = Path.stat
+    disappearing_stat_calls = 0
+
+    def flaky_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal disappearing_stat_calls
+        if path == disappearing:
+            disappearing_stat_calls += 1
+            if disappearing_stat_calls > 1:
+                raise FileNotFoundError(path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_serializes_publication_and_cleanup(tmp_path: Path) -> None:
+    snapshots_root = tmp_path / "gitconfig-snapshots"
+    snapshots_root.mkdir()
+    competing_started = threading.Event()
+    competing_acquired = threading.Event()
+
+    def competing_operation() -> None:
+        competing_started.set()
+        with gitconfig_snapshot_mod._snapshot_coordination_lock(snapshots_root):
+            competing_acquired.set()
+
+    with gitconfig_snapshot_mod._snapshot_coordination_lock(snapshots_root):
+        competitor = threading.Thread(target=competing_operation)
+        competitor.start()
+        assert competing_started.wait(timeout=1)
+        assert not competing_acquired.wait(timeout=0.1)
+
+    competitor.join(timeout=1)
+    assert competing_acquired.is_set()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_is_owned_by_agent_runtime_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
+    ownership: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "awf.service.gitconfig_snapshot.os.fchown",
+        lambda _fd, uid, gid: ownership.append((uid, gid)),
+    )
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        owner_uid=1000,
+        owner_gid=1000,
+    )
+
+    assert snapshot is not None
+    assert ownership
+    assert set(ownership) == {(1000, 1000)}
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_remains_agent_readable_for_non_root_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
+    monkeypatch.setattr("awf.service.gitconfig_snapshot.os.geteuid", lambda: 501)
+    monkeypatch.setattr(
+        "awf.service.gitconfig_snapshot.os.fchown",
+        lambda *_args: pytest.fail("non-root worker must not attempt fchown"),
+    )
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        owner_uid=1000,
+        owner_gid=1000,
+    )
+
+    assert snapshot is not None
+    assert snapshot.stat().st_mode & 0o777 == 0o644
+    assert snapshot.parent.stat().st_mode & 0o777 == 0o755
 
 
 @pytest.mark.unit

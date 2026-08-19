@@ -508,9 +508,11 @@ export interface Workspace {
   repo_url: string;
   branch_base: string;
   branch_name: string | null;
+  remote_push_branch: string | null;
   base_commit: string | null;
   task_title: string;
   task_prompt: string;
+  task_kind: string;
   task_external_id: string | null;
   task_class: string | null;
   owned_paths: string[];
@@ -543,7 +545,7 @@ export interface Workspace {
   compose_project_name: string | null;
   compose_file_path: string | null;
   pr_url: string | null;
-  pr_number?: number | null;
+  pr_number: number | null;
   failure_reason: string | null;
   failure_message: string | null;
   block_state?: WorkspaceBlockState | null;

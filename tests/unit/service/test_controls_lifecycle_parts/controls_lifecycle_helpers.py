@@ -202,6 +202,8 @@ async def _workspace(
         test_commands=["pytest -q"],
     )
     workspace.status = status.value
+    workspace.branch_name = f"awf/{workspace.id}"
+    workspace.remote_push_branch = workspace.branch_name
     workspace.compose_project_name = f"awf_{workspace.id}"
     workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
     await session.flush()

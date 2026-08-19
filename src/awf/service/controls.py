@@ -53,6 +53,7 @@ from awf.service.controls_errors import (
     WorkspaceRebaseMissingPrUrlError,
     WorkspaceRebaseStateError,
     WorkspaceRefreshStateError,
+    WorkspaceRemonitorMetadataMissingError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
     WorkspaceStackStopError,
@@ -432,6 +433,13 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
 
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)
+
+        missing_monitor_metadata = _remonitor_missing_metadata(workspace)
+        if missing_monitor_metadata:
+            raise WorkspaceRemonitorMetadataMissingError(
+                workspace,
+                missing=missing_monitor_metadata,
+            )
 
         operation = await operations.create(
             workspace_id=workspace_id,
@@ -1391,6 +1399,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _operator_operation_payload,
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
+    _remonitor_missing_metadata,
     _reset_failed_workspace_for_remonitor,
     _stack_release_replay_message,
     _with_secret_lease_evidence,
@@ -1420,6 +1429,7 @@ __all__ = [
     "WorkspaceGuidePolicyDowngradeRequiredError",
     "WorkspaceGuideStateError",
     "WorkspaceRemonitorMissingPrUrlError",
+    "WorkspaceRemonitorMetadataMissingError",
     "WorkspaceRemonitorStateError",
     "WorkspaceRefreshStateError",
     "WorkspaceValidateStateError",

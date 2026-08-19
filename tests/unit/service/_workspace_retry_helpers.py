@@ -437,6 +437,21 @@ async def _seed_failed_source_workspace(
     """
     async with factory() as session:
         repo = WorkspaceRepository(session)
+        task_policy = None
+        if task_kind == "sync_feature_pr":
+            task_policy = {
+                "task_kind": task_kind,
+                "pr_adoption": {
+                    "repo_slug": "example/retryable",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/example/retryable/pull/42",
+                    "head_ref": "contributors/fix-123",
+                    "base_ref": "development",
+                    "head_sha": "b" * 40,
+                    "base_sha": "a" * 40,
+                    "execution": {"mode": "local"},
+                },
+            }
         source = await repo.create(
             repo_url="git@github.com:example/retryable.git",
             branch_base="development",
@@ -453,6 +468,7 @@ async def _seed_failed_source_workspace(
             resolved_profile={"source": "retry-test-profile"},
             test_commands=["uv run pytest tests/unit -q"],
             task_kind=task_kind,
+            task_policy=task_policy,
         )
         await session.commit()
         return source.id

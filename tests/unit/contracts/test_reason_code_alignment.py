@@ -237,6 +237,57 @@ async def test_rest_and_mcp_agree_on_remonitor_pr_required(
 
 
 @pytest.mark.unit
+async def test_rest_and_mcp_agree_on_remonitor_metadata_missing(
+    contract_stack: ContractStack,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(contract_stack.factory)
+    async with contract_stack.factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="SEED_INCOMPLETE_RUNTIME",
+        )
+        await session.commit()
+    capability = CAPABILITIES_BY_NAME["remonitor_workspace"]
+
+    rest_response = await contract_stack.client.post(
+        capability.rest_path.format(workspace_id=workspace_id),
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "remonitor-metadata-rest",
+        },
+        json={"reason": "resume monitor"},
+    )
+    assert rest_response.status_code == 409
+    rest_envelope = normalize_rest_error_body(rest_response.json())
+
+    mcp_result = await _call_mcp(
+        contract_stack.mcp,
+        capability.mcp_tool or "",
+        {
+            "workspace_id": workspace_id,
+            "reason": "resume monitor",
+            "idempotency_key": "remonitor-metadata-mcp",
+        },
+    )
+    assert mcp_result.isError is True
+    mcp_envelope = normalize_mcp_error_body(mcp_result.structuredContent)
+
+    assert (
+        rest_envelope["error_code"]
+        == mcp_envelope["error_code"]
+        == "WORKSPACE_REMONITOR_METADATA_MISSING"
+    )
+    assert rest_envelope["message"] == mcp_envelope["message"]
+    assert rest_envelope["detail"] == mcp_envelope["detail"]
+
+
+@pytest.mark.unit
 async def test_rest_and_mcp_agree_on_validate_state_not_validatable(
     contract_stack: ContractStack,
 ) -> None:

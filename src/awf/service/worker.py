@@ -70,6 +70,9 @@ from awf.service.gc_terminal_passes import (
 from awf.service.gc_terminal_passes import (
     terminal_gc_discarded_statuses as _terminal_gc_discarded_statuses,
 )
+from awf.service.gitconfig_snapshot import (
+    materialize_service_gitconfig as _materialize_service_gitconfig,
+)
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     OrphanReapResult,
@@ -143,7 +146,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    git_env = _service_git_environment(host_home, github_token=settings.github_token)
+    gitconfig_snapshot = _materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=work_dir,
+        owner_uid=AGENT_RUNTIME_UID,
+        owner_gid=AGENT_RUNTIME_GID,
+    )
+    git_env = _service_git_environment(
+        host_home,
+        github_token=settings.github_token,
+        gitconfig_path=gitconfig_snapshot,
+    )
     _apply_service_git_environment(git_env)
     git = GitManager(
         work_dir / "git",
@@ -213,6 +226,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     auth_mount_resolver = ServiceAuthMountResolver(
         host_home=host_home,
         work_dir=work_dir,
+        gitconfig_source=gitconfig_snapshot,
         workspace_owner_uid=AGENT_RUNTIME_UID,
         workspace_owner_gid=AGENT_RUNTIME_GID,
     )
@@ -684,6 +698,7 @@ def _service_git_environment(
     *,
     github_token: str | None = None,
     source_env: Mapping[str, str] | None = None,
+    gitconfig_path: Path | None = None,
 ) -> dict[str, str]:
     """Git/SSH environment for service-worker host repository operations.
 
@@ -724,7 +739,7 @@ def _service_git_environment(
     ssh_config = host_home / ".ssh" / "config"
     if ssh_config.is_file():
         ssh_command.extend(["-o", "IgnoreUnknown=UseKeychain", "-F", str(ssh_config)])
-    gitconfig = host_home / ".gitconfig"
+    gitconfig = gitconfig_path or host_home / ".gitconfig"
     if gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
     known_hosts = host_home / ".ssh" / "known_hosts"

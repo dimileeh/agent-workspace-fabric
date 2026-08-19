@@ -1092,6 +1092,174 @@ async def test_remonitor_failed_workspace_with_pr_reopens_candidate_for_worker(
 
 
 @pytest.mark.unit
+async def test_remonitor_rejects_prelaunch_failed_workspace_without_runtime_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_workspace(client, monkeypatch)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        workspace.task_kind = "sync_feature_pr"
+        workspace.pr_url = "https://github.com/example/remonitor/pull/42"
+        workspace.pr_number = 42
+        workspace.remote_push_branch = "feature/existing-pr"
+        workspace.failure_reason = "infrastructure_failure"
+        workspace.failure_message = "git failed before provisioning"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="GIT_COMMAND_FAILED",
+        )
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach existing PR"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-prelaunch-failure"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": (
+            "Workspace remonitor requires a provisioned monitor runtime; retry the "
+            "workspace to reprovision and reattach its existing PR."
+        ),
+        "detail": {
+            "status": WorkspaceStatus.failed.value,
+            "missing": ["compose_project_name", "compose_file_path"],
+            "recommended_action": "retry_workspace",
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_message == "git failed before provisioning"
+
+
+@pytest.mark.unit
+async def test_remonitor_hosted_failed_workspace_does_not_require_compose_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        workspace.task_policy = {
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+            }
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach hosted PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-hosted-failure"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_remonitor_feature_workspace_recovers_missing_remote_branch_from_branch_name(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.task_kind == "feature_branch_pr"
+        assert workspace.branch_name
+        workspace.remote_push_branch = None
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach legacy feature PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-legacy-branch"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("missing_field", "expected_missing"),
+    [
+        ("pr_number", ["pr_number"]),
+        ("remote_push_branch", ["remote_push_branch"]),
+    ],
+)
+async def test_remonitor_rejects_failed_workspace_without_pr_identity_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+    expected_missing: list[str],
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        setattr(workspace, missing_field, None)
+        if missing_field == "remote_push_branch":
+            workspace.task_kind = "sync_feature_pr"
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach incomplete PR monitor"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": f"remonitor-missing-{missing_field}",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "WORKSPACE_REMONITOR_METADATA_MISSING"
+    assert response.json()["detail"]["detail"] == {
+        "status": WorkspaceStatus.failed.value,
+        "missing": expected_missing,
+        "recommended_action": "retry_workspace",
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "final_status",
     [

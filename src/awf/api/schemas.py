@@ -946,10 +946,12 @@ class WorkspaceResponse(BaseModel):
     repo_url: str
     branch_base: str
     branch_name: str | None
+    remote_push_branch: str | None
     base_commit: str | None
 
     task_title: str
     task_prompt: str
+    task_kind: str
     task_external_id: str | None
     task_tag: str | None = None
     task_class: TaskClass | None

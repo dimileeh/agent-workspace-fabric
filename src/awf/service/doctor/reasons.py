@@ -51,6 +51,24 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service logs --service worker",
         "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
     ),
+    "WORKSPACE_REMONITOR_METADATA_MISSING": _ReasonText(
+        (
+            "AWF refused to restart PR monitoring because the workspace lacks "
+            "persisted PR identity or local runtime metadata."
+        ),
+        (
+            "Retry the workspace so AWF can reprovision its runtime and reattach "
+            "the existing PR, then use Remonitor if another monitor restart is needed."
+        ),
+        (
+            "The workspace failed before provisioning or was created by an older "
+            "AWF version without one or more required fields: PR number, recoverable "
+            "remote branch, Compose project, or Compose file. Hosted PR adoption does "
+            "not require local Compose metadata."
+        ),
+        "awf workspace retry <workspace_id>",
+        _reason_catalog_link("WORKSPACE_REMONITOR_METADATA_MISSING"),
+    ),
     "FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF detected a code forge it does not support. GitHub and Bitbucket "

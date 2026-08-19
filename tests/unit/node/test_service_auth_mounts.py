@@ -613,6 +613,33 @@ def test_service_auth_mount_resolver_delegates_to_service_mount_resolution(
 
 
 @pytest.mark.unit
+def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / "digest"
+    snapshot = bundle / "home" / ".gitconfig"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("[user]\n  name = Snapshot\n")
+    wrapper = bundle / "agent.gitconfig"
+    wrapper.write_text(f"[include]\n  path = {snapshot}\n")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        gitconfig_source=snapshot,
+    )
+
+    mounts = resolver.resolve(workspace_id="ws_auth")
+
+    by_target = {mount.target: mount for mount in mounts}
+    assert by_target["/home/agent/.gitconfig"].source == str(wrapper)
+    assert by_target["/home/agent/.gitconfig"].mode == "ro"
+    assert str(bundle) not in by_target
+    assert all(mount.source != str(bundle) for mount in mounts)
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_skip_missing_paths(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
