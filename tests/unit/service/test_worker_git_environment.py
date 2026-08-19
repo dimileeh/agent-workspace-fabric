@@ -1239,13 +1239,19 @@ def test_service_gitconfig_snapshot_is_owned_by_agent_runtime_user(
     (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
     ownership: list[tuple[int, int]] = []
     file_operations: list[tuple[str, int]] = []
+    transferred_inodes: set[tuple[int, int]] = set()
     original_fchmod = os.fchmod
 
     def record_fchmod(fd: int, mode: int) -> None:
+        stat = os.fstat(fd)
+        if (stat.st_dev, stat.st_ino) in transferred_inodes:
+            raise PermissionError("CAP_FOWNER unavailable after ownership transfer")
         file_operations.append(("chmod", fd))
         original_fchmod(fd, mode)
 
     def record_fchown(fd: int, uid: int, gid: int) -> None:
+        stat = os.fstat(fd)
+        transferred_inodes.add((stat.st_dev, stat.st_ino))
         file_operations.append(("chown", fd))
         ownership.append((uid, gid))
 

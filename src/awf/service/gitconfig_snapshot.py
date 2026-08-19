@@ -419,8 +419,11 @@ def _hold_worker_bundle_lease(bundle_root: Path) -> None:
     # ``a+b`` upgrades bundles published by the immediately preceding AWF
     # build, before lifetime leases existed. The lock is metadata only; config
     # content and the agent-mounted inode remain immutable.
-    lease = (bundle_root / _WORKER_LEASE_NAME).open("a+b")
-    os.fchmod(lease.fileno(), 0o600)
+    lease_path = bundle_root / _WORKER_LEASE_NAME
+    lease_existed = lease_path.exists()
+    lease = lease_path.open("a+b")
+    if not lease_existed:
+        os.fchmod(lease.fileno(), 0o600)
     fcntl.flock(lease.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     _ACTIVE_BUNDLE_LEASES[bundle_root] = lease
 
