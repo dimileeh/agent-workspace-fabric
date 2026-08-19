@@ -124,7 +124,7 @@ class ForgeClient(Protocol):
         repo: RepoRef,
         pr_number: int,
     ) -> PullRequestSnapshot:
-        """Return a PR's lifecycle and live head ref via one lightweight read."""
+        """Return a PR's lifecycle, live head ref, and target SHA."""
         ...
 
     async def fetch_pr_status(

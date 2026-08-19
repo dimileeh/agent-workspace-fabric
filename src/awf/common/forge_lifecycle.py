@@ -19,3 +19,4 @@ class PullRequestSnapshot:
 
     lifecycle: PullRequestLifecycle
     head_ref: str | None
+    base_sha: str | None = None

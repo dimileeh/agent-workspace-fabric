@@ -9,7 +9,8 @@ purely for cohesion (one place for the PR-state query and its pagination peers).
 from __future__ import annotations
 
 # Minimal lifecycle/identity query for admission paths that need to distinguish
-# an open PR from a terminal or deleted one and may need its live head branch.
+# an open PR from a terminal or deleted one and may need its live head branch
+# and target commit.
 # Keep this separate from the monitor's full status snapshot so unrelated
 # CI/review pagination cannot block admission.
 _GQL_PR_LIFECYCLE = """
@@ -19,6 +20,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       closed
       merged
       headRefName
+      baseRefOid
     }
   }
 }

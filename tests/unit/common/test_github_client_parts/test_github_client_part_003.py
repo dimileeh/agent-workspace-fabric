@@ -1002,6 +1002,7 @@ class TestFetchPrStatusPart002:
                                 "closed": False,
                                 "merged": False,
                                 "headRefName": "contributors/live-head",
+                                "baseRefOid": "b" * 40,
                             }
                         }
                     }
@@ -1016,8 +1017,10 @@ class TestFetchPrStatusPart002:
 
         assert snapshot.lifecycle is PullRequestLifecycle.open
         assert snapshot.head_ref == "contributors/live-head"
+        assert snapshot.base_sha == "b" * 40
         query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
         assert "headRefName" in query_arg
+        assert "baseRefOid" in query_arg
 
     @pytest.mark.unit
     async def test_pull_request_lifecycle_lookup_retries_transient_response(self) -> None:

@@ -284,7 +284,7 @@ class GitHubClient:
         repo: RepoRef,
         pr_number: int,
     ) -> PullRequestSnapshot:
-        """Return a PR's lifecycle and live head branch using one minimal read."""
+        """Return a PR's lifecycle, live head branch, and target SHA."""
         payload = await self._graphql(
             query=_GQL_PR_LIFECYCLE,
             variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
@@ -299,7 +299,11 @@ class GitHubClient:
             lifecycle = PullRequestLifecycle.closed
         else:
             lifecycle = PullRequestLifecycle.open
-        return PullRequestSnapshot(lifecycle, _clean_optional_str(pr.get("headRefName")))
+        return PullRequestSnapshot(
+            lifecycle,
+            _clean_optional_str(pr.get("headRefName")),
+            _clean_optional_str(pr.get("baseRefOid")),
+        )
 
     async def fetch_pr_status(
         self,

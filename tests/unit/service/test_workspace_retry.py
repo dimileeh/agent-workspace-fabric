@@ -16,7 +16,7 @@ from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
-from awf.node.provisioner_helpers import _provision_checkout_base_branch
+from awf.node.provisioner_helpers import _provision_base_commit, _provision_checkout_base_branch
 from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
@@ -136,6 +136,7 @@ async def test_live_pr_snapshot_uses_current_forge_metadata(
             return PullRequestSnapshot(
                 lifecycle=PullRequestLifecycle.open,
                 head_ref="contributors/live-head",
+                base_sha="b" * 40,
             )
 
     monkeypatch.setattr(
@@ -153,6 +154,7 @@ async def test_live_pr_snapshot_uses_current_forge_metadata(
     assert snapshot == PullRequestSnapshot(
         lifecycle=PullRequestLifecycle.open,
         head_ref="contributors/live-head",
+        base_sha="b" * 40,
     )
     assert calls == [
         {
@@ -598,6 +600,7 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
         assert source is not None
         source.pr_url = pr_url
         source.pr_number = None
+        source.base_commit = "b" * 40
         source.compose_project_name = None
         source.compose_file_path = None
         await session.commit()
@@ -702,6 +705,7 @@ async def test_retry_recovers_open_feature_pr_head_ref_from_live_snapshot(
         return PullRequestSnapshot(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/live-feature-head",
+            base_sha="c" * 40,
         )
 
     monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
@@ -720,7 +724,70 @@ async def test_retry_recovers_open_feature_pr_head_ref_from_live_snapshot(
     assert retried.pr_url == "https://github.com/example/retryable/pull/10"
     assert retried.pr_number == 10
     assert retried.remote_push_branch == "contributors/live-feature-head"
+    assert retried.base_commit == "c" * 40
     assert _provision_checkout_base_branch(retried) == "contributors/live-feature-head"
+    assert _provision_base_commit(retried, checked_out_head="h" * 40) == "c" * 40
+
+
+async def test_retry_rejects_open_feature_pr_without_persisted_or_live_base_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/legacy-feature",
+        remote_push_branch="contributors/live-feature-head",
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.base_commit = None
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/live-feature-head",
+            base_sha=None,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry existing PR",
+                settings=settings,
+                provider_environ={},
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "pr_number": 10,
+        "pr_url": "https://github.com/example/retryable/pull/10",
+        "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
+    }
+    assert [workspace.id for workspace in workspaces] == [first.id]
 
 
 async def test_retry_prefers_live_open_pr_head_over_stale_persisted_refs(
@@ -748,12 +815,14 @@ async def test_retry_prefers_live_open_pr_head_over_stale_persisted_refs(
         source = await WorkspaceRepository(session).get(first.id)
         assert source is not None
         source.pr_number = 10
+        source.base_commit = "b" * 40
         await session.commit()
 
     async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
         return PullRequestSnapshot(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/current-live-head",
+            base_sha="c" * 40,
         )
 
     monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
@@ -770,6 +839,7 @@ async def test_retry_prefers_live_open_pr_head_over_stale_persisted_refs(
 
     retried = retry.new_workspace
     assert retried.remote_push_branch == "contributors/current-live-head"
+    assert retried.base_commit == "b" * 40
     assert _provision_checkout_base_branch(retried) == "contributors/current-live-head"
 
 
@@ -846,6 +916,7 @@ async def test_retry_preserves_feature_pr_reopened_after_external_close(
         source = await WorkspaceRepository(session).get(first.id)
         assert source is not None
         source.pr_number = 10
+        source.base_commit = "b" * 40
         source.compose_project_name = None
         source.compose_file_path = None
         await session.commit()
@@ -1038,6 +1109,7 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
         source = await repo.get(first.id)
         assert source is not None
         source.pr_number = 10
+        source.base_commit = "b" * 40
         source.compose_project_name = None
         source.compose_file_path = None
         source.status = WorkspaceStatus.monitoring_pr.value

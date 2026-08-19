@@ -129,7 +129,11 @@ async def test_pull_request_snapshot_includes_live_head_ref() -> None:
     fake.enqueue(
         "GET",
         _PR,
-        json={"state": "OPEN", "source": {"branch": {"name": "contributors/live-head"}}},
+        json={
+            "state": "OPEN",
+            "source": {"branch": {"name": "contributors/live-head"}},
+            "destination": {"commit": {"hash": "b" * 40}},
+        },
     )
     client = make_client(fake)
 
@@ -137,7 +141,33 @@ async def test_pull_request_snapshot_includes_live_head_ref() -> None:
 
     assert snapshot.lifecycle is PullRequestLifecycle.open
     assert snapshot.head_ref == "contributors/live-head"
+    assert snapshot.base_sha == "b" * 40
     assert [request.url.path for request in fake.requests] == [_PR]
+
+
+async def test_pull_request_snapshot_resolves_abbreviated_target_sha() -> None:
+    abbreviated_base = "b" * 12
+    full_base = "b" * 40
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json={
+            "state": "OPEN",
+            "source": {"branch": {"name": "contributors/live-head"}},
+            "destination": {"commit": {"hash": abbreviated_base}},
+        },
+    )
+    fake.enqueue("GET", f"{_REPO}/commit/{abbreviated_base}", json={"hash": full_base})
+    client = make_client(fake)
+
+    snapshot = await client.fetch_pull_request_snapshot(repo=repo(), pr_number=42)
+
+    assert snapshot.base_sha == full_base
+    assert [request.url.path for request in fake.requests] == [
+        _PR,
+        f"{_REPO}/commit/{abbreviated_base}",
+    ]
 
 
 async def test_pull_request_lifecycle_lookup_retries_transient_response() -> None:

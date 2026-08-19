@@ -536,6 +536,8 @@ async def retry_workspace_row(
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     preserve_existing_feature_pr = bool(planning_scope_context is None and existing_feature_pr)
     live_pr_head_ref: str | None = None
+    live_pr_base_commit: str | None = None
+    retry_base_commit: str | None = None
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
         try:
@@ -551,6 +553,7 @@ async def retry_workspace_row(
                 )
                 existing_pr_lifecycle = existing_pr_snapshot.lifecycle
                 live_pr_head_ref = existing_pr_snapshot.head_ref
+                live_pr_base_commit = existing_pr_snapshot.base_sha
         except Exception as exc:
             raise workspaces.WorkspaceRetryPrStateUnavailableError(
                 "Could not verify whether the existing pull request is still open.",
@@ -606,6 +609,25 @@ async def retry_workspace_row(
                     "reason_code": "PR_HEAD_REF_UNAVAILABLE",
                 },
             )
+        candidate_base_commits = (source.base_commit, live_pr_base_commit)
+        retry_base_commit = next(
+            (
+                base_commit.strip()
+                for base_commit in candidate_base_commits
+                if base_commit and base_commit.strip()
+            ),
+            None,
+        )
+        if retry_base_commit is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's target base commit.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
+                },
+            )
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -631,9 +653,10 @@ async def retry_workspace_row(
         remote_push_branch=retry_remote_push_branch,
     )
     if preserve_existing_feature_pr:
+        assert retry_base_commit is not None
         retried.pr_url = source.pr_url
         retried.pr_number = existing_feature_pr_number
-        retried.base_commit = source.base_commit
+        retried.base_commit = retry_base_commit
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)
