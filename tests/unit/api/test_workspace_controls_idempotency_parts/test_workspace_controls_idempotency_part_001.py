@@ -1261,6 +1261,11 @@ async def test_remonitor_rejects_failed_workspace_without_pr_identity_metadata(
         "recommended_action": "retry_workspace",
     }
     assert await _counts(engine, workspace_id) == before_counts
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert getattr(workspace, missing_field) is None
 
 
 @pytest.mark.unit
