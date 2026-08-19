@@ -446,6 +446,52 @@ async def test_retry_preserves_existing_feature_pr_identity(
     assert _provision_checkout_base_branch(retried) == expected_remote_push_branch
 
 
+async def test_retry_replaces_feature_pr_closed_externally(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/closed-feature",
+        remote_push_branch="contributors/closed-head",
+        failure_reason_code="pr_closed_externally",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="replace closed PR",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "feature_branch_pr"
+    assert retried.pr_url is None
+    assert retried.pr_number is None
+    assert retried.remote_push_branch is None
+    assert _provision_checkout_base_branch(retried) == retried.branch_base
+
+
 async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filtering(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

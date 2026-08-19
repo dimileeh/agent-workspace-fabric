@@ -194,6 +194,7 @@ async def _mark_failed(
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
     release_runtime: bool = True,
+    failure_reason_code: str = "TEST_FAIL",
 ) -> dict[str, object]:
     """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
@@ -213,7 +214,11 @@ async def _mark_failed(
             "source": "frozen:test-profile",
         }
         workspace.resolved_profile = frozen_profile
-        await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=failure_reason_code,
+        )
         if release_runtime:
             await repo.add_event(
                 workspace,

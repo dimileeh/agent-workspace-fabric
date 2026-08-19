@@ -38,6 +38,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
+from awf.runtime.pr_monitor_actions import AbortReason
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -88,6 +89,16 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
+
+
+def _source_pr_closed_externally(source: Workspace) -> bool:
+    """Return whether the source's terminal transition recorded a closed PR."""
+    return any(
+        event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.failed.value
+        and event.reason_code == AbortReason.pr_closed_externally.value
+        for event in source.events
+    )
 
 
 async def _source_runtime_not_yet_released(
@@ -464,11 +475,14 @@ async def retry_workspace_row(
         # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
-    preserve_existing_feature_pr = (
-        planning_scope_context is None
-        and source.task_kind == TaskKind.feature_branch_pr.value
+    existing_feature_pr = (
+        source.task_kind == TaskKind.feature_branch_pr.value
         and bool(source.pr_url)
         and source.pr_number is not None
+    )
+    closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
+    preserve_existing_feature_pr = (
+        planning_scope_context is None and existing_feature_pr and not closed_existing_feature_pr
     )
     retry_remote_push_branch = (
         source.remote_push_branch
@@ -476,7 +490,12 @@ async def retry_workspace_row(
         or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
         else None
     )
-    if preserve_existing_feature_pr:
+    if closed_existing_feature_pr:
+        # A monitor-confirmed closed PR cannot be reused, and its remote head
+        # may already have been deleted. Provision a fresh branch so the retry
+        # can open a replacement PR.
+        retry_remote_push_branch = None
+    elif preserve_existing_feature_pr:
         # The retry executes on a fresh local branch, but it must push back to
         # the existing PR's remote head. Legacy feature rows may predate
         # remote_push_branch persistence, where branch_name is that head ref.
