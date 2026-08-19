@@ -1186,18 +1186,47 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     class _RecordingGitManager:
         def __init__(self, _work_dir: Path, *, env: dict[str, str], **_kwargs: object) -> None:
             self.envs = [env]
+            self.task_envs: dict[asyncio.Task[Any], dict[str, str]] = {}
             created["git"] = self
 
         def replace_env(self, env: dict[str, str]) -> None:
             self.envs.append(env)
 
+        def set_task_env(self, env: dict[str, str]) -> asyncio.Task[Any]:
+            task = asyncio.current_task()
+            assert task is not None
+            self.task_envs[task] = env
+            return task
+
+        def reset_task_env(self, token: asyncio.Task[Any]) -> None:
+            self.task_envs.pop(token)
+
+        def current_gitconfig(self) -> str:
+            task = asyncio.current_task()
+            env = self.task_envs.get(task, self.envs[-1])
+            return env["GIT_CONFIG_GLOBAL"]
+
     class _RecordingAuthMountResolver:
         def __init__(self, *, gitconfig_source: Path | None, **_kwargs: object) -> None:
             self.sources = [gitconfig_source]
+            self.task_sources: dict[asyncio.Task[Any], Path | None] = {}
             created["auth_mount_resolver"] = self
 
         def replace_gitconfig_source(self, source: Path | None) -> None:
             self.sources.append(source)
+
+        def set_task_gitconfig_source(self, source: Path | None) -> asyncio.Task[Any]:
+            task = asyncio.current_task()
+            assert task is not None
+            self.task_sources[task] = source
+            return task
+
+        def reset_task_gitconfig_source(self, token: asyncio.Task[Any]) -> None:
+            self.task_sources.pop(token)
+
+        def current_source(self) -> Path | None:
+            task = asyncio.current_task()
+            return self.task_sources.get(task, self.sources[-1])
 
     class _RecordingProvisioner:
         def __init__(
@@ -1250,19 +1279,35 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     async def exercise_overlapping_provisions() -> None:
         first_started = asyncio.Event()
         finish_first = asyncio.Event()
+        observed: dict[str, tuple[str, Path | None]] = {}
 
         async def first_provision() -> None:
             await created["before_provision"]()
             first_started.set()
             await finish_first.wait()
+            observed["first"] = (
+                created["git"].current_gitconfig(),
+                created["auth_mount_resolver"].current_source(),
+            )
             await created["after_provision"]()
 
         first = asyncio.create_task(first_provision())
         await first_started.wait()
         await created["before_provision"]()
+        observed["second"] = (
+            created["git"].current_gitconfig(),
+            created["auth_mount_resolver"].current_source(),
+        )
         await created["after_provision"]()
         finish_first.set()
         await first
+
+        assert observed == {
+            "first": (str(tmp_path / "snapshot-old"), tmp_path / "snapshot-old"),
+            "second": (str(tmp_path / "snapshot-new"), tmp_path / "snapshot-new"),
+        }
+        assert created["git"].task_envs == {}
+        assert created["auth_mount_resolver"].task_sources == {}
 
     asyncio.run(exercise_overlapping_provisions())
 

@@ -7,6 +7,7 @@ import os
 import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
+from contextvars import Token
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -258,7 +259,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
 
     snapshot_refresh_lock = asyncio.Lock()
     current_gitconfig_snapshot = gitconfig_snapshot
+    current_git_env = git_env
     provisioning_gitconfig_snapshots: dict[asyncio.Task[Any], Path | None] = {}
+    provisioning_gitconfig_bindings: dict[
+        asyncio.Task[Any], tuple[Token[dict[str, str]], Token[Path | None]]
+    ] = {}
 
     def _release_superseded_gitconfig_leases() -> None:
         _release_superseded_service_gitconfig_leases(
@@ -271,10 +276,21 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
 
     async def _refresh_service_gitconfig() -> None:
         """Refresh Git config for worker Git and subsequently launched agents."""
-        nonlocal current_gitconfig_snapshot
+        nonlocal current_git_env, current_gitconfig_snapshot
         async with snapshot_refresh_lock:
             provision_task = asyncio.current_task()
             assert provision_task is not None
+
+            def _bind_provision(
+                snapshot: Path | None,
+                env: dict[str, str],
+            ) -> None:
+                provisioning_gitconfig_snapshots[provision_task] = snapshot
+                provisioning_gitconfig_bindings[provision_task] = (
+                    git.set_task_env(env),
+                    auth_mount_resolver.set_task_gitconfig_source(snapshot),
+                )
+
             refresh_source_home = host_home
             if gitconfig_source_socket is not None:
                 try:
@@ -287,7 +303,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                         error=str(exc),
                         fallback="current_gitconfig",
                     )
-                    provisioning_gitconfig_snapshots[provision_task] = current_gitconfig_snapshot
+                    _bind_provision(current_gitconfig_snapshot, current_git_env)
                     _release_superseded_gitconfig_leases()
                     return
                 refresh_source_home = (
@@ -309,7 +325,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                     error=str(exc),
                     fallback="current_gitconfig",
                 )
-                provisioning_gitconfig_snapshots[provision_task] = current_gitconfig_snapshot
+                _bind_provision(current_gitconfig_snapshot, current_git_env)
                 _release_superseded_gitconfig_leases()
                 return
             refreshed_git_env = _service_git_environment(
@@ -321,7 +337,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             git.replace_env(refreshed_git_env)
             auth_mount_resolver.replace_gitconfig_source(refreshed_snapshot)
             current_gitconfig_snapshot = refreshed_snapshot
-            provisioning_gitconfig_snapshots[provision_task] = refreshed_snapshot
+            current_git_env = refreshed_git_env
+            _bind_provision(refreshed_snapshot, refreshed_git_env)
             _release_superseded_gitconfig_leases()
 
     async def _release_service_gitconfig() -> None:
@@ -330,6 +347,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             provision_task = asyncio.current_task()
             if provision_task is not None:
                 provisioning_gitconfig_snapshots.pop(provision_task, None)
+                binding = provisioning_gitconfig_bindings.pop(provision_task, None)
+                if binding is not None:
+                    git_env_token, auth_source_token = binding
+                    auth_mount_resolver.reset_task_gitconfig_source(auth_source_token)
+                    git.reset_task_env(git_env_token)
             _release_superseded_gitconfig_leases()
 
     secret_lease_resolver = LocalSecretLeaseMountResolver(

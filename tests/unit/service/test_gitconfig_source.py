@@ -293,11 +293,23 @@ def test_worker_requests_replaceable_source_and_preserves_it_on_helper_failure(
         def replace_env(self, _env: dict[str, str]) -> None:
             pass
 
+        def set_task_env(self, _env: dict[str, str]) -> object:
+            return object()
+
+        def reset_task_env(self, _token: object) -> None:
+            pass
+
     class _AuthMountResolver:
         def __init__(self, **_kwargs: object) -> None:
             pass
 
         def replace_gitconfig_source(self, _source: Path | None) -> None:
+            pass
+
+        def set_task_gitconfig_source(self, _source: Path | None) -> object:
+            return object()
+
+        def reset_task_gitconfig_source(self, _token: object) -> None:
             pass
 
     class _Provisioner:

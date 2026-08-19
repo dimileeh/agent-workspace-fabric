@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -112,10 +113,28 @@ class ServiceAuthMountResolver:
     workspace_owner_uid: int | None = None
     workspace_owner_gid: int | None = None
     overlay_mounter: OverlayMounter | None = None
+    _task_gitconfig_source: ContextVar[Path | None] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._task_gitconfig_source = ContextVar(f"service_auth_gitconfig_source_{id(self)}")
 
     def replace_gitconfig_source(self, source: Path | None) -> None:
         """Use ``source`` for auth mounts resolved for subsequent workspaces."""
         self.gitconfig_source = source
+
+    def set_task_gitconfig_source(self, source: Path | None) -> Token[Path | None]:
+        """Pin current-task auth mounts to ``source`` until reset."""
+        return self._task_gitconfig_source.set(source)
+
+    def reset_task_gitconfig_source(self, token: Token[Path | None]) -> None:
+        """Release a current-task Git-config source pin."""
+        self._task_gitconfig_source.reset(token)
+
+    def _effective_gitconfig_source(self) -> Path | None:
+        try:
+            return self._task_gitconfig_source.get()
+        except LookupError:
+            return self.gitconfig_source
 
     def resolve(
         self,
@@ -127,7 +146,7 @@ class ServiceAuthMountResolver:
         return resolve_service_auth_mounts(
             host_home=self.host_home,
             work_dir=self.work_dir,
-            gitconfig_source=self.gitconfig_source,
+            gitconfig_source=self._effective_gitconfig_source(),
             workspace_id=workspace_id,
             host_env=self.host_env,
             suppressed_targets=suppressed_targets,

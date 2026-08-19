@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -35,6 +36,38 @@ class TestGitEnvironment:
 
         assert result.stdout == f"{home}:ok"
         assert refreshed.stdout == f"{replacement_home}:refreshed"
+
+    @pytest.mark.unit
+    async def test_task_environment_survives_shared_replacement(self, tmp_path: Path) -> None:
+        """An in-flight task keeps its pinned environment after a shared refresh."""
+        manager = GitManager(tmp_path / "work", env={"AWF_TEST_ENV": "initial"})
+        task_bound = asyncio.Event()
+        shared_replaced = asyncio.Event()
+
+        async def run_with_pinned_environment() -> str:
+            token = manager.set_task_env({"AWF_TEST_ENV": "pinned"})
+            try:
+                task_bound.set()
+                await shared_replaced.wait()
+                result = await manager._run(  # noqa: SLF001 - environment regression seam.
+                    ["sh", "-c", "printf '%s' \"$AWF_TEST_ENV\""],
+                    operation="pinned-env",
+                )
+                return result.stdout
+            finally:
+                manager.reset_task_env(token)
+
+        pinned_task = asyncio.create_task(run_with_pinned_environment())
+        await asyncio.wait_for(task_bound.wait(), timeout=1)
+        manager.replace_env({"AWF_TEST_ENV": "replacement"})
+        shared_replaced.set()
+
+        assert await pinned_task == "pinned"
+        replacement = await manager._run(  # noqa: SLF001 - environment regression seam.
+            ["sh", "-c", "printf '%s' \"$AWF_TEST_ENV\""],
+            operation="replacement-env",
+        )
+        assert replacement.stdout == "replacement"
 
 
 class TestAgentWritableWorktreeHelpers:

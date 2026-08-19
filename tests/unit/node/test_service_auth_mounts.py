@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -669,6 +670,58 @@ def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
     assert all(mount.source != str(bundle) for mount in mounts)
     assert refreshed_by_target["/home/agent/.gitconfig"].source == str(replacement_wrapper)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_service_auth_mount_resolver_task_source_survives_shared_replacement(
+    tmp_path: Path,
+) -> None:
+    """An in-flight task resolves mounts from its pinned Git-config snapshot."""
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+
+    def make_snapshot(name: str) -> tuple[Path, Path]:
+        bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / name
+        snapshot = bundle / "home" / ".gitconfig"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(f"[user]\n  name = {name}\n")
+        wrapper = bundle / "agent.gitconfig"
+        wrapper.write_text(f"[include]\n  path = {snapshot}\n")
+        return snapshot, wrapper
+
+    initial, _initial_wrapper = make_snapshot("initial")
+    pinned, pinned_wrapper = make_snapshot("pinned")
+    replacement, replacement_wrapper = make_snapshot("replacement")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        gitconfig_source=initial,
+        host_env={},
+    )
+    task_bound = asyncio.Event()
+    shared_replaced = asyncio.Event()
+
+    async def resolve_with_pinned_source() -> str:
+        token = resolver.set_task_gitconfig_source(pinned)
+        try:
+            task_bound.set()
+            await shared_replaced.wait()
+            mounts = await asyncio.to_thread(resolver.resolve, workspace_id="ws_pinned")
+            return {mount.target: mount for mount in mounts}["/home/agent/.gitconfig"].source
+        finally:
+            resolver.reset_task_gitconfig_source(token)
+
+    pinned_task = asyncio.create_task(resolve_with_pinned_source())
+    await asyncio.wait_for(task_bound.wait(), timeout=1)
+    resolver.replace_gitconfig_source(replacement)
+    shared_replaced.set()
+
+    assert await pinned_task == str(pinned_wrapper)
+    replacement_mounts = resolver.resolve(workspace_id="ws_replacement")
+    assert {mount.target: mount for mount in replacement_mounts}[
+        "/home/agent/.gitconfig"
+    ].source == str(replacement_wrapper)
 
 
 @pytest.mark.unit
