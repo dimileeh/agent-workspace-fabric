@@ -151,7 +151,7 @@ async def request_gitconfig_source_refresh(socket_path: Path) -> Path | None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host-home", type=Path, required=True)
+    parser.add_argument("--host-home-parent", type=Path, required=True)
     parser.add_argument("--logical-host-home", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
@@ -162,7 +162,7 @@ def main() -> None:
     """Run the local-service Git-config source bridge."""
     args = _parse_args()
     server = GitconfigSourceServer(
-        host_home=args.host_home,
+        host_home=args.host_home_parent / args.logical_host_home.name,
         logical_host_home=args.logical_host_home,
         work_dir=args.work_dir,
         socket_path=args.socket,

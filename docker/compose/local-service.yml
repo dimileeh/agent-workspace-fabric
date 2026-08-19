@@ -197,9 +197,9 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # The nested home and socket mounts override this parent view; it exists
-      # so includes such as ../shared-config/base.inc resolve inside the helper.
-      - ${AWF_HOST_HOME:-${HOME}}/..:/run:ro
+      # Keep the parent view separate from /run so Docker does not create later
+      # mount targets beside the host home. It exposes ../ relative includes.
+      - ${AWF_HOST_HOME:-${HOME}}/..:/run/awf-host-parent:ro
       - ${AWF_HOST_HOME:-${HOME}}:/run/awf-host-home:ro
       - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
@@ -208,8 +208,8 @@ services:
       - python
       - -m
       - awf.service.gitconfig_source
-      - --host-home
-      - /run/awf-host-home
+      - --host-home-parent
+      - /run/awf-host-parent
       - --logical-host-home
       - ${AWF_HOST_HOME:-${HOME}}
       - --work-dir

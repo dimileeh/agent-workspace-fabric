@@ -371,7 +371,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert gitconfig_source["cap_add"] == ["CHOWN", "DAC_OVERRIDE"]
     assert gitconfig_source["security_opt"] == ["no-new-privileges:true"]
     assert gitconfig_source["volumes"] == [
-        f"{expected_host_home}/..:/run:ro",
+        f"{expected_host_home}/..:/run/awf-host-parent:ro",
         f"{expected_host_home}:/run/awf-host-home:ro",
         f"{expected_host_home}:{expected_host_home}:ro",
         f"{expected_work_dir}:{expected_work_dir}",
@@ -381,8 +381,8 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "python",
         "-m",
         "awf.service.gitconfig_source",
-        "--host-home",
-        "/run/awf-host-home",
+        "--host-home-parent",
+        "/run/awf-host-parent",
         "--logical-host-home",
         expected_host_home,
         "--work-dir",
@@ -390,6 +390,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "--socket",
         "/run/awf-gitconfig-source/source.sock",
     ]
+    assert all(not volume.endswith(":/run:ro") for volume in gitconfig_source["volumes"])
     assert f"{expected_host_home}/..:/run:ro" not in services["worker"]["volumes"]
     assert f"{expected_host_home}:{expected_host_home}:ro" not in services["worker"]["volumes"]
     assert (

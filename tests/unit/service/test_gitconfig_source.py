@@ -393,8 +393,8 @@ def test_gitconfig_source_main_wires_compose_arguments(
         "argv",
         [
             "gitconfig_source.py",
-            "--host-home",
-            str(tmp_path / "home"),
+            "--host-home-parent",
+            str(tmp_path / "mounted-parent"),
             "--logical-host-home",
             str(tmp_path / "logical-home"),
             "--work-dir",
@@ -407,7 +407,7 @@ def test_gitconfig_source_main_wires_compose_arguments(
     source_mod.main()
 
     assert created == {
-        "host_home": tmp_path / "home",
+        "host_home": tmp_path / "mounted-parent" / "logical-home",
         "logical_host_home": tmp_path / "logical-home",
         "work_dir": tmp_path / "work",
         "socket_path": tmp_path / "socket",
