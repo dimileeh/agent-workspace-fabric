@@ -391,6 +391,59 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
     assert preflight["override_reason"] == "retry after local auth repair"
 
 
+@pytest.mark.parametrize(
+    ("remote_push_branch", "expected_remote_push_branch"),
+    [
+        ("contributors/existing-head", "contributors/existing-head"),
+        (None, "awf/original-feature"),
+    ],
+)
+async def test_retry_preserves_existing_feature_pr_identity(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    remote_push_branch: str | None,
+    expected_remote_push_branch: str,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/original-feature",
+        remote_push_branch=remote_push_branch,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry existing PR",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "feature_branch_pr"
+    assert retried.pr_url == "https://github.com/example/retryable/pull/10"
+    assert retried.pr_number == 10
+    assert retried.remote_push_branch == expected_remote_push_branch
+
+
 async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filtering(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

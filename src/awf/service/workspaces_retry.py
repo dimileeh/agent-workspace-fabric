@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.config import Settings, get_settings
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     Task,
     TaskAttempt,
@@ -464,6 +464,23 @@ async def retry_workspace_row(
         # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
+    preserve_existing_feature_pr = (
+        source.task_kind == TaskKind.feature_branch_pr.value
+        and bool(source.pr_url)
+        and source.pr_number is not None
+    )
+    retry_remote_push_branch = (
+        source.remote_push_branch
+        if planning_scope_context is None
+        or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
+        else None
+    )
+    if preserve_existing_feature_pr:
+        # The retry executes on a fresh local branch, but it must push back to
+        # the existing PR's remote head. Legacy feature rows may predate
+        # remote_push_branch persistence, where branch_name is that head ref.
+        retry_remote_push_branch = source.remote_push_branch or source.branch_name
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -485,13 +502,11 @@ async def retry_workspace_row(
         requires_database=source.requires_database,
         idempotency_key=None,
         task_kind=source.task_kind,
-        remote_push_branch=(
-            source.remote_push_branch
-            if planning_scope_context is None
-            or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
-            else None
-        ),
+        remote_push_branch=retry_remote_push_branch,
     )
+    if preserve_existing_feature_pr:
+        retried.pr_url = source.pr_url
+        retried.pr_number = source.pr_number
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)
