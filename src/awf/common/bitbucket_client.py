@@ -89,6 +89,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_pr,
 )
 from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -392,6 +393,81 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             # outdated concept, so they are intentionally not included here.
             outdated_unresolved_inline_threads=outdated_inline_threads,
         )
+
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using one retrying PR read."""
+        return (
+            await self._fetch_pull_request_snapshot(
+                repo=repo,
+                pr_number=pr_number,
+                operation="bitbucket fetch_pull_request_lifecycle",
+            )
+        ).lifecycle
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle, live head branch, and target SHA."""
+        return await self._fetch_pull_request_snapshot(
+            repo=repo,
+            pr_number=pr_number,
+            operation="bitbucket fetch_pull_request_snapshot",
+        )
+
+    async def _fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        operation: str,
+    ) -> PullRequestSnapshot:
+        try:
+            pr = await self._request_json(
+                "GET",
+                self._pr_path(repo, pr_number),
+                operation=operation,
+                cache=True,
+            )
+        except BitbucketClientError as exc:
+            if exc.status == 404:
+                return PullRequestSnapshot(PullRequestLifecycle.missing, None)
+            raise
+        if not isinstance(pr, dict):
+            raise BitbucketClientError(
+                operation=operation,
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned an invalid response",
+            )
+        state = str(pr.get("state") or "").upper()
+        if state not in {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}:
+            raise BitbucketClientError(
+                operation=operation,
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned unknown state {state or '<empty>'}",
+            )
+        if state == "OPEN":
+            lifecycle = PullRequestLifecycle.open
+        elif state == "MERGED":
+            lifecycle = PullRequestLifecycle.merged
+        else:
+            lifecycle = PullRequestLifecycle.closed
+        head_ref = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
+        )
+        base_sha = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("destination")).get("commit")).get("hash")
+        )
+        if base_sha is not None and len(base_sha) < 40:
+            base_sha = await self._resolve_full_commit_sha(repo, base_sha)
+        return PullRequestSnapshot(lifecycle, head_ref, base_sha)
 
     async def fetch_failing_check_logs(
         self,

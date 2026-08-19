@@ -27,6 +27,7 @@ import stat
 import subprocess
 import weakref
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -465,16 +466,13 @@ class GitManager:
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
         self._env = {**os.environ, **env} if env is not None else None
+        self._task_env: ContextVar[dict[str, str]] = ContextVar(f"git_manager_task_env_{id(self)}")
         self._worktree_owner_uid = worktree_owner_uid
         self._worktree_owner_gid = worktree_owner_gid
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
-        """Return the per-loop lock for ``mirror_path``, creating it on
-        first use. Safe across multiple ``asyncio.run`` invocations
-        (tests, multi-loop callers) because each loop gets its own
-        inner dict and the inner dict + its Locks are GC'd when the
-        loop goes away."""
+        """Return the per-event-loop mirror lock, safe across repeated asyncio runs."""
         loop = asyncio.get_running_loop()
         loop_locks = cls._mirror_locks.get(loop)
         if loop_locks is None:
@@ -485,6 +483,25 @@ class GitManager:
     @property
     def work_dir(self) -> Path:
         return self._work_dir
+
+    def replace_env(self, env: Mapping[str, str]) -> None:
+        """Replace the environment used by subsequent Git subprocesses."""
+        self._env = {**os.environ, **env}
+
+    def set_task_env(self, env: Mapping[str, str]) -> Token[dict[str, str]]:
+        """Pin Git subprocesses in the current task to ``env`` until reset."""
+        return self._task_env.set({**os.environ, **env})
+
+    def reset_task_env(self, token: Token[dict[str, str]]) -> None:
+        """Release a current-task Git environment pin."""
+        self._task_env.reset(token)
+
+    def _effective_env(self) -> dict[str, str] | None:
+        """Return the current task's pinned environment or the shared default."""
+        try:
+            return self._task_env.get()
+        except LookupError:
+            return self._env
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -874,7 +891,10 @@ class GitManager:
         so the reason-coded failure is not misread as a first-time clone.
         """
         try:
-            verify_bitbucket_git_auth(repo_url, self._env if self._env is not None else os.environ)
+            effective_env = self._effective_env()
+            verify_bitbucket_git_auth(
+                repo_url, effective_env if effective_env is not None else os.environ
+            )
         except GitAuthNotConfiguredError as exc:
             raise GitOperationError(
                 operation=operation,
@@ -890,7 +910,7 @@ class GitManager:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self._env,
+            env=self._effective_env(),
         )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")

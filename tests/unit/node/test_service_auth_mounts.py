@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -610,6 +611,138 @@ def test_service_auth_mount_resolver_delegates_to_service_mount_resolution(
     by_target = {m.target: m for m in mounts}
     assert by_target["/home/agent/.gitconfig"].source == str(host_home / ".gitconfig")
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
+
+
+@pytest.mark.unit
+def test_service_auth_mount_resolver_does_not_probe_snapshot_wrapper_for_host_home(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    host_gitconfig = host_home / ".gitconfig"
+    host_gitconfig.write_text("[user]\n  name = Host\n")
+    unrelated_wrapper = tmp_path / "agent.gitconfig"
+    unrelated_wrapper.write_text("[user]\n  name = Unrelated\n")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    mounts = resolver.resolve(workspace_id="ws_auth")
+
+    by_target = {mount.target: mount for mount in mounts}
+    assert by_target["/home/agent/.gitconfig"].source == str(host_gitconfig)
+
+
+@pytest.mark.unit
+def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / "digest"
+    snapshot = bundle / "home" / ".gitconfig"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("[user]\n  name = Snapshot\n")
+    wrapper = bundle / "agent.gitconfig"
+    wrapper.write_text(f"[include]\n  path = {snapshot}\n")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        gitconfig_source=snapshot,
+        host_env={},
+    )
+
+    mounts = resolver.resolve(workspace_id="ws_auth")
+
+    replacement_bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / "new"
+    replacement = replacement_bundle / "home" / ".gitconfig"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_text("[user]\n  name = Replacement\n")
+    replacement_wrapper = replacement_bundle / "agent.gitconfig"
+    replacement_wrapper.write_text(f"[include]\n  path = {replacement}\n")
+    resolver.replace_gitconfig_source(replacement)
+    refreshed_mounts = resolver.resolve(workspace_id="ws_refreshed_auth")
+
+    by_target = {mount.target: mount for mount in mounts}
+    refreshed_by_target = {mount.target: mount for mount in refreshed_mounts}
+    assert by_target["/home/agent/.gitconfig"].source == str(wrapper)
+    assert by_target["/home/agent/.gitconfig"].mode == "ro"
+    assert all(mount.source != str(bundle) for mount in mounts)
+    assert refreshed_by_target["/home/agent/.gitconfig"].source == str(replacement_wrapper)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_service_auth_mount_resolver_task_source_survives_shared_replacement(
+    tmp_path: Path,
+) -> None:
+    """An in-flight task resolves mounts from its pinned Git-config snapshot."""
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+
+    def make_snapshot(name: str) -> tuple[Path, Path]:
+        bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / name
+        snapshot = bundle / "home" / ".gitconfig"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(f"[user]\n  name = {name}\n")
+        wrapper = bundle / "agent.gitconfig"
+        wrapper.write_text(f"[include]\n  path = {snapshot}\n")
+        return snapshot, wrapper
+
+    initial, _initial_wrapper = make_snapshot("initial")
+    pinned, pinned_wrapper = make_snapshot("pinned")
+    replacement, replacement_wrapper = make_snapshot("replacement")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        gitconfig_source=initial,
+        host_env={},
+    )
+    task_bound = asyncio.Event()
+    shared_replaced = asyncio.Event()
+
+    async def resolve_with_pinned_source() -> str:
+        token = resolver.set_task_gitconfig_source(pinned)
+        try:
+            task_bound.set()
+            await shared_replaced.wait()
+            mounts = await asyncio.to_thread(resolver.resolve, workspace_id="ws_pinned")
+            return {mount.target: mount for mount in mounts}["/home/agent/.gitconfig"].source
+        finally:
+            resolver.reset_task_gitconfig_source(token)
+
+    pinned_task = asyncio.create_task(resolve_with_pinned_source())
+    await asyncio.wait_for(task_bound.wait(), timeout=1)
+    resolver.replace_gitconfig_source(replacement)
+    shared_replaced.set()
+
+    assert await pinned_task == str(pinned_wrapper)
+    replacement_mounts = resolver.resolve(workspace_id="ws_replacement")
+    assert {mount.target: mount for mount in replacement_mounts}[
+        "/home/agent/.gitconfig"
+    ].source == str(replacement_wrapper)
+
+
+@pytest.mark.unit
+def test_service_auth_mount_resolver_uses_snapshot_when_wrapper_is_missing(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    snapshot = tmp_path / "bundle" / "home" / ".gitconfig"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("[user]\n  name = Snapshot\n")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        gitconfig_source=snapshot,
+    )
+
+    mounts = resolver.resolve(workspace_id="ws_auth")
+
+    by_target = {mount.target: mount for mount in mounts}
+    assert by_target["/home/agent/.gitconfig"].source == str(snapshot)
 
 
 @pytest.mark.unit

@@ -828,6 +828,12 @@ Existing monitor workspaces can also be recovered with
 `awf workspace remonitor`, the matching REST control route, or
 `awf_remonitor_workspace` through MCP.
 
+Remonitor assumes the workspace still has persisted PR identity and a
+recoverable monitor runtime. A workspace that failed before provisioning may
+have a PR but no Compose metadata; AWF rejects Remonitor with
+`WORKSPACE_REMONITOR_METADATA_MISSING`, and the operator should use Retry so a
+replacement attempt can reprovision the runtime and reattach the existing PR.
+
 ### Operator guidance (`guide`/`instruct`)
 
 `remonitor` recovers a *lost* monitor; to **steer a live one**, use the

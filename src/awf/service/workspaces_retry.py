@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -12,8 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
+from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.github_client import RepoRef
+from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     Task,
     TaskAttempt,
@@ -38,6 +43,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
+from awf.runtime.pr_monitor_actions import AbortReason
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -69,6 +75,10 @@ if TYPE_CHECKING:
     )
 
 
+_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
+PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
+
+
 def _workspace_create() -> Any:
     """Import create helpers lazily to avoid module-load cycles."""
     from awf.service import workspaces_create
@@ -88,6 +98,52 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
+
+
+def _source_pr_closed_externally(source: Workspace) -> bool:
+    """Return whether the source's terminal transition recorded a closed PR."""
+    latest_failed_event = _latest_failed_state_event(source)
+    return (
+        latest_failed_event is not None
+        and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
+    )
+
+
+def _pr_number_from_url(pr_url: str) -> int | None:
+    """Recover a positive PR number from a GitHub or Bitbucket PR URL."""
+    match = _PR_NUMBER_RE.search(pr_url)
+    if match is None:
+        return None
+    pr_number = int(match.group(1))
+    return pr_number if pr_number > 0 else None
+
+
+async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
+    """Return the source PR's current lifecycle according to its forge."""
+    repo = RepoRef.from_url(source.repo_url)
+    forge = concrete_forge_for_repo(
+        (source.resolved_profile or {}).get("forge"),
+        source.repo_url,
+    )
+    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+        return await client.fetch_pull_request_lifecycle(
+            repo=repo,
+            pr_number=pr_number,
+        )
+
+
+async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
+    """Return the source PR's current lifecycle and head ref from its forge."""
+    repo = RepoRef.from_url(source.repo_url)
+    forge = concrete_forge_for_repo(
+        (source.resolved_profile or {}).get("forge"),
+        source.repo_url,
+    )
+    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+        return await client.fetch_pull_request_snapshot(
+            repo=repo,
+            pr_number=pr_number,
+        )
 
 
 async def _source_runtime_not_yet_released(
@@ -190,6 +246,7 @@ async def retry_workspace_row(
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
     ignore_source_runtime_check: bool = False,
+    pr_lifecycle_checker: PrLifecycleChecker | None = None,
 ) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt.
 
@@ -464,6 +521,114 @@ async def retry_workspace_row(
         # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
+    existing_feature_pr_number = (
+        source.pr_number
+        if source.pr_number is not None
+        else _pr_number_from_url(source.pr_url)
+        if source.pr_url
+        else None
+    )
+    existing_feature_pr = (
+        source.task_kind == TaskKind.feature_branch_pr.value
+        and bool(source.pr_url)
+        and existing_feature_pr_number is not None
+    )
+    closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
+    preserve_existing_feature_pr = bool(planning_scope_context is None and existing_feature_pr)
+    live_pr_head_ref: str | None = None
+    live_pr_base_commit: str | None = None
+    retry_base_commit: str | None = None
+    if preserve_existing_feature_pr:
+        assert existing_feature_pr_number is not None
+        try:
+            if pr_lifecycle_checker is not None:
+                existing_pr_lifecycle = await pr_lifecycle_checker(
+                    source,
+                    existing_feature_pr_number,
+                )
+            else:
+                existing_pr_snapshot = await _live_pr_snapshot(
+                    source,
+                    existing_feature_pr_number,
+                )
+                existing_pr_lifecycle = existing_pr_snapshot.lifecycle
+                live_pr_head_ref = existing_pr_snapshot.head_ref
+                live_pr_base_commit = existing_pr_snapshot.base_sha
+        except Exception as exc:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not verify whether the existing pull request is still open.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "reason_code": "PR_STATE_LOOKUP_FAILED",
+                },
+            ) from exc
+        if existing_pr_lifecycle is PullRequestLifecycle.merged:
+            raise workspaces.WorkspaceRetryPrAlreadyMergedError(
+                "The existing pull request is already merged; its work must not be retried.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_ALREADY_MERGED",
+                },
+            )
+        preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
+        closed_existing_feature_pr = not preserve_existing_feature_pr
+    retry_remote_push_branch = (
+        source.remote_push_branch
+        if planning_scope_context is None
+        or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
+        else None
+    )
+    if closed_existing_feature_pr:
+        # A monitor-confirmed closed PR cannot be reused, and its remote head
+        # may already have been deleted. Provision a fresh branch so the retry
+        # can open a replacement PR.
+        retry_remote_push_branch = None
+    elif preserve_existing_feature_pr:
+        # The retry executes on a fresh local branch, but it must push back to
+        # the existing PR's live remote head. Persisted refs remain fallbacks
+        # for lifecycle checkers and legacy rows without a live snapshot.
+        candidate_head_refs = (
+            live_pr_head_ref,
+            source.remote_push_branch,
+            source.branch_name,
+        )
+        retry_remote_push_branch = next(
+            (head_ref.strip() for head_ref in candidate_head_refs if head_ref and head_ref.strip()),
+            None,
+        )
+        if retry_remote_push_branch is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's remote head branch.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_HEAD_REF_UNAVAILABLE",
+                },
+            )
+        candidate_base_commits = (source.base_commit, live_pr_base_commit)
+        retry_base_commit = next(
+            (
+                base_commit.strip()
+                for base_commit in candidate_base_commits
+                if base_commit and base_commit.strip()
+            ),
+            None,
+        )
+        if retry_base_commit is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's target base commit.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
+                },
+            )
+
     retried = await repo.create(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -485,13 +650,13 @@ async def retry_workspace_row(
         requires_database=source.requires_database,
         idempotency_key=None,
         task_kind=source.task_kind,
-        remote_push_branch=(
-            source.remote_push_branch
-            if planning_scope_context is None
-            or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
-            else None
-        ),
+        remote_push_branch=retry_remote_push_branch,
     )
+    if preserve_existing_feature_pr:
+        assert retry_base_commit is not None
+        retried.pr_url = source.pr_url
+        retried.pr_number = existing_feature_pr_number
+        retried.base_commit = retry_base_commit
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)

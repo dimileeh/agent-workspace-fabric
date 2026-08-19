@@ -17,7 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,6 +94,7 @@ from awf.service.workspaces import (
 _egress_plan_decision = _provisioner_helpers._egress_plan_decision
 _egress_plan_destination_category = _provisioner_helpers._egress_plan_destination_category
 _positive_int = _provisioner_helpers._positive_int
+_provision_base_commit = _provisioner_helpers._provision_base_commit
 _provision_checkout_base_branch = _provisioner_helpers._provision_checkout_base_branch
 _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
 _provision_profile_auto_merge_is_trusted = (
@@ -182,11 +183,9 @@ class ProvisionerConfig:
 
 
 class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
-    """Orchestrates git + state transitions for one workspace at a time.
+    """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
-    Stateless apart from injected dependencies — safe to share across concurrent
-    workspace provisioning tasks.
-    """
+    _run_claimed_provision = _provisioner_helpers._run_claimed_provision
 
     def __init__(
         self,
@@ -196,6 +195,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
         service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
+        before_provision: Callable[[], Awaitable[None]] | None = None,
+        after_provision: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
@@ -203,6 +204,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+        self._before_provision, self._after_provision = before_provision, after_provision
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
@@ -233,17 +235,14 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             if ws is None:
                 return  # Workspace disappeared or wasn't requested; nothing to do.
 
-        await self._provision_claimed_workspace(workspace_id, ws)
+        await self._run_claimed_provision(workspace_id, ws)
 
     async def provision_claimed(
         self, workspace_id: str, execution_claim_epoch: int | None = None
     ) -> None:
         """Drive a workspace already claimed into ``provisioning`` by the worker.
 
-        ``execution_claim_epoch`` (when supplied) fences this provision against
-        a later claimant: it is verified just before the stack launch and gates
-        the terminal ``provisioning -> ready`` / ``-> failed`` transitions so a
-        stale worker can never force or steal the row (D4/D7).
+        The optional epoch fences launch and terminal transitions against a later claimant (D4/D7).
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -262,9 +261,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
-        await self._provision_claimed_workspace(
-            workspace_id, ws, execution_claim_epoch=execution_claim_epoch
-        )
+        await self._run_claimed_provision(workspace_id, ws, claim_epoch=execution_claim_epoch)
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
@@ -306,6 +303,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         destination_category: str | None = None
         stack_launch_started = False
         try:
+            if self._before_provision is not None:
+                await self._before_provision()
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
                 repo_url=ws.repo_url,
@@ -319,7 +318,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 reason_code="PROVISIONER_STALE_STATUS",
             ):
                 return
-            base_commit = await self._git.head_sha(workspace_id=workspace_id)
+            checked_out_head = await self._git.head_sha(workspace_id=workspace_id)
+            base_commit = _provision_base_commit(ws, checked_out_head=checked_out_head)
             profile_resolution = None
             if ws.resolved_profile is None:
                 profile_resolution = resolve_workspace_profile(

@@ -31,6 +31,7 @@ from awf.common.bitbucket_client_parsing import (
     parse_bb_datetime,
     parse_check_timings,
 )
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import RepoRef
 
 from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
@@ -89,6 +90,121 @@ async def test_fetch_pr_status_non_dict_body_raises() -> None:
     with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert "not found" in excinfo.value.body
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("OPEN", PullRequestLifecycle.open),
+        ("DECLINED", PullRequestLifecycle.closed),
+        ("SUPERSEDED", PullRequestLifecycle.closed),
+        ("MERGED", PullRequestLifecycle.merged),
+    ],
+)
+async def test_pull_request_lifecycle_lookup_fetches_only_pr_lifecycle(
+    state: str,
+    expected: PullRequestLifecycle,
+) -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json={"state": state})
+    client = make_client(fake)
+
+    assert await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42) is expected
+    assert [request.url.path for request in fake.requests] == [_PR]
+
+
+async def test_pull_request_lifecycle_lookup_reports_missing_pr() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=404, json={"type": "error"})
+    client = make_client(fake)
+
+    assert (
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+        is PullRequestLifecycle.missing
+    )
+
+
+async def test_pull_request_snapshot_includes_live_head_ref() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json={
+            "state": "OPEN",
+            "source": {"branch": {"name": "contributors/live-head"}},
+            "destination": {"commit": {"hash": "b" * 40}},
+        },
+    )
+    client = make_client(fake)
+
+    snapshot = await client.fetch_pull_request_snapshot(repo=repo(), pr_number=42)
+
+    assert snapshot.lifecycle is PullRequestLifecycle.open
+    assert snapshot.head_ref == "contributors/live-head"
+    assert snapshot.base_sha == "b" * 40
+    assert [request.url.path for request in fake.requests] == [_PR]
+
+
+async def test_pull_request_snapshot_resolves_abbreviated_target_sha() -> None:
+    abbreviated_base = "b" * 12
+    full_base = "b" * 40
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json={
+            "state": "OPEN",
+            "source": {"branch": {"name": "contributors/live-head"}},
+            "destination": {"commit": {"hash": abbreviated_base}},
+        },
+    )
+    fake.enqueue("GET", f"{_REPO}/commit/{abbreviated_base}", json={"hash": full_base})
+    client = make_client(fake)
+
+    snapshot = await client.fetch_pull_request_snapshot(repo=repo(), pr_number=42)
+
+    assert snapshot.base_sha == full_base
+    assert [request.url.path for request in fake.requests] == [
+        _PR,
+        f"{_REPO}/commit/{abbreviated_base}",
+    ]
+
+
+async def test_pull_request_lifecycle_lookup_retries_transient_response() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=429, headers={"Retry-After": "5"})
+    fake.enqueue("GET", _PR, json={"state": "OPEN"})
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep)
+
+    assert (
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+        is PullRequestLifecycle.open
+    )
+    assert sleep.delays == [5.0]
+
+
+async def test_pull_request_lifecycle_lookup_propagates_non_missing_error() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=403, json={"type": "error"})
+    client = make_client(fake)
+
+    with pytest.raises(BitbucketClientError) as excinfo:
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+    assert excinfo.value.status == 403
+
+
+@pytest.mark.parametrize("payload", [["not", "an", "object"], {"state": "PAUSED"}])
+async def test_pull_request_lifecycle_lookup_rejects_indeterminate_response(
+    payload: object,
+) -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json=payload)
+    client = make_client(fake)
+
+    with pytest.raises(BitbucketClientError) as excinfo:
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+    assert "fetch_pull_request_lifecycle" in excinfo.value.operation
 
 
 async def test_account_id_is_cached_across_status_fetches() -> None:

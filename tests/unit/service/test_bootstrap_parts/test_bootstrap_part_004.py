@@ -488,6 +488,7 @@ def test_bootstrap_skips_preflight_without_host_work_dir(
         "agent_runtime_build",
         "postgres",
         "migrate",
+        "gitconfig_source",
         "api_worker",
     ]
     for env in captured_env:

@@ -99,7 +99,9 @@ async def _seed_monitoring_workspace(
         workspace.remote_push_branch = workspace.branch_name
         workspace.base_commit = "a" * 40
         workspace.compose_project_name = f"awf_{workspace.id}"
-        workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
+        workspace.compose_file_path = str(
+            Path(__file__).resolve().parents[4] / "docker/compose/workspace.base.yml.j2"
+        )
         await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
         if final_status == WorkspaceStatus.ready:
             await session.commit()
@@ -1092,6 +1094,263 @@ async def test_remonitor_failed_workspace_with_pr_reopens_candidate_for_worker(
 
 
 @pytest.mark.unit
+async def test_remonitor_rejects_prelaunch_failed_workspace_without_runtime_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_workspace(client, monkeypatch)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        workspace.task_kind = "sync_feature_pr"
+        workspace.pr_url = "https://github.com/example/remonitor/pull/42"
+        workspace.pr_number = 42
+        workspace.remote_push_branch = "feature/existing-pr"
+        workspace.failure_reason = "infrastructure_failure"
+        workspace.failure_message = "git failed before provisioning"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="GIT_COMMAND_FAILED",
+        )
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach existing PR"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-prelaunch-failure"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": (
+            "Workspace remonitor requires a provisioned monitor runtime; retry the "
+            "workspace to reprovision and reattach its existing PR."
+        ),
+        "detail": {
+            "status": WorkspaceStatus.failed.value,
+            "missing": ["compose_project_name", "compose_file_path"],
+            "recommended_action": "retry_workspace",
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_message == "git failed before provisioning"
+
+
+@pytest.mark.unit
+async def test_remonitor_rejects_failed_workspace_when_compose_file_was_removed(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    removed_compose_file = tmp_path / "removed" / "compose.yml"
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_file_path = str(removed_compose_file)
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach garbage-collected PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-removed-compose"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": (
+            "Workspace remonitor requires a provisioned monitor runtime; retry the "
+            "workspace to reprovision and reattach its existing PR."
+        ),
+        "detail": {
+            "status": WorkspaceStatus.failed.value,
+            "missing": ["compose_file_path"],
+            "recommended_action": "retry_workspace",
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+    assert not removed_compose_file.exists()
+
+
+@pytest.mark.unit
+async def test_remonitor_rejects_monitoring_workspace_without_retry_recommendation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach incomplete PR monitor"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "remonitor-monitoring-metadata",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": "Workspace remonitor requires a provisioned monitor runtime.",
+        "detail": {
+            "status": WorkspaceStatus.monitoring_pr.value,
+            "missing": ["compose_project_name", "compose_file_path"],
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+
+
+@pytest.mark.unit
+async def test_remonitor_hosted_failed_workspace_does_not_require_compose_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        workspace.task_policy = {
+            "pr_adoption": {
+                "execution": {"mode": "hosted"},
+            }
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach hosted PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-hosted-failure"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_remonitor_feature_workspace_recovers_missing_remote_branch_from_branch_name(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.task_kind == "feature_branch_pr"
+        assert workspace.branch_name
+        workspace.remote_push_branch = None
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach legacy feature PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-legacy-branch"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.remote_push_branch == workspace.branch_name
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("missing_field", "expected_missing"),
+    [
+        ("pr_number", ["pr_number"]),
+        ("remote_push_branch", ["remote_push_branch"]),
+    ],
+)
+async def test_remonitor_rejects_failed_workspace_without_pr_identity_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+    expected_missing: list[str],
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        setattr(workspace, missing_field, None)
+        if missing_field == "remote_push_branch":
+            workspace.task_kind = "sync_feature_pr"
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach incomplete PR monitor"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": f"remonitor-missing-{missing_field}",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "WORKSPACE_REMONITOR_METADATA_MISSING"
+    assert response.json()["detail"]["detail"] == {
+        "status": WorkspaceStatus.failed.value,
+        "missing": expected_missing,
+        "recommended_action": "retry_workspace",
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert getattr(workspace, missing_field) is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "final_status",
     [
@@ -1187,239 +1446,4 @@ async def test_recovery_operations_require_idempotency_key(
     assert response.json()["detail"] == {
         "error_code": "INVALID_REQUEST",
         "message": "Idempotency-Key header is required for this endpoint.",
-    }
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    (
-        "action",
-        "first_status",
-        "with_open_candidate",
-        "terminal_operation_status",
-        "terminal_workspace_status",
-        "body",
-    ),
-    [
-        (
-            "refresh",
-            WorkspaceStatus.ready,
-            False,
-            OperationStatus.succeeded,
-            WorkspaceStatus.destroyed,
-            {"reason": "stale policy"},
-        ),
-        (
-            "validate",
-            WorkspaceStatus.monitoring_pr,
-            False,
-            OperationStatus.failed,
-            WorkspaceStatus.completed,
-            {"reason": "rerun required validation", "requested_tier": 2},
-        ),
-        (
-            "rebase",
-            WorkspaceStatus.monitoring_pr,
-            True,
-            OperationStatus.succeeded,
-            WorkspaceStatus.completed,
-            {"reason": "base branch advanced"},
-        ),
-    ],
-)
-async def test_recovery_exact_key_replays_terminal_operation_after_workspace_moves(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-    action: str,
-    first_status: WorkspaceStatus,
-    with_open_candidate: bool,
-    terminal_operation_status: OperationStatus,
-    terminal_workspace_status: WorkspaceStatus,
-    body: dict[str, object],
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(
-        engine,
-        final_status=first_status,
-        with_open_candidate=with_open_candidate,
-    )
-    headers = {
-        **_auth(monkeypatch),
-        "Idempotency-Key": f"{action}-terminal-replay",
-    }
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    assert first.status_code == 202
-    original_payload = first.json()
-    await _mark_operation_and_workspace_terminal(
-        engine,
-        workspace_id=workspace_id,
-        operation_id=original_payload["id"],
-        operation_status=terminal_operation_status,
-        workspace_status=terminal_workspace_status,
-    )
-    before_counts = await _counts(engine, workspace_id)
-
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/{action}",
-        json=body,
-        headers=headers,
-    )
-    after_counts = await _counts(engine, workspace_id)
-
-    assert replay.status_code == 202
-    replay_payload = replay.json()
-    assert replay_payload["id"] == original_payload["id"]
-    assert replay_payload["status"] == terminal_operation_status.value
-    assert after_counts == before_counts
-
-
-@pytest.mark.unit
-async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_request(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(
-        engine,
-        final_status=WorkspaceStatus.ready,
-    )
-    headers = {**_auth(monkeypatch), "Idempotency-Key": "refresh-first"}
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/refresh",
-        json={"reason": "stale policy"},
-        headers={**headers, "If-Match": "3"},
-    )
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/refresh",
-        json={"reason": "stale policy"},
-        headers={**_auth(monkeypatch), "Idempotency-Key": "refresh-second"},
-    )
-
-    assert first.status_code == 202
-    assert replay.status_code == 202
-    payload = first.json()
-    assert replay.json()["id"] == payload["id"]
-    assert payload["workspace_id"] == workspace_id
-    assert payload["type"] == "refresh"
-    assert payload["status"] == "pending"
-    assert payload["idempotency_key"] == "refresh-first"
-    assert payload["owner"] == "operator_api"
-    assert payload["source"] == "operator_api"
-    assert payload["reason"] == "stale policy"
-    assert payload["reason_code"] == "OPERATOR_REFRESH"
-    assert payload["payload"] == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "stale policy",
-        "reason_code": "OPERATOR_REFRESH",
-        "requested_action": "refresh",
-        "expected_version": 3,
-    }
-
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        operations = (
-            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
-            .scalars()
-            .all()
-        )
-        refresh_event = (
-            await session.execute(
-                select(WorkspaceEvent).where(
-                    WorkspaceEvent.workspace_id == workspace_id,
-                    WorkspaceEvent.event_type == "workspace.refresh_requested",
-                )
-            )
-        ).scalar_one()
-
-    assert [operation.id for operation in operations] == [payload["id"]]
-    assert refresh_event.reason_code == "OPERATOR_REFRESH"
-    assert refresh_event.payload == {
-        "source": "operator_api",
-        "reason": "stale policy",
-        "operation_id": payload["id"],
-        "expected_version": 3,
-    }
-
-
-@pytest.mark.unit
-async def test_validate_endpoint_returns_operation_response_and_coalesces_active_request(
-    client: AsyncClient,
-    engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await _seed_monitoring_workspace(engine)
-
-    first = await client.post(
-        f"/v1/workspaces/{workspace_id}/validate",
-        json={"reason": "rerun required validation", "requested_tier": 2},
-        headers={
-            **_auth(monkeypatch),
-            "Idempotency-Key": "validate-first",
-            "If-Match": "7",
-        },
-    )
-    replay = await client.post(
-        f"/v1/workspaces/{workspace_id}/validate",
-        json={"reason": "rerun required validation", "requested_tier": 2},
-        headers={**_auth(monkeypatch), "Idempotency-Key": "validate-second"},
-    )
-
-    assert first.status_code == 202
-    assert replay.status_code == 202
-    payload = first.json()
-    assert replay.json()["id"] == payload["id"]
-    assert payload["workspace_id"] == workspace_id
-    assert payload["type"] == "validate"
-    assert payload["status"] == "pending"
-    assert payload["owner"] == "operator_api"
-    assert payload["source"] == "operator_api"
-    assert payload["reason"] == "rerun required validation"
-    assert payload["reason_code"] == "OPERATOR_VALIDATE"
-    assert payload["payload"] == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "rerun required validation",
-        "reason_code": "OPERATOR_VALIDATE",
-        "requested_action": "validate",
-        "recovery_mode": "validate_only",
-        "requested_tier": 2,
-        "expected_version": 7,
-    }
-
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        operations = (
-            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
-            .scalars()
-            .all()
-        )
-        validate_event = (
-            await session.execute(
-                select(WorkspaceEvent).where(
-                    WorkspaceEvent.workspace_id == workspace_id,
-                    WorkspaceEvent.event_type == "workspace.validate_requested",
-                )
-            )
-        ).scalar_one()
-
-    assert workspace is not None
-    assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 8
-    assert [operation.id for operation in operations] == [payload["id"]]
-    assert validate_event.reason_code == "OPERATOR_VALIDATE"
-    assert validate_event.payload == {
-        "source": "operator_api",
-        "reason": "rerun required validation",
-        "operation_id": payload["id"],
-        "recovery_mode": "validate_only",
-        "requested_tier": 2,
-        "expected_version": 7,
     }

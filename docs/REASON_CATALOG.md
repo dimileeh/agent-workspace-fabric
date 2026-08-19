@@ -698,10 +698,10 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_closed](#pr_already_closed)
 
 ### PR_ALREADY_MERGED
-**Problem:** The PR selected for monitor adoption is already merged.
-**Likely Cause:** There is no open PR monitor work left for AWF to own.
-**Operator Fix:** No monitor adoption is needed; use workspace cleanup or status commands instead.
-**Related Command:** `awf workspace adopt-pr`
+**Problem:** AWF refused to adopt or retry work for a pull request that is already merged.
+**Likely Cause:** The selected adoption PR or the source workspace's existing PR merged before AWF could adopt or retry it, so there is no open PR work left to own.
+**Operator Fix:** Do not adopt or retry the merged pull request. Use workspace cleanup or status commands, or create a new workspace for follow-up work.
+**Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
 ### PR_CREATE_FORGE_NOT_SUPPORTED
@@ -927,6 +927,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** If the weakening is intended, re-run with `--approve-policy-downgrade` and a reason, e.g. `awf workspace guide <id> --grant "<path>" --approve-policy-downgrade --reason "<justification>"`. Otherwise send a REVERT directive so the agent restores the protected file.
 **Related Command:** `awf workspace guide`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_policy_downgrade_required](#workspace_guide_policy_downgrade_required)
+
+### WORKSPACE_REMONITOR_METADATA_MISSING
+**Problem:** AWF refused to restart PR monitoring because the workspace lacks persisted PR identity or local runtime metadata.
+**Likely Cause:** The workspace failed before provisioning or was created by an older AWF version without one or more required fields: PR number, recoverable remote branch, Compose project, or Compose file. Hosted PR adoption does not require local Compose metadata.
+**Operator Fix:** Retry the workspace so AWF can reprovision its runtime and reattach the existing PR, then use Remonitor if another monitor restart is needed.
+**Related Command:** `awf workspace retry <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_remonitor_metadata_missing](#workspace_remonitor_metadata_missing)
+
+### WORKSPACE_RETRY_PR_STATE_UNAVAILABLE
+**Problem:** AWF refused to retry a workspace because it could not safely establish the existing open pull request's live state, head branch, or target base commit.
+**Likely Cause:** The forge lookup failed, required pull-request metadata was missing, or neither the live response nor the persisted workspace record contained a usable head branch or base commit.
+**Operator Fix:** Verify forge authentication and connectivity, then confirm the pull request is open and exposes a non-empty head branch and target base commit before retrying again. Inspect the response detail's `reason_code` to identify the unavailable field or failed lookup.
+**Related Command:** `awf workspace retry <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_retry_pr_state_unavailable](#workspace_retry_pr_state_unavailable)
 
 ### WORKSPACE_STATE_NOT_GUIDABLE
 **Problem:** Workspace is not in a state eligible for operator guidance.

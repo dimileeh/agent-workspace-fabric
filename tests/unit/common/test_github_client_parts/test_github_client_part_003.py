@@ -16,6 +16,7 @@ import json
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
@@ -934,6 +935,114 @@ class TestFetchPrStatusPart002:
         assert status.closed is True
         assert status.merged is True
         assert status.merge_commit_sha == "mergecommit1234567890"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("closed", "merged", "expected"),
+        [
+            (False, False, PullRequestLifecycle.open),
+            (True, False, PullRequestLifecycle.closed),
+            (False, True, PullRequestLifecycle.merged),
+            (True, True, PullRequestLifecycle.merged),
+        ],
+    )
+    async def test_pull_request_lifecycle_lookup_fetches_only_lifecycle_state(
+        self,
+        closed: bool,
+        merged: bool,
+        expected: PullRequestLifecycle,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"repository": {"pullRequest": {"closed": closed, "merged": merged}}}}
+            ),
+        )
+        client = GitHubClient(fake)
+
+        assert (
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=1
+            )
+            is expected
+        )
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "closed" in query_arg
+        assert "merged" in query_arg
+        assert "reviewThreads" not in query_arg
+        assert "statusCheckRollup" not in query_arg
+
+    @pytest.mark.unit
+    async def test_pull_request_lifecycle_lookup_reports_missing_pr(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"data": {"repository": {"pullRequest": None}}}),
+        )
+        client = GitHubClient(fake)
+
+        assert (
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=404
+            )
+            is PullRequestLifecycle.missing
+        )
+
+    @pytest.mark.unit
+    async def test_pull_request_snapshot_includes_live_head_ref(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "closed": False,
+                                "merged": False,
+                                "headRefName": "contributors/live-head",
+                                "baseRefOid": "b" * 40,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        snapshot = await client.fetch_pull_request_snapshot(
+            repo=RepoRef(owner="o", name="r"), pr_number=1
+        )
+
+        assert snapshot.lifecycle is PullRequestLifecycle.open
+        assert snapshot.head_ref == "contributors/live-head"
+        assert snapshot.base_sha == "b" * 40
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "headRefName" in query_arg
+        assert "baseRefOid" in query_arg
+
+    @pytest.mark.unit
+    async def test_pull_request_lifecycle_lookup_retries_transient_response(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"repository": {"pullRequest": {"closed": False, "merged": False}}}}
+            ),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        assert (
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=1
+            )
+            is PullRequestLifecycle.open
+        )
+        assert len(fake.calls) == 2
+        assert len(sleep.calls) == 1
 
     @pytest.mark.unit
     async def test_graphql_argv_shape(self) -> None:

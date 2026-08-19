@@ -660,6 +660,8 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -751,6 +753,8 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -1014,6 +1018,8 @@ def _stub_worker_runtime_dependencies(
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
+            after_provision: object = None,
         ) -> None:
             """Test helper for  init  ."""
             pass

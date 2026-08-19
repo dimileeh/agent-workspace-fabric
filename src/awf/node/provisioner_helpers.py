@@ -131,13 +131,40 @@ def _provision_local_branch_name(
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
-    """Return the base branch a provisioning worktree should check out."""
+    """Return the remote branch a provisioning worktree should check out.
+
+    A feature retry that reuses an existing PR must start from that PR's
+    preserved remote head. The executor later updates the same head with a
+    non-force push, so starting from ``branch_base`` would discard the PR's
+    existing ancestry and make the push non-fast-forward.
+    """
     return (
         _sync_feature_pr_pull_head_ref(ws)
         or _sync_feature_pr_head_ref(ws)
         or _release_sync_source_branch(ws)
+        or (
+            ws.remote_push_branch
+            if ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
+            else None
+        )
         or ws.branch_base
     )
+
+
+def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:
+    """Return the target base SHA that scopes execution and validation.
+
+    Preserved feature PRs start their worktree at the PR head so subsequent
+    pushes remain fast-forward. Their pre-existing ``base_commit`` still marks
+    the target-branch side of the complete PR diff and must not be replaced by
+    that checkout head.
+    """
+    preserves_feature_pr = ws.task_kind == "sync_feature_pr" or bool(
+        ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
+    )
+    if preserves_feature_pr and ws.base_commit:
+        return ws.base_commit
+    return checked_out_head
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
@@ -245,6 +272,26 @@ def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
     if mode == ProfileEgressMode.offline:
         return "internal_only"
     return "policy_decision"
+
+
+async def _run_claimed_provision(
+    provisioner: Any,
+    workspace_id: str,
+    workspace: Workspace,
+    *,
+    claim_epoch: int | None = None,
+) -> None:
+    """Run provisioning between paired service-resource lifecycle hooks."""
+    hook_started = provisioner._before_provision is not None
+    try:
+        await provisioner._provision_claimed_workspace(
+            workspace_id,
+            workspace,
+            execution_claim_epoch=claim_epoch,
+        )
+    finally:
+        if hook_started and provisioner._after_provision is not None:
+            await provisioner._after_provision()
 
 
 async def record_stale_action_skip(

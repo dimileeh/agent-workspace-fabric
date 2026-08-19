@@ -51,6 +51,24 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service logs --service worker",
         "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
     ),
+    "WORKSPACE_REMONITOR_METADATA_MISSING": _ReasonText(
+        (
+            "AWF refused to restart PR monitoring because the workspace lacks "
+            "persisted PR identity or local runtime metadata."
+        ),
+        (
+            "Retry the workspace so AWF can reprovision its runtime and reattach "
+            "the existing PR, then use Remonitor if another monitor restart is needed."
+        ),
+        (
+            "The workspace failed before provisioning or was created by an older "
+            "AWF version without one or more required fields: PR number, recoverable "
+            "remote branch, Compose project, or Compose file. Hosted PR adoption does "
+            "not require local Compose metadata."
+        ),
+        "awf workspace retry <workspace_id>",
+        _reason_catalog_link("WORKSPACE_REMONITOR_METADATA_MISSING"),
+    ),
     "FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF detected a code forge it does not support. GitHub and Bitbucket "
@@ -864,10 +882,16 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "docs/REASON_CATALOG.md#pr_already_closed",
     ),
     "PR_ALREADY_MERGED": _ReasonText(
-        "The PR selected for monitor adoption is already merged.",
-        "No monitor adoption is needed; use workspace cleanup or status commands instead.",
-        "There is no open PR monitor work left for AWF to own.",
-        "awf workspace adopt-pr",
+        "AWF refused to adopt or retry work for a pull request that is already merged.",
+        (
+            "Do not adopt or retry the merged pull request. Use workspace cleanup or status "
+            "commands, or create a new workspace for follow-up work."
+        ),
+        (
+            "The selected adoption PR or the source workspace's existing PR merged before "
+            "AWF could adopt or retry it, so there is no open PR work left to own."
+        ),
+        "awf workspace show <workspace_id>",
         "docs/REASON_CATALOG.md#pr_already_merged",
     ),
     "PR_METADATA_FETCH_FAILED": _ReasonText(

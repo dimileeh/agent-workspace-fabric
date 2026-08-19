@@ -928,6 +928,10 @@ def _bootstrap_stages(
                 (*compose, "up", "--build", "--force-recreate", "migrate"),
             ),
             _BootstrapStage(
+                "gitconfig_source",
+                (*compose, "up", "-d", "--build", "--wait", "gitconfig-source"),
+            ),
+            _BootstrapStage(
                 "api_worker",
                 (*compose, "up", "-d", "--build", "--no-deps", "api", "worker"),
             ),

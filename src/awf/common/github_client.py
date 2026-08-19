@@ -35,6 +35,7 @@ from urllib.parse import quote
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client_adoption import (
     BranchOpenPullRequestResolver as BranchOpenPullRequestResolver,
 )
@@ -51,6 +52,7 @@ from awf.common.github_client_ref import RepoRef as RepoRef
 from awf.common.github_graphql import (
     _GQL_PR_FILES_PAGE,
     _GQL_PR_ISSUE_COMMENTS_PAGE,
+    _GQL_PR_LIFECYCLE,
     _GQL_PR_REVIEW_THREADS_PAGE,
     _GQL_PR_REVIEWS_PAGE,
     _GQL_PR_STATE,
@@ -266,6 +268,42 @@ class GitHubClient:
     async def __aexit__(self, *exc_info: object) -> None:
         """Exit an ``async with`` block (no-op; see :meth:`aclose`)."""
         await self.aclose()
+
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using a minimal retrying read."""
+        return (await self.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)).lifecycle
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle, live head branch, and target SHA."""
+        payload = await self._graphql(
+            query=_GQL_PR_LIFECYCLE,
+            variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
+            retry_policy=RetryPolicy.READ,
+        )
+        pr = payload["data"]["repository"]["pullRequest"]
+        if pr is None:
+            return PullRequestSnapshot(PullRequestLifecycle.missing, None)
+        if pr["merged"]:
+            lifecycle = PullRequestLifecycle.merged
+        elif pr["closed"]:
+            lifecycle = PullRequestLifecycle.closed
+        else:
+            lifecycle = PullRequestLifecycle.open
+        return PullRequestSnapshot(
+            lifecycle,
+            _clean_optional_str(pr.get("headRefName")),
+            _clean_optional_str(pr.get("baseRefOid")),
+        )
 
     async def fetch_pr_status(
         self,

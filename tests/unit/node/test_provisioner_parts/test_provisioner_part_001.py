@@ -34,6 +34,7 @@ from awf.node.provisioner import (
     _egress_plan_decision,
     _egress_plan_destination_category,
     _positive_int,
+    _provision_base_commit,
     _provision_checkout_base_branch,
     _provision_local_branch_name,
     _provision_remote_push_branch,
@@ -201,6 +202,7 @@ class TestSuccess:
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
         origin_repo: Path,
@@ -222,11 +224,29 @@ class TestSuccess:
                 )
 
         launcher = _RecordingStackLauncher()
+        refresh_calls: list[None] = []
+        release_calls: list[None] = []
+
+        async def _refresh_service_auth() -> None:
+            refresh_calls.append(None)
+
+        async def _release_service_auth() -> None:
+            release_calls.append(None)
+
+        original_add_worktree = git_manager.add_worktree
+
+        async def _add_worktree_after_refresh(**kwargs: Any) -> WorktreeLayout:
+            assert refresh_calls == [None]
+            return await original_add_worktree(**kwargs)
+
+        monkeypatch.setattr(git_manager, "add_worktree", _add_worktree_after_refresh)
         provisioner = Provisioner(
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
             config=ProvisionerConfig(node_id="test-node-01"),
+            before_provision=_refresh_service_auth,
+            after_provision=_release_service_auth,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
@@ -244,6 +264,8 @@ class TestSuccess:
         await provisioner.provision(ws_id)
 
         assert len(launcher.requests) == 1
+        assert refresh_calls == [None]
+        assert release_calls == [None]
         request = launcher.requests[0]
         assert request.workspace_id == ws_id
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
@@ -259,6 +281,32 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_after_provision_hook_runs_when_claimed_pipeline_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provisioner = object.__new__(Provisioner)
+        release_calls: list[None] = []
+
+        async def _before_provision() -> None:
+            pass
+
+        async def _after_provision() -> None:
+            release_calls.append(None)
+
+        async def _raise_from_pipeline(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("provision failed")
+
+        provisioner._before_provision = _before_provision  # noqa: SLF001
+        provisioner._after_provision = _after_provision  # noqa: SLF001
+        monkeypatch.setattr(provisioner, "_provision_claimed_workspace", _raise_from_pipeline)
+
+        with pytest.raises(RuntimeError, match="provision failed"):
+            await provisioner._run_claimed_provision("ws_failure", Workspace())  # noqa: SLF001
+
+        assert release_calls == [None]
 
     @pytest.mark.unit
     async def test_stack_launch_uses_configured_default_model_when_task_model_omitted(
@@ -1054,6 +1102,7 @@ class TestSuccess:
                 resolved_profile={"name": "generic"},
             )
             ws.pr_number = 277
+            ws.base_commit = "b" * 40
             await s.commit()
             workspace_id = ws.id
 
@@ -1074,6 +1123,7 @@ class TestSuccess:
             assert reloaded.branch_base == "development"
             assert reloaded.branch_name == f"feature-sync/{workspace_id}"
             assert reloaded.remote_push_branch == "feature/ready"
+            assert reloaded.base_commit == "b" * 40
 
     @pytest.mark.unit
     def test_sync_feature_pr_checkout_uses_pull_head_ref_when_pr_number_is_present(
@@ -1096,6 +1146,21 @@ class TestSuccess:
 
         assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
         assert _provision_remote_push_branch(ws) == "feature/fork-head"
+
+    @pytest.mark.unit
+    def test_existing_feature_pr_checkout_preserves_target_base_commit(self) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="feature/existing-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/278",
+            pr_number=278,
+            base_commit="b" * 40,
+        )
+
+        assert _provision_base_commit(ws, checked_out_head="h" * 40) == "b" * 40
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

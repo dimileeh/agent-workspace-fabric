@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.common.config import get_settings
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace
 from awf.db.repositories import (
@@ -79,6 +80,25 @@ _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+
+
+def _remonitor_missing_metadata(workspace: Workspace) -> list[str]:
+    """Return persisted fields required to recover this workspace's PR monitor."""
+
+    missing: list[str] = []
+    if workspace.pr_number is None:
+        missing.append("pr_number")
+    can_recover_feature_branch = workspace.task_kind == "feature_branch_pr" and bool(
+        workspace.branch_name
+    )
+    if not workspace.remote_push_branch and not can_recover_feature_branch:
+        missing.append("remote_push_branch")
+    if not pr_adoption_is_hosted(workspace.task_policy):
+        if not workspace.compose_project_name:
+            missing.append("compose_project_name")
+        if not workspace.compose_file_path or not Path(workspace.compose_file_path).is_file():
+            missing.append("compose_file_path")
+    return missing
 
 
 async def stop_project_containers(compose_project_name: str | None) -> None:

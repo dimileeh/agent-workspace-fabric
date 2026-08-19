@@ -9,12 +9,88 @@ import {
 
 test("control eligibility remonitor requires PR-monitorable workspace", () => {
   assertControl(
-    { overview: overview({ status: "monitoring_pr", pr_url: "https://github.test/pr/1" }) },
+    {
+      overview: overview({ status: "monitoring_pr", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace(),
+    },
     "remonitor",
     { enabled: true, reason: null },
   );
   assertControl(
-    { overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }) },
+    {
+      overview: overview({ status: "monitoring_pr", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({ compose_file_path: null }),
+    },
+    "remonitor",
+    { enabled: false, reason: "cancel, then retry to reprovision existing PR" },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
+        compose_project_name: "awf_ws_123",
+        compose_file_path: "/tmp/awf/ws_123/compose.yml",
+      }),
+    },
+    "remonitor",
+    { enabled: true, reason: null },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({ status: "failed", pr_number: null }),
+    },
+    "remonitor",
+    { enabled: false, reason: "retry to reprovision existing PR" },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
+        task_kind: "sync_feature_pr",
+        remote_push_branch: null,
+      }),
+    },
+    "remonitor",
+    { enabled: false, reason: "retry to reprovision existing PR" },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
+        task_kind: "feature_branch_pr",
+        branch_name: "awf/ws_legacy",
+        remote_push_branch: null,
+      }),
+    },
+    "remonitor",
+    { enabled: true, reason: null },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
+        compose_project_name: null,
+        compose_file_path: null,
+      }),
+    },
+    "remonitor",
+    { enabled: false, reason: "retry to reprovision existing PR" },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
+        compose_project_name: null,
+        compose_file_path: null,
+        task_policy: { pr_adoption: { execution: { mode: "hosted" } } },
+      }),
+    },
     "remonitor",
     { enabled: true, reason: null },
   );
@@ -485,7 +561,13 @@ function workspace(overrides = {}) {
     id: "ws_123",
     status: "monitoring_pr",
     version: 7,
+    task_kind: "feature_branch_pr",
+    branch_name: "awf/ws_123",
+    remote_push_branch: "awf/ws_123",
     pr_url: "https://github.test/pr/1",
+    pr_number: 1,
+    compose_project_name: "awf_ws_123",
+    compose_file_path: "/tmp/awf/ws_123/compose.yml",
     recovery: null,
     validation_provenance: null,
     ...overrides,

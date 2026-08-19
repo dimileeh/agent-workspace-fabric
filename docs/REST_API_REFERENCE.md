@@ -294,6 +294,12 @@ Returns `202 Accepted` with an operation response.
 Re-enter PR monitoring for a workspace that had its monitor fall off.
 Auth required. Requires `Idempotency-Key` and supports `If-Match`.
 
+The workspace must already have persisted PR identity and recoverable runtime
+metadata. Otherwise AWF returns `409 Conflict` with
+`WORKSPACE_REMONITOR_METADATA_MISSING` and `recommended_action` set to
+`retry_workspace`; retrying reprovisions the runtime and reattaches the existing
+PR.
+
 ```bash
 curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
   -H "Authorization: Bearer $AWF_API_TOKEN" \

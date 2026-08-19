@@ -285,7 +285,10 @@ uv run --python 3.12 --extra dev awf workspace destroy ws_123 --if-match 7
 ```
 
 `retry` re-runs a failed or cancelled workspace as a fresh attempt; `remonitor`
-requests PR-monitor recovery for a workspace that is monitoring a PR.
+requests PR-monitor recovery for a workspace that already has persisted PR and
+runtime metadata. If AWF reports `WORKSPACE_REMONITOR_METADATA_MISSING`, use
+`retry`: the fresh attempt reprovisions the runtime and reattaches the existing
+PR before monitoring resumes.
 
 Control commands send an `Idempotency-Key` header. The CLI generates one when
 `--idempotency-key` is omitted, which is convenient for one-off operator

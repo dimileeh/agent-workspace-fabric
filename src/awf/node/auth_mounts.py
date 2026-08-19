@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -76,6 +77,7 @@ from awf.node.compose_manager import AuthMount
 _CONTAINER_HOME = "/home/agent"
 _GH_CONFIG_TARGET = f"{_CONTAINER_HOME}/.config/gh"
 _GITCONFIG_TARGET = f"{_CONTAINER_HOME}/.gitconfig"
+_SNAPSHOT_AGENT_GITCONFIG_NAME = "agent.gitconfig"
 _SSH_TARGET = f"{_CONTAINER_HOME}/.ssh"
 _CODEX_TARGET = f"{_CONTAINER_HOME}/.codex"
 _OPENCODE_TARGET = f"{_CONTAINER_HOME}/.config/opencode"
@@ -100,16 +102,39 @@ class WorkspaceAuthMountResolver(Protocol):
     ) -> tuple[AuthMount, ...]: ...
 
 
-@dataclass(frozen=True)
+@dataclass
 class ServiceAuthMountResolver:
     """Resolve host credentials for workspace stacks launched by the service worker."""
 
     host_home: Path
     work_dir: Path
+    gitconfig_source: Path | None = None
     host_env: Mapping[str, str] | None = None
     workspace_owner_uid: int | None = None
     workspace_owner_gid: int | None = None
     overlay_mounter: OverlayMounter | None = None
+    _task_gitconfig_source: ContextVar[Path | None] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._task_gitconfig_source = ContextVar(f"service_auth_gitconfig_source_{id(self)}")
+
+    def replace_gitconfig_source(self, source: Path | None) -> None:
+        """Use ``source`` for auth mounts resolved for subsequent workspaces."""
+        self.gitconfig_source = source
+
+    def set_task_gitconfig_source(self, source: Path | None) -> Token[Path | None]:
+        """Pin current-task auth mounts to ``source`` until reset."""
+        return self._task_gitconfig_source.set(source)
+
+    def reset_task_gitconfig_source(self, token: Token[Path | None]) -> None:
+        """Release a current-task Git-config source pin."""
+        self._task_gitconfig_source.reset(token)
+
+    def _effective_gitconfig_source(self) -> Path | None:
+        try:
+            return self._task_gitconfig_source.get()
+        except LookupError:
+            return self.gitconfig_source
 
     def resolve(
         self,
@@ -121,6 +146,7 @@ class ServiceAuthMountResolver:
         return resolve_service_auth_mounts(
             host_home=self.host_home,
             work_dir=self.work_dir,
+            gitconfig_source=self._effective_gitconfig_source(),
             workspace_id=workspace_id,
             host_env=self.host_env,
             suppressed_targets=suppressed_targets,
@@ -136,6 +162,7 @@ def resolve_service_auth_mounts(
     host_home: Path,
     work_dir: Path,
     workspace_id: str,
+    gitconfig_source: Path | None = None,
     host_env: Mapping[str, str] | None = None,  # noqa: ARG001
     suppressed_targets: Collection[str] = (),
     suppressed_providers: Collection[str] = (),
@@ -163,6 +190,7 @@ def resolve_service_auth_mounts(
     )
     base_mounts = _build_host_auth_mounts(
         normalized_home,
+        gitconfig_source=gitconfig_source,
         suppressed_targets=suppressed_target_set,
     )
     return _workspace_auth_mounts(
@@ -180,18 +208,36 @@ def resolve_service_auth_mounts(
 def _build_host_auth_mounts(
     host_home: Path,
     *,
+    gitconfig_source: Path | None = None,
     suppressed_targets: Collection[str] = (),
 ) -> list[AuthMount]:
+    resolved_gitconfig_source = gitconfig_source or host_home / ".gitconfig"
     ro_mounts = [
         (host_home / ".config" / "gh", _GH_CONFIG_TARGET, "ro"),
-        (host_home / ".gitconfig", _GITCONFIG_TARGET, "ro"),
         (host_home / ".ssh", _SSH_TARGET, "ro"),
     ]
-    return [
+    mounts = [
         AuthMount(source=str(src), target=target, mode=mode)
         for src, target, mode in ro_mounts
         if target not in suppressed_targets and src.exists()
     ]
+    if _GITCONFIG_TARGET in suppressed_targets or not resolved_gitconfig_source.exists():
+        return mounts
+
+    mount_source = resolved_gitconfig_source
+    if gitconfig_source is not None:
+        bundle_root = resolved_gitconfig_source.parent.parent
+        agent_gitconfig = bundle_root / _SNAPSHOT_AGENT_GITCONFIG_NAME
+        if agent_gitconfig.is_file():
+            mount_source = agent_gitconfig
+    mounts.append(
+        AuthMount(
+            source=str(mount_source),
+            target=_GITCONFIG_TARGET,
+            mode="ro",
+        )
+    )
+    return mounts
 
 
 def _workspace_auth_mounts(

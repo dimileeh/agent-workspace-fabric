@@ -128,10 +128,59 @@ function remonitorControl(context: WorkspaceOperatorContext): WorkspaceOperatorC
   if (!prUrl && (status === "monitoring_pr" || status === "failed")) {
     return control("remonitor", { visible: true, enabled: false, reason: "no PR" });
   }
+  if (
+    prUrl &&
+    (status === "monitoring_pr" || status === "failed") &&
+    requiresRuntimeReprovision(context.workspace)
+  ) {
+    return control("remonitor", {
+      visible: true,
+      enabled: false,
+      reason:
+        status === "monitoring_pr"
+          ? "cancel, then retry to reprovision existing PR"
+          : "retry to reprovision existing PR",
+    });
+  }
   if (prUrl && (status === "monitoring_pr" || status === "failed")) {
     return control("remonitor", { visible: true, enabled: true, reason: null });
   }
   return control("remonitor", { visible, enabled: false, reason: "not monitorable" });
+}
+
+function requiresRuntimeReprovision(workspace: Workspace | null | undefined): boolean {
+  if (!workspace) {
+    return true;
+  }
+  if (workspace.pr_number == null) {
+    return true;
+  }
+  const canRecoverFeatureBranch =
+    workspace.task_kind === "feature_branch_pr" && Boolean(workspace.branch_name);
+  if (!workspace.remote_push_branch && !canRecoverFeatureBranch) {
+    return true;
+  }
+  if (isHostedPrAdoption(workspace.task_policy)) {
+    return false;
+  }
+  return !workspace.compose_project_name || !workspace.compose_file_path;
+}
+
+function isHostedPrAdoption(taskPolicy: Record<string, unknown> | null | undefined): boolean {
+  if (!taskPolicy) {
+    return false;
+  }
+  const adoption = taskPolicy.pr_adoption;
+  if (!adoption || typeof adoption !== "object" || Array.isArray(adoption)) {
+    return false;
+  }
+  const execution = (adoption as Record<string, unknown>).execution;
+  return (
+    Boolean(execution) &&
+    typeof execution === "object" &&
+    !Array.isArray(execution) &&
+    (execution as Record<string, unknown>).mode === "hosted"
+  );
 }
 
 function refreshControl(context: WorkspaceOperatorContext): WorkspaceOperatorControl {

@@ -11159,6 +11159,17 @@
               }
             ]
           },
+          "remote_push_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Push Branch"
+          },
           "repo_url": {
             "title": "Repo Url",
             "type": "string"
@@ -11243,6 +11254,10 @@
             ],
             "title": "Task External Id"
           },
+          "task_kind": {
+            "title": "Task Kind",
+            "type": "string"
+          },
           "task_policy": {
             "additionalProperties": true,
             "title": "Task Policy",
@@ -11294,9 +11309,11 @@
           "repo_url",
           "branch_base",
           "branch_name",
+          "remote_push_branch",
           "base_commit",
           "task_title",
           "task_prompt",
+          "task_kind",
           "task_external_id",
           "task_class",
           "owned_paths",
