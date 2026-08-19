@@ -118,7 +118,12 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
         # atomically replace the source between these steps; parsing ``target``
         # keeps the mirrored include graph consistent with the published main
         # config content.
-        for include_path in _relative_include_paths(target):
+        include_paths = _relative_include_paths(target)
+        _rewrite_relative_gitdir_conditions(
+            config_path=target,
+            source_dir=current.parent,
+        )
+        for include_path in include_paths:
             included = (current.parent / include_path).resolve()
             if included.is_file() and included.is_relative_to(resolved_home):
                 pending.append((included, depth + 1))
@@ -164,6 +169,66 @@ def _relative_include_paths(config_path: Path) -> tuple[Path, ...]:
             continue
         paths.append(candidate)
     return tuple(paths)
+
+
+def _rewrite_relative_gitdir_conditions(*, config_path: Path, source_dir: Path) -> None:
+    """Keep ``gitdir:./`` conditions based at their original config directory."""
+
+    result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(config_path),
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^includeIf\..*\.path$",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode == 1 and not result.stderr:
+        return
+    if result.returncode != 0:
+        message = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            f"could not inspect gitconfig conditions: {message or result.returncode}",
+        )
+
+    conditions: set[str] = set()
+    for raw_key in result.stdout.split(b"\0"):
+        key = raw_key.decode(errors="surrogateescape")
+        if not key:
+            continue
+        condition = key[len("includeif.") : -len(".path")]
+        if condition.startswith("gitdir:./") or condition.startswith("gitdir/i:./"):
+            conditions.add(condition)
+
+    source_prefix = source_dir.as_posix().rstrip("/")
+    for condition in conditions:
+        kind, relative_pattern = condition.split(":./", maxsplit=1)
+        rewritten = f"{kind}:{source_prefix}/{relative_pattern}"
+        rename = subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                str(config_path),
+                "--rename-section",
+                f"includeIf.{condition}",
+                f"includeIf.{rewritten}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        if rename.returncode != 0:
+            message = rename.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"could not rewrite relative gitdir condition: {message or rename.returncode}",
+            )
 
 
 def _snapshot_digest(snapshot_home: Path) -> str:

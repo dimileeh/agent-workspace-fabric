@@ -150,6 +150,68 @@ def test_service_gitconfig_snapshot_preserves_relative_include_origin(tmp_path: 
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_relative_gitdir_conditions(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text(
+        '[includeIf "gitdir:./repos/"]\n'
+        "  path = identities/top.inc\n"
+        "[include]\n"
+        "  path = configs/conditions.inc\n",
+    )
+    (host_home / "configs").mkdir()
+    (host_home / "configs" / "conditions.inc").write_text(
+        '[includeIf "gitdir/i:./Repos/"]\n  path = ../identities/nested.inc\n',
+    )
+    (host_home / "identities").mkdir()
+    (host_home / "identities" / "top.inc").write_text(
+        "[user]\n  email = top@example.com\n",
+    )
+    (host_home / "identities" / "nested.inc").write_text(
+        "[user]\n  email = nested@example.com\n",
+    )
+    top_repo = host_home / "repos" / "top"
+    nested_repo = host_home / "configs" / "repos" / "nested"
+    subprocess.run(["git", "init", "--quiet", str(top_repo)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(nested_repo)], check=True)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    rewritten_top = f'[includeIf "gitdir:{host_home}/repos/"]'
+    assert rewritten_top in snapshot.read_text()
+    assert rewritten_top in (snapshot.parent.parent / "agent.gitconfig").read_text()
+    assert (
+        f'[includeIf "gitdir/i:{host_home}/configs/Repos/"]'
+        in (snapshot.parent / "configs" / "conditions.inc").read_text()
+    )
+    for repo, expected_email in (
+        (top_repo, "top@example.com"),
+        (nested_repo, "nested@example.com"),
+    ):
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "config",
+                "--file",
+                str(snapshot),
+                "--includes",
+                "user.email",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected_email
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_is_absent_without_host_config(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
