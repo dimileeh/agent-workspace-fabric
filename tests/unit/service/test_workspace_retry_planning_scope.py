@@ -105,3 +105,27 @@ async def test_retry_planning_scope_preserves_promoted_fallback_model(
     assert retried is not None
     assert retried.agent == "codex"
     assert retried.task_policy["agent_model"] == "gpt-5.5"
+
+
+async def test_retry_planning_scope_clears_existing_feature_pr_identity(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    await _mark_planning_scope_failed(factory, first.id)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_url = "https://github.com/example/retryable/pull/10"
+        source.pr_number = 10
+        await session.commit()
+
+    retry = await _retry_with_preflight_override(service, first.id)
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+
+    assert retried is not None
+    assert retried.remote_push_branch is None
+    assert retried.pr_url is None
+    assert retried.pr_number is None

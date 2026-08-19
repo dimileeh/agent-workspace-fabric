@@ -465,7 +465,8 @@ async def retry_workspace_row(
         # updating the provisioner checks could break the invariant.
 
     preserve_existing_feature_pr = (
-        source.task_kind == TaskKind.feature_branch_pr.value
+        planning_scope_context is None
+        and source.task_kind == TaskKind.feature_branch_pr.value
         and bool(source.pr_url)
         and source.pr_number is not None
     )
