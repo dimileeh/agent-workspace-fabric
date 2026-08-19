@@ -565,10 +565,10 @@ def _make_bundle_readable(
         directory.chmod(0o755)
     for path in (item for item in bundle_root.rglob("*") if item.is_file()):
         with path.open("r+b") as file_obj:
+            os.fchmod(file_obj.fileno(), 0o644 if needs_shared_read else 0o600)
             if use_agent_ownership:
                 assert owner_uid is not None and owner_gid is not None
                 os.fchown(file_obj.fileno(), owner_uid, owner_gid)
-            os.fchmod(file_obj.fileno(), 0o644 if needs_shared_read else 0o600)
             os.fsync(file_obj.fileno())
 
 

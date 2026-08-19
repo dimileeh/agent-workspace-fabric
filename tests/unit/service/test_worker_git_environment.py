@@ -1238,9 +1238,21 @@ def test_service_gitconfig_snapshot_is_owned_by_agent_runtime_user(
     host_home.mkdir()
     (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
     ownership: list[tuple[int, int]] = []
+    file_operations: list[tuple[str, int]] = []
+    original_fchmod = os.fchmod
+
+    def record_fchmod(fd: int, mode: int) -> None:
+        file_operations.append(("chmod", fd))
+        original_fchmod(fd, mode)
+
+    def record_fchown(fd: int, uid: int, gid: int) -> None:
+        file_operations.append(("chown", fd))
+        ownership.append((uid, gid))
+
+    monkeypatch.setattr("awf.service.gitconfig_snapshot.os.fchmod", record_fchmod)
     monkeypatch.setattr(
         "awf.service.gitconfig_snapshot.os.fchown",
-        lambda _fd, uid, gid: ownership.append((uid, gid)),
+        record_fchown,
     )
     monkeypatch.setattr(os, "geteuid", lambda: 0)
 
@@ -1254,6 +1266,9 @@ def test_service_gitconfig_snapshot_is_owned_by_agent_runtime_user(
     assert snapshot is not None
     assert ownership
     assert set(ownership) == {(1000, 1000)}
+    for index, operation in enumerate(file_operations):
+        if operation[0] == "chown":
+            assert file_operations[index - 1] == ("chmod", operation[1])
     assert snapshot.stat().st_mode & 0o777 == 0o600
 
 
