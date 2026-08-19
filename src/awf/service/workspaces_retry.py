@@ -592,6 +592,7 @@ async def retry_workspace_row(
     if preserve_existing_feature_pr:
         retried.pr_url = source.pr_url
         retried.pr_number = existing_feature_pr_number
+        retried.base_commit = source.base_commit
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)

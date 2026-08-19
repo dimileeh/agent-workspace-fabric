@@ -34,6 +34,7 @@ from awf.node.provisioner import (
     _egress_plan_decision,
     _egress_plan_destination_category,
     _positive_int,
+    _provision_base_commit,
     _provision_checkout_base_branch,
     _provision_local_branch_name,
     _provision_remote_push_branch,
@@ -1101,6 +1102,7 @@ class TestSuccess:
                 resolved_profile={"name": "generic"},
             )
             ws.pr_number = 277
+            ws.base_commit = "b" * 40
             await s.commit()
             workspace_id = ws.id
 
@@ -1121,6 +1123,7 @@ class TestSuccess:
             assert reloaded.branch_base == "development"
             assert reloaded.branch_name == f"feature-sync/{workspace_id}"
             assert reloaded.remote_push_branch == "feature/ready"
+            assert reloaded.base_commit == "b" * 40
 
     @pytest.mark.unit
     def test_sync_feature_pr_checkout_uses_pull_head_ref_when_pr_number_is_present(
@@ -1143,6 +1146,21 @@ class TestSuccess:
 
         assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
         assert _provision_remote_push_branch(ws) == "feature/fork-head"
+
+    @pytest.mark.unit
+    def test_existing_feature_pr_checkout_preserves_target_base_commit(self) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="feature/existing-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/278",
+            pr_number=278,
+            base_commit="b" * 40,
+        )
+
+        assert _provision_base_commit(ws, checked_out_head="h" * 40) == "b" * 40
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

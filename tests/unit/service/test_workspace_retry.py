@@ -492,6 +492,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
         source = await WorkspaceRepository(session).get(first.id)
         assert source is not None
         source.pr_number = 10
+        source.base_commit = "b" * 40
         source.compose_project_name = None
         source.compose_file_path = None
         await session.commit()
@@ -512,6 +513,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
     assert retried.pr_url == "https://github.com/example/retryable/pull/10"
     assert retried.pr_number == 10
     assert retried.remote_push_branch == expected_remote_push_branch
+    assert retried.base_commit == "b" * 40
     assert _provision_checkout_base_branch(retried) == expected_remote_push_branch
 
 

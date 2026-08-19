@@ -151,6 +151,22 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
     )
 
 
+def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:
+    """Return the target base SHA that scopes execution and validation.
+
+    Preserved feature PRs start their worktree at the PR head so subsequent
+    pushes remain fast-forward. Their pre-existing ``base_commit`` still marks
+    the target-branch side of the complete PR diff and must not be replaced by
+    that checkout head.
+    """
+    preserves_feature_pr = ws.task_kind == "sync_feature_pr" or bool(
+        ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
+    )
+    if preserves_feature_pr and ws.base_commit:
+        return ws.base_commit
+    return checked_out_head
+
+
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
     """Return the remote push branch for sync tasks, or None for normal workspaces."""
     return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch

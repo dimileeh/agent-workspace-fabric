@@ -94,6 +94,7 @@ from awf.service.workspaces import (
 _egress_plan_decision = _provisioner_helpers._egress_plan_decision
 _egress_plan_destination_category = _provisioner_helpers._egress_plan_destination_category
 _positive_int = _provisioner_helpers._positive_int
+_provision_base_commit = _provisioner_helpers._provision_base_commit
 _provision_checkout_base_branch = _provisioner_helpers._provision_checkout_base_branch
 _provision_local_branch_name = _provisioner_helpers._provision_local_branch_name
 _provision_profile_auto_merge_is_trusted = (
@@ -341,7 +342,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 reason_code="PROVISIONER_STALE_STATUS",
             ):
                 return
-            base_commit = await self._git.head_sha(workspace_id=workspace_id)
+            checked_out_head = await self._git.head_sha(workspace_id=workspace_id)
+            base_commit = _provision_base_commit(ws, checked_out_head=checked_out_head)
             profile_resolution = None
             if ws.resolved_profile is None:
                 profile_resolution = resolve_workspace_profile(
