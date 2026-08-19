@@ -201,24 +201,19 @@ def _build_host_auth_mounts(
     if _GITCONFIG_TARGET in suppressed_targets or not resolved_gitconfig_source.exists():
         return mounts
 
-    bundle_root = resolved_gitconfig_source.parent.parent
-    agent_gitconfig = bundle_root / _SNAPSHOT_AGENT_GITCONFIG_NAME
-    if agent_gitconfig.is_file():
-        mounts.append(
-            AuthMount(
-                source=str(agent_gitconfig),
-                target=_GITCONFIG_TARGET,
-                mode="ro",
-            )
+    mount_source = resolved_gitconfig_source
+    if gitconfig_source is not None:
+        bundle_root = resolved_gitconfig_source.parent.parent
+        agent_gitconfig = bundle_root / _SNAPSHOT_AGENT_GITCONFIG_NAME
+        if agent_gitconfig.is_file():
+            mount_source = agent_gitconfig
+    mounts.append(
+        AuthMount(
+            source=str(mount_source),
+            target=_GITCONFIG_TARGET,
+            mode="ro",
         )
-    else:
-        mounts.append(
-            AuthMount(
-                source=str(resolved_gitconfig_source),
-                target=_GITCONFIG_TARGET,
-                mode="ro",
-            )
-        )
+    )
     return mounts
 
 
