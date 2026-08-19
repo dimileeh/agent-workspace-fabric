@@ -110,7 +110,7 @@ async def _mark_failed(
         workspace.failure_message = "pytest failed"
         workspace.branch_name = branch_name
         workspace.remote_push_branch = remote_push_branch
-        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_url = None
         workspace.compose_project_name = "awf_old_attempt"
         assert workspace.resolved_profile is not None
         frozen_profile = {

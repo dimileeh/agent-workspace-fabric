@@ -283,6 +283,12 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
         super().__init__(message, detail=payload)
 
 
+class WorkspaceRetryPrStateUnavailableError(WorkspaceRetryError):
+    """Raised when retry cannot safely determine whether an existing PR is open."""
+
+    error_code = "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE"
+
+
 class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
     """Raised when provider readiness preflight blocks workspace startup."""
 
@@ -1375,6 +1381,7 @@ __all__ = [
     "WorkspaceRetryRecoveringInFlightError",
     "WorkspaceRetryExhaustedError",
     "WorkspaceRetrySalvageUnavailableError",
+    "WorkspaceRetryPrStateUnavailableError",
     "WorkspaceProviderReadinessBlockedError",
     "WorkspaceUnsupportedAgentRuntimeError",
     "WorkspaceCreateIdempotencyConflictError",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
+import awf.service.workspaces_retry as workspaces_retry_service
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
@@ -18,11 +20,13 @@ from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
+    WorkspaceRetryPrStateUnavailableError,
     WorkspaceRetryRecoveringInFlightError,
     create_workspace_row,
     retry_workspace_row,
 )
 from awf.service.workspaces_retry import (
+    _live_pr_is_open,
     _pr_number_from_url,
     _prune_and_migrate_retired_agent,
     _prune_retired_fallbacks,
@@ -45,6 +49,13 @@ pytestmark = pytest.mark.unit
 __all__ = ["factory"]
 
 
+def _live_pr_state(open_: bool) -> Callable[[Workspace, int], Awaitable[bool]]:
+    async def _check(_source: Workspace, _pr_number: int) -> bool:
+        return open_
+
+    return _check
+
+
 def test_retry_not_found_error_has_instance_detail() -> None:
     error = WorkspaceRetryNotFoundError("ws_missing")
 
@@ -62,6 +73,54 @@ def test_retry_not_found_error_has_instance_detail() -> None:
 )
 def test_pr_number_from_url_rejects_invalid_or_non_positive_number(pr_url: str) -> None:
     assert _pr_number_from_url(pr_url) is None
+
+
+@pytest.mark.parametrize(
+    ("closed", "merged", "expected"),
+    [(False, False, True), (True, False, False), (False, True, False)],
+)
+async def test_live_pr_is_open_uses_current_forge_status(
+    monkeypatch: pytest.MonkeyPatch,
+    closed: bool,
+    merged: bool,
+    expected: bool,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeForgeClient:
+        async def __aenter__(self) -> FakeForgeClient:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+        async def fetch_pr_status(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(kwargs)
+            return SimpleNamespace(closed=closed, merged=merged)
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "make_forge_client",
+        lambda _forge, _runner: FakeForgeClient(),
+    )
+    source = SimpleNamespace(
+        repo_url="git@github.com:example/retryable.git",
+        resolved_profile={"forge": "github"},
+    )
+
+    assert await _live_pr_is_open(source, 10) is expected
+    assert calls == [
+        {
+            "repo": workspaces_retry_service.RepoRef(
+                owner="example",
+                name="retryable",
+                forge="github",
+            ),
+            "pr_number": 10,
+            "base_behind_count": 0,
+            "retry": False,
+        }
+    ]
 
 
 async def test_create_blocks_provider_readiness_before_rows(
@@ -432,6 +491,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
         first.id,
         branch_name="awf/original-feature",
         remote_push_branch=remote_push_branch,
+        pr_url="https://github.com/example/retryable/pull/10",
     )
     async with factory() as session:
         source = await WorkspaceRepository(session).get(first.id)
@@ -449,6 +509,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
             provider_readiness_override_reason="retry existing PR",
             settings=settings,
             provider_environ={},
+            pr_open_checker=_live_pr_state(True),
         )
 
     retried = retry.new_workspace
@@ -504,6 +565,7 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
             provider_readiness_override_reason="recover legacy PR identity",
             settings=settings,
             provider_environ={},
+            pr_open_checker=_live_pr_state(True),
         )
 
     retried = retry.new_workspace
@@ -532,6 +594,7 @@ async def test_retry_replaces_feature_pr_closed_externally(
         branch_name="awf/closed-feature",
         remote_push_branch="contributors/closed-head",
         failure_reason_code="pr_closed_externally",
+        pr_url="https://github.com/example/retryable/pull/10",
     )
     async with factory() as session:
         source = await WorkspaceRepository(session).get(first.id)
@@ -559,6 +622,97 @@ async def test_retry_replaces_feature_pr_closed_externally(
     assert _provision_checkout_base_branch(retried) == retried.branch_base
 
 
+async def test_retry_replaces_feature_pr_closed_after_unrelated_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/later-closed-feature",
+        remote_push_branch="contributors/later-closed-head",
+        failure_reason_code="VALIDATION_FAILED",
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="replace PR closed after failure",
+            settings=settings,
+            provider_environ={},
+            pr_open_checker=_live_pr_state(False),
+        )
+
+    retried = retry.new_workspace
+    assert retried.pr_url is None
+    assert retried.pr_number is None
+    assert retried.remote_push_branch is None
+    assert _provision_checkout_base_branch(retried) == retried.branch_base
+
+
+async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+
+    async def unavailable(_source: Workspace, _pr_number: int) -> bool:
+        raise RuntimeError("forge unavailable")
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry existing PR",
+                settings=settings,
+                provider_environ={},
+                pr_open_checker=unavailable,
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "pr_number": 10,
+        "reason_code": "PR_STATE_LOOKUP_FAILED",
+    }
+    assert [workspace.id for workspace in workspaces] == [first.id]
+
+
 async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -578,6 +732,7 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
         branch_name="awf/remonitored-feature",
         remote_push_branch="contributors/open-head",
         failure_reason_code="pr_closed_externally",
+        pr_url="https://github.com/example/retryable/pull/10",
     )
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -609,6 +764,7 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
             provider_readiness_override_reason="retry current open PR",
             settings=settings,
             provider_environ={},
+            pr_open_checker=_live_pr_state(True),
         )
 
     retried = retry.new_workspace
