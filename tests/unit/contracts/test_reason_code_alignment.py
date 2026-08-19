@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.service.workspaces import WorkspaceRetryPrStateUnavailableError
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     collect_known_error_codes,
@@ -108,6 +109,13 @@ async def test_known_error_codes_appear_in_parity_matrix() -> None:
         "Contract registry references error codes not in the parity matrix "
         f"Schema/Error-Code column: {sorted(missing)}"
     )
+
+
+@pytest.mark.unit
+def test_retry_pr_state_unavailable_error_is_registered() -> None:
+    capability = CAPABILITIES_BY_NAME["retry_workspace"]
+
+    assert WorkspaceRetryPrStateUnavailableError.error_code in capability.error_codes
 
 
 @pytest.mark.unit

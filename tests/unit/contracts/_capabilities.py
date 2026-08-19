@@ -353,6 +353,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "WORKSPACE_NOT_FOUND",
                 "WORKSPACE_NOT_RETRYABLE",
                 "WORKSPACE_RETRY_EXHAUSTED",
+                "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE",
                 "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE",
                 "PROVIDER_READINESS_PRECHECK_FAILED",
             }

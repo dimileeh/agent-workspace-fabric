@@ -935,6 +935,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace retry <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_remonitor_metadata_missing](#workspace_remonitor_metadata_missing)
 
+### WORKSPACE_RETRY_PR_STATE_UNAVAILABLE
+**Problem:** AWF refused to retry a workspace because it could not safely establish the existing open pull request's live state, head branch, or target base commit.
+**Likely Cause:** The forge lookup failed, required pull-request metadata was missing, or neither the live response nor the persisted workspace record contained a usable head branch or base commit.
+**Operator Fix:** Verify forge authentication and connectivity, then confirm the pull request is open and exposes a non-empty head branch and target base commit before retrying again. Inspect the response detail's `reason_code` to identify the unavailable field or failed lookup.
+**Related Command:** `awf workspace retry <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_retry_pr_state_unavailable](#workspace_retry_pr_state_unavailable)
+
 ### WORKSPACE_STATE_NOT_GUIDABLE
 **Problem:** Workspace is not in a state eligible for operator guidance.
 **Likely Cause:** The workspace is not in `monitoring_pr`; operator guidance can only steer the PR monitor while it owns an open pull request.
