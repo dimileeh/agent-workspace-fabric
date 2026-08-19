@@ -25,7 +25,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import reported_auto_merge
 from awf.common.redaction import redact_secrets
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
     Workspace,
@@ -182,6 +182,8 @@ def workspace_response(
 ) -> WorkspaceResponse:
     """Build a full API response payload for a workspace including computed fields."""
     computed_fields = dict(workspace_observability_payload(workspace))
+    computed_fields["remote_push_branch"] = getattr(workspace, "remote_push_branch", None)
+    computed_fields["task_kind"] = getattr(workspace, "task_kind", TaskKind.feature_branch_pr.value)
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
     computed_fields["validation_provenance"] = (
         validation_provenance
