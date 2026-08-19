@@ -175,11 +175,8 @@ def _logical_source_dir(
 
     lexical_source_dir = Path(os.path.abspath(source_dir))  # noqa: PTH100
     lexical_source_home = Path(os.path.abspath(source_home))  # noqa: PTH100
-    try:
-        relative = lexical_source_dir.relative_to(lexical_source_home)
-    except ValueError:
-        return lexical_source_dir
-    return logical_home / relative
+    relative = Path(os.path.relpath(lexical_source_dir, lexical_source_home))
+    return Path(os.path.abspath(logical_home / relative))  # noqa: PTH100
 
 
 def _relative_to_home(path: Path, *, source_home: Path) -> Path:

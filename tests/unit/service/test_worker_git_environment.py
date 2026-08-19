@@ -418,6 +418,56 @@ def test_service_gitconfig_snapshot_preserves_relative_gitdir_conditions(tmp_pat
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_maps_external_relative_gitdir_conditions(
+    tmp_path: Path,
+) -> None:
+    helper_root = tmp_path / "run" / "awf-host-root"
+    host_home = helper_root / "home" / "agent"
+    shared_config = helper_root / "home" / "shared"
+    logical_home = tmp_path / "host" / "home" / "agent"
+    logical_shared = tmp_path / "host" / "home" / "shared"
+    host_home.mkdir(parents=True)
+    shared_config.mkdir(parents=True)
+    logical_home.mkdir(parents=True)
+    (host_home / ".gitconfig").write_text(
+        "[include]\n  path = ../shared/base.inc\n",
+    )
+    (shared_config / "base.inc").write_text(
+        '[includeIf "gitdir:./repos/"]\n  path = identity.inc\n',
+    )
+    (shared_config / "identity.inc").write_text(
+        "[user]\n  email = external-condition@example.com\n",
+    )
+    repo = logical_shared / "repos" / "project"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        logical_host_home=logical_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "config",
+            "--file",
+            str(snapshot),
+            "--includes",
+            "user.email",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "external-condition@example.com"
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_is_absent_without_host_config(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
