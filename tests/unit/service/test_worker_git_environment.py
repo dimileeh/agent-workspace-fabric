@@ -150,6 +150,53 @@ def test_service_gitconfig_snapshot_preserves_relative_include_origin(tmp_path: 
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_external_relative_include(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    shared_config = tmp_path / "shared-config"
+    host_home.mkdir()
+    shared_config.mkdir()
+    (host_home / ".gitconfig").write_text("[include]\n  path = ../shared-config/base.inc\n")
+    (shared_config / "base.inc").write_text(
+        "[include]\n  path = nested/identity.inc\n",
+    )
+    (shared_config / "nested").mkdir()
+    (shared_config / "nested" / "identity.inc").write_text(
+        "[user]\n  email = external@example.com\n",
+    )
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert ".external-includes" in snapshot.read_text()
+    external_copies = tuple((snapshot.parent / ".external-includes").iterdir())
+    assert len(external_copies) == 2
+    assert not (snapshot.parent.parent / "shared-config").exists()
+    result = subprocess.run(
+        ["git", "config", "--file", str(snapshot), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "external@example.com"
+
+    agent_config = snapshot.parent.parent / "agent.gitconfig"
+    agent_result = subprocess.run(
+        ["git", "config", "--file", str(agent_config), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert agent_result.returncode == 1
+    assert agent_result.stdout == ""
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_preserves_symlinked_relative_include_path(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,7 @@ _SNAPSHOTS_DIR = "gitconfig-snapshots"
 _SNAPSHOT_HOME_DIR = "home"
 _SERVICE_GITCONFIG_NAME = ".gitconfig"
 _AGENT_GITCONFIG_NAME = "agent.gitconfig"
+_EXTERNAL_INCLUDES_DIR = ".external-includes"
 _MAX_INCLUDE_DEPTH = 16
 _MAX_SNAPSHOT_BUNDLES = 8
 _MAX_SNAPSHOT_AGE_SECONDS = 30 * 24 * 60 * 60
@@ -41,8 +42,9 @@ def materialize_service_gitconfig(
     The bundle path is content-addressed. Repeated worker starts therefore reuse
     the same inode, while a changed config gets a new path and cannot invalidate
     a persistent agent container's existing Docker bind mount. Relative include
-    files below ``host_home`` are mirrored into the bundle so relocating the
-    global config does not change their origin semantics.
+    files are mirrored into the bundle so relocating the global config does not
+    change their origin semantics. External relative targets are mapped into a
+    confined bundle directory rather than retaining parent traversal.
     """
 
     source_home = host_home.expanduser().absolute()
@@ -97,11 +99,10 @@ def materialize_service_gitconfig(
 
 
 def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) -> None:
-    pending: list[tuple[Path, int]] = [(source, 0)]
+    pending: list[tuple[Path, Path, int]] = [(source, Path(_SERVICE_GITCONFIG_NAME), 0)]
     copied: set[Path] = set()
-    resolved_home = source_home.resolve()
     while pending:
-        current, depth = pending.pop()
+        current, relative, depth = pending.pop()
         resolved = current.resolve()
         if resolved in copied:
             continue
@@ -109,7 +110,6 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
             raise RuntimeError("gitconfig relative include depth exceeds safe limit")
         copied.add(resolved)
 
-        relative = _relative_to_home(current, source_home=source_home)
         target = snapshot_home / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(current.read_bytes())
@@ -118,16 +118,33 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
         # atomically replace the source between these steps; parsing ``target``
         # keeps the mirrored include graph consistent with the published main
         # config content.
-        include_paths = _relative_include_paths(target)
+        includes = _relative_includes(target)
+        for key, include_path in includes:
+            included = current.parent / include_path
+            resolved_include = included.resolve()
+            if not resolved_include.is_file():
+                continue
+            included_relative = _snapshot_relative_path(
+                included,
+                source_home=source_home,
+            )
+            snapshot_include = snapshot_home / included_relative
+            current_destination = Path(
+                os.path.abspath(target.parent / include_path),  # noqa: PTH100
+            )
+            if current_destination != snapshot_include:
+                rewritten_path = Path(os.path.relpath(snapshot_include, target.parent))
+                _rewrite_relative_include(
+                    config_path=target,
+                    key=key,
+                    old_path=include_path,
+                    new_path=rewritten_path,
+                )
+            pending.append((included, included_relative, depth + 1))
         _rewrite_relative_gitdir_conditions(
             config_path=target,
             source_dir=current.parent,
         )
-        for include_path in include_paths:
-            included = current.parent / include_path
-            resolved_include = included.resolve()
-            if resolved_include.is_file() and resolved_include.is_relative_to(resolved_home):
-                pending.append((included, depth + 1))
 
 
 def _relative_to_home(path: Path, *, source_home: Path) -> Path:
@@ -140,7 +157,19 @@ def _relative_to_home(path: Path, *, source_home: Path) -> Path:
     return lexical_path.relative_to(lexical_home)
 
 
-def _relative_include_paths(config_path: Path) -> tuple[Path, ...]:
+def _snapshot_relative_path(path: Path, *, source_home: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        relative = _relative_to_home(path, source_home=source_home)
+    except ValueError:
+        relative = None
+    if relative is not None and resolved.is_relative_to(source_home.resolve()):
+        return relative
+    digest = hashlib.sha256(os.fsencode(resolved)).hexdigest()
+    return Path(_EXTERNAL_INCLUDES_DIR) / digest
+
+
+def _relative_includes(config_path: Path) -> tuple[tuple[str, Path], ...]:
     result = subprocess.run(
         [
             "git",
@@ -161,19 +190,50 @@ def _relative_include_paths(config_path: Path) -> tuple[Path, ...]:
         message = result.stderr.decode(errors="replace").strip()
         raise RuntimeError(f"could not inspect gitconfig includes: {message or result.returncode}")
 
-    paths: list[Path] = []
+    includes: list[tuple[str, Path]] = []
     for entry in result.stdout.split(b"\0"):
         if not entry:
             continue
-        _key, separator, raw_value = entry.partition(b"\n")
+        raw_key, separator, raw_value = entry.partition(b"\n")
         if not separator:
             continue
         value = raw_value.decode(errors="surrogateescape")
         candidate = Path(value)
         if value.startswith("~") or candidate.is_absolute():
             continue
-        paths.append(candidate)
-    return tuple(paths)
+        key = raw_key.decode(errors="surrogateescape")
+        includes.append((key, candidate))
+    return tuple(includes)
+
+
+def _rewrite_relative_include(
+    *,
+    config_path: Path,
+    key: str,
+    old_path: Path,
+    new_path: Path,
+) -> None:
+    result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(config_path),
+            "--fixed-value",
+            "--replace-all",
+            key,
+            new_path.as_posix(),
+            old_path.as_posix(),
+        ],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            f"could not rewrite relative gitconfig include: {message or result.returncode}",
+        )
 
 
 def _rewrite_relative_gitdir_conditions(*, config_path: Path, source_dir: Path) -> None:
