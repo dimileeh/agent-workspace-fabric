@@ -124,15 +124,20 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
             source_dir=current.parent,
         )
         for include_path in include_paths:
-            included = (current.parent / include_path).resolve()
-            if included.is_file() and included.is_relative_to(resolved_home):
+            included = current.parent / include_path
+            resolved_include = included.resolve()
+            if resolved_include.is_file() and resolved_include.is_relative_to(resolved_home):
                 pending.append((included, depth + 1))
 
 
 def _relative_to_home(path: Path, *, source_home: Path) -> Path:
     if path == source_home / _SERVICE_GITCONFIG_NAME:
         return Path(_SERVICE_GITCONFIG_NAME)
-    return path.resolve().relative_to(source_home.resolve())
+    # Normalize ``..`` without resolving symlinks: the parent config continues
+    # to reference this lexical path after it is copied into the snapshot.
+    lexical_path = Path(os.path.abspath(path))  # noqa: PTH100 - preserve symlink alias
+    lexical_home = Path(os.path.abspath(source_home))  # noqa: PTH100 - same path basis
+    return lexical_path.relative_to(lexical_home)
 
 
 def _relative_include_paths(config_path: Path) -> tuple[Path, ...]:

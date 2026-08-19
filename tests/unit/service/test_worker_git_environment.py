@@ -150,6 +150,35 @@ def test_service_gitconfig_snapshot_preserves_relative_include_origin(tmp_path: 
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_symlinked_relative_include_path(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[include]\n  path = parts/identity.inc\n")
+    (host_home / "parts").mkdir()
+    (host_home / "actual.inc").write_text("[user]\n  email = symlink@example.com\n")
+    (host_home / "parts" / "identity.inc").symlink_to(host_home / "actual.inc")
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    included_snapshot = snapshot.parent / "parts" / "identity.inc"
+    assert included_snapshot.read_text() == "[user]\n  email = symlink@example.com\n"
+    result = subprocess.run(
+        ["git", "config", "--file", str(snapshot), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "symlink@example.com"
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_preserves_relative_gitdir_conditions(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
