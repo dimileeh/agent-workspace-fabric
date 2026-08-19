@@ -197,6 +197,9 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
+      # The nested home and socket mounts override this parent view; it exists
+      # so includes such as ../shared-config/base.inc resolve inside the helper.
+      - ${AWF_HOST_HOME:-${HOME}}/..:/run:ro
       - ${AWF_HOST_HOME:-${HOME}}:/run/awf-host-home:ro
       - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
