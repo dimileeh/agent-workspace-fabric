@@ -101,7 +101,7 @@ class WorkspaceAuthMountResolver(Protocol):
     ) -> tuple[AuthMount, ...]: ...
 
 
-@dataclass(frozen=True)
+@dataclass
 class ServiceAuthMountResolver:
     """Resolve host credentials for workspace stacks launched by the service worker."""
 
@@ -112,6 +112,10 @@ class ServiceAuthMountResolver:
     workspace_owner_uid: int | None = None
     workspace_owner_gid: int | None = None
     overlay_mounter: OverlayMounter | None = None
+
+    def replace_gitconfig_source(self, source: Path | None) -> None:
+        """Use ``source`` for auth mounts resolved for subsequent workspaces."""
+        self.gitconfig_source = source
 
     def resolve(
         self,

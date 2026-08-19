@@ -17,7 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -182,11 +182,7 @@ class ProvisionerConfig:
 
 
 class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
-    """Orchestrates git + state transitions for one workspace at a time.
-
-    Stateless apart from injected dependencies — safe to share across concurrent
-    workspace provisioning tasks.
-    """
+    """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
     def __init__(
         self,
@@ -196,6 +192,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
         service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
+        before_provision: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
@@ -203,6 +200,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
+        self._before_provision = before_provision
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
@@ -306,6 +304,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         destination_category: str | None = None
         stack_launch_started = False
         try:
+            if self._before_provision is not None:
+                await self._before_provision()
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
                 repo_url=ws.repo_url,

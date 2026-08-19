@@ -486,6 +486,10 @@ class GitManager:
     def work_dir(self) -> Path:
         return self._work_dir
 
+    def replace_env(self, env: Mapping[str, str]) -> None:
+        """Replace the environment used by subsequent Git subprocesses."""
+        self._env = {**os.environ, **env}
+
     # ── Public API ──────────────────────────────────────────────────────────
 
     def get_worktree_path(self, workspace_id: str) -> Path:

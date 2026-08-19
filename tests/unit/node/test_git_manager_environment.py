@@ -25,8 +25,16 @@ class TestGitEnvironment:
             ["sh", "-c", 'printf \'%s:%s\' "$HOME" "$AWF_TEST_ENV"'],
             operation="env",
         )
+        replacement_home = tmp_path / "replacement-home"
+        replacement_home.mkdir()
+        manager.replace_env({"HOME": str(replacement_home), "AWF_TEST_ENV": "refreshed"})
+        refreshed = await manager._run(  # noqa: SLF001 - same environment seam.
+            ["sh", "-c", 'printf \'%s:%s\' "$HOME" "$AWF_TEST_ENV"'],
+            operation="refreshed-env",
+        )
 
         assert result.stdout == f"{home}:ok"
+        assert refreshed.stdout == f"{replacement_home}:refreshed"
 
 
 class TestAgentWritableWorktreeHelpers:

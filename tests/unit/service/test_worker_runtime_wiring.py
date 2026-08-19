@@ -661,6 +661,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -752,6 +753,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
         ) -> None:
             created["provisioner_config"] = config
 
@@ -1015,6 +1017,7 @@ def _stub_worker_runtime_dependencies(
             stack_launcher: object,
             config: object,
             service_diagnostics: object = None,
+            before_provision: object = None,
         ) -> None:
             """Test helper for  init  ."""
             pass
@@ -1151,6 +1154,88 @@ def test_build_worker_runtime_falls_back_to_live_gitconfig_when_snapshot_fails(
             {"error": str(snapshot_error), "fallback": "host_gitconfig"},
         )
     ]
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_refreshes_gitconfig_consumers_before_provision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """New provisions use a changed host Git config without restarting the worker."""
+    created: dict[str, Any] = {}
+    snapshots: Any = iter(
+        (
+            tmp_path / "snapshot-old",
+            tmp_path / "snapshot-new",
+            OSError("refresh failed"),
+        )
+    )
+    applied_envs: list[dict[str, str]] = []
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=object(),
+        build_feature=lambda **_kwargs: object(),
+        build_release=lambda **_kwargs: object(),
+    )
+
+    class _RecordingGitManager:
+        def __init__(self, _work_dir: Path, *, env: dict[str, str], **_kwargs: object) -> None:
+            self.envs = [env]
+            created["git"] = self
+
+        def replace_env(self, env: dict[str, str]) -> None:
+            self.envs.append(env)
+
+    class _RecordingAuthMountResolver:
+        def __init__(self, *, gitconfig_source: Path | None, **_kwargs: object) -> None:
+            self.sources = [gitconfig_source]
+            created["auth_mount_resolver"] = self
+
+        def replace_gitconfig_source(self, source: Path | None) -> None:
+            self.sources.append(source)
+
+    class _RecordingProvisioner:
+        def __init__(self, *, before_provision: Any, **_kwargs: object) -> None:
+            created["before_provision"] = before_provision
+
+    def _materialize(**_kwargs: object) -> Path:
+        snapshot = next(snapshots)
+        if isinstance(snapshot, OSError):
+            raise snapshot
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text("[user]\n  name = Snapshot\n")
+        return snapshot
+
+    monkeypatch.setattr(worker_mod, "GitManager", _RecordingGitManager)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _RecordingAuthMountResolver)
+    monkeypatch.setattr(worker_mod, "Provisioner", _RecordingProvisioner)
+    monkeypatch.setattr(worker_mod, "_materialize_service_gitconfig", _materialize)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", applied_envs.append)
+
+    settings = _settings(tmp_path)
+    live_gitconfig = Path(settings.host_home) / ".gitconfig"
+    live_gitconfig.parent.mkdir(parents=True)
+    live_gitconfig.write_text("[user]\n  name = Live fallback\n")
+    runtime = worker_mod.build_worker_runtime(settings)
+    assert runtime is not None
+
+    asyncio.run(created["before_provision"]())
+    asyncio.run(created["before_provision"]())
+
+    expected_paths = [
+        str(tmp_path / "snapshot-old"),
+        str(tmp_path / "snapshot-new"),
+        str(live_gitconfig),
+    ]
+    assert [env["GIT_CONFIG_GLOBAL"] for env in created["git"].envs] == expected_paths
+    assert created["auth_mount_resolver"].sources == [
+        tmp_path / "snapshot-old",
+        tmp_path / "snapshot-new",
+        None,
+    ]
+    assert [env["GIT_CONFIG_GLOBAL"] for env in applied_envs] == expected_paths
 
 
 @pytest.mark.unit

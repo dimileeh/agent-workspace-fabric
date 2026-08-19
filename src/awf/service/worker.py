@@ -239,6 +239,36 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         workspace_owner_uid=AGENT_RUNTIME_UID,
         workspace_owner_gid=AGENT_RUNTIME_GID,
     )
+
+    snapshot_refresh_lock = asyncio.Lock()
+
+    async def _refresh_service_gitconfig() -> None:
+        """Refresh Git config for worker Git and subsequently launched agents."""
+        async with snapshot_refresh_lock:
+            try:
+                refreshed_snapshot = await asyncio.to_thread(
+                    _materialize_service_gitconfig,
+                    host_home=host_home,
+                    work_dir=work_dir,
+                    owner_uid=AGENT_RUNTIME_UID,
+                    owner_gid=AGENT_RUNTIME_GID,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                _log.warning(
+                    "worker.gitconfig_snapshot_refresh_failed",
+                    error=str(exc),
+                    fallback="host_gitconfig",
+                )
+                refreshed_snapshot = None
+            refreshed_git_env = _service_git_environment(
+                host_home,
+                github_token=settings.github_token,
+                gitconfig_path=refreshed_snapshot,
+            )
+            _apply_service_git_environment(refreshed_git_env)
+            git.replace_env(refreshed_git_env)
+            auth_mount_resolver.replace_gitconfig_source(refreshed_snapshot)
+
     secret_lease_resolver = LocalSecretLeaseMountResolver(
         host_home=host_home,
         work_dir=work_dir,
@@ -269,6 +299,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         git=git,
         stack_launcher=stack_launcher,
         service_diagnostics=compose,
+        before_provision=_refresh_service_gitconfig,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
@@ -769,6 +800,8 @@ def _service_git_environment(
 def _apply_service_git_environment(env: dict[str, str]) -> None:
     """Apply host git/SSH settings to subprocesses launched by the worker."""
 
+    if "GIT_CONFIG_GLOBAL" not in env:
+        os.environ.pop("GIT_CONFIG_GLOBAL", None)
     os.environ.update(env)
 
 

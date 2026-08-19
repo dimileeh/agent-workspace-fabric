@@ -654,10 +654,21 @@ def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
 
     mounts = resolver.resolve(workspace_id="ws_auth")
 
+    replacement_bundle = tmp_path / "work" / "service-auth" / "gitconfig-snapshots" / "new"
+    replacement = replacement_bundle / "home" / ".gitconfig"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_text("[user]\n  name = Replacement\n")
+    replacement_wrapper = replacement_bundle / "agent.gitconfig"
+    replacement_wrapper.write_text(f"[include]\n  path = {replacement}\n")
+    resolver.replace_gitconfig_source(replacement)
+    refreshed_mounts = resolver.resolve(workspace_id="ws_refreshed_auth")
+
     by_target = {mount.target: mount for mount in mounts}
+    refreshed_by_target = {mount.target: mount for mount in refreshed_mounts}
     assert by_target["/home/agent/.gitconfig"].source == str(wrapper)
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
     assert all(mount.source != str(bundle) for mount in mounts)
+    assert refreshed_by_target["/home/agent/.gitconfig"].source == str(replacement_wrapper)
 
 
 @pytest.mark.unit

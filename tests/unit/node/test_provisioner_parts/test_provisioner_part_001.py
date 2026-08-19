@@ -201,6 +201,7 @@ class TestSuccess:
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
         origin_repo: Path,
@@ -222,11 +223,24 @@ class TestSuccess:
                 )
 
         launcher = _RecordingStackLauncher()
+        refresh_calls: list[None] = []
+
+        async def _refresh_service_auth() -> None:
+            refresh_calls.append(None)
+
+        original_add_worktree = git_manager.add_worktree
+
+        async def _add_worktree_after_refresh(**kwargs: Any) -> WorktreeLayout:
+            assert refresh_calls == [None]
+            return await original_add_worktree(**kwargs)
+
+        monkeypatch.setattr(git_manager, "add_worktree", _add_worktree_after_refresh)
         provisioner = Provisioner(
             session_factory=session_factory,
             git=git_manager,
             stack_launcher=launcher,
             config=ProvisionerConfig(node_id="test-node-01"),
+            before_provision=_refresh_service_auth,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
@@ -244,6 +258,7 @@ class TestSuccess:
         await provisioner.provision(ws_id)
 
         assert len(launcher.requests) == 1
+        assert refresh_calls == [None]
         request = launcher.requests[0]
         assert request.workspace_id == ws_id
         assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
