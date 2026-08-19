@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1083,6 +1084,73 @@ def _stub_worker_runtime_dependencies(
     )
     monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", build_feature)
     monkeypatch.setattr(worker_mod, "build_release_pr_monitor", build_release)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "snapshot_error",
+    [
+        OSError("snapshot filesystem failure"),
+        RuntimeError("snapshot validation failure"),
+        subprocess.TimeoutExpired(cmd=["git", "config"], timeout=1),
+    ],
+    ids=["os-error", "runtime-error", "subprocess-error"],
+)
+def test_build_worker_runtime_falls_back_to_live_gitconfig_when_snapshot_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    snapshot_error: Exception,
+) -> None:
+    """A bad host config snapshot must not prevent worker startup."""
+    created: dict[str, Any] = {}
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=object(),
+        build_feature=lambda **_kwargs: object(),
+        build_release=lambda **_kwargs: object(),
+    )
+
+    class _RecordingGitManager:
+        def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
+            created["git_env"] = env
+
+    class _RecordingAuthMountResolver:
+        def __init__(self, *, gitconfig_source: Path | None, **_kwargs: object) -> None:
+            created["gitconfig_source"] = gitconfig_source
+
+    def _raise_snapshot_error(**_kwargs: object) -> None:
+        raise snapshot_error
+
+    monkeypatch.setattr(worker_mod, "GitManager", _RecordingGitManager)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _RecordingAuthMountResolver)
+    monkeypatch.setattr(worker_mod, "_materialize_service_gitconfig", _raise_snapshot_error)
+    monkeypatch.setattr(
+        worker_mod,
+        "_log",
+        SimpleNamespace(
+            warning=lambda event, **kwargs: warnings.append((event, kwargs)),
+        ),
+    )
+    settings = _settings(tmp_path)
+    host_home = Path(settings.host_home)
+    host_home.mkdir(parents=True)
+    live_gitconfig = host_home / ".gitconfig"
+    live_gitconfig.write_text("[user]\n  name = Live fallback\n")
+
+    runtime = worker_mod.build_worker_runtime(settings)
+
+    assert runtime is not None
+    assert created["git_env"]["GIT_CONFIG_GLOBAL"] == str(live_gitconfig)
+    assert created["gitconfig_source"] is None
+    assert warnings == [
+        (
+            "worker.gitconfig_snapshot_failed",
+            {"error": str(snapshot_error), "fallback": "host_gitconfig"},
+        )
+    ]
 
 
 @pytest.mark.unit

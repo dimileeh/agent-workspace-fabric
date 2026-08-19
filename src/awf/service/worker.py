@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -146,12 +147,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    gitconfig_snapshot = _materialize_service_gitconfig(
-        host_home=host_home,
-        work_dir=work_dir,
-        owner_uid=AGENT_RUNTIME_UID,
-        owner_gid=AGENT_RUNTIME_GID,
-    )
+    try:
+        gitconfig_snapshot = _materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=work_dir,
+            owner_uid=AGENT_RUNTIME_UID,
+            owner_gid=AGENT_RUNTIME_GID,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        _log.warning(
+            "worker.gitconfig_snapshot_failed",
+            error=str(exc),
+            fallback="host_gitconfig",
+        )
+        gitconfig_snapshot = None
     git_env = _service_git_environment(
         host_home,
         github_token=settings.github_token,
