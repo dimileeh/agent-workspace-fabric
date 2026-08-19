@@ -77,6 +77,9 @@ from awf.service.gitconfig_snapshot import (
 from awf.service.gitconfig_snapshot import (
     release_superseded_service_gitconfig_leases as _release_superseded_service_gitconfig_leases,
 )
+from awf.service.gitconfig_source import (
+    request_gitconfig_source_refresh as _request_gitconfig_source_refresh,
+)
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     OrphanReapResult,
@@ -149,10 +152,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     session_factory = make_session_factory(engine)
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
+    gitconfig_source_socket = (
+        Path(settings.gitconfig_source_socket).expanduser().resolve()
+        if settings.gitconfig_source_socket
+        else None
+    )
+    gitconfig_source_home = (
+        gitconfig_source_socket.parent / "current"
+        if gitconfig_source_socket is not None
+        else host_home
+    )
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     try:
         gitconfig_snapshot = _materialize_service_gitconfig(
-            host_home=host_home,
+            host_home=gitconfig_source_home,
             work_dir=work_dir,
             owner_uid=AGENT_RUNTIME_UID,
             owner_gid=AGENT_RUNTIME_GID,
@@ -262,10 +275,30 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         async with snapshot_refresh_lock:
             provision_task = asyncio.current_task()
             assert provision_task is not None
+            refresh_source_home = host_home
+            if gitconfig_source_socket is not None:
+                try:
+                    refreshed_source = await _request_gitconfig_source_refresh(
+                        gitconfig_source_socket
+                    )
+                except (OSError, RuntimeError) as exc:
+                    _log.warning(
+                        "worker.gitconfig_source_refresh_failed",
+                        error=str(exc),
+                        fallback="current_gitconfig",
+                    )
+                    provisioning_gitconfig_snapshots[provision_task] = current_gitconfig_snapshot
+                    _release_superseded_gitconfig_leases()
+                    return
+                refresh_source_home = (
+                    refreshed_source.parent
+                    if refreshed_source is not None
+                    else gitconfig_source_socket.parent / "current"
+                )
             try:
                 refreshed_snapshot = await asyncio.to_thread(
                     _materialize_service_gitconfig,
-                    host_home=host_home,
+                    host_home=refresh_source_home,
                     work_dir=work_dir,
                     owner_uid=AGENT_RUNTIME_UID,
                     owner_gid=AGENT_RUNTIME_GID,

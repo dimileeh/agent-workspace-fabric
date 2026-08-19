@@ -406,6 +406,13 @@ class Settings(BaseSettings):
             "agent/GitHub credentials for workspace container auth mounts."
         ),
     )
+    gitconfig_source_socket: str | None = Field(
+        default=None,
+        description=(
+            "Optional Unix socket used by the local worker to refresh Git config "
+            "from a replaceable host-side source."
+        ),
+    )
     claude_base_gc_enabled: bool = Field(
         default=True,
         description=(

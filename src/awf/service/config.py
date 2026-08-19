@@ -121,6 +121,7 @@ class ServiceSettings:
     hosted_delegation_max_output_bytes: int = 1_000_000
     planning_max_iterations_default: int = 3
     host_home: str = "~"
+    gitconfig_source_socket: str | None = None
     claude_base_gc_enabled: bool = True
     node_id: str | None = None
     branch_prefix: str = "awf"
@@ -261,6 +262,7 @@ def resolve_service_settings(
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
+        gitconfig_source_socket=settings.gitconfig_source_socket,
         claude_base_gc_enabled=settings.claude_base_gc_enabled,
         api_token=_resolve_service_api_token(settings, service_env),
         github_token=_resolve_github_token(settings.github_token, env),
