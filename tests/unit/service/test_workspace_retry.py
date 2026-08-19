@@ -572,6 +572,56 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
     assert _provision_checkout_base_branch(retried) == "awf/legacy-feature"
 
 
+async def test_retry_rejects_open_feature_pr_without_persisted_head_ref(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/lost-feature-head",
+        remote_push_branch=None,
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.branch_name = None
+        source.pr_number = 10
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry existing PR",
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "pr_number": 10,
+        "pr_url": "https://github.com/example/retryable/pull/10",
+        "reason_code": "PR_HEAD_REF_UNAVAILABLE",
+    }
+    assert [workspace.id for workspace in workspaces] == [first.id]
+
+
 async def test_retry_replaces_feature_pr_closed_externally(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

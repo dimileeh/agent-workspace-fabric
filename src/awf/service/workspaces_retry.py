@@ -564,7 +564,21 @@ async def retry_workspace_row(
         # The retry executes on a fresh local branch, but it must push back to
         # the existing PR's remote head. Legacy feature rows may predate
         # remote_push_branch persistence, where branch_name is that head ref.
-        retry_remote_push_branch = source.remote_push_branch or source.branch_name
+        persisted_head_refs = (source.remote_push_branch, source.branch_name)
+        retry_remote_push_branch = next(
+            (head_ref.strip() for head_ref in persisted_head_refs if head_ref and head_ref.strip()),
+            None,
+        )
+        if retry_remote_push_branch is None:
+            raise workspaces.WorkspaceRetryPrStateUnavailableError(
+                "Could not establish the existing pull request's remote head branch.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_HEAD_REF_UNAVAILABLE",
+                },
+            )
 
     retried = await repo.create(
         repo_url=source.repo_url,

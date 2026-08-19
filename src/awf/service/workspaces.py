@@ -284,7 +284,7 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
 
 
 class WorkspaceRetryPrStateUnavailableError(WorkspaceRetryError):
-    """Raised when retry cannot safely determine whether an existing PR is open."""
+    """Raised when retry cannot safely establish an existing PR's live identity."""
 
     error_code = "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE"
 
