@@ -198,6 +198,7 @@ services:
       - no-new-privileges:true
     volumes:
       - ${AWF_HOST_HOME:-${HOME}}:/run/awf-host-home:ro
+      - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
       - awf-gitconfig-source:/run/awf-gitconfig-source
     command:

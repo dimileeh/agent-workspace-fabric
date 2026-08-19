@@ -372,6 +372,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert gitconfig_source["security_opt"] == ["no-new-privileges:true"]
     assert gitconfig_source["volumes"] == [
         f"{expected_host_home}:/run/awf-host-home:ro",
+        f"{expected_host_home}:{expected_host_home}:ro",
         f"{expected_work_dir}:{expected_work_dir}",
         "awf-gitconfig-source:/run/awf-gitconfig-source",
     ]
