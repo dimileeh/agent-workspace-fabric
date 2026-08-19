@@ -175,25 +175,35 @@ def _copy_config_graph(
 
 
 def _resolve_host_root_symlink(path: Path, *, host_root: Path | None) -> Path:
-    """Follow a host symlink through its alternate root mount when provided."""
+    """Follow host symlinks at every component through an alternate root mount."""
     if host_root is None:
         return path
 
-    current = path
+    root = Path(os.path.abspath(host_root))  # noqa: PTH100
+    current = Path(os.path.abspath(path))  # noqa: PTH100
     visited: set[Path] = set()
-    while current.is_symlink():
-        normalized = Path(os.path.abspath(current))  # noqa: PTH100
-        if normalized in visited:
-            return current
-        visited.add(normalized)
-        target = current.readlink()
-        if target.is_absolute():
-            logical_target = Path(os.path.normpath(target))
+    while True:
+        relative = current.relative_to(root)
+        candidate = root
+        for index, component in enumerate(relative.parts):
+            candidate /= component
+            if not candidate.is_symlink():
+                continue
+            normalized = Path(os.path.abspath(candidate))  # noqa: PTH100
+            remaining = Path(*relative.parts[index + 1 :])
+            if normalized in visited:
+                return candidate / remaining
+            visited.add(normalized)
+            target = candidate.readlink()
+            if target.is_absolute():
+                logical_target = Path(os.path.normpath(target))
+            else:
+                logical_parent = Path("/") / candidate.parent.relative_to(root)
+                logical_target = Path(os.path.normpath(logical_parent / target))
+            current = root / logical_target.relative_to(logical_target.anchor) / remaining
+            break
         else:
-            logical_parent = Path("/") / current.parent.relative_to(host_root)
-            logical_target = Path(os.path.normpath(logical_parent / target))
-        current = host_root / logical_target.relative_to(logical_target.anchor)
-    return current
+            return current
 
 
 def _logical_source_dir(
