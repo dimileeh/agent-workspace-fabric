@@ -99,16 +99,19 @@ def materialize_service_gitconfig(
 
 
 def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) -> None:
-    pending: list[tuple[Path, Path, int]] = [(source, Path(_SERVICE_GITCONFIG_NAME), 0)]
-    copied: set[Path] = set()
+    pending: list[tuple[Path, Path, int, frozenset[Path]]] = [
+        (source, Path(_SERVICE_GITCONFIG_NAME), 0, frozenset()),
+    ]
+    copied_destinations: set[Path] = set()
     while pending:
-        current, relative, depth = pending.pop()
+        current, relative, depth, resolved_ancestors = pending.pop()
         resolved = current.resolve()
-        if resolved in copied:
+        if relative in copied_destinations or resolved in resolved_ancestors:
             continue
         if depth > _MAX_INCLUDE_DEPTH:
             raise RuntimeError("gitconfig relative include depth exceeds safe limit")
-        copied.add(resolved)
+        copied_destinations.add(relative)
+        child_ancestors = resolved_ancestors | {resolved}
 
         target = snapshot_home / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +143,7 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
                     old_path=include_path,
                     new_path=rewritten_path,
                 )
-            pending.append((included, included_relative, depth + 1))
+            pending.append((included, included_relative, depth + 1, child_ancestors))
         _rewrite_relative_gitdir_conditions(
             config_path=target,
             source_dir=current.parent,

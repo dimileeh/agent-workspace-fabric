@@ -243,6 +243,68 @@ def test_service_gitconfig_snapshot_preserves_symlinked_relative_include_path(
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_preserves_each_symlinked_include_alias(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text(
+        '[includeIf "gitdir:./repos/active/"]\n'
+        "  path = identities/active.inc\n"
+        '[includeIf "gitdir:./repos/inactive/"]\n'
+        "  path = identities/inactive.inc\n",
+    )
+    (host_home / "identities").mkdir()
+    (host_home / "identity.inc").write_text("[user]\n  email = alias@example.com\n")
+    (host_home / "identities" / "active.inc").symlink_to(host_home / "identity.inc")
+    (host_home / "identities" / "inactive.inc").symlink_to(host_home / "identity.inc")
+    active_repo = host_home / "repos" / "active" / "project"
+    subprocess.run(["git", "init", "--quiet", str(active_repo)], check=True)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert (snapshot.parent / "identities" / "active.inc").is_file()
+    assert (snapshot.parent / "identities" / "inactive.inc").is_file()
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(active_repo),
+            "config",
+            "--file",
+            str(snapshot),
+            "--includes",
+            "user.email",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "alias@example.com"
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_stops_symlinked_include_cycles(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[include]\n  path = again/.gitconfig\n")
+    (host_home / "again").symlink_to(host_home, target_is_directory=True)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert snapshot.read_text() == "[include]\n  path = again/.gitconfig\n"
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_preserves_relative_gitdir_conditions(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
