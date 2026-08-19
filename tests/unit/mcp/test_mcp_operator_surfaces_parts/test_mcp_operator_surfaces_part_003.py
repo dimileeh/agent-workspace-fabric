@@ -299,7 +299,7 @@ async def _workspace(
         workspace.branch_name = f"awf/{workspace.id}"
         workspace.remote_push_branch = workspace.branch_name
         workspace.compose_project_name = f"awf_{workspace.id}"
-        workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
+        workspace.compose_file_path = str(Path(__file__))
         workspace.pr_url = f"https://github.com/example/operator/pull/{len(title)}"
         workspace.pr_number = len(title)
         workspace.failure_reason = (

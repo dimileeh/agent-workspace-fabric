@@ -185,6 +185,8 @@ class ProvisionerConfig:
 class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
     """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
+    _run_claimed_provision = _provisioner_helpers._run_claimed_provision
+
     def __init__(
         self,
         *,
@@ -202,8 +204,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
         self._config = config
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
-        self._before_provision = before_provision
-        self._after_provision = after_provision
+        self._before_provision, self._after_provision = before_provision, after_provision
 
     def _effective_agent_model(self, workspace: Workspace) -> str | None:
         """Resolve the stack model with the executor's default-selection rules."""
@@ -241,10 +242,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
     ) -> None:
         """Drive a workspace already claimed into ``provisioning`` by the worker.
 
-        ``execution_claim_epoch`` (when supplied) fences this provision against
-        a later claimant: it is verified just before the stack launch and gates
-        the terminal ``provisioning -> ready`` / ``-> failed`` transitions so a
-        stale worker can never force or steal the row (D4/D7).
+        The optional epoch fences launch and terminal transitions against a later claimant (D4/D7).
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -263,29 +261,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
-        await self._run_claimed_provision(
-            workspace_id, ws, execution_claim_epoch=execution_claim_epoch
-        )
-
-    async def _run_claimed_provision(
-        self,
-        workspace_id: str,
-        ws: Workspace,
-        *,
-        execution_claim_epoch: int | None = None,
-    ) -> None:
-        """Run provisioning between paired service-resource lifecycle hooks."""
-
-        hook_started = self._before_provision is not None
-        try:
-            await self._provision_claimed_workspace(
-                workspace_id,
-                ws,
-                execution_claim_epoch=execution_claim_epoch,
-            )
-        finally:
-            if hook_started and self._after_provision is not None:
-                await self._after_provision()
+        await self._run_claimed_provision(workspace_id, ws, claim_epoch=execution_claim_epoch)
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""

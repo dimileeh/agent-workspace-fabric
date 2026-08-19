@@ -79,6 +79,11 @@ from awf.service.workspace_runtime_health import (
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
 )
+from awf.service.workspaces_retry_errors import (
+    WorkspaceRetryError,
+    WorkspaceRetryPrAlreadyMergedError,
+    WorkspaceRetryPrStateUnavailableError,
+)
 
 
 class RuntimeInspection(Protocol):
@@ -147,26 +152,6 @@ class _WorkspaceResponseSource:
 
 _log = get_logger(__name__)
 _PROFILE_APP_ENDPOINTS_ADAPTER = TypeAdapter(list[ProfileAppEndpoint])
-
-
-class WorkspaceRetryError(Exception):
-    """Base error for failures encountered while retrying a workspace."""
-
-    error_code = "WORKSPACE_RETRY_ERROR"
-    message = "Workspace retry failed."
-    detail: dict[str, Any] | None
-
-    def __init__(
-        self,
-        message: str | None = None,
-        *,
-        detail: dict[str, Any] | None = None,
-    ) -> None:
-        """Initialise with an optional override message and structured detail."""
-        if message is not None:
-            self.message = message
-        self.detail = detail
-        super().__init__(self.message)
 
 
 class WorkspaceRetryNotFoundError(WorkspaceRetryError):
@@ -281,18 +266,6 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
         if detail:
             payload.update(dict(detail))
         super().__init__(message, detail=payload)
-
-
-class WorkspaceRetryPrStateUnavailableError(WorkspaceRetryError):
-    """Raised when retry cannot safely establish an existing PR's live identity."""
-
-    error_code = "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE"
-
-
-class WorkspaceRetryPrAlreadyMergedError(WorkspaceRetryError):
-    """Raised when retry discovers that the source PR is already merged."""
-
-    error_code = "PR_ALREADY_MERGED"
 
 
 class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):

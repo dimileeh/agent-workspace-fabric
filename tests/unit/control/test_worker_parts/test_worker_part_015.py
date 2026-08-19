@@ -1221,6 +1221,9 @@ class TestRunOnceMonitorRecoveryPart003:
         async with session_factory() as s:
             workspace = await WorkspaceRepository(s).get(monitor_id)
             assert workspace is not None
+            compose_file = origin_repo / "compose.yml"
+            compose_file.write_text("services: {}\n")
+            workspace.compose_file_path = str(compose_file)
             future = datetime.now(UTC) + timedelta(hours=1)
             workspace.monitor_claimed_by = "dead-monitor-worker"
             workspace.monitor_claim_expires_at = future

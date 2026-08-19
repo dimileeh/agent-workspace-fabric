@@ -274,6 +274,26 @@ def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
     return "policy_decision"
 
 
+async def _run_claimed_provision(
+    provisioner: Any,
+    workspace_id: str,
+    workspace: Workspace,
+    *,
+    claim_epoch: int | None = None,
+) -> None:
+    """Run provisioning between paired service-resource lifecycle hooks."""
+    hook_started = provisioner._before_provision is not None
+    try:
+        await provisioner._provision_claimed_workspace(
+            workspace_id,
+            workspace,
+            execution_claim_epoch=claim_epoch,
+        )
+    finally:
+        if hook_started and provisioner._after_provision is not None:
+            await provisioner._after_provision()
+
+
 async def record_stale_action_skip(
     repo: Any,
     ws: Workspace,

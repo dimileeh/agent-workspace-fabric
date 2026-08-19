@@ -472,11 +472,7 @@ class GitManager:
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
-        """Return the per-loop lock for ``mirror_path``, creating it on
-        first use. Safe across multiple ``asyncio.run`` invocations
-        (tests, multi-loop callers) because each loop gets its own
-        inner dict and the inner dict + its Locks are GC'd when the
-        loop goes away."""
+        """Return the per-event-loop mirror lock, safe across repeated asyncio runs."""
         loop = asyncio.get_running_loop()
         loop_locks = cls._mirror_locks.get(loop)
         if loop_locks is None:
