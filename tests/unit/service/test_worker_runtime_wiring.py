@@ -1157,17 +1157,17 @@ def test_build_worker_runtime_falls_back_to_live_gitconfig_when_snapshot_fails(
 
 
 @pytest.mark.unit
-def test_build_worker_runtime_refreshes_gitconfig_consumers_before_provision(
+def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """New provisions use a changed host Git config without restarting the worker."""
+    """A failed refresh retains the last immutable snapshot for new provisions."""
     created: dict[str, Any] = {}
     snapshots: Any = iter(
         (
             tmp_path / "snapshot-old",
-            tmp_path / "snapshot-new",
             OSError("refresh failed"),
+            tmp_path / "snapshot-new",
         )
     )
     applied_envs: list[dict[str, str]] = []
@@ -1227,13 +1227,11 @@ def test_build_worker_runtime_refreshes_gitconfig_consumers_before_provision(
     expected_paths = [
         str(tmp_path / "snapshot-old"),
         str(tmp_path / "snapshot-new"),
-        str(live_gitconfig),
     ]
     assert [env["GIT_CONFIG_GLOBAL"] for env in created["git"].envs] == expected_paths
     assert created["auth_mount_resolver"].sources == [
         tmp_path / "snapshot-old",
         tmp_path / "snapshot-new",
-        None,
     ]
     assert [env["GIT_CONFIG_GLOBAL"] for env in applied_envs] == expected_paths
 

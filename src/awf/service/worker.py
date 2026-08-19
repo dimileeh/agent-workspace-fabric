@@ -257,9 +257,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                 _log.warning(
                     "worker.gitconfig_snapshot_refresh_failed",
                     error=str(exc),
-                    fallback="host_gitconfig",
+                    fallback="current_gitconfig",
                 )
-                refreshed_snapshot = None
+                return
             refreshed_git_env = _service_git_environment(
                 host_home,
                 github_token=settings.github_token,
