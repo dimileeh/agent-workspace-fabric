@@ -1209,6 +1209,10 @@ async def test_remonitor_feature_workspace_recovers_missing_remote_branch_from_b
 
     assert response.status_code == 200
     assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    assert workspace.remote_push_branch == workspace.branch_name
 
 
 @pytest.mark.unit

@@ -440,6 +440,14 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 workspace,
                 missing=missing_monitor_metadata,
             )
+        remote_push_branch_recovered = False
+        if (
+            workspace.task_kind == "feature_branch_pr"
+            and not workspace.remote_push_branch
+            and workspace.branch_name
+        ):
+            workspace.remote_push_branch = workspace.branch_name
+            remote_push_branch_recovered = True
 
         operation = await operations.create(
             workspace_id=workspace_id,
@@ -532,7 +540,9 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # churn, no spurious ``updated_at`` bump) when there is no episode — safe
         # to call unconditionally here and on the ``failed`` path.
         await repo.clear_workspace_attention(workspace_id)
-        if state_reset is None and (claims_will_reset or monitor_state_changed):
+        if state_reset is None and (
+            claims_will_reset or monitor_state_changed or remote_push_branch_recovered
+        ):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
