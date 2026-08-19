@@ -136,7 +136,10 @@ function remonitorControl(context: WorkspaceOperatorContext): WorkspaceOperatorC
     return control("remonitor", {
       visible: true,
       enabled: false,
-      reason: "retry to reprovision existing PR",
+      reason:
+        status === "monitoring_pr"
+          ? "cancel, then retry to reprovision existing PR"
+          : "retry to reprovision existing PR",
     });
   }
   if (prUrl && (status === "monitoring_pr" || status === "failed")) {

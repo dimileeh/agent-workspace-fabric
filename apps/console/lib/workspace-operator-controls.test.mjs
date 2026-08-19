@@ -22,7 +22,7 @@ test("control eligibility remonitor requires PR-monitorable workspace", () => {
       workspace: workspace({ compose_file_path: null }),
     },
     "remonitor",
-    { enabled: false, reason: "retry to reprovision existing PR" },
+    { enabled: false, reason: "cancel, then retry to reprovision existing PR" },
   );
   assertControl(
     {
