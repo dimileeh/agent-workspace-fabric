@@ -585,12 +585,12 @@ async def retry_workspace_row(
         retry_remote_push_branch = None
     elif preserve_existing_feature_pr:
         # The retry executes on a fresh local branch, but it must push back to
-        # the existing PR's remote head. Legacy feature rows may predate
-        # remote_push_branch persistence, where branch_name is that head ref.
+        # the existing PR's live remote head. Persisted refs remain fallbacks
+        # for lifecycle checkers and legacy rows without a live snapshot.
         candidate_head_refs = (
+            live_pr_head_ref,
             source.remote_push_branch,
             source.branch_name,
-            live_pr_head_ref,
         )
         retry_remote_push_branch = next(
             (head_ref.strip() for head_ref in candidate_head_refs if head_ref and head_ref.strip()),
