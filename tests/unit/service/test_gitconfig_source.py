@@ -61,6 +61,68 @@ def test_gitconfig_source_refresh_observes_atomic_host_replacement(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_gitconfig_source_resolves_absolute_symlink_through_host_root(
+    tmp_path: Path,
+) -> None:
+    """An external absolute host symlink is read through the helper mount."""
+    host_root = tmp_path / "host-root"
+    host_home = host_root / "home" / "agent"
+    external_config = host_root / "nix" / "store" / "profile" / "gitconfig"
+    actual_config = host_root / "nix" / "store" / "actual" / "gitconfig"
+    host_home.mkdir(parents=True)
+    external_config.parent.mkdir(parents=True)
+    actual_config.parent.mkdir(parents=True)
+    actual_config.write_text("[include]\n  path = identity.inc\n", encoding="utf-8")
+    external_config.symlink_to("../actual/gitconfig")
+    (host_home / "identity.inc").write_text(
+        "[user]\n  email = agent@example.com\n",
+        encoding="utf-8",
+    )
+    (host_home / ".gitconfig").symlink_to("/nix/store/profile/gitconfig")
+    server = GitconfigSourceServer(
+        host_home=host_home,
+        host_root=host_root,
+        logical_host_home=Path("/home/agent"),
+        work_dir=tmp_path / "work",
+        socket_path=tmp_path / "work" / "service-auth" / "source.sock",
+    )
+
+    snapshot = server.refresh()
+
+    assert snapshot is not None
+    result = subprocess.run(
+        ["git", "config", "--file", str(snapshot), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "agent@example.com"
+
+
+@pytest.mark.unit
+def test_gitconfig_source_treats_host_root_symlink_cycle_as_absent(tmp_path: Path) -> None:
+    """A cyclic host symlink cannot wedge the refresh helper."""
+    host_root = tmp_path / "host-root"
+    host_home = host_root / "home" / "agent"
+    first = host_root / "nix" / "store" / "first"
+    second = host_root / "nix" / "store" / "second"
+    host_home.mkdir(parents=True)
+    first.parent.mkdir(parents=True)
+    (host_home / ".gitconfig").symlink_to("/nix/store/first")
+    first.symlink_to("/nix/store/second")
+    second.symlink_to("/nix/store/first")
+    server = GitconfigSourceServer(
+        host_home=host_home,
+        host_root=host_root,
+        work_dir=tmp_path / "work",
+        socket_path=tmp_path / "work" / "service-auth" / "source.sock",
+    )
+
+    assert server.refresh() is None
+
+
+@pytest.mark.unit
 def test_gitconfig_source_rewrites_relative_gitdirs_to_logical_host_home(
     tmp_path: Path,
 ) -> None:
@@ -373,12 +435,14 @@ def test_gitconfig_source_main_wires_compose_arguments(
             self,
             *,
             host_home: Path,
+            host_root: Path,
             logical_host_home: Path,
             work_dir: Path,
             socket_path: Path,
         ) -> None:
             created.update(
                 host_home=host_home,
+                host_root=host_root,
                 logical_host_home=logical_host_home,
                 work_dir=work_dir,
                 socket_path=socket_path,
@@ -410,6 +474,7 @@ def test_gitconfig_source_main_wires_compose_arguments(
 
     assert created == {
         "host_home": mounted_root / logical_home.relative_to("/"),
+        "host_root": mounted_root,
         "logical_host_home": logical_home,
         "work_dir": tmp_path / "work",
         "socket_path": tmp_path / "socket",

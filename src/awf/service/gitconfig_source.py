@@ -32,11 +32,13 @@ class GitconfigSourceServer:
         self,
         *,
         host_home: Path,
+        host_root: Path | None = None,
         logical_host_home: Path | None = None,
         work_dir: Path,
         socket_path: Path,
     ) -> None:
         self.host_home = host_home
+        self.host_root = host_root
         self.logical_host_home = logical_host_home or host_home
         self.work_dir = work_dir
         self.socket_path = socket_path
@@ -47,6 +49,7 @@ class GitconfigSourceServer:
         """Snapshot the currently named host config and publish its source home."""
         snapshot = materialize_service_gitconfig(
             host_home=self.host_home,
+            host_root=self.host_root,
             logical_host_home=self.logical_host_home,
             work_dir=self.work_dir,
             owner_uid=AGENT_RUNTIME_UID,
@@ -166,6 +169,7 @@ def main() -> None:
     )
     server = GitconfigSourceServer(
         host_home=mounted_home,
+        host_root=args.host_root,
         logical_host_home=args.logical_host_home,
         work_dir=args.work_dir,
         socket_path=args.socket,

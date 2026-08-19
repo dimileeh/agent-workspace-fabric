@@ -33,6 +33,7 @@ _ACTIVE_BUNDLE_LEASES: dict[Path, BinaryIO] = {}
 def materialize_service_gitconfig(
     *,
     host_home: Path,
+    host_root: Path | None = None,
     logical_host_home: Path | None = None,
     work_dir: Path,
     owner_uid: int | None = None,
@@ -52,7 +53,8 @@ def materialize_service_gitconfig(
     condition_home = (
         logical_host_home.expanduser().absolute() if logical_host_home is not None else source_home
     )
-    source = source_home / _SERVICE_GITCONFIG_NAME
+    source_origin = source_home / _SERVICE_GITCONFIG_NAME
+    source = _resolve_host_root_symlink(source_origin, host_root=host_root)
     if not source.is_file():
         return None
     if (owner_uid is None) != (owner_gid is None):
@@ -66,7 +68,9 @@ def materialize_service_gitconfig(
         staging_home = staging_root / _SNAPSHOT_HOME_DIR
         _copy_config_graph(
             source=source,
+            source_origin=source_origin,
             source_home=source_home,
+            host_root=host_root,
             condition_home=condition_home,
             snapshot_home=staging_home,
         )
@@ -106,16 +110,18 @@ def materialize_service_gitconfig(
 def _copy_config_graph(
     *,
     source: Path,
+    source_origin: Path,
     source_home: Path,
+    host_root: Path | None,
     condition_home: Path,
     snapshot_home: Path,
 ) -> None:
-    pending: list[tuple[Path, Path, int, frozenset[Path]]] = [
-        (source, Path(_SERVICE_GITCONFIG_NAME), 0, frozenset()),
+    pending: list[tuple[Path, Path, Path, int, frozenset[Path]]] = [
+        (source, source_origin, Path(_SERVICE_GITCONFIG_NAME), 0, frozenset()),
     ]
     copied_destinations: set[Path] = set()
     while pending:
-        current, relative, depth, resolved_ancestors = pending.pop()
+        current, current_origin, relative, depth, resolved_ancestors = pending.pop()
         resolved = current.resolve()
         if relative in copied_destinations or resolved in resolved_ancestors:
             continue
@@ -134,12 +140,13 @@ def _copy_config_graph(
         # config content.
         includes = _relative_includes(target)
         for key, include_path in includes:
-            included = current.parent / include_path
+            included_origin = current_origin.parent / include_path
+            included = _resolve_host_root_symlink(included_origin, host_root=host_root)
             resolved_include = included.resolve()
             if not resolved_include.is_file():
                 continue
             included_relative = _snapshot_relative_path(
-                included,
+                included_origin,
                 source_home=source_home,
             )
             snapshot_include = snapshot_home / included_relative
@@ -154,15 +161,39 @@ def _copy_config_graph(
                     old_path=include_path,
                     new_path=rewritten_path,
                 )
-            pending.append((included, included_relative, depth + 1, child_ancestors))
+            pending.append(
+                (included, included_origin, included_relative, depth + 1, child_ancestors),
+            )
         _rewrite_relative_gitdir_conditions(
             config_path=target,
             source_dir=_logical_source_dir(
-                current.parent,
+                current_origin.parent,
                 source_home=source_home,
                 logical_home=condition_home,
             ),
         )
+
+
+def _resolve_host_root_symlink(path: Path, *, host_root: Path | None) -> Path:
+    """Follow a host symlink through its alternate root mount when provided."""
+    if host_root is None:
+        return path
+
+    current = path
+    visited: set[Path] = set()
+    while current.is_symlink():
+        normalized = Path(os.path.abspath(current))  # noqa: PTH100
+        if normalized in visited:
+            return current
+        visited.add(normalized)
+        target = current.readlink()
+        if target.is_absolute():
+            logical_target = Path(os.path.normpath(target))
+        else:
+            logical_parent = Path("/") / current.parent.relative_to(host_root)
+            logical_target = Path(os.path.normpath(logical_parent / target))
+        current = host_root / logical_target.relative_to(logical_target.anchor)
+    return current
 
 
 def _logical_source_dir(
