@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -70,6 +71,9 @@ if TYPE_CHECKING:
     )
 
 
+_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
+
+
 def _workspace_create() -> Any:
     """Import create helpers lazily to avoid module-load cycles."""
     from awf.service import workspaces_create
@@ -98,6 +102,15 @@ def _source_pr_closed_externally(source: Workspace) -> bool:
         latest_failed_event is not None
         and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
     )
+
+
+def _pr_number_from_url(pr_url: str) -> int | None:
+    """Recover a positive PR number from a GitHub or Bitbucket PR URL."""
+    match = _PR_NUMBER_RE.search(pr_url)
+    if match is None:
+        return None
+    pr_number = int(match.group(1))
+    return pr_number if pr_number > 0 else None
 
 
 async def _source_runtime_not_yet_released(
@@ -474,10 +487,17 @@ async def retry_workspace_row(
         # surfacing as a Docker bind error. Reordering these two guards without
         # updating the provisioner checks could break the invariant.
 
+    existing_feature_pr_number = (
+        source.pr_number
+        if source.pr_number is not None
+        else _pr_number_from_url(source.pr_url)
+        if source.pr_url
+        else None
+    )
     existing_feature_pr = (
         source.task_kind == TaskKind.feature_branch_pr.value
         and bool(source.pr_url)
-        and source.pr_number is not None
+        and existing_feature_pr_number is not None
     )
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     preserve_existing_feature_pr = (
@@ -525,7 +545,7 @@ async def retry_workspace_row(
     )
     if preserve_existing_feature_pr:
         retried.pr_url = source.pr_url
-        retried.pr_number = source.pr_number
+        retried.pr_number = existing_feature_pr_number
 
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)

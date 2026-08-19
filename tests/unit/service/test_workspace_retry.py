@@ -23,6 +23,7 @@ from awf.service.workspaces import (
     retry_workspace_row,
 )
 from awf.service.workspaces_retry import (
+    _pr_number_from_url,
     _prune_and_migrate_retired_agent,
     _prune_retired_fallbacks,
 )
@@ -49,6 +50,18 @@ def test_retry_not_found_error_has_instance_detail() -> None:
 
     assert error.detail is None
     assert error.__dict__["detail"] is None
+
+
+@pytest.mark.parametrize(
+    "pr_url",
+    [
+        "https://github.com/example/retryable/pull/0",
+        "https://github.com/example/retryable/issues/10",
+        "not-a-pr-url",
+    ],
+)
+def test_pr_number_from_url_rejects_invalid_or_non_positive_number(pr_url: str) -> None:
+    assert _pr_number_from_url(pr_url) is None
 
 
 async def test_create_blocks_provider_readiness_before_rows(
@@ -444,6 +457,60 @@ async def test_retry_preserves_existing_feature_pr_identity(
     assert retried.pr_number == 10
     assert retried.remote_push_branch == expected_remote_push_branch
     assert _provision_checkout_base_branch(retried) == expected_remote_push_branch
+
+
+@pytest.mark.parametrize(
+    ("pr_url", "expected_pr_number"),
+    [
+        ("https://github.com/example/retryable/pull/10", 10),
+        ("https://bitbucket.org/example/retryable/pull-requests/11", 11),
+    ],
+)
+async def test_retry_recovers_missing_feature_pr_number_from_url(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    pr_url: str,
+    expected_pr_number: int,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/legacy-feature",
+        remote_push_branch=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_url = pr_url
+        source.pr_number = None
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="recover legacy PR identity",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.pr_url == pr_url
+    assert retried.pr_number == expected_pr_number
+    assert retried.remote_push_branch == "awf/legacy-feature"
+    assert _provision_checkout_base_branch(retried) == "awf/legacy-feature"
 
 
 async def test_retry_replaces_feature_pr_closed_externally(
