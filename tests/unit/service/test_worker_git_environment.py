@@ -747,6 +747,7 @@ def test_service_gitconfig_snapshot_skips_cleanup_when_compose_state_is_unknown(
     current = snapshots_root / ("b" * 64)
     stale.mkdir(parents=True)
     current.mkdir()
+    (stale / "worker.lock").touch()
     compose_file = work_dir / "compose" / "ws_active" / "compose.yml"
     compose_file.parent.mkdir(parents=True)
     compose_file.write_text("services: {}\n")
