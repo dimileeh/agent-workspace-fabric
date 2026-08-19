@@ -16,7 +16,7 @@ from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
-from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
@@ -127,6 +127,20 @@ async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLi
     )
     async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
         return await client.fetch_pull_request_lifecycle(
+            repo=repo,
+            pr_number=pr_number,
+        )
+
+
+async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
+    """Return the source PR's current lifecycle and head ref from its forge."""
+    repo = RepoRef.from_url(source.repo_url)
+    forge = concrete_forge_for_repo(
+        (source.resolved_profile or {}).get("forge"),
+        source.repo_url,
+    )
+    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+        return await client.fetch_pull_request_snapshot(
             repo=repo,
             pr_number=pr_number,
         )
@@ -521,13 +535,22 @@ async def retry_workspace_row(
     )
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     preserve_existing_feature_pr = bool(planning_scope_context is None and existing_feature_pr)
+    live_pr_head_ref: str | None = None
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
         try:
-            existing_pr_lifecycle = await (pr_lifecycle_checker or _live_pr_lifecycle)(
-                source,
-                existing_feature_pr_number,
-            )
+            if pr_lifecycle_checker is not None:
+                existing_pr_lifecycle = await pr_lifecycle_checker(
+                    source,
+                    existing_feature_pr_number,
+                )
+            else:
+                existing_pr_snapshot = await _live_pr_snapshot(
+                    source,
+                    existing_feature_pr_number,
+                )
+                existing_pr_lifecycle = existing_pr_snapshot.lifecycle
+                live_pr_head_ref = existing_pr_snapshot.head_ref
         except Exception as exc:
             raise workspaces.WorkspaceRetryPrStateUnavailableError(
                 "Could not verify whether the existing pull request is still open.",
@@ -564,9 +587,13 @@ async def retry_workspace_row(
         # The retry executes on a fresh local branch, but it must push back to
         # the existing PR's remote head. Legacy feature rows may predate
         # remote_push_branch persistence, where branch_name is that head ref.
-        persisted_head_refs = (source.remote_push_branch, source.branch_name)
+        candidate_head_refs = (
+            source.remote_push_branch,
+            source.branch_name,
+            live_pr_head_ref,
+        )
         retry_remote_push_branch = next(
-            (head_ref.strip() for head_ref in persisted_head_refs if head_ref and head_ref.strip()),
+            (head_ref.strip() for head_ref in candidate_head_refs if head_ref and head_ref.strip()),
             None,
         )
         if retry_remote_push_branch is None:

@@ -124,6 +124,22 @@ async def test_pull_request_lifecycle_lookup_reports_missing_pr() -> None:
     )
 
 
+async def test_pull_request_snapshot_includes_live_head_ref() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json={"state": "OPEN", "source": {"branch": {"name": "contributors/live-head"}}},
+    )
+    client = make_client(fake)
+
+    snapshot = await client.fetch_pull_request_snapshot(repo=repo(), pr_number=42)
+
+    assert snapshot.lifecycle is PullRequestLifecycle.open
+    assert snapshot.head_ref == "contributors/live-head"
+    assert [request.url.path for request in fake.requests] == [_PR]
+
+
 async def test_pull_request_lifecycle_lookup_retries_transient_response() -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=429, headers={"Retry-After": "5"})

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.db.repositories as repositories
 import awf.service.workspaces_retry as workspaces_retry_service
 from awf.api.schemas import WorkspaceCreateRequest
-from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -29,6 +29,7 @@ from awf.service.workspaces import (
 )
 from awf.service.workspaces_retry import (
     _live_pr_lifecycle,
+    _live_pr_snapshot,
     _pr_number_from_url,
     _prune_and_migrate_retired_agent,
     _prune_retired_fallbacks,
@@ -106,6 +107,53 @@ async def test_live_pr_lifecycle_uses_current_forge_status(
     )
 
     assert await _live_pr_lifecycle(source, 10) is PullRequestLifecycle.merged
+    assert calls == [
+        {
+            "repo": workspaces_retry_service.RepoRef(
+                owner="example",
+                name="retryable",
+                forge="github",
+            ),
+            "pr_number": 10,
+        }
+    ]
+
+
+async def test_live_pr_snapshot_uses_current_forge_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeForgeClient:
+        async def __aenter__(self) -> FakeForgeClient:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+        async def fetch_pull_request_snapshot(self, **kwargs: object) -> PullRequestSnapshot:
+            calls.append(kwargs)
+            return PullRequestSnapshot(
+                lifecycle=PullRequestLifecycle.open,
+                head_ref="contributors/live-head",
+            )
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "make_forge_client",
+        lambda _forge, _runner: FakeForgeClient(),
+    )
+    source = SimpleNamespace(
+        repo_url="git@github.com:example/retryable.git",
+        resolved_profile={"forge": "github"},
+    )
+
+    snapshot = await _live_pr_snapshot(source, 10)
+
+    assert snapshot == PullRequestSnapshot(
+        lifecycle=PullRequestLifecycle.open,
+        head_ref="contributors/live-head",
+    )
     assert calls == [
         {
             "repo": workspaces_retry_service.RepoRef(
@@ -620,6 +668,59 @@ async def test_retry_rejects_open_feature_pr_without_persisted_head_ref(
         "reason_code": "PR_HEAD_REF_UNAVAILABLE",
     }
     assert [workspace.id for workspace in workspaces] == [first.id]
+
+
+async def test_retry_recovers_open_feature_pr_head_ref_from_live_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/lost-feature-head",
+        remote_push_branch=None,
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.branch_name = None
+        source.pr_number = 10
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/live-feature-head",
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry existing PR",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.pr_url == "https://github.com/example/retryable/pull/10"
+    assert retried.pr_number == 10
+    assert retried.remote_push_branch == "contributors/live-feature-head"
+    assert _provision_checkout_base_branch(retried) == "contributors/live-feature-head"
 
 
 async def test_retry_replaces_feature_pr_closed_externally(

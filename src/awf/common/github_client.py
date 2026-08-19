@@ -35,7 +35,7 @@ from urllib.parse import quote
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client_adoption import (
     BranchOpenPullRequestResolver as BranchOpenPullRequestResolver,
 )
@@ -276,6 +276,15 @@ class GitHubClient:
         pr_number: int,
     ) -> PullRequestLifecycle:
         """Return a PR's lifecycle using a minimal retrying read."""
+        return (await self.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)).lifecycle
+
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        """Return a PR's lifecycle and live head branch using one minimal read."""
         payload = await self._graphql(
             query=_GQL_PR_LIFECYCLE,
             variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
@@ -283,12 +292,14 @@ class GitHubClient:
         )
         pr = payload["data"]["repository"]["pullRequest"]
         if pr is None:
-            return PullRequestLifecycle.missing
+            return PullRequestSnapshot(PullRequestLifecycle.missing, None)
         if pr["merged"]:
-            return PullRequestLifecycle.merged
-        if pr["closed"]:
-            return PullRequestLifecycle.closed
-        return PullRequestLifecycle.open
+            lifecycle = PullRequestLifecycle.merged
+        elif pr["closed"]:
+            lifecycle = PullRequestLifecycle.closed
+        else:
+            lifecycle = PullRequestLifecycle.open
+        return PullRequestSnapshot(lifecycle, _clean_optional_str(pr.get("headRefName")))
 
     async def fetch_pr_status(
         self,

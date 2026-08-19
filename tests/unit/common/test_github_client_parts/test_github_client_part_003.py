@@ -990,6 +990,36 @@ class TestFetchPrStatusPart002:
         )
 
     @pytest.mark.unit
+    async def test_pull_request_snapshot_includes_live_head_ref(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "closed": False,
+                                "merged": False,
+                                "headRefName": "contributors/live-head",
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        snapshot = await client.fetch_pull_request_snapshot(
+            repo=RepoRef(owner="o", name="r"), pr_number=1
+        )
+
+        assert snapshot.lifecycle is PullRequestLifecycle.open
+        assert snapshot.head_ref == "contributors/live-head"
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "headRefName" in query_arg
+
+    @pytest.mark.unit
     async def test_pull_request_lifecycle_lookup_retries_transient_response(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
