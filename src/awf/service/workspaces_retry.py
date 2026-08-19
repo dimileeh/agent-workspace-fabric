@@ -93,11 +93,10 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
 
 def _source_pr_closed_externally(source: Workspace) -> bool:
     """Return whether the source's terminal transition recorded a closed PR."""
-    return any(
-        event.event_type == "workspace.state_changed"
-        and event.new_state == WorkspaceStatus.failed.value
-        and event.reason_code == AbortReason.pr_closed_externally.value
-        for event in source.events
+    latest_failed_event = _latest_failed_state_event(source)
+    return (
+        latest_failed_event is not None
+        and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
     )
 
 

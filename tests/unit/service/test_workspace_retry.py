@@ -492,6 +492,65 @@ async def test_retry_replaces_feature_pr_closed_externally(
     assert _provision_checkout_base_branch(retried) == retried.branch_base
 
 
+async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/remonitored-feature",
+        remote_push_branch="contributors/open-head",
+        failure_reason_code="pr_closed_externally",
+    )
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        source.status = WorkspaceStatus.monitoring_pr.value
+        await repo.add_event_with_states(
+            source,
+            event_type="workspace.remonitor_requested",
+            old_state=WorkspaceStatus.failed,
+            new_state=WorkspaceStatus.monitoring_pr,
+            reason_code="OPERATOR_REMONITOR",
+        )
+        await repo.transition(
+            source,
+            to=WorkspaceStatus.failed,
+            reason_code="VALIDATION_FAILED",
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry current open PR",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.pr_url == "https://github.com/example/retryable/pull/10"
+    assert retried.pr_number == 10
+    assert retried.remote_push_branch == "contributors/open-head"
+    assert _provision_checkout_base_branch(retried) == "contributors/open-head"
+
+
 async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filtering(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
