@@ -108,6 +108,10 @@ class ForgeClient(Protocol):
     satisfies the same surface.
     """
 
+    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
+        """Return whether a PR exists and is open via a lightweight retrying read."""
+        ...
+
     async def fetch_pr_status(
         self,
         *,

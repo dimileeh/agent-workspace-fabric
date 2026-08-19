@@ -51,6 +51,7 @@ from awf.common.github_client_ref import RepoRef as RepoRef
 from awf.common.github_graphql import (
     _GQL_PR_FILES_PAGE,
     _GQL_PR_ISSUE_COMMENTS_PAGE,
+    _GQL_PR_LIFECYCLE,
     _GQL_PR_REVIEW_THREADS_PAGE,
     _GQL_PR_REVIEWS_PAGE,
     _GQL_PR_STATE,
@@ -266,6 +267,18 @@ class GitHubClient:
     async def __aexit__(self, *exc_info: object) -> None:
         """Exit an ``async with`` block (no-op; see :meth:`aclose`)."""
         await self.aclose()
+
+    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
+        """Return whether a PR exists and is open using a minimal retrying read."""
+        payload = await self._graphql(
+            query=_GQL_PR_LIFECYCLE,
+            variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
+            retry_policy=RetryPolicy.READ,
+        )
+        pr = payload["data"]["repository"]["pullRequest"]
+        if pr is None:
+            return False
+        return not pr["closed"] and not pr["merged"]
 
     async def fetch_pr_status(
         self,

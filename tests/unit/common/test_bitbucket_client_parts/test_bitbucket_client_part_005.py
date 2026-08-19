@@ -91,6 +91,64 @@ async def test_fetch_pr_status_non_dict_body_raises() -> None:
     assert "not found" in excinfo.value.body
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("OPEN", True), ("DECLINED", False), ("SUPERSEDED", False), ("MERGED", False)],
+)
+async def test_pull_request_open_lookup_fetches_only_pr_lifecycle(
+    state: str,
+    expected: bool,
+) -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json={"state": state})
+    client = make_client(fake)
+
+    assert await client.is_pull_request_open(repo=repo(), pr_number=42) is expected
+    assert [request.url.path for request in fake.requests] == [_PR]
+
+
+async def test_pull_request_open_lookup_treats_missing_pr_as_not_open() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=404, json={"type": "error"})
+    client = make_client(fake)
+
+    assert not await client.is_pull_request_open(repo=repo(), pr_number=42)
+
+
+async def test_pull_request_open_lookup_retries_transient_response() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=429, headers={"Retry-After": "5"})
+    fake.enqueue("GET", _PR, json={"state": "OPEN"})
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep)
+
+    assert await client.is_pull_request_open(repo=repo(), pr_number=42)
+    assert sleep.delays == [5.0]
+
+
+async def test_pull_request_open_lookup_propagates_non_missing_error() -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, status=403, json={"type": "error"})
+    client = make_client(fake)
+
+    with pytest.raises(BitbucketClientError) as excinfo:
+        await client.is_pull_request_open(repo=repo(), pr_number=42)
+    assert excinfo.value.status == 403
+
+
+@pytest.mark.parametrize("payload", [["not", "an", "object"], {"state": "PAUSED"}])
+async def test_pull_request_open_lookup_rejects_indeterminate_response(
+    payload: object,
+) -> None:
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json=payload)
+    client = make_client(fake)
+
+    with pytest.raises(BitbucketClientError) as excinfo:
+        await client.is_pull_request_open(repo=repo(), pr_number=42)
+    assert "is_pull_request_open" in excinfo.value.operation
+
+
 async def test_account_id_is_cached_across_status_fetches() -> None:
     fake = FakeBitbucket()
     _seed_fetch_status(fake)

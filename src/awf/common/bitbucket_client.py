@@ -393,6 +393,34 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             outdated_unresolved_inline_threads=outdated_inline_threads,
         )
 
+    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
+        """Return whether a PR exists and is open using one retrying PR read."""
+        try:
+            pr = await self._request_json(
+                "GET",
+                self._pr_path(repo, pr_number),
+                operation="bitbucket is_pull_request_open",
+                cache=True,
+            )
+        except BitbucketClientError as exc:
+            if exc.status == 404:
+                return False
+            raise
+        if not isinstance(pr, dict):
+            raise BitbucketClientError(
+                operation="bitbucket is_pull_request_open",
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned an invalid response",
+            )
+        state = str(pr.get("state") or "").upper()
+        if state not in {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}:
+            raise BitbucketClientError(
+                operation="bitbucket is_pull_request_open",
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} returned unknown state {state or '<empty>'}",
+            )
+        return state == "OPEN"
+
     async def fetch_failing_check_logs(
         self,
         *,

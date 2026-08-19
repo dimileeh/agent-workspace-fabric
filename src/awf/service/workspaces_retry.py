@@ -125,13 +125,10 @@ async def _live_pr_is_open(source: Workspace, pr_number: int) -> bool:
         source.repo_url,
     )
     async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        status = await client.fetch_pr_status(
+        return await client.is_pull_request_open(
             repo=repo,
             pr_number=pr_number,
-            base_behind_count=0,
-            retry=False,
         )
-    return not status.closed and not status.merged
 
 
 async def _source_runtime_not_yet_released(

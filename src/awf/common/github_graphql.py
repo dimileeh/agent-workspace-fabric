@@ -8,6 +8,20 @@ purely for cohesion (one place for the PR-state query and its pagination peers).
 
 from __future__ import annotations
 
+# Minimal lifecycle query for admission paths that only need to distinguish an
+# open PR from a terminal or deleted one. Keep this separate from the monitor's
+# full status snapshot so unrelated CI/review pagination cannot block admission.
+_GQL_PR_LIFECYCLE = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      closed
+      merged
+    }
+  }
+}
+"""
+
 # GraphQL: fetch PR state + review threads + review comments in one query.
 # The changed-file list feeds merge policy, so it is paginated below whenever
 # GitHub reports more than the first 100 paths.

@@ -936,6 +936,66 @@ class TestFetchPrStatusPart002:
         assert status.merge_commit_sha == "mergecommit1234567890"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("closed", "merged", "expected"),
+        [(False, False, True), (True, False, False), (False, True, False)],
+    )
+    async def test_pull_request_open_lookup_fetches_only_lifecycle_state(
+        self,
+        closed: bool,
+        merged: bool,
+        expected: bool,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"repository": {"pullRequest": {"closed": closed, "merged": merged}}}}
+            ),
+        )
+        client = GitHubClient(fake)
+
+        assert (
+            await client.is_pull_request_open(repo=RepoRef(owner="o", name="r"), pr_number=1)
+            is expected
+        )
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "closed" in query_arg
+        assert "merged" in query_arg
+        assert "reviewThreads" not in query_arg
+        assert "statusCheckRollup" not in query_arg
+
+    @pytest.mark.unit
+    async def test_pull_request_open_lookup_treats_missing_pr_as_not_open(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"data": {"repository": {"pullRequest": None}}}),
+        )
+        client = GitHubClient(fake)
+
+        assert not await client.is_pull_request_open(
+            repo=RepoRef(owner="o", name="r"), pr_number=404
+        )
+
+    @pytest.mark.unit
+    async def test_pull_request_open_lookup_retries_transient_response(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"repository": {"pullRequest": {"closed": False, "merged": False}}}}
+            ),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        assert await client.is_pull_request_open(repo=RepoRef(owner="o", name="r"), pr_number=1)
+        assert len(fake.calls) == 2
+        assert len(sleep.calls) == 1
+
+    @pytest.mark.unit
     async def test_graphql_argv_shape(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_sample_pr_payload())

@@ -94,9 +94,9 @@ async def test_live_pr_is_open_uses_current_forge_status(
         async def __aexit__(self, *_exc_info: object) -> None:
             return None
 
-        async def fetch_pr_status(self, **kwargs: object) -> SimpleNamespace:
+        async def is_pull_request_open(self, **kwargs: object) -> bool:
             calls.append(kwargs)
-            return SimpleNamespace(closed=closed, merged=merged)
+            return not closed and not merged
 
     monkeypatch.setattr(
         workspaces_retry_service,
@@ -117,8 +117,6 @@ async def test_live_pr_is_open_uses_current_forge_status(
                 forge="github",
             ),
             "pr_number": 10,
-            "base_behind_count": 0,
-            "retry": False,
         }
     ]
 
