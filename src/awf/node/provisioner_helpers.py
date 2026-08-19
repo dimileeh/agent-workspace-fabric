@@ -131,11 +131,22 @@ def _provision_local_branch_name(
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
-    """Return the base branch a provisioning worktree should check out."""
+    """Return the remote branch a provisioning worktree should check out.
+
+    A feature retry that reuses an existing PR must start from that PR's
+    preserved remote head. The executor later updates the same head with a
+    non-force push, so starting from ``branch_base`` would discard the PR's
+    existing ancestry and make the push non-fast-forward.
+    """
     return (
         _sync_feature_pr_pull_head_ref(ws)
         or _sync_feature_pr_head_ref(ws)
         or _release_sync_source_branch(ws)
+        or (
+            ws.remote_push_branch
+            if ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
+            else None
+        )
         or ws.branch_base
     )
 

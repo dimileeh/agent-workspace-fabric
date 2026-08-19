@@ -13,6 +13,7 @@ from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
+from awf.node.provisioner_helpers import _provision_checkout_base_branch
 from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
@@ -442,6 +443,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
     assert retried.pr_url == "https://github.com/example/retryable/pull/10"
     assert retried.pr_number == 10
     assert retried.remote_push_branch == expected_remote_push_branch
+    assert _provision_checkout_base_branch(retried) == expected_remote_push_branch
 
 
 async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filtering(
