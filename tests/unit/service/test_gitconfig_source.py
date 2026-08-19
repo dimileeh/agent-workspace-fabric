@@ -138,6 +138,41 @@ def test_gitconfig_source_resolves_intermediate_absolute_symlink_through_host_ro
 
 
 @pytest.mark.unit
+def test_gitconfig_source_confines_parent_include_to_host_root(tmp_path: Path) -> None:
+    """Parent traversal uses the mounted host root, not the helper filesystem."""
+    host_root = tmp_path / "host-root"
+    host_home = host_root / "home" / "agent"
+    host_home.mkdir(parents=True)
+    (host_home / ".gitconfig").write_text(
+        "[include]\n  path = ../../../identity.inc\n",
+        encoding="utf-8",
+    )
+    (host_root / "identity.inc").write_text(
+        "[user]\n  email = agent@example.com\n",
+        encoding="utf-8",
+    )
+    server = GitconfigSourceServer(
+        host_home=host_home,
+        host_root=host_root,
+        logical_host_home=Path("/home/agent"),
+        work_dir=tmp_path / "work",
+        socket_path=tmp_path / "work" / "service-auth" / "source.sock",
+    )
+
+    snapshot = server.refresh()
+
+    assert snapshot is not None
+    result = subprocess.run(
+        ["git", "config", "--file", str(snapshot), "--includes", "user.email"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "agent@example.com"
+
+
+@pytest.mark.unit
 def test_gitconfig_source_treats_host_root_symlink_cycle_as_absent(tmp_path: Path) -> None:
     """A cyclic host symlink cannot wedge the refresh helper."""
     host_root = tmp_path / "host-root"

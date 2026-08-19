@@ -183,7 +183,12 @@ def _resolve_host_root_symlink(path: Path, *, host_root: Path | None) -> Path:
         return path
 
     root = Path(os.path.abspath(host_root))  # noqa: PTH100
-    current = Path(os.path.abspath(path))  # noqa: PTH100
+    # Normalize parent traversal in the host's namespace. Applying abspath to
+    # the helper-mounted path first could escape the alternate root even though
+    # the same traversal stops at the host filesystem root.
+    logical_path = Path("/") / path.relative_to(root)
+    normalized_logical = Path(os.path.normpath(logical_path))
+    current = root / normalized_logical.relative_to(normalized_logical.anchor)
     visited: set[Path] = set()
     while True:
         relative = current.relative_to(root)
