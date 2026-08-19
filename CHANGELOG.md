@@ -6,9 +6,9 @@
   rewrites and service restarts with immutable, content-addressed config
   bundles that preserve worker relative includes and native-Linux agent
   ownership without exposing the worker include graph to agents; stale bundles
-  are reaped only after live-reference checks, and incomplete failed workspaces
-  now direct operators to Retry instead of allowing an unrecoverable Remonitor
-  request.
+  are reaped only after live-reference checks.
+- Fixed unrecoverable Remonitor requests: incomplete failed workspaces that
+  lack persisted recovery metadata now direct operators to Retry.
 - **BREAKING: `auto_merge` now defaults to `false` everywhere.** It is one
   uniform, opt-in setting that behaves identically for `awf workspace create`
   and `awf workspace adopt-pr`, resolved once at provision time. `task_kind`

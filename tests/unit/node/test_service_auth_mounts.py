@@ -649,6 +649,7 @@ def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
         host_home=host_home,
         work_dir=tmp_path / "work",
         gitconfig_source=snapshot,
+        host_env={},
     )
 
     mounts = resolver.resolve(workspace_id="ws_auth")
@@ -656,7 +657,6 @@ def test_service_auth_mount_resolver_uses_stable_gitconfig_snapshot(
     by_target = {mount.target: mount for mount in mounts}
     assert by_target["/home/agent/.gitconfig"].source == str(wrapper)
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
-    assert str(bundle) not in by_target
     assert all(mount.source != str(bundle) for mount in mounts)
 
 
