@@ -320,13 +320,14 @@ def test_service_gitconfig_snapshot_skips_cleanup_when_docker_state_is_unknown(
 
 
 @pytest.mark.unit
-def test_service_gitconfig_snapshot_discovers_container_mount(
+def test_service_gitconfig_snapshot_discovers_container_mount_from_stopped_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    commands: list[list[str]] = []
     responses = iter(
         (
             subprocess.CompletedProcess(
-                args=["docker", "container", "ls", "--quiet"],
+                args=["docker", "container", "ls", "--all", "--quiet"],
                 returncode=0,
                 stdout="container-id\n",
                 stderr="",
@@ -346,14 +347,20 @@ def test_service_gitconfig_snapshot_discovers_container_mount(
             ),
         )
     )
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return next(responses)
+
     monkeypatch.setattr(
         gitconfig_snapshot_mod.subprocess,
         "run",
-        lambda *_args, **_kwargs: next(responses),
+        run,
     )
 
     sources = gitconfig_snapshot_mod._running_container_mount_sources()
 
+    assert commands[0] == ["docker", "container", "ls", "--all", "--quiet"]
     assert sources == frozenset({Path("/work/bundle/agent.gitconfig")})
 
 

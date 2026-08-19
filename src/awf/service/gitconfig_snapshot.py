@@ -378,7 +378,7 @@ def _compose_config_contents(work_dir: Path) -> tuple[str, ...] | None:
 def _running_container_mount_sources() -> frozenset[Path] | None:
     try:
         listed = subprocess.run(
-            ["docker", "container", "ls", "--quiet"],
+            ["docker", "container", "ls", "--all", "--quiet"],
             check=False,
             capture_output=True,
             text=True,
