@@ -388,15 +388,17 @@ def test_gitconfig_source_main_wires_compose_arguments(
             created["served"] = Path("yes")
 
     monkeypatch.setattr(source_mod, "GitconfigSourceServer", _Server)
+    mounted_root = tmp_path / "mounted-root"
+    logical_home = tmp_path / "logical" / "nested" / "home"
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "gitconfig_source.py",
-            "--host-home-parent",
-            str(tmp_path / "mounted-parent"),
+            "--host-root",
+            str(mounted_root),
             "--logical-host-home",
-            str(tmp_path / "logical-home"),
+            str(logical_home),
             "--work-dir",
             str(tmp_path / "work"),
             "--socket",
@@ -407,8 +409,8 @@ def test_gitconfig_source_main_wires_compose_arguments(
     source_mod.main()
 
     assert created == {
-        "host_home": tmp_path / "mounted-parent" / "logical-home",
-        "logical_host_home": tmp_path / "logical-home",
+        "host_home": mounted_root / logical_home.relative_to("/"),
+        "logical_host_home": logical_home,
         "work_dir": tmp_path / "work",
         "socket_path": tmp_path / "socket",
         "served": Path("yes"),

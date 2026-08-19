@@ -197,9 +197,10 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # Keep the parent view separate from /run so Docker does not create later
-      # mount targets beside the host home. It exposes ../ relative includes.
-      - ${AWF_HOST_HOME:-${HOME}}/..:/run/awf-host-parent:ro
+      # Mirror the host filesystem beneath a separate read-only root so relative
+      # includes can traverse any number of parents without escaping the view.
+      # This broad mount is confined to this networkless, hardened helper.
+      - /:/run/awf-host-root:ro
       - ${AWF_HOST_HOME:-${HOME}}:/run/awf-host-home:ro
       - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
@@ -208,8 +209,8 @@ services:
       - python
       - -m
       - awf.service.gitconfig_source
-      - --host-home-parent
-      - /run/awf-host-parent
+      - --host-root
+      - /run/awf-host-root
       - --logical-host-home
       - ${AWF_HOST_HOME:-${HOME}}
       - --work-dir
