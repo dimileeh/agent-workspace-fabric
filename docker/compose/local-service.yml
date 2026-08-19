@@ -206,6 +206,8 @@ services:
       - awf.service.gitconfig_source
       - --host-home
       - /run/awf-host-home
+      - --logical-host-home
+      - ${AWF_HOST_HOME:-${HOME}}
       - --work-dir
       - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
       - --socket

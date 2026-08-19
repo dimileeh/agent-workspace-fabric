@@ -33,6 +33,7 @@ _ACTIVE_BUNDLE_LEASES: dict[Path, BinaryIO] = {}
 def materialize_service_gitconfig(
     *,
     host_home: Path,
+    logical_host_home: Path | None = None,
     work_dir: Path,
     owner_uid: int | None = None,
     owner_gid: int | None = None,
@@ -48,6 +49,9 @@ def materialize_service_gitconfig(
     """
 
     source_home = host_home.expanduser().absolute()
+    condition_home = (
+        logical_host_home.expanduser().absolute() if logical_host_home is not None else source_home
+    )
     source = source_home / _SERVICE_GITCONFIG_NAME
     if not source.is_file():
         return None
@@ -63,6 +67,7 @@ def materialize_service_gitconfig(
         _copy_config_graph(
             source=source,
             source_home=source_home,
+            condition_home=condition_home,
             snapshot_home=staging_home,
         )
         digest = _snapshot_digest(staging_home)
@@ -98,7 +103,13 @@ def materialize_service_gitconfig(
             shutil.rmtree(staging_root)
 
 
-def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) -> None:
+def _copy_config_graph(
+    *,
+    source: Path,
+    source_home: Path,
+    condition_home: Path,
+    snapshot_home: Path,
+) -> None:
     pending: list[tuple[Path, Path, int, frozenset[Path]]] = [
         (source, Path(_SERVICE_GITCONFIG_NAME), 0, frozenset()),
     ]
@@ -146,8 +157,29 @@ def _copy_config_graph(*, source: Path, source_home: Path, snapshot_home: Path) 
             pending.append((included, included_relative, depth + 1, child_ancestors))
         _rewrite_relative_gitdir_conditions(
             config_path=target,
-            source_dir=current.parent,
+            source_dir=_logical_source_dir(
+                current.parent,
+                source_home=source_home,
+                logical_home=condition_home,
+            ),
         )
+
+
+def _logical_source_dir(
+    source_dir: Path,
+    *,
+    source_home: Path,
+    logical_home: Path,
+) -> Path:
+    """Map helper-mounted config directories to their worker-visible paths."""
+
+    lexical_source_dir = Path(os.path.abspath(source_dir))  # noqa: PTH100
+    lexical_source_home = Path(os.path.abspath(source_home))  # noqa: PTH100
+    try:
+        relative = lexical_source_dir.relative_to(lexical_source_home)
+    except ValueError:
+        return lexical_source_dir
+    return logical_home / relative
 
 
 def _relative_to_home(path: Path, *, source_home: Path) -> Path:

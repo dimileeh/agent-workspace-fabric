@@ -375,6 +375,19 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_work_dir}:{expected_work_dir}",
         "awf-gitconfig-source:/run/awf-gitconfig-source",
     ]
+    assert gitconfig_source["command"] == [
+        "python",
+        "-m",
+        "awf.service.gitconfig_source",
+        "--host-home",
+        "/run/awf-host-home",
+        "--logical-host-home",
+        expected_host_home,
+        "--work-dir",
+        expected_work_dir,
+        "--socket",
+        "/run/awf-gitconfig-source/source.sock",
+    ]
     assert f"{expected_host_home}:{expected_host_home}:ro" not in services["worker"]["volumes"]
     assert (
         f"{expected_host_home}/.gitconfig:{expected_host_home}/.gitconfig:ro"

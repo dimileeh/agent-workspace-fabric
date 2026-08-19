@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import subprocess
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -57,6 +58,80 @@ def test_gitconfig_source_refresh_observes_atomic_host_replacement(tmp_path: Pat
     assert first.read_text(encoding="utf-8") == "[user]\n  name = Before\n"
     assert second.read_text(encoding="utf-8") == "[user]\n  name = After\n"
     assert (socket_path.parent / "current").resolve() == second.parent
+
+
+@pytest.mark.unit
+def test_gitconfig_source_rewrites_relative_gitdirs_to_logical_host_home(
+    tmp_path: Path,
+) -> None:
+    """Helper-only mount paths must not leak into worker-consumed conditions."""
+    mounted_home = tmp_path / "mounted-host-home"
+    logical_home = tmp_path / "logical-host-home"
+    mounted_home.mkdir()
+    (mounted_home / ".gitconfig").write_text(
+        '[includeIf "gitdir:./repos/"]\n'
+        "  path = identities/top.inc\n"
+        "[include]\n"
+        "  path = configs/conditions.inc\n",
+        encoding="utf-8",
+    )
+    (mounted_home / "configs").mkdir()
+    (mounted_home / "configs" / "conditions.inc").write_text(
+        '[includeIf "gitdir/i:./Repos/"]\n  path = ../identities/nested.inc\n',
+        encoding="utf-8",
+    )
+    (mounted_home / "identities").mkdir()
+    (mounted_home / "identities" / "top.inc").write_text(
+        "[user]\n  email = top@example.com\n",
+        encoding="utf-8",
+    )
+    (mounted_home / "identities" / "nested.inc").write_text(
+        "[user]\n  email = nested@example.com\n",
+        encoding="utf-8",
+    )
+    top_repo = logical_home / "repos" / "top"
+    nested_repo = logical_home / "configs" / "repos" / "nested"
+    subprocess.run(["git", "init", "--quiet", str(top_repo)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(nested_repo)], check=True)
+    server = GitconfigSourceServer(
+        host_home=mounted_home,
+        logical_host_home=logical_home,
+        work_dir=tmp_path / "work",
+        socket_path=tmp_path / "work" / "service-auth" / "source.sock",
+    )
+
+    snapshot = server.refresh()
+
+    assert snapshot is not None
+    assert str(mounted_home) not in snapshot.read_text(encoding="utf-8")
+    assert f'[includeIf "gitdir:{logical_home}/repos/"]' in snapshot.read_text(
+        encoding="utf-8",
+    )
+    nested_config = snapshot.parent / "configs" / "conditions.inc"
+    assert f'[includeIf "gitdir/i:{logical_home}/configs/Repos/"]' in nested_config.read_text(
+        encoding="utf-8",
+    )
+    for repo, expected_email in (
+        (top_repo, "top@example.com"),
+        (nested_repo, "nested@example.com"),
+    ):
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "config",
+                "--file",
+                str(snapshot),
+                "--includes",
+                "user.email",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected_email
 
 
 @pytest.mark.unit
@@ -282,9 +357,17 @@ def test_gitconfig_source_main_wires_compose_arguments(
     created: dict[str, Path] = {}
 
     class _Server:
-        def __init__(self, *, host_home: Path, work_dir: Path, socket_path: Path) -> None:
+        def __init__(
+            self,
+            *,
+            host_home: Path,
+            logical_host_home: Path,
+            work_dir: Path,
+            socket_path: Path,
+        ) -> None:
             created.update(
                 host_home=host_home,
+                logical_host_home=logical_host_home,
                 work_dir=work_dir,
                 socket_path=socket_path,
             )
@@ -300,6 +383,8 @@ def test_gitconfig_source_main_wires_compose_arguments(
             "gitconfig_source.py",
             "--host-home",
             str(tmp_path / "home"),
+            "--logical-host-home",
+            str(tmp_path / "logical-home"),
             "--work-dir",
             str(tmp_path / "work"),
             "--socket",
@@ -311,6 +396,7 @@ def test_gitconfig_source_main_wires_compose_arguments(
 
     assert created == {
         "host_home": tmp_path / "home",
+        "logical_host_home": tmp_path / "logical-home",
         "work_dir": tmp_path / "work",
         "socket_path": tmp_path / "socket",
         "served": Path("yes"),

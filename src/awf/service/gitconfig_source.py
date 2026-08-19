@@ -28,8 +28,16 @@ _log = structlog.get_logger(__name__)
 class GitconfigSourceServer:
     """Publish fresh immutable snapshots from a directory-mounted host home."""
 
-    def __init__(self, *, host_home: Path, work_dir: Path, socket_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        host_home: Path,
+        logical_host_home: Path | None = None,
+        work_dir: Path,
+        socket_path: Path,
+    ) -> None:
         self.host_home = host_home
+        self.logical_host_home = logical_host_home or host_home
         self.work_dir = work_dir
         self.socket_path = socket_path
         self.ready = asyncio.Event()
@@ -39,6 +47,7 @@ class GitconfigSourceServer:
         """Snapshot the currently named host config and publish its source home."""
         snapshot = materialize_service_gitconfig(
             host_home=self.host_home,
+            logical_host_home=self.logical_host_home,
             work_dir=self.work_dir,
             owner_uid=AGENT_RUNTIME_UID,
             owner_gid=AGENT_RUNTIME_GID,
@@ -143,6 +152,7 @@ async def request_gitconfig_source_refresh(socket_path: Path) -> Path | None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host-home", type=Path, required=True)
+    parser.add_argument("--logical-host-home", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
     return parser.parse_args()
@@ -153,6 +163,7 @@ def main() -> None:
     args = _parse_args()
     server = GitconfigSourceServer(
         host_home=args.host_home,
+        logical_host_home=args.logical_host_home,
         work_dir=args.work_dir,
         socket_path=args.socket,
     )
