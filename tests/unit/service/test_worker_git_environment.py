@@ -432,6 +432,349 @@ def test_service_gitconfig_snapshot_is_absent_without_host_config(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_requires_complete_ownership(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
+
+    with pytest.raises(
+        ValueError,
+        match="gitconfig snapshot ownership requires both uid and gid",
+    ):
+        worker_mod._materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+            owner_uid=1000,
+        )
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_rejects_excessive_include_depth(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    config_paths = [host_home / ".gitconfig"] + [
+        host_home / f"level-{index}.inc" for index in range(18)
+    ]
+    for current, included in zip(config_paths, config_paths[1:], strict=False):
+        current.write_text(f"[include]\n  path = {included.name}\n")
+    config_paths[-1].write_text("[user]\n  name = Too deep\n")
+
+    with pytest.raises(
+        RuntimeError,
+        match="gitconfig relative include depth exceeds safe limit",
+    ):
+        worker_mod._materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+        )
+
+    snapshots_root = tmp_path / "work" / "service-auth" / "gitconfig-snapshots"
+    assert not tuple(snapshots_root.glob(".gitconfig-*"))
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_ignores_unavailable_and_nonrelative_includes(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    external = tmp_path / "external.inc"
+    external.write_text("[user]\n  email = external@example.com\n")
+    source_text = (
+        "[include]\n"
+        "  path = missing.inc\n"
+        "[include]\n"
+        f"  path = {external}\n"
+        "[include]\n"
+        "  path = ~/.config/git/optional.inc\n"
+        '[includeIf "gitdir:/external/repos/"]\n'
+        "  path = condition-missing.inc\n"
+    )
+    (host_home / ".gitconfig").write_text(source_text)
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert snapshot.read_text() == source_text
+    assert [
+        path.relative_to(snapshot.parent) for path in snapshot.parent.rglob("*") if path.is_file()
+    ] == [Path(".gitconfig")]
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_stops_lexical_include_cycle(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text(
+        "[include]\n  path = configs/base.inc\n[include]\n  path = .gitconfig\n",
+    )
+    (host_home / "configs").mkdir()
+    (host_home / "configs" / "base.inc").write_text(
+        "[include]\n  path = ../.gitconfig\n",
+    )
+
+    snapshot = worker_mod._materialize_service_gitconfig(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert (snapshot.parent / "configs" / "base.inc").is_file()
+    assert sorted(
+        path.relative_to(snapshot.parent) for path in snapshot.parent.rglob("*") if path.is_file()
+    ) == [Path(".gitconfig"), Path("configs/base.inc")]
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_rejects_invalid_gitconfig(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[include\n  path = broken.inc\n")
+
+    with pytest.raises(RuntimeError, match="could not inspect gitconfig includes"):
+        worker_mod._materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+        )
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_ignores_incomplete_git_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / ".gitconfig"
+    config_path.touch()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["git", "config"],
+            returncode=0,
+            stdout=b"include.path-without-value\0",
+            stderr=b"",
+        ),
+    )
+
+    assert gitconfig_snapshot_mod._relative_includes(config_path) == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("failed_option", "source_text", "extra_file", "expected_message"),
+    [
+        (
+            "--replace-all",
+            "[include]\n  path = ../shared.inc\n",
+            "shared.inc",
+            "could not rewrite relative gitconfig include",
+        ),
+        (
+            "--name-only",
+            "[user]\n  name = AWF\n",
+            None,
+            "could not inspect gitconfig conditions",
+        ),
+        (
+            "--rename-section",
+            '[includeIf "gitdir:./repos/"]\n  path = identity.inc\n',
+            "host-home/identity.inc",
+            "could not rewrite relative gitdir condition",
+        ),
+    ],
+)
+def test_service_gitconfig_snapshot_propagates_git_rewrite_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_option: str,
+    source_text: str,
+    extra_file: str | None,
+    expected_message: str,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text(source_text)
+    if extra_file is not None:
+        included = tmp_path / extra_file
+        included.parent.mkdir(parents=True, exist_ok=True)
+        included.write_text("[user]\n  email = included@example.com\n")
+    original_run = subprocess.run
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if failed_option in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=2,
+                stdout=b"",
+                stderr=b"simulated git failure",
+            )
+        return original_run(command, **kwargs)  # type: ignore[call-overload,return-value]
+
+    monkeypatch.setattr(gitconfig_snapshot_mod.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=expected_message):
+        worker_mod._materialize_service_gitconfig(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+        )
+
+    snapshots_root = tmp_path / "work" / "service-auth" / "gitconfig-snapshots"
+    assert not tuple(snapshots_root.glob(".gitconfig-*"))
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_cleanup_is_noop_without_bundles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots_root = tmp_path / "work" / "service-auth" / "gitconfig-snapshots"
+    snapshots_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: pytest.fail("empty cleanup must not query Docker"),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=tmp_path / "work",
+        protected_root=snapshots_root / ("a" * 64),
+        now=10**10,
+    )
+
+    assert tuple(snapshots_root.iterdir()) == (snapshots_root / ".snapshot.lock",)
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_retains_recent_unreferenced_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    recent = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    recent.mkdir(parents=True)
+    current.mkdir()
+    for bundle in (recent, current):
+        (bundle / "worker.lock").touch()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=recent.stat().st_mtime,
+    )
+
+    assert recent.is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_retains_bundle_registered_to_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    active = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    active.mkdir(parents=True)
+    current.mkdir()
+    for bundle in (active, current):
+        (bundle / "worker.lock").touch()
+    active_lease = (active / "worker.lock").open("r+b")
+    gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES[active] = active_lease
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+    assert active.is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_retains_prelease_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    stale = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    stale.mkdir(parents=True)
+    current.mkdir()
+    (current / "worker.lock").touch()
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+    assert stale.is_dir()
+
+
+@pytest.mark.unit
+def test_service_gitconfig_snapshot_skips_cleanup_when_compose_state_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    snapshots_root = work_dir / "service-auth" / "gitconfig-snapshots"
+    stale = snapshots_root / ("a" * 64)
+    current = snapshots_root / ("b" * 64)
+    stale.mkdir(parents=True)
+    current.mkdir()
+    compose_file = work_dir / "compose" / "ws_active" / "compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n")
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == compose_file:
+            raise OSError("compose file disappeared")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(
+        gitconfig_snapshot_mod,
+        "_running_container_mount_sources",
+        lambda: frozenset(),
+    )
+
+    gitconfig_snapshot_mod._reap_stale_gitconfig_bundles(
+        snapshots_root=snapshots_root,
+        work_dir=work_dir,
+        protected_root=current,
+        now=10**10,
+    )
+
+    assert stale.is_dir()
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_reaps_only_unreferenced_stale_bundles(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -539,6 +882,187 @@ def test_service_gitconfig_snapshot_discovers_container_mount_from_stopped_conta
 
     assert commands[0] == ["docker", "container", "ls", "--all", "--quiet"]
     assert sources == frozenset({Path("/work/bundle/agent.gitconfig")})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("responses", "expected"),
+    [
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=1,
+                    stdout="",
+                    stderr="daemon unavailable",
+                )
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+            ],
+            frozenset(),
+        ),
+        ([OSError("docker missing")], None),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=1,
+                    stdout="",
+                    stderr="inspect failed",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout="{}",
+                    stderr="",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout="[null]",
+                    stderr="",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout='[{"Mounts": {}}]',
+                    stderr="",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout='[{"Mounts": [null]}]',
+                    stderr="",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout='[{"Mounts": [{"Source": null}]}]',
+                    stderr="",
+                ),
+            ],
+            frozenset(),
+        ),
+        (
+            [
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "ls"],
+                    returncode=0,
+                    stdout="container-id\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=["docker", "container", "inspect"],
+                    returncode=0,
+                    stdout="not-json",
+                    stderr="",
+                ),
+            ],
+            None,
+        ),
+    ],
+    ids=[
+        "list-failed",
+        "no-containers",
+        "docker-unavailable",
+        "inspect-failed",
+        "not-a-list",
+        "container-not-object",
+        "mounts-not-list",
+        "mount-not-object",
+        "source-not-string",
+        "invalid-json",
+    ],
+)
+def test_service_gitconfig_snapshot_container_discovery_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[subprocess.CompletedProcess[str] | OSError],
+    expected: frozenset[Path] | None,
+) -> None:
+    remaining = iter(responses)
+
+    def run(
+        _command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        response = next(remaining)
+        if isinstance(response, OSError):
+            raise response
+        return response
+
+    monkeypatch.setattr(gitconfig_snapshot_mod.subprocess, "run", run)
+
+    assert gitconfig_snapshot_mod._running_container_mount_sources() == expected
 
 
 @pytest.mark.unit
