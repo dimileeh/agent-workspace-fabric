@@ -31,6 +31,7 @@ from awf.common.bitbucket_client_parsing import (
     parse_bb_datetime,
     parse_check_timings,
 )
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import RepoRef
 
 from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
@@ -93,51 +94,62 @@ async def test_fetch_pr_status_non_dict_body_raises() -> None:
 
 @pytest.mark.parametrize(
     ("state", "expected"),
-    [("OPEN", True), ("DECLINED", False), ("SUPERSEDED", False), ("MERGED", False)],
+    [
+        ("OPEN", PullRequestLifecycle.open),
+        ("DECLINED", PullRequestLifecycle.closed),
+        ("SUPERSEDED", PullRequestLifecycle.closed),
+        ("MERGED", PullRequestLifecycle.merged),
+    ],
 )
-async def test_pull_request_open_lookup_fetches_only_pr_lifecycle(
+async def test_pull_request_lifecycle_lookup_fetches_only_pr_lifecycle(
     state: str,
-    expected: bool,
+    expected: PullRequestLifecycle,
 ) -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json={"state": state})
     client = make_client(fake)
 
-    assert await client.is_pull_request_open(repo=repo(), pr_number=42) is expected
+    assert await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42) is expected
     assert [request.url.path for request in fake.requests] == [_PR]
 
 
-async def test_pull_request_open_lookup_treats_missing_pr_as_not_open() -> None:
+async def test_pull_request_lifecycle_lookup_reports_missing_pr() -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=404, json={"type": "error"})
     client = make_client(fake)
 
-    assert not await client.is_pull_request_open(repo=repo(), pr_number=42)
+    assert (
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+        is PullRequestLifecycle.missing
+    )
 
 
-async def test_pull_request_open_lookup_retries_transient_response() -> None:
+async def test_pull_request_lifecycle_lookup_retries_transient_response() -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=429, headers={"Retry-After": "5"})
     fake.enqueue("GET", _PR, json={"state": "OPEN"})
     sleep = RecordingSleep()
     client = make_client(fake, sleep=sleep)
 
-    assert await client.is_pull_request_open(repo=repo(), pr_number=42)
+    assert (
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+        is PullRequestLifecycle.open
+    )
     assert sleep.delays == [5.0]
 
 
-async def test_pull_request_open_lookup_propagates_non_missing_error() -> None:
+async def test_pull_request_lifecycle_lookup_propagates_non_missing_error() -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=403, json={"type": "error"})
     client = make_client(fake)
 
     with pytest.raises(BitbucketClientError) as excinfo:
-        await client.is_pull_request_open(repo=repo(), pr_number=42)
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
     assert excinfo.value.status == 403
 
 
 @pytest.mark.parametrize("payload", [["not", "an", "object"], {"state": "PAUSED"}])
-async def test_pull_request_open_lookup_rejects_indeterminate_response(
+async def test_pull_request_lifecycle_lookup_rejects_indeterminate_response(
     payload: object,
 ) -> None:
     fake = FakeBitbucket()
@@ -145,8 +157,8 @@ async def test_pull_request_open_lookup_rejects_indeterminate_response(
     client = make_client(fake)
 
     with pytest.raises(BitbucketClientError) as excinfo:
-        await client.is_pull_request_open(repo=repo(), pr_number=42)
-    assert "is_pull_request_open" in excinfo.value.operation
+        await client.fetch_pull_request_lifecycle(repo=repo(), pr_number=42)
+    assert "fetch_pull_request_lifecycle" in excinfo.value.operation
 
 
 async def test_account_id_is_cached_across_status_fetches() -> None:

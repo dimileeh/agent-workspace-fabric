@@ -89,6 +89,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_pr,
 )
 from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -393,33 +394,42 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             outdated_unresolved_inline_threads=outdated_inline_threads,
         )
 
-    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
-        """Return whether a PR exists and is open using one retrying PR read."""
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using one retrying PR read."""
         try:
             pr = await self._request_json(
                 "GET",
                 self._pr_path(repo, pr_number),
-                operation="bitbucket is_pull_request_open",
+                operation="bitbucket fetch_pull_request_lifecycle",
                 cache=True,
             )
         except BitbucketClientError as exc:
             if exc.status == 404:
-                return False
+                return PullRequestLifecycle.missing
             raise
         if not isinstance(pr, dict):
             raise BitbucketClientError(
-                operation="bitbucket is_pull_request_open",
+                operation="bitbucket fetch_pull_request_lifecycle",
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} returned an invalid response",
             )
         state = str(pr.get("state") or "").upper()
         if state not in {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}:
             raise BitbucketClientError(
-                operation="bitbucket is_pull_request_open",
+                operation="bitbucket fetch_pull_request_lifecycle",
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} returned unknown state {state or '<empty>'}",
             )
-        return state == "OPEN"
+        if state == "OPEN":
+            return PullRequestLifecycle.open
+        if state == "MERGED":
+            return PullRequestLifecycle.merged
+        return PullRequestLifecycle.closed
 
     async def fetch_failing_check_logs(
         self,

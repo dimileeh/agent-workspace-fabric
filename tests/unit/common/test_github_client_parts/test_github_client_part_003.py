@@ -16,6 +16,7 @@ import json
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
@@ -938,13 +939,18 @@ class TestFetchPrStatusPart002:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("closed", "merged", "expected"),
-        [(False, False, True), (True, False, False), (False, True, False)],
+        [
+            (False, False, PullRequestLifecycle.open),
+            (True, False, PullRequestLifecycle.closed),
+            (False, True, PullRequestLifecycle.merged),
+            (True, True, PullRequestLifecycle.merged),
+        ],
     )
-    async def test_pull_request_open_lookup_fetches_only_lifecycle_state(
+    async def test_pull_request_lifecycle_lookup_fetches_only_lifecycle_state(
         self,
         closed: bool,
         merged: bool,
-        expected: bool,
+        expected: PullRequestLifecycle,
     ) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -956,7 +962,9 @@ class TestFetchPrStatusPart002:
         client = GitHubClient(fake)
 
         assert (
-            await client.is_pull_request_open(repo=RepoRef(owner="o", name="r"), pr_number=1)
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=1
+            )
             is expected
         )
         query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
@@ -966,7 +974,7 @@ class TestFetchPrStatusPart002:
         assert "statusCheckRollup" not in query_arg
 
     @pytest.mark.unit
-    async def test_pull_request_open_lookup_treats_missing_pr_as_not_open(self) -> None:
+    async def test_pull_request_lifecycle_lookup_reports_missing_pr(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -974,12 +982,15 @@ class TestFetchPrStatusPart002:
         )
         client = GitHubClient(fake)
 
-        assert not await client.is_pull_request_open(
-            repo=RepoRef(owner="o", name="r"), pr_number=404
+        assert (
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=404
+            )
+            is PullRequestLifecycle.missing
         )
 
     @pytest.mark.unit
-    async def test_pull_request_open_lookup_retries_transient_response(self) -> None:
+    async def test_pull_request_lifecycle_lookup_retries_transient_response(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
         fake.queue_result(
@@ -991,7 +1002,12 @@ class TestFetchPrStatusPart002:
         sleep = _RecordedSleep()
         client = GitHubClient(fake, sleep=sleep)
 
-        assert await client.is_pull_request_open(repo=RepoRef(owner="o", name="r"), pr_number=1)
+        assert (
+            await client.fetch_pull_request_lifecycle(
+                repo=RepoRef(owner="o", name="r"), pr_number=1
+            )
+            is PullRequestLifecycle.open
+        )
         assert len(fake.calls) == 2
         assert len(sleep.calls) == 1
 

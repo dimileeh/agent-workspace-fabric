@@ -16,6 +16,7 @@ from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
@@ -75,7 +76,7 @@ if TYPE_CHECKING:
 
 
 _PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
-PrOpenChecker = Callable[[Workspace, int], Awaitable[bool]]
+PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
 
 
 def _workspace_create() -> Any:
@@ -117,15 +118,15 @@ def _pr_number_from_url(pr_url: str) -> int | None:
     return pr_number if pr_number > 0 else None
 
 
-async def _live_pr_is_open(source: Workspace, pr_number: int) -> bool:
-    """Return whether the source PR is currently open according to its forge."""
+async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
+    """Return the source PR's current lifecycle according to its forge."""
     repo = RepoRef.from_url(source.repo_url)
     forge = concrete_forge_for_repo(
         (source.resolved_profile or {}).get("forge"),
         source.repo_url,
     )
     async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.is_pull_request_open(
+        return await client.fetch_pull_request_lifecycle(
             repo=repo,
             pr_number=pr_number,
         )
@@ -231,7 +232,7 @@ async def retry_workspace_row(
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
     ignore_source_runtime_check: bool = False,
-    pr_open_checker: PrOpenChecker | None = None,
+    pr_lifecycle_checker: PrLifecycleChecker | None = None,
 ) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt.
 
@@ -523,7 +524,7 @@ async def retry_workspace_row(
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
         try:
-            existing_pr_is_open = await (pr_open_checker or _live_pr_is_open)(
+            existing_pr_lifecycle = await (pr_lifecycle_checker or _live_pr_lifecycle)(
                 source,
                 existing_feature_pr_number,
             )
@@ -536,8 +537,18 @@ async def retry_workspace_row(
                     "reason_code": "PR_STATE_LOOKUP_FAILED",
                 },
             ) from exc
-        closed_existing_feature_pr = not existing_pr_is_open
-        preserve_existing_feature_pr = existing_pr_is_open
+        if existing_pr_lifecycle is PullRequestLifecycle.merged:
+            raise workspaces.WorkspaceRetryPrAlreadyMergedError(
+                "The existing pull request is already merged; its work must not be retried.",
+                detail={
+                    "source_workspace_id": source.id,
+                    "pr_number": existing_feature_pr_number,
+                    "pr_url": source.pr_url,
+                    "reason_code": "PR_ALREADY_MERGED",
+                },
+            )
+        preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
+        closed_existing_feature_pr = not preserve_existing_feature_pr
     retry_remote_push_branch = (
         source.remote_push_branch
         if planning_scope_context is None

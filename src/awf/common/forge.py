@@ -50,6 +50,7 @@ from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
@@ -108,8 +109,13 @@ class ForgeClient(Protocol):
     satisfies the same surface.
     """
 
-    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
-        """Return whether a PR exists and is open via a lightweight retrying read."""
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle via a lightweight retrying read."""
         ...
 
     async def fetch_pr_status(

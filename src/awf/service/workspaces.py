@@ -289,6 +289,12 @@ class WorkspaceRetryPrStateUnavailableError(WorkspaceRetryError):
     error_code = "WORKSPACE_RETRY_PR_STATE_UNAVAILABLE"
 
 
+class WorkspaceRetryPrAlreadyMergedError(WorkspaceRetryError):
+    """Raised when retry discovers that the source PR is already merged."""
+
+    error_code = "PR_ALREADY_MERGED"
+
+
 class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
     """Raised when provider readiness preflight blocks workspace startup."""
 
@@ -1381,6 +1387,7 @@ __all__ = [
     "WorkspaceRetryRecoveringInFlightError",
     "WorkspaceRetryExhaustedError",
     "WorkspaceRetrySalvageUnavailableError",
+    "WorkspaceRetryPrAlreadyMergedError",
     "WorkspaceRetryPrStateUnavailableError",
     "WorkspaceProviderReadinessBlockedError",
     "WorkspaceUnsupportedAgentRuntimeError",

@@ -35,6 +35,7 @@ from urllib.parse import quote
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.github_client_adoption import (
     BranchOpenPullRequestResolver as BranchOpenPullRequestResolver,
 )
@@ -268,8 +269,13 @@ class GitHubClient:
         """Exit an ``async with`` block (no-op; see :meth:`aclose`)."""
         await self.aclose()
 
-    async def is_pull_request_open(self, *, repo: RepoRef, pr_number: int) -> bool:
-        """Return whether a PR exists and is open using a minimal retrying read."""
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        """Return a PR's lifecycle using a minimal retrying read."""
         payload = await self._graphql(
             query=_GQL_PR_LIFECYCLE,
             variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
@@ -277,8 +283,12 @@ class GitHubClient:
         )
         pr = payload["data"]["repository"]["pullRequest"]
         if pr is None:
-            return False
-        return not pr["closed"] and not pr["merged"]
+            return PullRequestLifecycle.missing
+        if pr["merged"]:
+            return PullRequestLifecycle.merged
+        if pr["closed"]:
+            return PullRequestLifecycle.closed
+        return PullRequestLifecycle.open
 
     async def fetch_pr_status(
         self,

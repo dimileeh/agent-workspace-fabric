@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.db.repositories as repositories
 import awf.service.workspaces_retry as workspaces_retry_service
 from awf.api.schemas import WorkspaceCreateRequest
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -20,13 +21,14 @@ from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
+    WorkspaceRetryPrAlreadyMergedError,
     WorkspaceRetryPrStateUnavailableError,
     WorkspaceRetryRecoveringInFlightError,
     create_workspace_row,
     retry_workspace_row,
 )
 from awf.service.workspaces_retry import (
-    _live_pr_is_open,
+    _live_pr_lifecycle,
     _pr_number_from_url,
     _prune_and_migrate_retired_agent,
     _prune_retired_fallbacks,
@@ -49,9 +51,11 @@ pytestmark = pytest.mark.unit
 __all__ = ["factory"]
 
 
-def _live_pr_state(open_: bool) -> Callable[[Workspace, int], Awaitable[bool]]:
-    async def _check(_source: Workspace, _pr_number: int) -> bool:
-        return open_
+def _live_pr_state(
+    lifecycle: PullRequestLifecycle,
+) -> Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]:
+    async def _check(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        return lifecycle
 
     return _check
 
@@ -75,15 +79,8 @@ def test_pr_number_from_url_rejects_invalid_or_non_positive_number(pr_url: str) 
     assert _pr_number_from_url(pr_url) is None
 
 
-@pytest.mark.parametrize(
-    ("closed", "merged", "expected"),
-    [(False, False, True), (True, False, False), (False, True, False)],
-)
-async def test_live_pr_is_open_uses_current_forge_status(
+async def test_live_pr_lifecycle_uses_current_forge_status(
     monkeypatch: pytest.MonkeyPatch,
-    closed: bool,
-    merged: bool,
-    expected: bool,
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -94,9 +91,9 @@ async def test_live_pr_is_open_uses_current_forge_status(
         async def __aexit__(self, *_exc_info: object) -> None:
             return None
 
-        async def is_pull_request_open(self, **kwargs: object) -> bool:
+        async def fetch_pull_request_lifecycle(self, **kwargs: object) -> PullRequestLifecycle:
             calls.append(kwargs)
-            return not closed and not merged
+            return PullRequestLifecycle.merged
 
     monkeypatch.setattr(
         workspaces_retry_service,
@@ -108,7 +105,7 @@ async def test_live_pr_is_open_uses_current_forge_status(
         resolved_profile={"forge": "github"},
     )
 
-    assert await _live_pr_is_open(source, 10) is expected
+    assert await _live_pr_lifecycle(source, 10) is PullRequestLifecycle.merged
     assert calls == [
         {
             "repo": workspaces_retry_service.RepoRef(
@@ -507,7 +504,7 @@ async def test_retry_preserves_existing_feature_pr_identity(
             provider_readiness_override_reason="retry existing PR",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(True),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
         )
 
     retried = retry.new_workspace
@@ -563,7 +560,7 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
             provider_readiness_override_reason="recover legacy PR identity",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(True),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
         )
 
     retried = retry.new_workspace
@@ -610,7 +607,7 @@ async def test_retry_replaces_feature_pr_closed_externally(
             provider_readiness_override_reason="replace closed PR",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(False),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
         )
 
     retried = retry.new_workspace
@@ -658,7 +655,7 @@ async def test_retry_preserves_feature_pr_reopened_after_external_close(
             provider_readiness_override_reason="reuse reopened PR",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(True),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
         )
 
     retried = retry.new_workspace
@@ -705,7 +702,7 @@ async def test_retry_replaces_feature_pr_closed_after_unrelated_failure(
             provider_readiness_override_reason="replace PR closed after failure",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(False),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
         )
 
     retried = retry.new_workspace
@@ -713,6 +710,59 @@ async def test_retry_replaces_feature_pr_closed_after_unrelated_failure(
     assert retried.pr_number is None
     assert retried.remote_push_branch is None
     assert _provision_checkout_base_branch(retried) == retried.branch_base
+
+
+async def test_retry_rejects_feature_pr_merged_after_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/merged-feature",
+        remote_push_branch="contributors/merged-head",
+        failure_reason_code="VALIDATION_FAILED",
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrAlreadyMergedError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="reject merged PR retry",
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.merged),
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "pr_number": 10,
+        "pr_url": "https://github.com/example/retryable/pull/10",
+        "reason_code": "PR_ALREADY_MERGED",
+    }
+    assert exc_info.value.error_code == "PR_ALREADY_MERGED"
+    assert [workspace.id for workspace in workspaces] == [first.id]
 
 
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
@@ -734,7 +784,7 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
         pr_url="https://github.com/example/retryable/pull/10",
     )
 
-    async def unavailable(_source: Workspace, _pr_number: int) -> bool:
+    async def unavailable(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
         raise RuntimeError("forge unavailable")
 
     async with factory() as session:
@@ -746,7 +796,7 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
                 provider_readiness_override_reason="retry existing PR",
                 settings=settings,
                 provider_environ={},
-                pr_open_checker=unavailable,
+                pr_lifecycle_checker=unavailable,
             )
 
         workspaces = list((await session.execute(select(Workspace))).scalars())
@@ -810,7 +860,7 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
             provider_readiness_override_reason="retry current open PR",
             settings=settings,
             provider_environ={},
-            pr_open_checker=_live_pr_state(True),
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
         )
 
     retried = retry.new_workspace
