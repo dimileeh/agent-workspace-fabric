@@ -142,7 +142,10 @@ def _copy_config_graph(
         for key, include_path in includes:
             included_origin = current_origin.parent / include_path
             included = _resolve_host_root_symlink(included_origin, host_root=host_root)
-            resolved_include = included.resolve()
+            try:
+                resolved_include = included.resolve()
+            except (OSError, RuntimeError):
+                continue
             if not resolved_include.is_file():
                 continue
             included_relative = _snapshot_relative_path(

@@ -555,6 +555,28 @@ def test_service_gitconfig_snapshot_ignores_unavailable_and_nonrelative_includes
 
 
 @pytest.mark.unit
+def test_service_gitconfig_snapshot_ignores_nested_symlink_cycle(tmp_path: Path) -> None:
+    helper_root = tmp_path / "run" / "awf-host-root"
+    host_home = helper_root / "home" / "agent"
+    host_home.mkdir(parents=True)
+    source_text = "[user]\n  name = AWF\n[include]\n  path = cycle.inc\n"
+    (host_home / ".gitconfig").write_text(source_text)
+    (host_home / "cycle.inc").symlink_to("cycle.inc")
+
+    snapshot = gitconfig_snapshot_mod.materialize_service_gitconfig(
+        host_home=host_home,
+        host_root=helper_root,
+        work_dir=tmp_path / "work",
+    )
+
+    assert snapshot is not None
+    assert snapshot.read_text() == source_text
+    assert [
+        path.relative_to(snapshot.parent) for path in snapshot.parent.rglob("*") if path.is_file()
+    ] == [Path(".gitconfig")]
+
+
+@pytest.mark.unit
 def test_service_gitconfig_snapshot_stops_lexical_include_cycle(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_home.mkdir()
