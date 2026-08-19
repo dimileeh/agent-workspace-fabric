@@ -251,7 +251,23 @@ def test_bootstrap_stages_do_not_start_console_by_default(tmp_path: Path) -> Non
         assets=assets,
     )
 
-    assert [stage.name for stage in stages] == ["postgres", "migrate", "api_worker"]
+    assert [stage.name for stage in stages] == [
+        "postgres",
+        "migrate",
+        "gitconfig_source",
+        "api_worker",
+    ]
+    assert stages[-2].command == (
+        "docker",
+        "compose",
+        "-f",
+        str(root / "compose.yaml"),
+        "up",
+        "-d",
+        "--build",
+        "--wait",
+        "gitconfig-source",
+    )
 
 
 @pytest.mark.unit
@@ -274,7 +290,13 @@ def test_bootstrap_stages_start_console_when_requested(tmp_path: Path) -> None:
         assets=assets,
     )
 
-    assert [stage.name for stage in stages] == ["postgres", "migrate", "api_worker", "console"]
+    assert [stage.name for stage in stages] == [
+        "postgres",
+        "migrate",
+        "gitconfig_source",
+        "api_worker",
+        "console",
+    ]
     assert stages[-1].command == (
         "docker",
         "compose",
