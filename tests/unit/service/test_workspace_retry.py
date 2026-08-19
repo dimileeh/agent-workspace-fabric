@@ -610,6 +610,7 @@ async def test_retry_replaces_feature_pr_closed_externally(
             provider_readiness_override_reason="replace closed PR",
             settings=settings,
             provider_environ={},
+            pr_open_checker=_live_pr_state(False),
         )
 
     retried = retry.new_workspace
@@ -618,6 +619,53 @@ async def test_retry_replaces_feature_pr_closed_externally(
     assert retried.pr_number is None
     assert retried.remote_push_branch is None
     assert _provision_checkout_base_branch(retried) == retried.branch_base
+
+
+async def test_retry_preserves_feature_pr_reopened_after_external_close(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="awf/reopened-feature",
+        remote_push_branch="contributors/reopened-head",
+        failure_reason_code="pr_closed_externally",
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="reuse reopened PR",
+            settings=settings,
+            provider_environ={},
+            pr_open_checker=_live_pr_state(True),
+        )
+
+    retried = retry.new_workspace
+    assert retried.pr_url == "https://github.com/example/retryable/pull/10"
+    assert retried.pr_number == 10
+    assert retried.remote_push_branch == "contributors/reopened-head"
+    assert _provision_checkout_base_branch(retried) == "contributors/reopened-head"
 
 
 async def test_retry_replaces_feature_pr_closed_after_unrelated_failure(

@@ -519,9 +519,7 @@ async def retry_workspace_row(
         and existing_feature_pr_number is not None
     )
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
-    preserve_existing_feature_pr = bool(
-        planning_scope_context is None and existing_feature_pr and not closed_existing_feature_pr
-    )
+    preserve_existing_feature_pr = bool(planning_scope_context is None and existing_feature_pr)
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
         try:
@@ -538,9 +536,8 @@ async def retry_workspace_row(
                     "reason_code": "PR_STATE_LOOKUP_FAILED",
                 },
             ) from exc
-        if not existing_pr_is_open:
-            closed_existing_feature_pr = True
-            preserve_existing_feature_pr = False
+        closed_existing_feature_pr = not existing_pr_is_open
+        preserve_existing_feature_pr = existing_pr_is_open
     retry_remote_push_branch = (
         source.remote_push_branch
         if planning_scope_context is None
