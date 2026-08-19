@@ -99,7 +99,9 @@ async def _seed_monitoring_workspace(
         workspace.remote_push_branch = workspace.branch_name
         workspace.base_commit = "a" * 40
         workspace.compose_project_name = f"awf_{workspace.id}"
-        workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
+        workspace.compose_file_path = str(
+            Path(__file__).resolve().parents[4] / "docker/compose/workspace.base.yml.j2"
+        )
         await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
         if final_status == WorkspaceStatus.ready:
             await session.commit()
@@ -1143,6 +1145,49 @@ async def test_remonitor_rejects_prelaunch_failed_workspace_without_runtime_meta
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.failed.value
     assert workspace.failure_message == "git failed before provisioning"
+
+
+@pytest.mark.unit
+async def test_remonitor_rejects_failed_workspace_when_compose_file_was_removed(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+    )
+    removed_compose_file = tmp_path / "removed" / "compose.yml"
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.compose_file_path = str(removed_compose_file)
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach garbage-collected PR monitor"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-removed-compose"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_REMONITOR_METADATA_MISSING",
+        "message": (
+            "Workspace remonitor requires a provisioned monitor runtime; retry the "
+            "workspace to reprovision and reattach its existing PR."
+        ),
+        "detail": {
+            "status": WorkspaceStatus.failed.value,
+            "missing": ["compose_file_path"],
+            "recommended_action": "retry_workspace",
+        },
+    }
+    assert await _counts(engine, workspace_id) == before_counts
+    assert not removed_compose_file.exists()
 
 
 @pytest.mark.unit

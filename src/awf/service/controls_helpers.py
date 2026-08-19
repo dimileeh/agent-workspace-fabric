@@ -96,7 +96,7 @@ def _remonitor_missing_metadata(workspace: Workspace) -> list[str]:
     if not pr_adoption_is_hosted(workspace.task_policy):
         if not workspace.compose_project_name:
             missing.append("compose_project_name")
-        if not workspace.compose_file_path:
+        if not workspace.compose_file_path or not Path(workspace.compose_file_path).is_file():
             missing.append("compose_file_path")
     return missing
 
