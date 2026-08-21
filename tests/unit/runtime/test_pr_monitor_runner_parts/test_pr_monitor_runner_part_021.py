@@ -1186,6 +1186,11 @@ class TestParseVerdict:
                 'see [link](url "a ** b")',
             ),
             (
+                '**AWF-VERDICT: FALSE POSITIVE: see [link](<url> "a ** b")**',
+                "false_positive",
+                'see [link](<url> "a ** b")',
+            ),
+            (
                 "**AWF-VERDICT: FALSE POSITIVE: see [link](url 'a * b')**",
                 "false_positive",
                 "see [link](url 'a * b')",
@@ -1194,6 +1199,11 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see [link](url (a ** b))**",
                 "false_positive",
                 "see [link](url (a ** b))",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](<url> (a ** b))**",
+                "false_positive",
+                "see [link](<url> (a ** b))",
             ),
             # URI/email autolink interiors are opaque (PRRT_kwDOSJAM6s6bTgB-).
             (
@@ -1395,6 +1405,13 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo **bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo *bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+            # Angle-bracket destination glued to a title (no required whitespace)
+            # is not a CommonMark link; title markers steal the outer closer
+            # (PRRT_kwDOSJAM6s6bTvK5).
+            '**AWF-VERDICT: FALSE POSITIVE: see [link](<url>"**steal") rest**',
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](<url>'*steal') rest*",
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](<url>(**steal)) rest**",
+            '__AWF-VERDICT: FALSE POSITIVE: see [link](<url>"__steal") rest__',
             # Unmatched label closer is not a link; destination stars steal the
             # outer closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -1824,8 +1841,10 @@ class TestParseVerdict:
             ("see ![img](foo**bar)**", "**", False),
             ("see [link](<foo **bar>)**", "**", False),
             ('see [link](url "a ** b")**', "**", False),
+            ('see [link](<url> "a ** b")**', "**", False),
             ("see [link](url 'a * b')*", "*", False),
             ("see [link](url (a ** b))**", "**", False),
+            ("see [link](<url> (a ** b))**", "**", False),
             ("see [link]( foo**bar )**", "**", False),
             # Real mid-reason emphasis after a link destination still claims.
             ("see [link](foo**bar) and **unclosed**", "**", True),
@@ -1835,6 +1854,12 @@ class TestParseVerdict:
             ("see [link](foo **bar)**", "**", True),
             ("see [link](foo *bar)*", "*", True),
             ("see [link](foo __bar)__", "__", True),
+            # Angle-bracket destination glued to title (no whitespace) is not a
+            # link; title markers claim the closer (PRRT_kwDOSJAM6s6bTvK5).
+            ('see [link](<url>"**steal") rest**', "**", True),
+            ("see [link](<url>'*steal') rest*", "*", True),
+            ("see [link](<url>(**steal)) rest**", "**", True),
+            ('see [link](<url>"__steal") rest__', "__", True),
             # Title without destination stays opaque; unclosed titles are not.
             ('see [link]( "a ** b")**', "**", False),
             ('see [link](url "a**b**', "**", True),

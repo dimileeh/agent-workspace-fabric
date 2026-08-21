@@ -1292,7 +1292,9 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     PRRT_kwDOSJAM6s6bTtr6). Only CommonMark-valid link destinations are opaque:
     angle-bracket form may contain spaces; the non-bracket form must be
     nonempty and free of ASCII space/controls, with parentheses only when
-    balanced or escaped. An optional quoted/parenthesized title may follow.
+    balanced or escaped. An optional quoted/parenthesized title may follow,
+    but CommonMark requires whitespace between destination and title — a
+    glued title after ``>`` is not opaque (PRRT_kwDOSJAM6s6bTvK5).
     ``*`` / ``_`` inside a valid destination or title are literal and must not
     participate in emphasis pairing (PRRT_kwDOSJAM6s6bTLZq). Invalid
     destinations (whitespace in non-bracket form, newline, unclosed ``)``,
@@ -1314,6 +1316,7 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
         return start
 
     # Optional destination (CommonMark §6.3).
+    saw_destination = False
     if text[index] == "<":
         index += 1
         while index < n:
@@ -1331,6 +1334,7 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
             index += 1
         else:
             return start
+        saw_destination = True
     elif text[index] not in ")\"'(":
         # Non-bracket destination: no ASCII space/controls; balanced parens.
         depth = 0
@@ -1358,13 +1362,19 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
             dest_chars += 1
         if dest_chars == 0 or depth != 0:
             return start
+        saw_destination = True
 
+    after_dest = index
     index = _skip_link_ws(index)
     if index >= n or text[index] == "\n":
         return start
 
     if text[index] == ")":
         return index + 1
+
+    # Title requires whitespace after a destination (PRRT_kwDOSJAM6s6bTvK5).
+    if saw_destination and index == after_dest:
+        return start
 
     # Optional link title (double-quote, single-quote, or parentheses).
     if text[index] == '"':
@@ -1470,7 +1480,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
     Non-angle-bracket destinations with ASCII spaces are not links; their
-    markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6).
+    markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
+    destination glued to a quoted/parenthesized title (no whitespace) is
+    likewise invalid, so title markers remain emphasis
+    (PRRT_kwDOSJAM6s6bTvK5).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
