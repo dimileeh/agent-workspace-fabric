@@ -100,6 +100,23 @@ class ProvisionerCursorPreflightMixin:
                 )
                 await session.commit()
                 return True
+            # Status alone is insufficient: a later claimant can advance
+            # execution_claim_epoch while the row stays ``provisioning``. Fence
+            # the readiness snapshot/event write the same way the blocking
+            # branch and egress-audit path do so a reclaimed provision cannot
+            # mutate the new claimant's timeline.
+            if (
+                execution_claim_epoch is not None
+                and persisted.execution_claim_epoch != execution_claim_epoch
+            ):
+                _log.info(
+                    "provisioner.skip_fenced_epoch",
+                    workspace_id=workspace_id,
+                    action="deferred_cursor_router_preflight",
+                    expected_epoch=execution_claim_epoch,
+                    actual_epoch=persisted.execution_claim_epoch,
+                )
+                return True
             policy = dict(persisted.task_policy or {})
             policy["provider_readiness_preflight"] = dict(preflight)
             persisted.task_policy = policy

@@ -190,6 +190,7 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
 
     persisted = SimpleNamespace(
         status=WorkspaceStatus.provisioning.value,
+        execution_claim_epoch=3,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
     repo = SimpleNamespace(get=AsyncMock(return_value=persisted))
@@ -216,6 +217,7 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
         workspace_id="ws_test",
         ws=ws,  # type: ignore[arg-type]
         profile=WorkspaceProfile(name="repo-local"),
+        execution_claim_epoch=3,
     )
     assert stopped is False
     harness.mark_failed.assert_not_awaited()
@@ -228,6 +230,69 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     )
     assert recorded[0]["preflight"]["reason_code"] == "CURSOR_ROUTER_AVAILABLE"
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded claim must not commit readiness into the new claimant's timeline."""
+
+    async def _ready(**_kwargs: object) -> dict[str, object]:
+        return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
+        _ready,
+    )
+    recorded: list[dict[str, object]] = []
+
+    async def _record(_repo: object, workspace: object, preflight: object) -> None:
+        recorded.append({"workspace": workspace, "preflight": dict(preflight)})  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight._record_provider_readiness_preflight",
+        _record,
+    )
+
+    persisted = SimpleNamespace(
+        status=WorkspaceStatus.provisioning.value,
+        execution_claim_epoch=9,
+        task_policy={"cursor_auto_mode": "intelligence"},
+    )
+    repo = SimpleNamespace(get=AsyncMock(return_value=persisted))
+    session = SimpleNamespace(commit=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    harness = _Harness()
+    harness._session_factory = lambda: _SessionCtx()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
+        lambda _session: repo,
+    )
+    ws = SimpleNamespace(
+        agent="cursor",
+        task_policy={"cursor_auto_mode": "intelligence"},
+    )
+    stopped = await harness._run_deferred_cursor_auto_router_preflight(
+        workspace_id="ws_test",
+        ws=ws,  # type: ignore[arg-type]
+        profile=WorkspaceProfile(name="repo-local"),
+        execution_claim_epoch=3,
+    )
+    assert stopped is True
+    assert "provider_readiness_preflight" not in persisted.task_policy
+    assert "provider_readiness_preflight" not in ws.task_policy
+    assert recorded == []
+    session.commit.assert_not_awaited()
+    harness.mark_failed.assert_not_awaited()
+    assert harness.stale_skips == []
 
 
 @pytest.mark.asyncio
