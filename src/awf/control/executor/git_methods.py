@@ -316,18 +316,23 @@ async def _recover_orphan_history(
     the cumulative diff, reattaching the branch to a valid ancestry so the PR
     can be opened normally.
 
-    A behind-but-related PR head is not an orphan: when the target tip advanced
-    past an unrebased head, ``base_commit`` (often the live ``baseRefOid``) is
-    not an ancestor of HEAD, yet ``merge-base`` still succeeds. Squashing onto
-    that tip would rewrite history and break the reuse path's non-force push,
-    so shared ancestry is retained and the caller continues.
+    A behind-but-related preserved PR head is not an orphan: when the target tip
+    advanced past an unrebased head, ``base_commit`` (often the live
+    ``baseRefOid``) may not be an ancestor of HEAD, yet ``merge-base`` still
+    succeeds. Squashing onto that tip would rewrite history and break the reuse
+    path's non-force push. The provisioner normally rewrites ``base_commit`` to
+    the shared ancestor for preserved PRs; this exemption is a second line of
+    defense and applies only to positively identified preserved feature PRs.
+    Ordinary workspaces that share history but do not descend from
+    ``base_commit`` (e.g. an agent checked out a sibling/older branch) still
+    soft-reset so the push cannot revert target-branch commits.
 
-    Returns ``True`` when HEAD descends from ``base_commit`` or still shares
-    history with it (caller continues), or ``False`` when the branch is
-    orphaned and automatic recovery also failed — in which case the workspace
-    is marked FAILED here (after depositing any planning artifacts) and the
-    caller must return. ``base_commit`` is always populated by ``_claim_ready``
-    before this runs.
+    Returns ``True`` when HEAD descends from ``base_commit``, or when a
+    preserved feature PR still shares history with it (caller continues), or
+    ``False`` when the branch is orphaned / diverged and automatic recovery
+    also failed — in which case the workspace is marked FAILED here (after
+    depositing any planning artifacts) and the caller must return.
+    ``base_commit`` is always populated by ``_claim_ready`` before this runs.
     """
     ancestor = await git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
     if ancestor.ok:
@@ -335,15 +340,19 @@ async def _recover_orphan_history(
     shared = await git_in_worktree(["merge-base", base_commit, "HEAD"])
     shared_base = shared.stdout.strip() if shared.ok else ""
     if shared_base:
-        # Target tip moved past this head (or base was otherwise not an
-        # ancestor) but history is still related — not an orphan rewrite.
-        _log.info(
-            "executor.orphan_history_shared_ancestor_retained",
-            workspace_id=workspace_id,
-            base_commit=base_commit,
-            merge_base=shared_base,
+        preserves_feature_pr = ws.task_kind == "sync_feature_pr" or bool(
+            ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
         )
-        return True
+        if preserves_feature_pr:
+            # Preserved PR: tip moved past this head (or base was otherwise not
+            # an ancestor) but history is still related — not an orphan rewrite.
+            _log.info(
+                "executor.orphan_history_shared_ancestor_retained",
+                workspace_id=workspace_id,
+                base_commit=base_commit,
+                merge_base=shared_base,
+            )
+            return True
     _log.warning(
         "executor.orphan_history_detected",
         workspace_id=workspace_id,
