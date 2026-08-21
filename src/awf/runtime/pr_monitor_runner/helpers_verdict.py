@@ -1097,6 +1097,37 @@ def _verdict_reason_begins_with_emphasis_opener(reason: str, opener: str) -> boo
     return not (len(reason) > len(opener) and reason[len(opener)] == opener[0])
 
 
+def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
+    """Return whether a trailing closer pairs inside ``reason``.
+
+    After a prefix-only emphasis strip, a candidate may still end on a valid
+    same-delimiter closer. An even count of exact-length delimiter runs that
+    ends at EOF means the reason owns a separately balanced span
+    (``This is **expected**``), not an unmatched leftover (``rationale**``)
+    (PRRT_kwDOSJAM6s6bRROQ).
+    """
+    closer_start = len(reason) - len(opener)
+    if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
+        return False
+    marker = opener[0]
+    run_len = len(opener)
+    run_count = 0
+    i = 0
+    while i < len(reason):
+        if reason[i] != marker or _markdown_char_is_escaped(reason, i):
+            i += 1
+            continue
+        # Consecutive markers after an unescaped start cannot be escaped
+        # (a backslash would interrupt the run).
+        j = i
+        while j < len(reason) and reason[j] == marker:
+            j += 1
+        if j - i == run_len:
+            run_count += 1
+        i = j
+    return run_count >= 2 and run_count % 2 == 0
+
+
 def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     """Return a canonical verdict wrapped in balanced top-level emphasis.
 
@@ -1110,6 +1141,11 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
     absorb leftover markers into the reason, and do not fall back to a
     whole-line strip that would leave the prefix closer inside the reason.
+
+    A prefix closer plus a separately balanced reason span that ends on the
+    same delimiter (``**AWF-VERDICT: FALSE POSITIVE:** This is **expected**``)
+    remains valid: the trailing closer belongs to the reason, not a second
+    line wrapper (PRRT_kwDOSJAM6s6bRROQ).
 
     Whole-line stripping must also fail closed when the remaining reason begins
     with the same opener run: the trailing closer then belongs to reason
@@ -1129,17 +1165,21 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
         if _markdown_emphasis_prefix_closer_is_valid(inner, reason_start, opener):
             prefix_closer_valid = True
             candidate = inner[:reason_start] + inner[reason_start + len(opener) :]
-            trailing_closer_start = len(candidate) - len(opener)
-            # Leftover trailing closer means the prefix wrap was not alone.
-            if (
-                not _markdown_emphasis_closer_is_valid(candidate, trailing_closer_start, opener)
-                and _AWF_VERDICT.fullmatch(candidate) is not None
-            ):
-                return candidate
+            matched = _AWF_VERDICT.fullmatch(candidate)
+            if matched is not None:
+                trailing_closer_start = len(candidate) - len(opener)
+                trailing_is_closer = _markdown_emphasis_closer_is_valid(
+                    candidate, trailing_closer_start, opener
+                )
+                # Unmatched leftover closer ⇒ reject; balanced reason span ⇒ keep.
+                if not trailing_is_closer or _verdict_reason_trailing_emphasis_is_balanced(
+                    matched.group("reason"), opener
+                ):
+                    return candidate
 
     closer_start = len(inner) - len(opener)
     if _markdown_emphasis_closer_is_valid(inner, closer_start, opener):
-        # Both a prefix closer and a whole-line closer ⇒ malformed emphasis.
+        # Prefix closer plus unmatched trailing closer ⇒ malformed emphasis.
         if prefix_closer_valid:
             return None
         candidate = inner[:closer_start]

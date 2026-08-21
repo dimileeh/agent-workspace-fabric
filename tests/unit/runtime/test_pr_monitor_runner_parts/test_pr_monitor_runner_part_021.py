@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _strip_markdown_list_prefix,
     _strip_markdown_task_list_checkbox,
     _strip_verdict_result_label_attempt_prefix,
+    _verdict_reason_trailing_emphasis_is_balanced,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict_markdown import (
     _VERDICT_REASON_PYTHON_DUNDER,
@@ -1126,6 +1127,18 @@ class TestParseVerdict:
                 "false_positive",
                 "code-formatted wrapper",
             ),
+            # Prefix wrap + balanced trailing reason emphasis must resolve
+            # (PRRT_kwDOSJAM6s6bRROQ).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:** This is **expected**",
+                "false_positive",
+                "This is **expected**",
+            ),
+            (
+                "*AWF-VERDICT: FIXED:* done with *emphasis*",
+                "fix_committed",
+                "done with *emphasis*",
+            ),
         ],
     )
     def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
@@ -1295,6 +1308,29 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
                 "AWF-VERDICT: FALSE POSITIVE: ***lead* rest",
             ),
+            # Prefix-only wrap plus a separately balanced reason span ending at
+            # EOF is valid Markdown, not a dual whole-line closer
+            # (PRRT_kwDOSJAM6s6bRROQ).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:** This is **expected**",
+                "AWF-VERDICT: FALSE POSITIVE: This is **expected**",
+            ),
+            (
+                "*AWF-VERDICT: FIXED:* committed with *emphasis*",
+                "AWF-VERDICT: FIXED: committed with *emphasis*",
+            ),
+            (
+                "__AWF-VERDICT: DEFER:__ track __later__",
+                "AWF-VERDICT: DEFER: track __later__",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:** rationale with **bold** and **more**",
+                "AWF-VERDICT: FALSE POSITIVE: rationale with **bold** and **more**",
+            ),
+            (
+                r"**AWF-VERDICT: FALSE POSITIVE:** see \**literal and **ok**",
+                r"AWF-VERDICT: FALSE POSITIVE: see \**literal and **ok**",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1303,6 +1339,30 @@ class TestParseVerdict:
         expected: str,
     ) -> None:
         assert _normalize_markdown_emphasized_verdict_line(line) == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("reason", "opener", "expected"),
+        [
+            ("This is **expected**", "**", True),
+            ("rationale**", "**", False),
+            ("rationale", "**", False),
+            ("**a** junk**", "**", False),
+            # Longer mid-run is skipped; trailing exact pair still balances.
+            ("***lead* and **done**", "**", True),
+            # Escaped markers are not delimiter runs.
+            (r"see \**literal and **ok**", "**", True),
+            # Trailing whitespace makes the closer invalid (not right-flanking).
+            ("bold** ", "**", False),
+        ],
+    )
+    def test_private_verdict_reason_trailing_emphasis_balance(
+        self,
+        reason: str,
+        opener: str,
+        expected: bool,
+    ) -> None:
+        assert _verdict_reason_trailing_emphasis_is_balanced(reason, opener) is expected
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
