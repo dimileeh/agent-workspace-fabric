@@ -324,6 +324,80 @@ async def test_retry_resolves_feature_pr_lifecycle_before_host_port_admission_lo
 
 
 @pytest.mark.unit
+async def test_retry_resolves_feature_pr_lifecycle_before_source_row_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live forge PR lookup must not run while holding SELECT ... FOR UPDATE.
+
+    ``get_for_update`` keeps the source row locked for the rest of the
+    transaction, and forge reads use RetryPolicy.READ (sleep+retry). Resolving
+    PR lifecycle after the row lock would block concurrent controls or another
+    retry for the same source workspace.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            _request_with_preflight_override(
+                reason="forge lookup before source row lock",
+            ),
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(
+        factory,
+        source_id,
+        branch_name="awf/feature-head",
+        remote_push_branch="contributors/feature-head",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(source_id)
+        assert workspace is not None
+        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_number = 10
+        workspace.base_commit = "a" * 40
+        await session.commit()
+
+    calls: list[str] = []
+    real_get_for_update = WorkspaceRepository.get_for_update
+
+    async def _record_lifecycle(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        calls.append("forge-lifecycle")
+        return PullRequestLifecycle.open
+
+    async def _record_get_for_update(
+        repo: WorkspaceRepository,
+        workspace_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> Workspace | None:
+        calls.append("source-row-lock")
+        return await real_get_for_update(repo, workspace_id, skip_locked=skip_locked)
+
+    monkeypatch.setattr(WorkspaceRepository, "get_for_update", _record_get_for_update)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source_id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="forge lookup before source row lock",
+            provider_environ={},
+            pr_lifecycle_checker=_record_lifecycle,
+        )
+
+    assert calls == ["forge-lifecycle", "source-row-lock"]
+    assert retry.new_workspace.pr_number == 10
+    assert retry.new_workspace.remote_push_branch == "contributors/feature-head"
+
+
+@pytest.mark.unit
 async def test_retry_rejects_host_port_conflict(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

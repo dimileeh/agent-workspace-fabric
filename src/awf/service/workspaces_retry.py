@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -80,6 +81,17 @@ _PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
 PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
 
 
+@dataclass(frozen=True, slots=True)
+class _PrefetchedFeaturePrState:
+    """Forge PR state captured before ``get_for_update`` holds the source row."""
+
+    pr_number: int
+    lifecycle: PullRequestLifecycle
+    head_ref: str | None = None
+    base_sha: str | None = None
+    from_snapshot: bool = False
+
+
 def _workspace_create() -> Any:
     """Import create helpers lazily to avoid module-load cycles."""
     from awf.service import workspaces_create
@@ -117,6 +129,87 @@ def _pr_number_from_url(pr_url: str) -> int | None:
         return None
     pr_number = int(match.group(1))
     return pr_number if pr_number > 0 else None
+
+
+def _existing_feature_pr_number(source: Workspace) -> int | None:
+    """Return the source's feature PR number from ``pr_number`` or ``pr_url``."""
+    if source.pr_number is not None:
+        return source.pr_number
+    if source.pr_url:
+        return _pr_number_from_url(source.pr_url)
+    return None
+
+
+def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
+    """Return whether retry should consult live forge state for this source PR."""
+    if _planning_scope_retry_context(source) is not None:
+        return False
+    pr_number = _existing_feature_pr_number(source)
+    return (
+        source.task_kind == TaskKind.feature_branch_pr.value
+        and bool(source.pr_url)
+        and pr_number is not None
+    )
+
+
+async def _prefetch_existing_feature_pr_state(
+    source: Workspace,
+    *,
+    pr_lifecycle_checker: PrLifecycleChecker | None,
+) -> _PrefetchedFeaturePrState | None:
+    """Fetch forge PR lifecycle/snapshot before acquiring the source row lock.
+
+    Returns ``None`` when the unlocked source is not a preserve-existing-feature-PR
+    candidate. Raises the same ``WorkspaceRetry*`` errors as the former in-lock path
+    for lookup failure or an already-merged PR.
+    """
+    workspaces = _workspace_service()
+    if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
+        return None
+    if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
+        return None
+    if not _is_existing_feature_pr_preserve_candidate(source):
+        return None
+
+    pr_number = _existing_feature_pr_number(source)
+    assert pr_number is not None
+    try:
+        if pr_lifecycle_checker is not None:
+            lifecycle = await pr_lifecycle_checker(source, pr_number)
+            prefetched = _PrefetchedFeaturePrState(pr_number=pr_number, lifecycle=lifecycle)
+        else:
+            snapshot = await _live_pr_snapshot(source, pr_number)
+            prefetched = _PrefetchedFeaturePrState(
+                pr_number=pr_number,
+                lifecycle=snapshot.lifecycle,
+                head_ref=snapshot.head_ref,
+                base_sha=snapshot.base_sha,
+                from_snapshot=True,
+            )
+    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+        # Forge transport/API faults, runner I/O timeouts, and malformed
+        # RepoRef.from_url input map to PR_STATE_LOOKUP_FAILED. Programming
+        # errors (TypeError/AttributeError) must propagate unmasked
+        # (AGENTS.md: catch specific exceptions, not bare Exception).
+        raise workspaces.WorkspaceRetryPrStateUnavailableError(
+            "Could not verify whether the existing pull request is still open.",
+            detail={
+                "source_workspace_id": source.id,
+                "pr_number": pr_number,
+                "reason_code": "PR_STATE_LOOKUP_FAILED",
+            },
+        ) from exc
+    if prefetched.lifecycle is PullRequestLifecycle.merged:
+        raise workspaces.WorkspaceRetryPrAlreadyMergedError(
+            "The existing pull request is already merged; its work must not be retried.",
+            detail={
+                "source_workspace_id": source.id,
+                "pr_number": pr_number,
+                "pr_url": source.pr_url,
+                "reason_code": "PR_ALREADY_MERGED",
+            },
+        )
+    return prefetched
 
 
 async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
@@ -261,6 +354,20 @@ async def retry_workspace_row(
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
+    # Prefetch forge PR state from an unlocked read. ``get_for_update`` holds
+    # SELECT ... FOR UPDATE for the rest of the transaction, and forge reads use
+    # RetryPolicy.READ (sleep+retry). Looking up PR state under that row lock
+    # would block concurrent controls or another retry for the source workspace —
+    # the same hazard avoided below for host-port advisory locks.
+    preview = await repo.get(workspace_id)
+    if preview is None:
+        raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
+        preview,
+        pr_lifecycle_checker=pr_lifecycle_checker,
+    )
+    session.expunge(preview)
+
     source = await repo.get_for_update(workspace_id)
     if source is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
@@ -470,19 +577,12 @@ async def retry_workspace_row(
         # while the runtime-release gate still compares against the same host.
         source_effective_node_id = target_node_id
 
-    # Resolve existing feature-PR lifecycle/snapshot *before* host-port
-    # admission. ``pg_advisory_xact_lock`` is transaction-scoped, and forge
-    # reads use RetryPolicy.READ (sleep+retry). Looking up PR state after
-    # acquire_host_port_admission_lock would hold the port locks across an
-    # unbounded external call — the same hazard the merge path avoids with
-    # RetryPolicy.NEVER while holding the merge lock.
-    existing_feature_pr_number = (
-        source.pr_number
-        if source.pr_number is not None
-        else _pr_number_from_url(source.pr_url)
-        if source.pr_url
-        else None
-    )
+    # Apply prefetched forge PR state *before* host-port admission.
+    # ``pg_advisory_xact_lock`` is transaction-scoped; looking up PR state after
+    # acquire_host_port_admission_lock would hold port locks across an unbounded
+    # external call. The forge lookup itself already ran before get_for_update
+    # so RetryPolicy.READ sleeps never hold the source row lock either.
+    existing_feature_pr_number = _existing_feature_pr_number(source)
     existing_feature_pr = (
         source.task_kind == TaskKind.feature_branch_pr.value
         and bool(source.pr_url)
@@ -495,25 +595,13 @@ async def retry_workspace_row(
     retry_base_commit: str | None = None
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
-        try:
-            if pr_lifecycle_checker is not None:
-                existing_pr_lifecycle = await pr_lifecycle_checker(
-                    source,
-                    existing_feature_pr_number,
-                )
-            else:
-                existing_pr_snapshot = await _live_pr_snapshot(
-                    source,
-                    existing_feature_pr_number,
-                )
-                existing_pr_lifecycle = existing_pr_snapshot.lifecycle
-                live_pr_head_ref = existing_pr_snapshot.head_ref
-                live_pr_base_commit = existing_pr_snapshot.base_sha
-        except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
-            # Forge transport/API faults, runner I/O timeouts, and malformed
-            # RepoRef.from_url input map to PR_STATE_LOOKUP_FAILED. Programming
-            # errors (TypeError/AttributeError) must propagate unmasked
-            # (AGENTS.md: catch specific exceptions, not bare Exception).
+        if (
+            prefetched_feature_pr is None
+            or prefetched_feature_pr.pr_number != existing_feature_pr_number
+        ):
+            # Locked row still needs a preserve lookup, but identity changed
+            # after the unlocked prefetch (or prefetch was skipped). Refuse
+            # rather than sleeping on RetryPolicy.READ under FOR UPDATE.
             raise workspaces.WorkspaceRetryPrStateUnavailableError(
                 "Could not verify whether the existing pull request is still open.",
                 detail={
@@ -521,17 +609,12 @@ async def retry_workspace_row(
                     "pr_number": existing_feature_pr_number,
                     "reason_code": "PR_STATE_LOOKUP_FAILED",
                 },
-            ) from exc
-        if existing_pr_lifecycle is PullRequestLifecycle.merged:
-            raise workspaces.WorkspaceRetryPrAlreadyMergedError(
-                "The existing pull request is already merged; its work must not be retried.",
-                detail={
-                    "source_workspace_id": source.id,
-                    "pr_number": existing_feature_pr_number,
-                    "pr_url": source.pr_url,
-                    "reason_code": "PR_ALREADY_MERGED",
-                },
             )
+        existing_pr_lifecycle = prefetched_feature_pr.lifecycle
+        if prefetched_feature_pr.from_snapshot:
+            live_pr_head_ref = prefetched_feature_pr.head_ref
+            live_pr_base_commit = prefetched_feature_pr.base_sha
+        # Merged PRs are rejected during prefetch (before the row lock).
         preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
         closed_existing_feature_pr = not preserve_existing_feature_pr
 

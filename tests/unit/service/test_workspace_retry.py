@@ -1023,6 +1023,67 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     assert [workspace.id for workspace in workspaces] == [first.id]
 
 
+async def test_retry_blocks_when_prefetched_feature_pr_state_mismatches_locked_row(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Fail closed when locked preserve identity does not match unlocked prefetch.
+
+    Under the row lock we must not re-enter RetryPolicy.READ forge sleeps; a
+    missing/mismatched prefetch therefore maps to PR_STATE_LOOKUP_FAILED.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        source.pr_number = 10
+        await session.commit()
+
+    async def _skip_prefetch(_source: Workspace, *, pr_lifecycle_checker: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "_prefetch_existing_feature_pr_state",
+        _skip_prefetch,
+    )
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="prefetch mismatch",
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "pr_number": 10,
+        "reason_code": "PR_STATE_LOOKUP_FAILED",
+    }
+    assert [workspace.id for workspace in workspaces] == [first.id]
+
+
 async def test_retry_propagates_programming_error_from_pr_state_lookup(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
