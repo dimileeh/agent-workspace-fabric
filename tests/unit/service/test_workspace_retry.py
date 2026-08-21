@@ -731,7 +731,7 @@ async def test_retry_rejects_open_feature_pr_without_persisted_or_live_base_comm
     assert [workspace.id for workspace in workspaces] == [first.id]
 
 
-async def test_retry_prefers_live_open_pr_head_over_stale_persisted_refs(
+async def test_retry_prefers_live_open_pr_head_and_base_over_stale_persisted_refs(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -780,8 +780,9 @@ async def test_retry_prefers_live_open_pr_head_over_stale_persisted_refs(
 
     retried = retry.new_workspace
     assert retried.remote_push_branch == "contributors/current-live-head"
-    assert retried.base_commit == "b" * 40
+    assert retried.base_commit == "c" * 40
     assert _provision_checkout_base_branch(retried) == "contributors/current-live-head"
+    assert _provision_base_commit(retried, checked_out_head="h" * 40) == "c" * 40
 
 
 async def test_retry_replaces_feature_pr_closed_externally(

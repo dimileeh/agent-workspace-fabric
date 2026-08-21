@@ -714,8 +714,11 @@ async def retry_workspace_row(
         retry_remote_push_branch = None
     elif preserve_existing_feature_pr:
         # The retry executes on a fresh local branch, but it must push back to
-        # the existing PR's live remote head. Persisted refs remain fallbacks
-        # for lifecycle checkers and legacy rows without a live snapshot.
+        # the existing PR's live remote head and use the PR's current base SHA.
+        # Persisted refs remain fallbacks for lifecycle checkers and legacy
+        # rows without a live snapshot. Preferring a stale persisted base over
+        # the forge baseRefOid makes a rebased PR head look orphaned, so the
+        # executor squashes onto the old base and cannot fast-forward-push.
         candidate_head_refs = (
             live_pr_head_ref,
             source.remote_push_branch,
@@ -735,7 +738,7 @@ async def retry_workspace_row(
                     "reason_code": "PR_HEAD_REF_UNAVAILABLE",
                 },
             )
-        candidate_base_commits = (source.base_commit, live_pr_base_commit)
+        candidate_base_commits = (live_pr_base_commit, source.base_commit)
         retry_base_commit = next(
             (
                 base_commit.strip()
