@@ -494,12 +494,29 @@ def _tracked_monitor_workspace_ids(self: Any) -> list[str]:
     ]
 
 
+# Execution kinds that can await a long-lived PR monitor without being
+# reclassified to ``MONITOR_RESUME``. Durable operator cancel/destroy must
+# stop these coroutines the same way as an adopted ``MONITOR_RESUME``.
+_EXECUTION_KINDS_CANCELLED_WITH_WORKSPACE = frozenset(
+    {
+        _ExecutionTaskKind.READY,
+        _ExecutionTaskKind.PRESERVED_ACTIVE,
+        _ExecutionTaskKind.BLOCKED_RESUME,
+        _ExecutionTaskKind.RECOVERING_RESUME,
+    }
+)
+
+_CANCELLABLE_EXECUTION_TASK_KINDS = frozenset(
+    {_ExecutionTaskKind.MONITOR_RESUME, *_EXECUTION_KINDS_CANCELLED_WITH_WORKSPACE}
+)
+
+
 def _tracked_cancellable_execution_workspace_ids(self: Any) -> list[str]:
     """Return task ids whose durable cancellation must stop the coroutine."""
     return [
         workspace_id
         for workspace_id, kind in self._execution_task_kinds.items()
-        if kind in {_ExecutionTaskKind.MONITOR_RESUME, _ExecutionTaskKind.READY}
+        if kind in _CANCELLABLE_EXECUTION_TASK_KINDS
     ]
 
 
@@ -525,12 +542,13 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
     blocking a fresh dispatch for the *same* workspace until it truly stops,
     and the existing done-callback drops it once it does.
 
-    Initial/adopted PR monitors retain ``READY`` task kind after their executor
-    hands off to the long-lived monitor. A durable operator cancellation must
-    therefore cancel a tracked ``READY`` task too; otherwise the coroutine keeps
-    attempting repairs against a runtime that cancellation already removed.
-    Healthy ``READY`` tasks and every ``PRESERVED_ACTIVE``/already-draining task
-    remain untouched.
+    Several dispatch paths hand off to a long-lived monitor without
+    reclassifying the tracked kind (``READY`` first-run/adopted monitors,
+    ``PRESERVED_ACTIVE`` recovery validation, ``BLOCKED_RESUME`` /
+    ``RECOVERING_RESUME``). A durable operator cancellation must therefore
+    cancel those kinds too; otherwise the coroutine keeps attempting repairs
+    against a runtime that cancellation already removed. Healthy mid-execution
+    tasks of those kinds, and already-draining tasks, remain untouched.
     """
     cancellable_ids = _tracked_cancellable_execution_workspace_ids(self)
     if not cancellable_ids:
@@ -548,10 +566,10 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
             kind is _ExecutionTaskKind.MONITOR_RESUME
             and status != WorkspaceStatus.monitoring_pr.value
         )
-        cancelled_ready_execution = (
-            kind is _ExecutionTaskKind.READY and status in cancelled_statuses
+        cancelled_handoff_execution = (
+            kind in _EXECUTION_KINDS_CANCELLED_WITH_WORKSPACE and status in cancelled_statuses
         )
-        if not stale_monitor_resume and not cancelled_ready_execution:
+        if not stale_monitor_resume and not cancelled_handoff_execution:
             continue
         task = self._execution_tasks.get(workspace_id)
         if task is None:

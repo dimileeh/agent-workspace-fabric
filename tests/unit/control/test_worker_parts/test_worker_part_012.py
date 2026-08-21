@@ -1105,29 +1105,39 @@ class TestRunOnceExecutionPart005:
             worker._execution_task_kinds.clear()  # noqa: SLF001
 
     @pytest.mark.unit
-    async def test_monitor_reconcile_cancels_ready_task_when_workspace_is_cancelled(
+    @pytest.mark.parametrize(
+        "task_kind",
+        [
+            worker_dispatch_methods._ExecutionTaskKind.READY,
+            worker_dispatch_methods._ExecutionTaskKind.PRESERVED_ACTIVE,
+            worker_dispatch_methods._ExecutionTaskKind.BLOCKED_RESUME,
+            worker_dispatch_methods._ExecutionTaskKind.RECOVERING_RESUME,
+        ],
+    )
+    async def test_monitor_reconcile_cancels_handoff_kind_when_workspace_is_cancelled(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        task_kind: worker_dispatch_methods._ExecutionTaskKind,
     ) -> None:
-        """A first-run PR monitor retains READY kind after handoff and must still stop."""
-        ready_id = await _create_ready(session_factory, origin_repo, "cancelled-ready-monitor")
+        """Kinds that can await monitor.run() without reclassification must stop on cancel."""
+        workspace_id = await _create_ready(
+            session_factory, origin_repo, f"cancelled-{task_kind.value}-monitor"
+        )
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=_RecordingExecutor(),
             config=WorkerConfig(max_concurrent_executions=1),
         )
-        ready_task = asyncio.create_task(_pending_execution_task())
-        worker._execution_tasks[ready_id] = ready_task  # noqa: SLF001
-        worker._execution_task_kinds[ready_id] = (  # noqa: SLF001
-            worker_dispatch_methods._ExecutionTaskKind.READY
-        )
+        execution_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[workspace_id] = execution_task  # noqa: SLF001
+        worker._execution_task_kinds[workspace_id] = task_kind  # noqa: SLF001
 
         async with session_factory() as session:
             await session.execute(
                 update(Workspace)
-                .where(Workspace.id == ready_id)
+                .where(Workspace.id == workspace_id)
                 .values(status=WorkspaceStatus.cancelled.value)
             )
             await session.commit()
@@ -1138,22 +1148,23 @@ class TestRunOnceExecutionPart005:
 
             assert any(
                 event.get("event") == "worker.stale_monitor_execution_task_cancelled"
-                and event.get("workspace_id") == ready_id
+                and event.get("workspace_id") == workspace_id
                 and event.get("status") == WorkspaceStatus.cancelled.value
+                and event.get("task_kind") == task_kind
                 for event in captured
             )
-            assert ready_task.cancelling() > 0
-            assert worker._execution_tasks[ready_id] is ready_task  # noqa: SLF001
+            assert execution_task.cancelling() > 0
+            assert worker._execution_tasks[workspace_id] is execution_task  # noqa: SLF001
             assert (
-                worker._execution_task_kinds[ready_id]  # noqa: SLF001
+                worker._execution_task_kinds[workspace_id]  # noqa: SLF001
                 is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
             )
             assert worker._available_execution_slots() == 1  # noqa: SLF001
         finally:
-            if not ready_task.done():
-                ready_task.cancel()
+            if not execution_task.done():
+                execution_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(ready_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+                await asyncio.wait_for(execution_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
             worker._execution_tasks.clear()  # noqa: SLF001
             worker._execution_task_kinds.clear()  # noqa: SLF001
 
