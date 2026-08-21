@@ -91,8 +91,18 @@ class _FakeForgeClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        self.calls.append({"repo": repo, "base": base, "head": head, "title": title, "body": body})
+        self.calls.append(
+            {
+                "repo": repo,
+                "base": base,
+                "head": head,
+                "title": title,
+                "body": body,
+                "source_repo": source_repo,
+            }
+        )
         if self._error is not None:
             raise self._error
         return self._url
@@ -113,8 +123,18 @@ class _SequencedForgeClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        self.calls.append({"repo": repo, "base": base, "head": head, "title": title, "body": body})
+        self.calls.append(
+            {
+                "repo": repo,
+                "base": base,
+                "head": head,
+                "title": title,
+                "body": body,
+                "source_repo": source_repo,
+            }
+        )
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -1062,6 +1082,35 @@ class TestPushAndOpen:
         # Cross-fork create head is owner:branch for the API only; the result
         # branch must stay the plain ref so remote_push_branch handoff is valid.
         assert forge.calls[0]["head"] == "contributor:awf/ws_xyz"
+        assert forge.calls[0]["source_repo"] is None
+        assert result.branch == "awf/ws_xyz"
+
+    @pytest.mark.unit
+    async def test_bitbucket_fork_remote_uses_source_repo_not_owner_branch(self) -> None:
+        # Bitbucket rejects GitHub's owner:branch as a literal branch name. Cross-
+        # fork create must keep the unqualified head and pass the fork as
+        # source_repo so BitbucketClient can set source.repository.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        forge = _FakeForgeClient(url="https://bitbucket.org/workspace/repo/pull-requests/3")
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_xyz",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=forge,
+            repo_url="git@bitbucket.org:workspace/repo.git",
+            remote_url="git@bitbucket.org:contributor/repo.git",
+        )
+        assert forge.calls[0]["repo"] == RepoRef(owner="workspace", name="repo", forge="bitbucket")
+        assert forge.calls[0]["head"] == "awf/ws_xyz"
+        assert forge.calls[0]["source_repo"] == RepoRef(
+            owner="contributor", name="repo", forge="bitbucket"
+        )
         assert result.branch == "awf/ws_xyz"
 
     @pytest.mark.unit

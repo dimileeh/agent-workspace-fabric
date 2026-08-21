@@ -986,6 +986,7 @@ class GitHubClient:
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,  # noqa: ARG002 - ForgeClient parity; GitHub uses head
         transient_max_attempts: int | None = None,
     ) -> str:
         """Open a PR for an existing ``head`` branch against ``base``.

@@ -180,8 +180,14 @@ class ForgeClient(Protocol):
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        """Open a PR for ``head`` against ``base`` and return its URL."""
+        """Open a PR for ``head`` against ``base`` and return its URL.
+
+        ``source_repo`` identifies a fork head repository when ``head`` is an
+        unqualified branch name (Bitbucket cross-fork creates). GitHub callers
+        keep using ``owner:branch`` in ``head`` and leave ``source_repo`` unset.
+        """
         ...
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:

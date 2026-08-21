@@ -263,18 +263,22 @@ class PullRequestCreator:
             )
 
         # Push may target an adopted fork via ``remote_url``, but the PR must
-        # open against the workspace base ``repo_url``. When those differ, use a
-        # cross-fork head (``owner:branch``) so GitHub/Bitbucket attach the fork
-        # branch to the base repository.
+        # open against the workspace base ``repo_url``. When those differ, encode
+        # the fork head per forge: GitHub accepts ``owner:branch``; Bitbucket
+        # needs an unqualified branch plus ``source_repo`` (see BitbucketClient).
         repo = RepoRef.from_url(repo_url)
         create_head = branch_name
+        source_repo: RepoRef | None = None
         if remote_url:
             try:
                 push_repo = RepoRef.from_url(remote_url)
             except ValueError:
                 push_repo = None
             if push_repo is not None and push_repo.slug().lower() != repo.slug().lower():
-                create_head = f"{push_repo.owner}:{branch_name}"
+                if repo.forge == "github":
+                    create_head = f"{push_repo.owner}:{branch_name}"
+                else:
+                    source_repo = push_repo
         try:
             if repo.forge == "github":
                 return await self._create_github_pull_request_with_redundancy(
@@ -293,6 +297,7 @@ class PullRequestCreator:
                 head=create_head,
                 title=title,
                 body=body,
+                source_repo=source_repo,
             )
         except PullRequestError:
             raise

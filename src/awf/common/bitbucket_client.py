@@ -230,11 +230,28 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         head: str,
         title: str,
         body: str,
+        source_repo: RepoRef | None = None,
     ) -> str:
-        """Open a PR for ``head`` against ``base`` and return its web URL."""
+        """Open a PR for ``head`` against ``base`` and return its web URL.
+
+        Cross-fork creates pass an unqualified ``head`` plus ``source_repo`` (the
+        fork). GitHub-style ``owner:branch`` heads are also expanded into
+        ``source.repository`` so a literal ``owner:branch`` branch name is never
+        sent to Bitbucket.
+        """
+        source_branch = head
+        fork_repo = source_repo
+        if fork_repo is None and ":" in head:
+            owner, _, branch = head.partition(":")
+            if owner and branch:
+                source_branch = branch
+                fork_repo = RepoRef(owner=owner, name=repo.name, forge=repo.forge)
+        source: dict[str, object] = {"branch": {"name": source_branch}}
+        if fork_repo is not None:
+            source["repository"] = {"full_name": fork_repo.slug()}
         payload = {
             "title": title,
-            "source": {"branch": {"name": head}},
+            "source": source,
             "destination": {"branch": {"name": base}},
             "description": body,
         }

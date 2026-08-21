@@ -17,6 +17,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BitbucketClientError,
 )
+from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
 from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
@@ -70,7 +71,55 @@ async def test_create_pull_request_returns_html_url() -> None:
 
     payload = _json.loads(body.content)
     assert payload["source"]["branch"]["name"] == "feature/x"
+    assert "repository" not in payload["source"]
     assert payload["destination"]["branch"]["name"] == "development"
+
+
+async def test_create_pull_request_cross_fork_sets_source_repository() -> None:
+    # Cross-fork opens must not put GitHub's owner:branch into source.branch.name.
+    # Bitbucket needs the unqualified branch plus source.repository.full_name.
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "POST",
+        f"{_REPO}/pullrequests",
+        json={"links": {"html": {"href": "https://bitbucket.org/workspace/repo/pull-requests/11"}}},
+    )
+    client = make_client(fake)
+    fork = RepoRef(owner="contributor", name="repo", forge="bitbucket")
+    url = await client.create_pull_request(
+        repo=repo(),
+        base="development",
+        head="awf/ws_xyz",
+        title="t",
+        body="b",
+        source_repo=fork,
+    )
+    assert url == "https://bitbucket.org/workspace/repo/pull-requests/11"
+    import json as _json
+
+    payload = _json.loads(fake.calls("POST")[0].content)
+    assert payload["source"]["branch"]["name"] == "awf/ws_xyz"
+    assert payload["source"]["repository"]["full_name"] == "contributor/repo"
+
+
+async def test_create_pull_request_expands_owner_branch_head() -> None:
+    # Defense in depth: if a caller still passes GitHub-style owner:branch, expand
+    # it rather than asking Bitbucket for a literal "owner:branch" branch name.
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "POST",
+        f"{_REPO}/pullrequests",
+        json={"links": {"html": {"href": "https://bitbucket.org/workspace/repo/pull-requests/12"}}},
+    )
+    client = make_client(fake)
+    await client.create_pull_request(
+        repo=repo(), base="development", head="contributor:awf/ws_xyz", title="t", body="b"
+    )
+    import json as _json
+
+    payload = _json.loads(fake.calls("POST")[0].content)
+    assert payload["source"]["branch"]["name"] == "awf/ws_xyz"
+    assert payload["source"]["repository"]["full_name"] == "contributor/repo"
 
 
 async def test_create_pull_request_missing_href_raises() -> None:
