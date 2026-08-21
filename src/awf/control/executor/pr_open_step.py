@@ -74,6 +74,29 @@ async def _clear_stale_pr_identity_for_replacement(
         ws.task_policy = policy
 
 
+async def _sync_reuse_remote_push_branch(
+    self: Any,
+    *,
+    workspace_id: str,
+    ws: Any,
+    live_head_ref: str,
+) -> None:
+    """Persist the live PR head so reuse pushes to the branch the forge tracks.
+
+    Admission may have copied ``remote_push_branch`` while the PR was open under
+    an older head name. If the head was renamed before this push, reusing the
+    stale name would update a detached branch while monitoring continues on the
+    renamed PR head — and could merge without the retry tip.
+    """
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        persisted = await repo.get(workspace_id)
+        if persisted is not None:
+            persisted.remote_push_branch = live_head_ref
+            await session.commit()
+    ws.remote_push_branch = live_head_ref
+
+
 async def push_and_open_pr(
     self: Any,
     *,
@@ -91,10 +114,12 @@ async def push_and_open_pr(
     through the resolved ``ForgeClient`` (GitHub or Bitbucket Cloud).
 
     When ``ws.pr_url`` is set (e.g. a feature-PR retry that preserved the source
-    PR at admission), the live forge lifecycle is revalidated before reuse. A PR
+    PR at admission), the live forge snapshot is revalidated before reuse. A PR
     that merged or closed after admission is not reused: identity is cleared and
-    a replacement PR is opened for the pushed tip. If ``pr_number`` cannot be
-    resolved, or lifecycle lookup fails, reuse fails closed (identity kept,
+    a replacement PR is opened for the pushed tip. When the PR is still open but
+    its head ref was renamed after admission, the persisted push target is
+    updated to the live ``head_ref`` before reuse. If ``pr_number`` cannot be
+    resolved, or snapshot lookup fails, reuse fails closed (identity kept,
     workspace marked failed) so a still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
@@ -197,18 +222,18 @@ async def push_and_open_pr(
                     return None
 
                 try:
-                    lifecycle = await forge_client.fetch_pull_request_lifecycle(
+                    snapshot = await forge_client.fetch_pull_request_snapshot(
                         repo=RepoRef.from_url(ws.repo_url),
                         pr_number=pr_number,
                     )
-                    reuse_existing = lifecycle is PullRequestLifecycle.open
+                    reuse_existing = snapshot.lifecycle is PullRequestLifecycle.open
                     if not reuse_existing:
                         _log.info(
                             "executor.pr_reuse_abandoned",
                             workspace_id=workspace_id,
                             pr_number=pr_number,
                             pr_url=ws.pr_url,
-                            lifecycle=str(lifecycle),
+                            lifecycle=str(snapshot.lifecycle),
                         )
                 except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
                     _log.error(
@@ -231,7 +256,7 @@ async def push_and_open_pr(
                         pr_url=ws.pr_url,
                         source_head_sha=None,
                         evidence={
-                            "operation": "fetch_pull_request_lifecycle",
+                            "operation": "fetch_pull_request_snapshot",
                             "error_message": str(exc).strip() or "<no output>",
                         },
                     )
@@ -248,6 +273,28 @@ async def push_and_open_pr(
                     return None
 
                 if reuse_existing:
+                    live_head_ref = (
+                        snapshot.head_ref.strip()
+                        if isinstance(snapshot.head_ref, str) and snapshot.head_ref.strip()
+                        else None
+                    )
+                    if live_head_ref is not None and live_head_ref != existing_pr_remote_branch:
+                        _log.info(
+                            "executor.pr_reuse_head_ref_synced",
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            pr_url=ws.pr_url,
+                            previous_remote_branch=existing_pr_remote_branch,
+                            live_head_ref=live_head_ref,
+                        )
+                        await _sync_reuse_remote_push_branch(
+                            self,
+                            workspace_id=workspace_id,
+                            ws=ws,
+                            live_head_ref=live_head_ref,
+                        )
+                        existing_pr_remote_branch = live_head_ref
+                        audit_remote_branch = live_head_ref
                     pr = await self._pr_creator.push_and_open(
                         worktree_path=worktree_path,
                         branch_name=push_branch_name,

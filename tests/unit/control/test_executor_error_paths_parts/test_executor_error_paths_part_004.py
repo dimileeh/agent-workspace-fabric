@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -204,13 +204,16 @@ class _LifecycleForgeClient:
         self,
         *,
         lifecycle: PullRequestLifecycle = PullRequestLifecycle.open,
+        head_ref: str | None = None,
         create_url: str = "https://github.com/x/y/pull/99",
         lookup_error: Exception | None = None,
     ) -> None:
         self.lifecycle = lifecycle
+        self.head_ref = head_ref
         self.create_url = create_url
         self.lookup_error = lookup_error
         self.lifecycle_calls = 0
+        self.snapshot_calls = 0
         self.create_calls = 0
 
     async def __aenter__(self) -> _LifecycleForgeClient:
@@ -222,16 +225,25 @@ class _LifecycleForgeClient:
     async def aclose(self) -> None:
         return None
 
+    async def fetch_pull_request_snapshot(
+        self,
+        *,
+        repo: object,
+        pr_number: int,
+    ) -> PullRequestSnapshot:
+        self.snapshot_calls += 1
+        self.lifecycle_calls += 1
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return PullRequestSnapshot(self.lifecycle, self.head_ref)
+
     async def fetch_pull_request_lifecycle(
         self,
         *,
         repo: object,
         pr_number: int,
     ) -> PullRequestLifecycle:
-        self.lifecycle_calls += 1
-        if self.lookup_error is not None:
-            raise self.lookup_error
-        return self.lifecycle
+        return (await self.fetch_pull_request_snapshot(repo=repo, pr_number=pr_number)).lifecycle
 
     async def create_pull_request(
         self,
@@ -1146,7 +1158,10 @@ class TestPullRequestUnexpectedErrorPart002:
     ) -> None:
         # Reuse path must resolve a forge client to revalidate live lifecycle, then
         # push_and_open still receives forge_client=None once the PR is confirmed open.
-        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open)
+        forge = _LifecycleForgeClient(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="awf/ws_original",
+        )
 
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
             return forge
@@ -1170,6 +1185,7 @@ class TestPullRequestUnexpectedErrorPart002:
         await executor.execute(ws_id)
 
         assert forge.lifecycle_calls == 1
+        assert forge.snapshot_calls == 1
         assert pr_creator.forge_client is None
         assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
         assert pr_creator.remote_branch_name == "awf/ws_original"
@@ -1179,6 +1195,54 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_reuse_push_updates_remote_branch_when_live_head_renamed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Admission may have persisted the pre-rename head. Reuse must re-read
+        # the live snapshot and push to the current head_ref so monitoring does
+        # not merge the renamed PR without the retry tip.
+        forge = _LifecycleForgeClient(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/renamed-live-head",
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.snapshot_calls == 1
+        assert pr_creator.forge_client is None
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        assert pr_creator.remote_branch_name == "contributors/renamed-live-head"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+            assert ws.remote_push_branch == "contributors/renamed-live-head"
 
     @pytest.mark.unit
     async def test_reuse_push_opens_replacement_when_existing_pr_merged(
