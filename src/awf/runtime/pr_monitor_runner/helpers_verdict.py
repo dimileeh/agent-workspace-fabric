@@ -1237,8 +1237,8 @@ _MARKDOWN_INLINE_HTML_TOKEN = re.compile(
 def _advance_past_markdown_inline_html(text: str, start: int) -> int:
     """Return index after a CommonMark inline HTML token, or ``start`` if none.
 
-    Caller must pass ``start`` at ``<``. Incomplete or non-matching markup is
-    left alone so the scanner advances one character and keeps treating
+    Caller must pass ``start`` at an unescaped ``<``. Incomplete or non-matching
+    markup is left alone so the scanner advances one character and keeps treating
     subsequent ``*`` / ``_`` as emphasis (PRRT_kwDOSJAM6s6bTBv6).
     """
     match = _MARKDOWN_INLINE_HTML_TOKEN.match(text, start)
@@ -1270,7 +1270,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     under CommonMark and must not start that skip — otherwise a later real
     tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj). Inline HTML
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
-    the outer closer (PRRT_kwDOSJAM6s6bTBv6).
+    the outer closer (PRRT_kwDOSJAM6s6bTBv6). Backslash-escaped ``\\<`` is not an
+    HTML opener — attribute markers remain emphasis and can steal the closer
+    (PRRT_kwDOSJAM6s6bTLZk).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1283,7 +1285,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         if reason[i] == "`" and not _markdown_char_is_escaped(reason, i):
             i = _advance_past_markdown_code_span(reason, i)
             continue
-        if reason[i] == "<":
+        if reason[i] == "<" and not _markdown_char_is_escaped(reason, i):
             next_i = _advance_past_markdown_inline_html(reason, i)
             if next_i > i:
                 i = next_i
@@ -1359,7 +1361,8 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bShql). Escaped backticks are not code-span openers, so
     ``\\` **unclosed`x**`` still fails closed (PRRT_kwDOSJAM6s6bSsnj). Inline
     HTML tokens are similarly opaque so attribute stars do not steal the
-    closer (PRRT_kwDOSJAM6s6bTBv6).
+    closer (PRRT_kwDOSJAM6s6bTBv6). Escaped ``\\<`` is not an HTML token, so
+    ``\\<span title="**">x**`` still fails closed (PRRT_kwDOSJAM6s6bTLZk).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:

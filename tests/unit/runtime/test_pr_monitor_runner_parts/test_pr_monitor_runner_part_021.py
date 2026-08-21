@@ -1298,6 +1298,11 @@ class TestParseVerdict:
             r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
             r"*AWF-VERDICT: FALSE POSITIVE: \` *unclosed`x*",
             r"__AWF-VERDICT: FALSE POSITIVE: \` __unclosed`x__",
+            # Escaped ``\<`` is not an HTML token; attribute stars steal the
+            # outer closer (PRRT_kwDOSJAM6s6bTLZk).
+            r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
+            r"*AWF-VERDICT: FALSE POSITIVE: see \<em class='*'>x*",
+            r'__AWF-VERDICT: FALSE POSITIVE: see \<span title="__">x__',
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1379,6 +1384,11 @@ class TestParseVerdict:
             r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
             r"*AWF-VERDICT: FALSE POSITIVE: \` *unclosed`x*",
             r"__AWF-VERDICT: FALSE POSITIVE: \` __unclosed`x__",
+            # Escaped ``\<`` is not HTML; attribute markers steal the closer
+            # (PRRT_kwDOSJAM6s6bTLZk).
+            r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
+            r"*AWF-VERDICT: FALSE POSITIVE: see \<em class='*'>x*",
+            r'__AWF-VERDICT: FALSE POSITIVE: see \<span title="__">x__',
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1570,6 +1580,13 @@ class TestParseVerdict:
             # Incomplete HTML (no ``>``) is not a tag; attribute stars remain
             # emphasis and claim the trailing closer (PRRT_kwDOSJAM6s6bTBv6).
             ('see <span title="**"text**', "**", True),
+            # Escaped ``\<`` is literal; attribute stars claim the trailing
+            # closer (PRRT_kwDOSJAM6s6bTLZk).
+            (r'see \<span title="**">x**', "**", True),
+            (r"see \<em class='*'>x*", "*", True),
+            (r'see \<span title="__">x__', "__", True),
+            # Even backslash run leaves ``<`` unescaped; HTML stays opaque.
+            (r'see \\<span title="**">ok</span>**', "**", False),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
