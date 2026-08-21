@@ -1269,6 +1269,11 @@ class TestParseVerdict:
             # (PRRT_kwDOSJAM6s6bR2FM).
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
             "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
+            # Punctuation-to-alphanumeric mid run is opening-only; consuming it as
+            # a closer would wrongly resolve false_positive (PRRT_kwDOSJAM6s6bShqh).
+            "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: lead *open.*x rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: lead __open.__x rest__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1325,6 +1330,15 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
             "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
             "__AWF-VERDICT: FALSE POSITIVE: ___lead_ rest__",
+            # Punctuation-to-alphanumeric mid run is opening-only; treating it as
+            # a closer would consume an earlier opener and wrongly accept the
+            # whole-line wrap (PRRT_kwDOSJAM6s6bShqh).
+            "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: lead *open.*x rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: lead __open.__x rest__",
+            "**AWF-VERDICT: FALSE POSITIVE: lead **open$**x rest**",
+            "**AWF-VERDICT: FALSE POSITIVE: lead **open+**x rest**",
+            "**AWF-VERDICT: FALSE POSITIVE: lead **open^**x rest**",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1488,6 +1502,19 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_open(" **.", 1, 2, "*") is True
         assert _markdown_emphasis_run_can_open("**$", 0, 2, "*") is True
         assert _markdown_emphasis_run_can_open(" **$", 1, 2, "*") is True
+        # Punctuation then alphanumeric: not right-flanking (PRRT_kwDOSJAM6s6bShqh).
+        assert _markdown_emphasis_run_can_close(".*x", 1, 1, "*") is False
+        assert _markdown_emphasis_run_can_close(".**x", 1, 2, "*") is False
+        # ASCII punctuation with non-P Unicode categories as the precede char.
+        assert _markdown_emphasis_run_can_close("$*x", 1, 1, "*") is False
+        assert _markdown_emphasis_run_can_close("$**x", 1, 2, "*") is False
+        assert _markdown_emphasis_run_can_close("+**x", 1, 2, "*") is False
+        assert _markdown_emphasis_run_can_close("^**x", 1, 2, "*") is False
+        # Punctuation before + punctuation/whitespace/EOS after remains right-flanking.
+        assert _markdown_emphasis_run_can_close(".*.", 1, 1, "*") is True
+        assert _markdown_emphasis_run_can_close(".**", 1, 2, "*") is True
+        assert _markdown_emphasis_run_can_close(".** ", 1, 2, "*") is True
+        assert _markdown_emphasis_run_can_close(".**$", 1, 2, "*") is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True) is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False) is False
         assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True) is False

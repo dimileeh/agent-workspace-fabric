@@ -1126,6 +1126,13 @@ def _markdown_emphasis_run_can_close(text: str, start: int, length: int, marker:
         return False
     if start > 0 and text[start - 1].isspace():
         return False
+    # CommonMark right-flanking (2b): a run preceded by punctuation closes only
+    # when also followed by EOS, whitespace, or punctuation. Punctuation-to-
+    # alphanumeric runs (``.**x``) are opening-only (PRRT_kwDOSJAM6s6bShqh).
+    if start > 0 and _markdown_char_is_unicode_punctuation(text[start - 1]):
+        followed_ok = end >= len(text) or text[end].isspace()
+        if not followed_ok and not _markdown_char_is_unicode_punctuation(text[end]):
+            return False
     if marker == "_" and end < len(text) and text[end].isalnum():
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))
