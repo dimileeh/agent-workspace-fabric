@@ -1103,35 +1103,42 @@ def _verdict_reason_begins_with_emphasis_opener(reason: str, opener: str) -> boo
     return not (len(reason) > len(opener) and reason[len(opener)] == opener[0])
 
 
-def _markdown_emphasis_opener_is_valid(text: str, opener_start: int, opener: str) -> bool:
-    """Return whether ``opener`` at ``opener_start`` is a usable emphasis opener.
+def _markdown_emphasis_run_can_close(text: str, start: int, length: int, marker: str) -> bool:
+    """Return whether a maximal ``marker`` run at ``start`` is right-flanking."""
+    end = start + length
+    if start < 0 or length < 1 or end > len(text):
+        return False
+    if text[start:end] != marker * length:
+        return False
+    if start > 0 and text[start - 1].isspace():
+        return False
+    if marker == "_" and end < len(text) and text[end].isalnum():
+        return False
+    return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))
 
-    Mirrors ``_markdown_emphasis_closer_is_valid`` with left-flanking rules: the
-    run must not be followed by whitespace, must be exact-length, and must not
-    include backslash-escaped marker characters.
 
-    Underscore openers additionally follow CommonMark's intra-word rule: a
-    ``_`` / ``__`` / ``___`` run cannot open when preceded by an ASCII
-    alphanumeric character (PRRT_kwDOSJAM6s6bRy5w).
-    """
-    opener_end = opener_start + len(opener)
-    if opener_start < 0 or opener_end > len(text):
+def _markdown_emphasis_run_can_open(text: str, start: int, length: int, marker: str) -> bool:
+    """Return whether a maximal ``marker`` run at ``start`` is left-flanking."""
+    end = start + length
+    if start < 0 or length < 1 or end > len(text):
         return False
-    if text[opener_start:opener_end] != opener:
+    if text[start:end] != marker * length:
         return False
-    if (
-        opener_start > 0
-        and text[opener_start - 1] == opener[0]
-        and not _markdown_char_is_escaped(text, opener_start - 1)
-    ):
+    if end < len(text) and text[end].isspace():
         return False
-    if opener_end < len(text) and text[opener_end] == opener[0]:
+    if marker == "_" and start > 0 and text[start - 1].isalnum():
         return False
-    if opener_end < len(text) and text[opener_end].isspace():
+    return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))
+
+
+def _emphasis_run_pair_blocked_by_multiple_of_three(
+    opener_len: int, closer_len: int, closer_can_open: bool
+) -> bool:
+    """Return whether CommonMark rule 9 blocks pairing these run lengths."""
+    if not closer_can_open:
         return False
-    if opener[0] == "_" and opener_start > 0 and text[opener_start - 1].isalnum():
-        return False
-    return not any(_markdown_char_is_escaped(text, i) for i in range(opener_start, opener_end))
+    total = opener_len + closer_len
+    return total % 3 == 0 and opener_len % 3 != 0 and closer_len % 3 != 0
 
 
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
@@ -1143,13 +1150,19 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     while unmatched leftovers (``rationale**``) and even counts of closing-only
     runs (``rationale** more**``) are rejected (PRRT_kwDOSJAM6s6bRROQ,
     PRRT_kwDOSJAM6s6bRfTo).
+
+    CommonMark may split a longer same-character run across shorter closers
+    (``***lead* rest**`` consumes one star with ``*`` and two with the trailing
+    ``**``). Pair across all same-character run lengths so a trailing
+    wrapper-length closer stolen by that partial match is detected
+    (PRRT_kwDOSJAM6s6bR2FM). Leftover unmatched opener runs that would
+    literalize (``***lead* and **done**``) do not block ``trailing_paired``.
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False
     marker = opener[0]
-    run_len = len(opener)
-    open_depth = 0
+    open_stack: list[int] = []
     trailing_paired = False
     i = 0
     while i < len(reason):
@@ -1161,19 +1174,28 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         j = i
         while j < len(reason) and reason[j] == marker:
             j += 1
-        if j - i == run_len:
-            can_close = _markdown_emphasis_closer_is_valid(reason, i, opener)
-            can_open = _markdown_emphasis_opener_is_valid(reason, i, opener)
-            is_trailing = j == len(reason)
-            # Prefer closing an open span when both sides are flanking.
-            if can_close and open_depth > 0:
-                open_depth -= 1
+        length = j - i
+        can_close = _markdown_emphasis_run_can_close(reason, i, length, marker)
+        can_open = _markdown_emphasis_run_can_open(reason, i, length, marker)
+        is_trailing = j == len(reason)
+        remaining = length
+        if can_close:
+            while remaining > 0 and open_stack:
+                opener_len = open_stack[-1]
+                if _emphasis_run_pair_blocked_by_multiple_of_three(opener_len, remaining, can_open):
+                    break
+                # Prefer strong (2) when both runs still have at least two.
+                consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
+                open_stack[-1] -= consumed
+                remaining -= consumed
+                if open_stack[-1] == 0:
+                    open_stack.pop()
                 if is_trailing:
                     trailing_paired = True
-            elif can_open:
-                open_depth += 1
+        if remaining > 0 and can_open:
+            open_stack.append(remaining)
         i = j
-    return trailing_paired and open_depth == 0
+    return trailing_paired
 
 
 def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
@@ -1205,9 +1227,12 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bQqbC). The same applies when a mid-reason same-delimiter
     opener steals the trailing closer (``**… rationale **unclosed**``) — pair
     across the whole candidate before accepting the strip
-    (PRRT_kwDOSJAM6s6bRrWv). Underscore balance checks use the reason span only
-    and ignore word-internal ``_`` so ``NEEDS_HUMAN`` / snake_case reasons do
-    not falsely reject a valid whole-line ``_…_`` wrap (PRRT_kwDOSJAM6s6bRy5w).
+    (PRRT_kwDOSJAM6s6bRrWv). Longer same-character runs that CommonMark splits
+    across shorter closers (``**… ***lead* rest**``) likewise steal the trailing
+    wrapper closer (PRRT_kwDOSJAM6s6bR2FM). Underscore balance checks use the
+    reason span only and ignore word-internal ``_`` so ``NEEDS_HUMAN`` /
+    snake_case reasons do not falsely reject a valid whole-line ``_…_`` wrap
+    (PRRT_kwDOSJAM6s6bRy5w).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:

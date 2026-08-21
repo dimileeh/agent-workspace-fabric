@@ -11,7 +11,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _aggressively_peel_verdict_reason_wrappers,
+    _emphasis_run_pair_blocked_by_multiple_of_three,
     _html_wrapper_close_suffix_start,
+    _markdown_emphasis_run_can_close,
+    _markdown_emphasis_run_can_open,
     _normalize_markdown_emphasized_verdict_line,
     _peel_all_outer_html_verdict_reason_wrappers,
     _peel_all_outer_unconditional_verdict_reason_wrappers,
@@ -1249,6 +1252,10 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
+            # Partial longer-run match steals the trailing closer
+            # (PRRT_kwDOSJAM6s6bR2FM).
+            "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1290,6 +1297,11 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
+            # Longer mid-run partially pairs with a short closer then the
+            # trailing wrapper-length closer (PRRT_kwDOSJAM6s6bR2FM).
+            "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: ___lead_ rest__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1323,12 +1335,6 @@ class TestParseVerdict:
             (
                 r"**AWF-VERDICT: FALSE POSITIVE: rationale\***",
                 r"AWF-VERDICT: FALSE POSITIVE: rationale\*",
-            ),
-            # Reason-leading longer run than the line opener is a different
-            # delimiter, so whole-line strip still applies (PRRT_kwDOSJAM6s6bQqbC).
-            (
-                "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
-                "AWF-VERDICT: FALSE POSITIVE: ***lead* rest",
             ),
             # Prefix-only wrap plus a separately balanced reason span ending at
             # EOF is valid Markdown, not a dual whole-line closer
@@ -1393,8 +1399,14 @@ class TestParseVerdict:
             ("rationale** more**", "**", False),
             ("rationale* more*", "*", False),
             ("rationale__ more__", "__", False),
-            # Longer mid-run is skipped; trailing exact pair still balances.
+            # Longer mid-run may literalize leftovers; trailing exact pair of
+            # ``**done**`` still balances (open units need not return to zero).
             ("***lead* and **done**", "**", True),
+            # Partial longer-run match consumes the trailing wrapper-length
+            # closer inside the reason (PRRT_kwDOSJAM6s6bR2FM).
+            ("***lead* rest**", "**", True),
+            ("**lead* rest*", "*", True),
+            ("___lead_ rest__", "__", True),
             # Escaped markers are not delimiter runs.
             (r"see \**literal and **ok**", "**", True),
             # Trailing whitespace makes the closer invalid (not right-flanking).
@@ -1408,6 +1420,9 @@ class TestParseVerdict:
             ("already_correct_", "_", False),
             ("see_this_", "_", False),
             ("please clarify_", "_", False),
+            # Multiple-of-3 rule blocks pairing a length-1 opener run against a
+            # length-2 closer that can also open (``*foo**``).
+            ("*foo**", "**", False),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
@@ -1417,6 +1432,25 @@ class TestParseVerdict:
         expected: bool,
     ) -> None:
         assert _verdict_reason_trailing_emphasis_is_balanced(reason, opener) is expected
+
+    @pytest.mark.unit
+    def test_private_markdown_emphasis_run_flanking_helpers(self) -> None:
+        # Defensive bounds and content mismatches for the maximal-run helpers.
+        assert _markdown_emphasis_run_can_close("", 0, 1, "*") is False
+        assert _markdown_emphasis_run_can_close("**", -1, 2, "*") is False
+        assert _markdown_emphasis_run_can_close("ab", 0, 2, "*") is False
+        assert _markdown_emphasis_run_can_open("**", 0, 0, "*") is False
+        assert _markdown_emphasis_run_can_open("x*", 1, 1, "*") is True  # EOF is left-flanking
+        assert _markdown_emphasis_run_can_open("* ", 0, 1, "*") is False  # followed by space
+        assert _markdown_emphasis_run_can_close(" *", 1, 1, "*") is False  # preceded by space
+        assert _markdown_emphasis_run_can_close("a_b", 1, 1, "_") is False  # intra-word closer
+        assert _markdown_emphasis_run_can_open("a_b", 1, 1, "_") is False  # intra-word opener
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True) is True
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False) is False
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True) is False
+        # Escaped marker characters are never flanking runs.
+        assert _markdown_emphasis_run_can_close(r"a\*", 2, 1, "*") is False
+        assert _markdown_emphasis_run_can_open(r"\*", 1, 1, "*") is False
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
