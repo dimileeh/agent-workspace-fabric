@@ -1149,6 +1149,13 @@ class TestParseVerdict:
                 "false_positive",
                 "see `**`",
             ),
+            # Stars inside inline HTML attribute values are literal tag content
+            # and must not steal the whole-line closer (PRRT_kwDOSJAM6s6bTBv6).
+            (
+                '**AWF-VERDICT: FALSE POSITIVE: see <span title="**">ok</span>**',
+                "false_positive",
+                'see <span title="**">ok</span>',
+            ),
         ],
     )
     def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
@@ -1466,6 +1473,20 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see ``**``**",
                 "AWF-VERDICT: FALSE POSITIVE: see ``**``",
             ),
+            # Inline HTML tokens are opaque; attribute stars do not claim the
+            # outer closer (PRRT_kwDOSJAM6s6bTBv6).
+            (
+                '**AWF-VERDICT: FALSE POSITIVE: see <span title="**">ok</span>**',
+                'AWF-VERDICT: FALSE POSITIVE: see <span title="**">ok</span>',
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see <em class='*'>ok</em>*",
+                "AWF-VERDICT: FALSE POSITIVE: see <em class='*'>ok</em>",
+            ),
+            (
+                '__AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>__',
+                'AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>',
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1539,6 +1560,16 @@ class TestParseVerdict:
             (r"\` **unclosed`x**", "**", True),
             (r"\` *unclosed`x*", "*", True),
             (r"\` __unclosed`x__", "__", True),
+            # Inline HTML attribute stars are opaque; trailing closer is not
+            # claimed (PRRT_kwDOSJAM6s6bTBv6).
+            ('see <span title="**">ok</span>**', "**", False),
+            ("see <em class='*'>ok</em>*", "*", False),
+            ('see <span title="__">ok</span>__', "__", False),
+            # Real mid-reason emphasis after an HTML tag still claims the closer.
+            ('see <span title="**">ok</span> and **unclosed**', "**", True),
+            # Incomplete HTML (no ``>``) is not a tag; attribute stars remain
+            # emphasis and claim the trailing closer (PRRT_kwDOSJAM6s6bTBv6).
+            ('see <span title="**"text**', "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(

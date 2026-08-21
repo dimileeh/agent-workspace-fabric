@@ -1219,6 +1219,34 @@ def _advance_past_markdown_code_span(text: str, start: int) -> int:
     return start + open_len
 
 
+# CommonMark inline HTML tokens (spec §6.6). Attribute values reuse
+# ``_HTML_TYPE7_ATTR`` so a quoted ``>`` / ``*`` / ``_`` inside an attribute does
+# not truncate the tag or participate in emphasis pairing
+# (PRRT_kwDOSJAM6s6bTBv6).
+_MARKDOWN_INLINE_HTML_TOKEN = re.compile(
+    rf"<(?:[A-Za-z][A-Za-z0-9-]*{_HTML_TYPE7_ATTR}*\s*/?>|"
+    r"/[A-Za-z][A-Za-z0-9-]*\s*>|"
+    r"!--(?:-?>|.*?-->)|"
+    r"\?(?:.*?\?)>|"
+    r"![A-Z]+\s+[^>]*>|"
+    r"!\[CDATA\[.*?\]\]>)",
+    re.DOTALL,
+)
+
+
+def _advance_past_markdown_inline_html(text: str, start: int) -> int:
+    """Return index after a CommonMark inline HTML token, or ``start`` if none.
+
+    Caller must pass ``start`` at ``<``. Incomplete or non-matching markup is
+    left alone so the scanner advances one character and keeps treating
+    subsequent ``*`` / ``_`` as emphasis (PRRT_kwDOSJAM6s6bTBv6).
+    """
+    match = _MARKDOWN_INLINE_HTML_TOKEN.match(text, start)
+    if match is None:
+        return start
+    return match.end()
+
+
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
@@ -1240,7 +1268,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     literal content and must not claim the trailing wrapper closer
     (PRRT_kwDOSJAM6s6bShql). Backslash-escaped backticks are literal openers
     under CommonMark and must not start that skip — otherwise a later real
-    tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj).
+    tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj). Inline HTML
+    tokens are likewise opaque so attribute stars (``title="**"``) do not steal
+    the outer closer (PRRT_kwDOSJAM6s6bTBv6).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1253,6 +1283,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         if reason[i] == "`" and not _markdown_char_is_escaped(reason, i):
             i = _advance_past_markdown_code_span(reason, i)
             continue
+        if reason[i] == "<":
+            next_i = _advance_past_markdown_inline_html(reason, i)
+            if next_i > i:
+                i = next_i
+                continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
             i += 1
             continue
@@ -1322,7 +1357,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bRy5w). Inline code-span markers are opaque to that
     balance scan so ``**… see `**`**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bShql). Escaped backticks are not code-span openers, so
-    ``\\` **unclosed`x**`` still fails closed (PRRT_kwDOSJAM6s6bSsnj).
+    ``\\` **unclosed`x**`` still fails closed (PRRT_kwDOSJAM6s6bSsnj). Inline
+    HTML tokens are similarly opaque so attribute stars do not steal the
+    closer (PRRT_kwDOSJAM6s6bTBv6).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
