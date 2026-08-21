@@ -296,9 +296,11 @@ Auth required. Requires `Idempotency-Key` and supports `If-Match`.
 
 The workspace must already have persisted PR identity and recoverable runtime
 metadata. Otherwise AWF returns `409 Conflict` with
-`WORKSPACE_REMONITOR_METADATA_MISSING` and `recommended_action` set to
-`retry_workspace`; retrying reprovisions the runtime and reattaches the existing
-PR.
+`WORKSPACE_REMONITOR_METADATA_MISSING`. `recommended_action` is optional: when the
+workspace is `failed` and retry is available, the detail includes
+`recommended_action=retry_workspace` (retry reprovisions the runtime and
+reattaches the existing PR); other states, such as `monitoring_pr`, omit the
+field.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
