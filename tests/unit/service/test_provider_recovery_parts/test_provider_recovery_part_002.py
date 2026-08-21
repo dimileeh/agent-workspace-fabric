@@ -978,6 +978,62 @@ async def test_create_provider_recovery_attempt_row_clears_cursor_auto_mode_on_f
     assert CURSOR_AUTO_MODE_POLICY_KEY not in fallback.task_policy
 
 
+@pytest.mark.unit
+async def test_create_provider_recovery_attempt_row_preserves_cursor_auto_mode_on_retry(
+    factory,
+):
+    """Same-provider Auto retries must keep product-facing cursor_auto_mode.
+
+    decide_provider_recovery sets target_model to the current auto-smart selector
+    for retries; installing that as a fixed model would clear the mode and leave
+    only the raw selector in API/console identity.
+    """
+    from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="title",
+            task_prompt="prompt",
+            agent="cursor",
+            task_policy={
+                CURSOR_AUTO_MODE_POLICY_KEY: "balance",
+                "provider_recovery": {
+                    "max_same_provider_retries": 1,
+                    "max_fallback_attempts": 0,
+                },
+            },
+            test_commands=[],
+            owned_paths=[],
+        )
+        await session.commit()
+        ws_id = ws.id
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            ws_id,
+            metadata={
+                "retryable": True,
+                "provider": "cursor",
+                "model": "auto-smart[optimize_for=balanced]",
+                "failure_fingerprint": "cursor-auto:retry-preserve-mode",
+            },
+            now=datetime.now(UTC),
+        )
+        assert result is not None
+        assert result != "terminal"
+        assert result.action == "retry"
+        await session.commit()
+        retried = await WorkspaceRepository(session).get(result.new_workspace_id)
+
+    assert retried is not None
+    assert retried.task_policy[CURSOR_AUTO_MODE_POLICY_KEY] == "balance"
+    assert retried.task_policy.get("agent_model") is None
+
+
 def test_source_suppression_not_before_more():
     decision = ProviderRecoveryDecision(
         action="retry",

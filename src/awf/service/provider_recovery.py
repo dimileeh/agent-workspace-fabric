@@ -641,7 +641,9 @@ async def create_provider_recovery_attempt_row(
         decision=decision,
     )
     target_agent = decision.target_agent or source.agent
-    if decision.target_model is not None:
+    # Same-provider retries may carry target_model equal to the current Auto
+    # selector; only real fallbacks should pin a fixed model and clear mode.
+    if decision.action == "fallback" and decision.target_model is not None:
         new_policy = _install_fixed_recovery_model(new_policy, decision.target_model)
 
     retried = await repo.create(
