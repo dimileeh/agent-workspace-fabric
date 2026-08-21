@@ -53,7 +53,7 @@ def test_service_git_environment_forwards_github_token_for_gh_cli(tmp_path: Path
 
 @pytest.mark.unit
 def test_service_git_environment_marks_worker_managed_worktrees_safe(tmp_path: Path) -> None:
-    env = worker_mod._service_git_environment(tmp_path / "host-home")
+    env = worker_mod._service_git_environment(tmp_path / "host-home", source_env={})
     assert env["GIT_CONFIG_COUNT"] == "1"
     assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert env["GIT_CONFIG_VALUE_0"] == "*"
