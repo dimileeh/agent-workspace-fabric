@@ -1185,10 +1185,18 @@ def _markdown_emphasis_run_can_open(text: str, start: int, length: int, marker: 
 
 
 def _emphasis_run_pair_blocked_by_multiple_of_three(
-    opener_len: int, closer_len: int, closer_can_open: bool
+    opener_len: int,
+    closer_len: int,
+    closer_can_open: bool,
+    opener_can_close: bool,
 ) -> bool:
-    """Return whether CommonMark rule 9 blocks pairing these run lengths."""
-    if not closer_can_open:
+    """Return whether CommonMark rule 9 blocks pairing these run lengths.
+
+    Rule 9 applies when either delimiter can both open and close emphasis
+    (PRRT_kwDOSJAM6s6bTW7t): checking only the closer misses both-flanking
+    openers that must not pair with a closing-only run of complementary length.
+    """
+    if not closer_can_open and not opener_can_close:
         return False
     total = opener_len + closer_len
     return total % 3 == 0 and opener_len % 3 != 0 and closer_len % 3 != 0
@@ -1294,6 +1302,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     wrapper-length closer stolen by that partial match is detected
     (PRRT_kwDOSJAM6s6bR2FM). Leftover unmatched opener runs that would
     literalize (``***lead* and **done**``) do not block ``trailing_paired``.
+    Rule 9 must consult both delimiter sides: a both-flanking opener blocked
+    against a closing-only complementary-length run (``a*x**``, ``**lead*``)
+    must not claim the trailing wrapper closer (PRRT_kwDOSJAM6s6bTW7t).
 
     Closed Markdown code spans are opaque: ``*`` / ``_`` runs inside them are
     literal content and must not claim the trailing wrapper closer
@@ -1312,7 +1323,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False
     marker = opener[0]
-    open_stack: list[int] = []
+    # Each stack entry is (remaining_len, run_can_close) so rule 9 can consult
+    # opener-side both-flanking when the closer is closing-only
+    # (PRRT_kwDOSJAM6s6bTW7t).
+    open_stack: list[tuple[int, bool]] = []
     trailing_paired = False
     label_depth = 0
     i = 0
@@ -1357,19 +1371,21 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         remaining = length
         if can_close:
             while remaining > 0 and open_stack:
-                opener_len = open_stack[-1]
-                if _emphasis_run_pair_blocked_by_multiple_of_three(opener_len, remaining, can_open):
+                opener_len, opener_can_close = open_stack[-1]
+                if _emphasis_run_pair_blocked_by_multiple_of_three(
+                    opener_len, remaining, can_open, opener_can_close
+                ):
                     break
                 # Prefer strong (2) when both runs still have at least two.
                 consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
-                open_stack[-1] -= consumed
+                open_stack[-1] = (opener_len - consumed, opener_can_close)
                 remaining -= consumed
-                if open_stack[-1] == 0:
+                if open_stack[-1][0] == 0:
                     open_stack.pop()
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:
-            open_stack.append(remaining)
+            open_stack.append((remaining, can_close))
         i = j
     return trailing_paired
 

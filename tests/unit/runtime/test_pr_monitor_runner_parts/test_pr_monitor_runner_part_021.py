@@ -1302,9 +1302,10 @@ class TestParseVerdict:
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
             # Partial longer-run match steals the trailing closer
-            # (PRRT_kwDOSJAM6s6bR2FM).
+            # (PRRT_kwDOSJAM6s6bR2FM). Both-flanking openers blocked by rule 9
+            # against a complementary-length closer (``**lead*``) do not steal
+            # and remain valid whole-line wraps (PRRT_kwDOSJAM6s6bTW7t).
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
-            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
             # Punctuation-to-alphanumeric mid run is opening-only; consuming it as
             # a closer would wrongly resolve false_positive (PRRT_kwDOSJAM6s6bShqh).
             "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
@@ -1389,12 +1390,13 @@ class TestParseVerdict:
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
             # Longer mid-run partially pairs with a short closer then the
-            # trailing wrapper-length closer (PRRT_kwDOSJAM6s6bR2FM).
+            # trailing wrapper-length closer (PRRT_kwDOSJAM6s6bR2FM). A
+            # both-flanking ``**`` blocked by rule 9 against ``*`` does not
+            # steal (PRRT_kwDOSJAM6s6bTW7t).
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
-            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
             "__AWF-VERDICT: FALSE POSITIVE: ___lead_ rest__",
-            # Shorter mid opener + trailing wrapper at EOS: EOS is not
-            # left-flanking, so rule 9 does not block and the mid run steals
+            # Shorter mid opener + trailing wrapper at EOS: space-preceded mid
+            # run cannot close, so rule 9 does not block and the mid run steals
             # the closer (PRRT_kwDOSJAM6s6bTBv4).
             "**AWF-VERDICT: FALSE POSITIVE: reason *x**",
             "*AWF-VERDICT: FALSE POSITIVE: reason *x*",
@@ -1567,6 +1569,21 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)**",
                 "AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)",
             ),
+            # Both-flanking mid ``*`` plus closing-only trailing ``**``: rule 9
+            # blocks pairing when the opener can close, so the outer wrapper
+            # stays valid (PRRT_kwDOSJAM6s6bTW7t).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: a*x**",
+                "AWF-VERDICT: FALSE POSITIVE: a*x",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
+                "AWF-VERDICT: FALSE POSITIVE: **lead* rest",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: *foo**",
+                "AWF-VERDICT: FALSE POSITIVE: *foo",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1601,7 +1618,10 @@ class TestParseVerdict:
             # Partial longer-run match consumes the trailing wrapper-length
             # closer inside the reason (PRRT_kwDOSJAM6s6bR2FM).
             ("***lead* rest**", "**", True),
-            ("**lead* rest*", "*", True),
+            # Both-flanking opener + complementary closer: rule 9 blocks when
+            # the opener can close, so the trailing run is not stolen
+            # (PRRT_kwDOSJAM6s6bTW7t).
+            ("**lead* rest*", "*", False),
             ("___lead_ rest__", "__", True),
             # Escaped markers are not delimiter runs.
             (r"see \**literal and **ok**", "**", True),
@@ -1616,11 +1636,15 @@ class TestParseVerdict:
             ("already_correct_", "_", False),
             ("see_this_", "_", False),
             ("please clarify_", "_", False),
-            # Trailing ``**`` at EOS cannot open (CommonMark EOL=whitespace), so
-            # rule 9 does not block; the length-1 mid opener steals one closer
-            # star (PRRT_kwDOSJAM6s6bTBv4).
-            ("*foo**", "**", True),
+            # Space-preceded length-1 mid opener cannot close, so rule 9 does
+            # not block; it steals one star from the trailing ``**``
+            # (PRRT_kwDOSJAM6s6bTBv4). A BOL both-flanking ``*`` is blocked by
+            # rule 9 against trailing ``**`` (PRRT_kwDOSJAM6s6bTW7t).
+            ("*foo**", "**", False),
             ("reason *x**", "**", True),
+            # Both-flanking mid ``*`` can close: rule 9 must also consult the
+            # opener and block pairing with trailing ``**`` (PRRT_kwDOSJAM6s6bTW7t).
+            ("a*x**", "**", False),
             # Code-span markers are opaque; trailing closer is not claimed
             # (PRRT_kwDOSJAM6s6bShql).
             ("see `**`**", "**", False),
@@ -1742,9 +1766,10 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_close(".**", 1, 2, "*") is True
         assert _markdown_emphasis_run_can_close(".** ", 1, 2, "*") is True
         assert _markdown_emphasis_run_can_close(".**$", 1, 2, "*") is True
-        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True) is True
-        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False) is False
-        assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True) is False
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True, False) is True
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False, False) is False
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False, True) is True
+        assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True, True) is False
         # Escaped marker characters are never flanking runs.
         assert _markdown_emphasis_run_can_close(r"a\*", 2, 1, "*") is False
         assert _markdown_emphasis_run_can_open(r"\*", 1, 1, "*") is False
