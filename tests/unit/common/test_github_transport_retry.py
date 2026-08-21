@@ -14,6 +14,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
     _create_pr_reconcile_head,
+    _reconcile_matches_head_repo,
 )
 from awf.common.github_retry import (
     GITHUB_TRANSPORT_MAX_ATTEMPTS,
@@ -28,23 +29,107 @@ from awf.common.github_transport import execute_gh_with_retry as _execute_gh_wit
 @pytest.mark.unit
 def test_create_pr_reconcile_head_maps_cross_fork_and_same_repo() -> None:
     repo = RepoRef(owner="base-org", name="project")
+    # (list_branch, expected_slug | None, expected_owner | None)
     assert _create_pr_reconcile_head(repo=repo, head="feature") == (
         "feature",
         "base-org/project",
+        None,
     )
+    # Cross-fork without source_repo: match by owner (renamed-fork safe).
     assert _create_pr_reconcile_head(repo=repo, head="fork-owner:feature") == (
         "feature",
-        "fork-owner/project",
+        None,
+        "fork-owner",
+    )
+    fork = RepoRef(owner="fork-owner", name="project-renamed")
+    assert _create_pr_reconcile_head(repo=repo, head="fork-owner:feature", source_repo=fork) == (
+        "feature",
+        "fork-owner/project-renamed",
+        None,
     )
     # Malformed qualified heads fall back to same-repo matching on the raw value.
     assert _create_pr_reconcile_head(repo=repo, head=":feature") == (
         ":feature",
         "base-org/project",
+        None,
     )
     assert _create_pr_reconcile_head(repo=repo, head="acme/nested:feature") == (
         "acme/nested:feature",
         "base-org/project",
+        None,
     )
+    assert _reconcile_matches_head_repo(
+        "fork-owner/project-renamed",
+        expected_slug="fork-owner/project-renamed",
+        expected_owner=None,
+    )
+    assert _reconcile_matches_head_repo(
+        "fork-owner/project-renamed",
+        expected_slug=None,
+        expected_owner="fork-owner",
+    )
+    assert not _reconcile_matches_head_repo(
+        "other/project",
+        expected_slug=None,
+        expected_owner="fork-owner",
+    )
+    assert not _reconcile_matches_head_repo(
+        "a/b",
+        expected_slug=None,
+        expected_owner=None,
+    )
+
+
+@pytest.mark.unit
+async def test_create_pr_reconciles_renamed_fork_by_owner_and_source_slug() -> None:
+    """Renamed fork head_repo_slug must still reconcile after a lost create."""
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1,
+        stderr="a pull request already exists for fork-owner:feature",
+    )
+    runner.queue_result(
+        returncode=0,
+        stdout=_open_pr_list_payload(number=42, repo_slug="fork-owner/project-renamed"),
+    )
+    gh = GitHubClient(runner, sleep=_RecordedSleep())
+    url = await gh.create_pull_request(
+        repo=RepoRef(owner="base-org", name="project"),
+        base="main",
+        head="fork-owner:feature",
+        title="t",
+        body="b",
+        source_repo=RepoRef(owner="fork-owner", name="project-renamed"),
+    )
+    assert url == "https://github.com/fork-owner/project-renamed/pull/42"
+    outcome = gh.last_pr_create_outcome
+    assert outcome is not None
+    assert outcome.strategy == "reconciled_after_duplicate"
+    assert outcome.matched_pr is not None
+    assert outcome.matched_pr["head_repo_slug"] == "fork-owner/project-renamed"
+
+    # Without source_repo, owner-only matching still finds the renamed fork.
+    runner2 = FakeCommandRunner()
+    runner2.queue_result(
+        returncode=1,
+        stderr="a pull request already exists for fork-owner:feature",
+    )
+    runner2.queue_result(
+        returncode=0,
+        stdout=_open_pr_list_payload(number=43, repo_slug="fork-owner/project-renamed"),
+    )
+    gh2 = GitHubClient(runner2, sleep=_RecordedSleep())
+    url2 = await gh2.create_pull_request(
+        repo=RepoRef(owner="base-org", name="project"),
+        base="main",
+        head="fork-owner:feature",
+        title="t",
+        body="b",
+    )
+    assert url2 == "https://github.com/fork-owner/project-renamed/pull/43"
+    outcome2 = gh2.last_pr_create_outcome
+    assert outcome2 is not None
+    assert outcome2.strategy == "reconciled_after_duplicate"
 
 
 class _RecordedSleep:

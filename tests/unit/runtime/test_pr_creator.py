@@ -832,6 +832,47 @@ class TestPushAndOpen:
         assert list_calls[0].args[list_calls[0].args.index("--head") + 1] == "awf/ws_fork"
 
     @pytest.mark.unit
+    async def test_github_transient_cross_fork_reconciles_renamed_fork_pr(self) -> None:
+        # Push remote is a renamed fork (slug != base repo name). Create uses
+        # owner:branch; reconcile must match the real head_repo_slug.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push to renamed fork
+        runner.queue_result(
+            returncode=1,
+            stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+        )
+        runner.queue_result(
+            returncode=0,
+            stdout=_open_pr_list_payload(
+                number=56,
+                repo_slug="contributor/aira-agent-fork",
+                branch="awf/ws_renamed",
+                head_sha="c" * 40,
+                pr_url_repo_slug="dimileeh/aira-agent",
+            ),
+        )
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_renamed",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=_gh_client(runner),
+            repo_url=_GH_REPO_URL,
+            remote_url="git@github.com:contributor/aira-agent-fork.git",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/56"
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "reconciled_after_transient"
+        assert result.open_metadata["matched_pr"]["head_repo_slug"] == (
+            "contributor/aira-agent-fork"
+        )
+
+    @pytest.mark.unit
     async def test_github_deterministic_pr_create_failure_does_not_retry_or_lookup(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
@@ -1081,8 +1122,11 @@ class TestPushAndOpen:
         )
         # Cross-fork create head is owner:branch for the API only; the result
         # branch must stay the plain ref so remote_push_branch handoff is valid.
+        # source_repo preserves the push fork slug for renamed-fork reconcile.
         assert forge.calls[0]["head"] == "contributor:awf/ws_xyz"
-        assert forge.calls[0]["source_repo"] is None
+        assert forge.calls[0]["source_repo"] == RepoRef(
+            owner="contributor", name="aira-agent", forge="github"
+        )
         assert result.branch == "awf/ws_xyz"
 
     @pytest.mark.unit

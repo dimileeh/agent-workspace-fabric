@@ -264,8 +264,9 @@ class PullRequestCreator:
 
         # Push may target an adopted fork via ``remote_url``, but the PR must
         # open against the workspace base ``repo_url``. When those differ, encode
-        # the fork head per forge: GitHub accepts ``owner:branch``; Bitbucket
-        # needs an unqualified branch plus ``source_repo`` (see BitbucketClient).
+        # the fork head per forge: GitHub accepts ``owner:branch`` (and we also
+        # pass ``source_repo`` so create-reconcile can match a renamed fork's
+        # real slug); Bitbucket needs an unqualified branch plus ``source_repo``.
         repo = RepoRef.from_url(repo_url)
         create_head = branch_name
         source_repo: RepoRef | None = None
@@ -275,10 +276,9 @@ class PullRequestCreator:
             except ValueError:
                 push_repo = None
             if push_repo is not None and push_repo.slug().lower() != repo.slug().lower():
+                source_repo = push_repo
                 if repo.forge == "github":
                     create_head = f"{push_repo.owner}:{branch_name}"
-                else:
-                    source_repo = push_repo
         try:
             if repo.forge == "github":
                 return await self._create_github_pull_request_with_redundancy(
@@ -290,6 +290,7 @@ class PullRequestCreator:
                     title=title,
                     body=body,
                     head_sha=head_sha,
+                    source_repo=source_repo,
                 )
             url = await forge_client.create_pull_request(
                 repo=repo,
@@ -349,6 +350,7 @@ class PullRequestCreator:
         title: str,
         body: str,
         head_sha: str | None,
+        source_repo: RepoRef | None = None,
     ) -> PullRequestResult:
         github_client = forge_client if isinstance(forge_client, GitHubClient) else None
         try:
@@ -362,6 +364,7 @@ class PullRequestCreator:
                     head=head,
                     title=title,
                     body=body,
+                    source_repo=source_repo,
                     transient_max_attempts=self._pr_create_transient_max_retries + 1,
                 )
             else:
@@ -371,6 +374,7 @@ class PullRequestCreator:
                     head=head,
                     title=title,
                     body=body,
+                    source_repo=source_repo,
                 )
         except GitHubClientError as exc:
             details: dict[str, object] | None = None

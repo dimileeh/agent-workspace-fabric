@@ -186,7 +186,8 @@ class ForgeClient(Protocol):
 
         ``source_repo`` identifies a fork head repository when ``head`` is an
         unqualified branch name (Bitbucket cross-fork creates). GitHub callers
-        keep using ``owner:branch`` in ``head`` and leave ``source_repo`` unset.
+        use ``owner:branch`` in ``head`` and may also pass ``source_repo`` so
+        create-reconcile can match a renamed fork's real slug.
         """
         ...
 

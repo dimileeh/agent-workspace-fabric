@@ -105,13 +105,23 @@ def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
     return metadata
 
 
-def _create_pr_reconcile_head(*, repo: RepoRef, head: str) -> tuple[str, str]:
-    """Map create ``head`` to ``(list_branch, expected_head_repo_slug_lower)``.
+def _create_pr_reconcile_head(
+    *,
+    repo: RepoRef,
+    head: str,
+    source_repo: RepoRef | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Map create ``head`` to ``(list_branch, expected_slug, expected_owner)``.
 
     Cross-fork creates pass ``owner:branch``. ``gh pr list --head`` does not
-    accept that qualified form, so reconcile lists by the plain branch and
-    matches the fork's ``owner/<repo.name>`` slug. Same-repo creates keep the
-    plain branch and expect the base repo slug.
+    accept that qualified form, so reconcile lists by the plain branch.
+
+    When ``source_repo`` is provided (the push/fork remote), match that slug
+    exactly — including renamed forks whose name differs from ``repo.name``.
+    Without ``source_repo``, match any open PR whose head-repo **owner** equals
+    the qualified owner (still renamed-fork safe; avoids assuming
+    ``owner/<base-repo-name>``). Same-repo creates keep the plain branch and
+    expect the base repo slug.
     """
     stripped = head.strip()
     if ":" in stripped:
@@ -119,8 +129,27 @@ def _create_pr_reconcile_head(*, repo: RepoRef, head: str) -> tuple[str, str]:
         owner = owner.strip()
         branch = branch.strip()
         if owner and branch and "/" not in owner:
-            return branch, f"{owner}/{repo.name}".lower()
-    return stripped, repo.slug().lower()
+            if source_repo is not None:
+                return branch, source_repo.slug().lower(), None
+            return branch, None, owner.lower()
+    if source_repo is not None:
+        return stripped, source_repo.slug().lower(), None
+    return stripped, repo.slug().lower(), None
+
+
+def _reconcile_matches_head_repo(
+    head_repo_slug: str,
+    *,
+    expected_slug: str | None,
+    expected_owner: str | None,
+) -> bool:
+    """True when a listed open PR's head repo matches create-reconcile expectations."""
+    slug = head_repo_slug.lower()
+    if expected_slug is not None:
+        return slug == expected_slug
+    if expected_owner is not None:
+        return slug.partition("/")[0] == expected_owner
+    return False
 
 
 # GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
@@ -986,7 +1015,7 @@ class GitHubClient:
         head: str,
         title: str,
         body: str,
-        source_repo: RepoRef | None = None,  # noqa: ARG002 - ForgeClient parity; GitHub uses head
+        source_repo: RepoRef | None = None,
         transient_max_attempts: int | None = None,
     ) -> str:
         """Open a PR for an existing ``head`` branch against ``base``.
@@ -997,6 +1026,9 @@ class GitHubClient:
 
         Both branches already exist on origin (no worktree push), so this is
         a plain ``gh pr create`` and returns the new PR URL printed on stdout.
+
+        ``source_repo`` is optional for GitHub: when set (push/fork remote),
+        create-reconcile matches that slug so renamed forks are not rejected.
         """
         failures: list[dict[str, object]] = []
         reconcile_lookups: list[dict[str, object]] = []
@@ -1005,7 +1037,9 @@ class GitHubClient:
 
         async def _reconcile_create_pr() -> str | None:
             nonlocal reconciled_match, duplicate_lookup_failed
-            list_branch, expected_head_repo = _create_pr_reconcile_head(repo=repo, head=head)
+            list_branch, expected_slug, expected_owner = _create_pr_reconcile_head(
+                repo=repo, head=head, source_repo=source_repo
+            )
             try:
                 candidates = await list_open_pull_requests_for_branch(
                     runner=self._runner,
@@ -1041,15 +1075,21 @@ class GitHubClient:
             matching = [
                 candidate
                 for candidate in candidates
-                if candidate.head_repo_slug.lower() == expected_head_repo
+                if _reconcile_matches_head_repo(
+                    candidate.head_repo_slug,
+                    expected_slug=expected_slug,
+                    expected_owner=expected_owner,
+                )
             ]
             lookup_detail: dict[str, object] = {
                 "status": "found" if matching else "not_found",
                 "candidate_count": len(candidates),
                 "same_repo_count": len(matching),
                 "fork_collision_count": len(candidates) - len(matching),
-                "expected_head_repo_slug": expected_head_repo,
+                "expected_head_repo_slug": expected_slug,
             }
+            if expected_owner is not None:
+                lookup_detail["expected_head_owner"] = expected_owner
             if not matching:
                 reconcile_lookups.append(lookup_detail)
                 return None
