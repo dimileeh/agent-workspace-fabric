@@ -193,7 +193,10 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
         execution_claim_epoch=3,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
-    repo = SimpleNamespace(get=AsyncMock(return_value=persisted))
+    repo = SimpleNamespace(
+        get=AsyncMock(side_effect=AssertionError("ready path must use get_for_update")),
+        get_for_update=AsyncMock(return_value=persisted),
+    )
     session = SimpleNamespace(commit=AsyncMock())
 
     class _SessionCtx:
@@ -221,6 +224,8 @@ async def test_provisioner_deferred_cursor_preflight_persists_ready_snapshot(
     )
     assert stopped is False
     harness.mark_failed.assert_not_awaited()
+    repo.get_for_update.assert_awaited_once_with("ws_test")
+    repo.get.assert_not_awaited()
     assert persisted.task_policy["provider_readiness_preflight"] == {
         "blocks_launch": False,
         "reason_code": "CURSOR_ROUTER_AVAILABLE",
@@ -260,7 +265,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
         execution_claim_epoch=9,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
-    repo = SimpleNamespace(get=AsyncMock(return_value=persisted))
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
     session = SimpleNamespace(commit=AsyncMock())
 
     class _SessionCtx:
@@ -287,6 +292,7 @@ async def test_provisioner_deferred_cursor_preflight_skips_ready_write_when_fenc
         execution_claim_epoch=3,
     )
     assert stopped is True
+    repo.get_for_update.assert_awaited_once_with("ws_test")
     assert "provider_readiness_preflight" not in persisted.task_policy
     assert "provider_readiness_preflight" not in ws.task_policy
     assert recorded == []
@@ -310,7 +316,7 @@ async def test_provisioner_deferred_cursor_preflight_stops_on_stale_status(
         status=WorkspaceStatus.cancelled.value,
         task_policy={"cursor_auto_mode": "intelligence"},
     )
-    repo = SimpleNamespace(get=AsyncMock(return_value=persisted))
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
     session = SimpleNamespace(commit=AsyncMock())
 
     class _SessionCtx:
@@ -335,6 +341,7 @@ async def test_provisioner_deferred_cursor_preflight_stops_on_stale_status(
         profile=WorkspaceProfile(name="repo-local"),
     )
     assert stopped is True
+    repo.get_for_update.assert_awaited_once_with("ws_test")
     assert harness.stale_skips == ["deferred_cursor_router_preflight"]
     session.commit.assert_awaited_once()
 
@@ -352,7 +359,7 @@ async def test_provisioner_deferred_cursor_preflight_stops_when_workspace_missin
         "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
         _ready,
     )
-    repo = SimpleNamespace(get=AsyncMock(return_value=None))
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=None))
     session = SimpleNamespace(commit=AsyncMock())
 
     class _SessionCtx:
@@ -377,4 +384,5 @@ async def test_provisioner_deferred_cursor_preflight_stops_when_workspace_missin
         profile=WorkspaceProfile(name="repo-local"),
     )
     assert stopped is True
+    repo.get_for_update.assert_awaited_once_with("ws_gone")
     session.commit.assert_not_awaited()

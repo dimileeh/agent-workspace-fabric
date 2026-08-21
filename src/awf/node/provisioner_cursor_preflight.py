@@ -85,7 +85,9 @@ class ProvisionerCursorPreflightMixin:
 
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            persisted = await repo.get(workspace_id)
+            # Row lock makes status/epoch fence atomic with the readiness write
+            # so cancel or a later claimant cannot commit between read and commit.
+            persisted = await repo.get_for_update(workspace_id)
             if persisted is None:
                 # Cancel/destroy may remove the row during the Router probe;
                 # do not continue into egress/stack launch with only in-memory ws.
