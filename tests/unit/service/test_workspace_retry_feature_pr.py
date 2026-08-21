@@ -14,7 +14,11 @@ from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
-from awf.node.provisioner_helpers import _provision_base_commit, _provision_checkout_base_branch
+from awf.node.provisioner_helpers import (
+    _provision_base_commit,
+    _provision_checkout_base_branch,
+    _provision_remote_push_branch,
+)
 from awf.service.workspaces import (
     WorkspaceRetryPrAlreadyMergedError,
     WorkspaceRetryPrStateUnavailableError,
@@ -674,6 +678,98 @@ async def test_retry_recovers_adopted_sync_feature_pr_head_and_base_from_policy(
     # sync_feature_pr checkouts use refs/pull/N/head; base_commit scopes the PR.
     assert _provision_checkout_base_branch(retried) == "refs/pull/42/head"
     assert _provision_base_commit(retried, checked_out_head="h" * 40) == "a" * 40
+
+
+async def test_retry_persists_live_head_into_adopted_sync_feature_pr_policy(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Renamed forge heads must update pr_adoption so provisioning keeps them.
+
+    ``_provision_remote_push_branch`` prefers ``pr_adoption.head_ref`` over
+    ``remote_push_branch``. Leaving a stale adoption head after a live snapshot
+    would overwrite the live push target during provision (PRRT_kwDOSJAM6s6bGXss).
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/renamed-adopted",
+        remote_push_branch="contributors/stale-adopted-head",
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        assert source.task_policy["pr_adoption"]["head_ref"] == "contributors/fix-123"
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async def live_snapshot(_source: Workspace, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/renamed-live-head",
+            base_sha="d" * 40,
+        )
+
+    monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry renamed adopted PR head",
+            settings=settings,
+            provider_environ={},
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "sync_feature_pr"
+    assert retried.remote_push_branch == "contributors/renamed-live-head"
+    assert retried.base_commit == "d" * 40
+    adoption = retried.task_policy["pr_adoption"]
+    assert adoption["head_ref"] == "contributors/renamed-live-head"
+    assert adoption["base_sha"] == "d" * 40
+    assert _provision_remote_push_branch(retried) == "contributors/renamed-live-head"
+    assert _provision_checkout_base_branch(retried) == "refs/pull/42/head"
+
+
+@pytest.mark.parametrize(
+    ("task_policy", "head_ref", "base_sha", "expected"),
+    [
+        ({}, "live/head", "a" * 40, {}),
+        ({"pr_adoption": "not-a-dict"}, "live/head", "a" * 40, {"pr_adoption": "not-a-dict"}),
+        (
+            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
+            "  ",
+            None,
+            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
+        ),
+        (
+            {"pr_adoption": {"head_ref": "stale", "base_sha": "b" * 40}},
+            " live/head ",
+            " c" + ("0" * 39),
+            {"pr_adoption": {"head_ref": "live/head", "base_sha": "c" + ("0" * 39)}},
+        ),
+    ],
+)
+def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
+    task_policy: dict,
+    head_ref: str | None,
+    base_sha: str | None,
+    expected: dict,
+) -> None:
+    workspaces_retry_service._sync_retried_adoption_live_refs(
+        task_policy,
+        head_ref=head_ref,
+        base_sha=base_sha,
+    )
+    assert task_policy == expected
 
 
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(

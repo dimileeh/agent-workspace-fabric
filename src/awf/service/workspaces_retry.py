@@ -199,6 +199,28 @@ def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
     return _adoption_policy_str(source, "base_sha")
 
 
+def _sync_retried_adoption_live_refs(
+    task_policy: dict[str, Any],
+    *,
+    head_ref: str | None,
+    base_sha: str | None,
+) -> None:
+    """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
+
+    Provisioning prefers ``pr_adoption.head_ref`` over ``remote_push_branch``
+    via ``_provision_remote_push_branch``. If retry only updates the column and
+    leaves a stale adoption head (e.g. after a forge rename), provision
+    overwrites the live push target and sends fixes to the wrong branch.
+    """
+    adoption = task_policy.get("pr_adoption")
+    if not isinstance(adoption, dict):
+        return
+    if isinstance(head_ref, str) and head_ref.strip():
+        adoption["head_ref"] = head_ref.strip()
+    if isinstance(base_sha, str) and base_sha.strip():
+        adoption["base_sha"] = base_sha.strip()
+
+
 def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
     """Return whether retry should consult live forge state for this source PR."""
     if _planning_scope_retry_context(source) is not None:
@@ -827,6 +849,14 @@ async def retry_workspace_row(
                     "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
                 },
             )
+        # Provisioning prefers pr_adoption.head_ref over remote_push_branch.
+        # Keep the adoption policy in lockstep with the live forge refs so a
+        # renamed PR head is not overwritten back to the stale adoption value.
+        _sync_retried_adoption_live_refs(
+            retried_task_policy,
+            head_ref=retry_remote_push_branch,
+            base_sha=retry_base_commit,
+        )
 
     retried = await repo.create(
         repo_url=source.repo_url,
