@@ -151,24 +151,37 @@ async def create_workspace_row(
     # Also overlay any profile-declared provider API key (e.g. OPENAI_API_KEY) the
     # agent container would receive, so the non-Ollama create-time credential gate
     # does not block a workspace whose credential lives only in the profile env.
-    preflight_environ = overlay_profile_provider_credentials(
-        overlay_profile_ollama_base_url(
-            provider_environ if provider_environ is not None else os.environ,
+    # ``profile_ref=auto`` cannot load repo-local ``.awf/workspace.yml`` until
+    # provisioning clones the worktree. A create-time Cursor Router catalog probe
+    # would authenticate with the worker's CURSOR_API_KEY (or miss a profile-only
+    # key) and permanently record the result, skipping the provision-time recheck
+    # that overlays the resolved profile credentials. Defer when cursor_auto_mode
+    # is set, the profile is still unresolved, and the operator did not override.
+    defer_cursor_router_preflight = (
+        resolved_profile is None
+        and cursor_auto_mode_from_task_policy(base_task_policy) is not None
+        and not payload.preflight.provider_readiness_override
+    )
+    preflight: dict[str, Any] | None = None
+    if not defer_cursor_router_preflight:
+        preflight_environ = overlay_profile_provider_credentials(
+            overlay_profile_ollama_base_url(
+                provider_environ if provider_environ is not None else os.environ,
+                resolved_profile,
+            ),
             resolved_profile,
-        ),
-        resolved_profile,
-    )
-    preflight = await _selected_provider_preflight_for_task_async(
-        resolved_settings,
-        agent=payload.task.agent,
-        task_policy=base_task_policy,
-        override=payload.preflight.provider_readiness_override,
-        override_reason=payload.preflight.provider_readiness_override_reason,
-        provider_environ=preflight_environ,
-        run_subprocess=run_subprocess,
-        http_get=http_get,
-    )
-    _raise_if_provider_preflight_blocks(preflight)
+        )
+        preflight = await _selected_provider_preflight_for_task_async(
+            resolved_settings,
+            agent=payload.task.agent,
+            task_policy=base_task_policy,
+            override=payload.preflight.provider_readiness_override,
+            override_reason=payload.preflight.provider_readiness_override_reason,
+            provider_environ=preflight_environ,
+            run_subprocess=run_subprocess,
+            http_get=http_get,
+        )
+        _raise_if_provider_preflight_blocks(preflight)
     workspace_id = repositories.new_workspace_id()
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
@@ -177,11 +190,11 @@ async def create_workspace_row(
         resolved_profile=resolved_profile,
         workspace_id=workspace_id,
     )
+    task_policy_payload: dict[str, Any] = {**base_task_policy}
+    if preflight is not None:
+        task_policy_payload["provider_readiness_preflight"] = preflight
     task_policy = task_policy_with_coordination_warnings(
-        {
-            **base_task_policy,
-            "provider_readiness_preflight": preflight,
-        },
+        task_policy_payload,
         owned_path_overlap_coordination_warnings(overlaps),
     )
 
@@ -260,7 +273,8 @@ async def create_workspace_row(
         overlap_risk_summary=overlap_risk_summary(overlaps),
         score_summary=scheduler_score.score_summary,
     )
-    await _record_provider_readiness_preflight(repo, ws, preflight)
+    if preflight is not None:
+        await _record_provider_readiness_preflight(repo, ws, preflight)
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
