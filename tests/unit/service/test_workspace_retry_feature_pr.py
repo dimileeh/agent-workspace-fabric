@@ -25,6 +25,7 @@ from awf.service.workspaces_retry import _PrefetchedFeaturePrState
 from tests.unit.service._workspace_retry_helpers import (
     _mark_failed,
     _request_with_preflight_override,
+    _seed_failed_source_workspace,
     _settings_with_host_home,
     factory,
 )
@@ -572,6 +573,58 @@ async def test_retry_rejects_feature_pr_merged_after_failure(
     }
     assert exc_info.value.error_code == "PR_ALREADY_MERGED"
     assert [workspace.id for workspace in workspaces] == [first.id]
+
+
+async def test_retry_rejects_adopted_sync_feature_pr_merged_after_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Adopted monitors use sync_feature_pr and must still hit PR_ALREADY_MERGED."""
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/merged-adopted",
+        remote_push_branch="contributors/fix-123",
+        failure_reason_code="MONITOR_FAILED",
+        # Leave workspace.pr_url unset so identity comes from pr_adoption —
+        # the case the preserve predicate previously skipped by task_kind alone.
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        assert source.task_kind == "sync_feature_pr"
+        assert source.pr_url is None
+        assert source.pr_number is None
+        assert source.task_policy["pr_adoption"]["pr_number"] == 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryPrAlreadyMergedError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first_id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="reject merged adopted PR retry",
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.merged),
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+
+    assert exc_info.value.detail == {
+        "source_workspace_id": first_id,
+        "pr_number": 42,
+        "pr_url": "https://github.com/example/retryable/pull/42",
+        "reason_code": "PR_ALREADY_MERGED",
+    }
+    assert exc_info.value.error_code == "PR_ALREADY_MERGED"
+    assert [workspace.id for workspace in workspaces] == [first_id]
 
 
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(

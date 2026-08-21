@@ -132,12 +132,48 @@ def _pr_number_from_url(pr_url: str) -> int | None:
     return pr_number if pr_number > 0 else None
 
 
+def _sync_feature_pr_adoption(source: Workspace) -> Mapping[str, Any] | None:
+    """Return ``task_policy.pr_adoption`` for an adopted sync-feature-PR workspace."""
+    if source.task_kind != TaskKind.sync_feature_pr.value:
+        return None
+    policy = source.task_policy if isinstance(source.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption")
+    return adoption if isinstance(adoption, Mapping) else None
+
+
+def _existing_feature_pr_url(source: Workspace) -> str | None:
+    """Return the source's feature/adopted PR URL from columns or adoption policy."""
+    if source.pr_url:
+        return source.pr_url
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    pr_url = adoption.get("pr_url")
+    if isinstance(pr_url, str) and pr_url.strip():
+        return pr_url.strip()
+    return None
+
+
 def _existing_feature_pr_number(source: Workspace) -> int | None:
-    """Return the source's feature PR number from ``pr_number`` or ``pr_url``."""
+    """Return the source's feature/adopted PR number from columns, URL, or adoption."""
     if source.pr_number is not None:
         return source.pr_number
-    if source.pr_url:
-        return _pr_number_from_url(source.pr_url)
+    pr_url = _existing_feature_pr_url(source)
+    if pr_url:
+        from_url = _pr_number_from_url(pr_url)
+        if from_url is not None:
+            return from_url
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    raw = adoption.get("pr_number")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        parsed = int(raw.strip())
+        return parsed if parsed > 0 else None
     return None
 
 
@@ -147,8 +183,8 @@ def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
         return False
     pr_number = _existing_feature_pr_number(source)
     return (
-        source.task_kind == TaskKind.feature_branch_pr.value
-        and bool(source.pr_url)
+        source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
+        and _existing_feature_pr_url(source) is not None
         and pr_number is not None
     )
 
@@ -227,7 +263,7 @@ async def _prefetch_existing_feature_pr_state(
             detail={
                 "source_workspace_id": source.id,
                 "pr_number": pr_number,
-                "pr_url": source.pr_url,
+                "pr_url": _existing_feature_pr_url(source),
                 "reason_code": "PR_ALREADY_MERGED",
             },
         )
@@ -609,6 +645,7 @@ async def retry_workspace_row(
     # external call. The forge lookup itself already ran before get_for_update
     # so RetryPolicy.READ sleeps never hold the source row lock either.
     existing_feature_pr_number = _existing_feature_pr_number(source)
+    existing_feature_pr_url = _existing_feature_pr_url(source)
     # Preserve uses the same candidate helper as unlocked prefetch so the two
     # gates cannot drift. Closed-PR snapshot handling still keys off raw
     # feature-PR identity (planning-scope retries may clear a closed head even
@@ -616,8 +653,8 @@ async def retry_workspace_row(
     preserve_existing_feature_pr = _is_existing_feature_pr_preserve_candidate(source)
     existing_feature_pr = (
         existing_feature_pr_number is not None
-        and source.task_kind == TaskKind.feature_branch_pr.value
-        and bool(source.pr_url)
+        and source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
+        and existing_feature_pr_url is not None
     )
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     live_pr_head_ref: str | None = None
@@ -736,7 +773,7 @@ async def retry_workspace_row(
                 detail={
                     "source_workspace_id": source.id,
                     "pr_number": existing_feature_pr_number,
-                    "pr_url": source.pr_url,
+                    "pr_url": existing_feature_pr_url,
                     "reason_code": "PR_HEAD_REF_UNAVAILABLE",
                 },
             )
@@ -755,7 +792,7 @@ async def retry_workspace_row(
                 detail={
                     "source_workspace_id": source.id,
                     "pr_number": existing_feature_pr_number,
-                    "pr_url": source.pr_url,
+                    "pr_url": existing_feature_pr_url,
                     "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
                 },
             )
@@ -785,7 +822,7 @@ async def retry_workspace_row(
     )
     if preserve_existing_feature_pr:
         assert retry_base_commit is not None
-        retried.pr_url = source.pr_url
+        retried.pr_url = existing_feature_pr_url
         retried.pr_number = existing_feature_pr_number
         retried.base_commit = retry_base_commit
 
