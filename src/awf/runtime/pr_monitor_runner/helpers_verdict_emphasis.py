@@ -650,6 +650,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     ``[outer [inner](url)](foo**bar)`` leaves destination stars as emphasis that
     can steal the wrapper closer (PRRT_kwDOSJAM6s6bUCMq). Image openers stay
     active (images may contain links; links may contain images).
+    When a link or image is formed, CommonMark processes emphasis inside the
+    label in isolation: restore the opener stack to its state at the matching
+    ``[`` so a label closer cannot pair with an opener before the link
+    (``**see [x**](url) rest**`` — PRRT_kwDOSJAM6s6bUs3M). Non-formed brackets
+    keep free pairing; inactive ``]`` matches do not restore.
     Full/collapsed reference labels (``][…]`` / ``][]``) are opaque only when the
     label resolves to a block-level reference definition in the scanned text
     (PRRT_kwDOSJAM6s6bUCMm); otherwise stars in the ref id remain emphasis and
@@ -678,10 +683,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     # (PRRT_kwDOSJAM6s6bTW7t).
     open_stack: list[tuple[int, bool]] = []
     trailing_paired = False
-    # (open_at, is_image, active) — CommonMark deactivates earlier link openers
-    # when a link (not image) is formed so links cannot nest
-    # (PRRT_kwDOSJAM6s6bUCMq).
-    label_opens: list[tuple[int, bool, bool]] = []
+    # (open_at, is_image, active, stack_snapshot) — CommonMark deactivates earlier
+    # link openers when a link (not image) is formed so links cannot nest
+    # (PRRT_kwDOSJAM6s6bUCMq). On formation, restore open_stack to the snapshot
+    # taken at ``[`` so label-internal emphasis is isolated
+    # (PRRT_kwDOSJAM6s6bUs3M).
+    label_opens: list[tuple[int, bool, bool, list[tuple[int, bool]]]] = []
     # Reason is a mid-paragraph extract; do not treat BOS as a definition
     # boundary (PRRT_kwDOSJAM6s6bUPZ6).
     def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
@@ -712,12 +719,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
             is_image = (
                 i > 0 and reason[i - 1] == "!" and not _markdown_char_is_escaped(reason, i - 1)
             )
-            label_opens.append((i, is_image, True))
+            label_opens.append((i, is_image, True, list(open_stack)))
             i += 1
             continue
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
             if label_opens:
-                open_at, is_image, active = label_opens.pop()
+                open_at, is_image, active, stack_snapshot = label_opens.pop()
                 if not active:
                     # Inactive opener matches ``]`` as literal brackets only.
                     i += 1
@@ -741,11 +748,14 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
                             i = next_i
                             formed = True
                 if formed:
+                    # Isolate label emphasis from outer pairing
+                    # (PRRT_kwDOSJAM6s6bUs3M).
+                    open_stack[:] = stack_snapshot
                     if not is_image:
                         # Deactivate earlier link openers (not images).
-                        for idx, (pos, img, _act) in enumerate(label_opens):
+                        for idx, (pos, img, _act, snap) in enumerate(label_opens):
                             if not img:
-                                label_opens[idx] = (pos, img, False)
+                                label_opens[idx] = (pos, img, False, snap)
                     continue
             i += 1
             continue
@@ -840,7 +850,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**… see [details][issue**ref]**`` fails closed (PRRT_kwDOSJAM6s6bUCMm).
     Nested links deactivate the outer opener, so
     ``**… see [outer [inner](url)](foo**bar)**`` likewise fails closed
-    (PRRT_kwDOSJAM6s6bUCMq). A bare unmatched ``](…)``
+    (PRRT_kwDOSJAM6s6bUCMq). Formed-link labels isolate emphasis, so
+    ``**… reason **see [x**](url) rest**`` fails closed when the trailing
+    closer pairs with the mid-reason opener (PRRT_kwDOSJAM6s6bUs3M). A bare
+    unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
     inline link (``[link] (foo**bar)``), so markers steal the closer

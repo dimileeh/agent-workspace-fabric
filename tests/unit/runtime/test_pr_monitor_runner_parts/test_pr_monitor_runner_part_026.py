@@ -227,6 +227,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](foo**bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](foo*bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [outer [inner](url)](__bar)__",
+            # Link-label closers must not pair across the ``[`` boundary; the
+            # mid-reason opener steals the trailing wrapper closer
+            # (PRRT_kwDOSJAM6s6bUs3M).
+            "**AWF-VERDICT: FALSE POSITIVE: reason **see [x**](url) rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: reason *see [x*](url) rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __see [x__](url) rest__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -357,6 +363,14 @@ class TestParseVerdict:
             # (PRRT_kwDOSJAM6s6bUCMm).
             "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**",
             "*AWF-VERDICT: FIXED: see [details][issue*ref]*",
+            # Formed-link labels isolate emphasis: a closer inside the label
+            # cannot close an opener before ``[``, so the trailing run pairs
+            # with that opener and rejects the whole-line wrap
+            # (PRRT_kwDOSJAM6s6bUs3M).
+            "**AWF-VERDICT: FALSE POSITIVE: reason **see [x**](url) rest**",
+            "*AWF-VERDICT: FALSE POSITIVE: reason *see [x*](url) rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __see [x__](url) rest__",
+            "**AWF-VERDICT: FALSE POSITIVE: reason **see ![x**](url) rest**",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -524,6 +538,19 @@ class TestParseVerdict:
             (
                 "**AWF-VERDICT: FALSE POSITIVE: a*x**",
                 "AWF-VERDICT: FALSE POSITIVE: a*x",
+            ),
+            # Label-internal closers are isolated when a link forms, so a
+            # whole-line wrap with no mid-reason opener stays valid
+            # (PRRT_kwDOSJAM6s6bUs3M).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [x**](url) rest**",
+                "AWF-VERDICT: FALSE POSITIVE: see [x**](url) rest",
+            ),
+            # Non-link brackets are literals; label closers may still pair
+            # across ``[`` and leave the trailing wrapper free.
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: reason **see [x**] rest**",
+                "AWF-VERDICT: FALSE POSITIVE: reason **see [x**] rest",
             ),
         ],
     )
