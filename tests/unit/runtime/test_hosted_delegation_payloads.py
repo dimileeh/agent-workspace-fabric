@@ -1134,6 +1134,48 @@ services:
 
 
 @pytest.mark.unit
+def test_rendered_stack_payload_excludes_legacy_unmarked_clarification_service(
+    tmp_path: Path,
+) -> None:
+    """Pre-marker Core clarification must not ship local agent image/auth mounts."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+  clarification:
+    image: awf-agent-runtime:latest
+    working_dir: /workspace
+    volumes:
+      - /run/awf/hosted-auth-placeholders/codex:/run/awf/clarification-auth/0:ro
+    profiles:
+      - awf-clarification
+    networks:
+      - clarification_egress_net
+    command:
+      - sh
+      - -c
+      - sleep infinity
+    restart: "no"
+  agent:
+    image: awf-agent-runtime:latest
+    working_dir: /workspace
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    payload = _hosted_validation_rendered_stack_payload(
+        compose_project="awf_ws_hosted",
+        compose_file=compose_file,
+    )
+
+    assert payload is not None
+    assert set(payload["services"]) == {"postgres"}
+    assert "clarification" not in payload["services"]
+
+
+@pytest.mark.unit
 def test_hosted_profile_environment_omit_ignores_unexpected_container_shapes() -> None:
     """Coverage profile env omission only mutates dict environment containers."""
     list_container: list[object] = []

@@ -352,13 +352,24 @@ def _hosted_validation_rendered_stack_services(
     """Return sanitized non-agent services from a rendered compose document."""
     if not isinstance(services, Mapping):
         return {}
+    # Pre-marker Core clarification services lack the managed stamp; match them
+    # the same way upgrade_persisted_clarification_service does — against the
+    # rendered agent image and working_dir — so hosted stacks never forward the
+    # local helper image or sanitized host-auth mounts.
+    agent = services.get("agent")
+    legacy_agent_image = agent.get("image") if isinstance(agent, Mapping) else None
+    legacy_agent_working_dir = agent.get("working_dir") if isinstance(agent, Mapping) else None
     payload: dict[str, Any] = {}
     for name, service in services.items():
         service_name = str(name)
         if (
             service_name == "agent"
             or not isinstance(service, Mapping)
-            or is_managed_persisted_clarification_service(service)
+            or is_managed_persisted_clarification_service(
+                service,
+                legacy_agent_image=legacy_agent_image,
+                legacy_agent_working_dir=legacy_agent_working_dir,
+            )
         ):
             continue
         payload[service_name] = _hosted_validation_sanitize_compose_service(
