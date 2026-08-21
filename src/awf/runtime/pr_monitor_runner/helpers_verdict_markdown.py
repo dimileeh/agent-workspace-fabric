@@ -369,9 +369,9 @@ _VERDICT_RESULT_LABEL_ATTEMPT_PREFIX = re.compile(
 )
 # Leading Markdown emphasis / strong markers (``**AWF-VERDICT: …**``,
 # ``*AWF-VERDICT: …*``, ``__…__``). Require a following non-space so list
-# markers (``* item``) stay handled by ``_MARKDOWN_LIST_PREFIX``. Attempt-only
-# strip — a trailing emphasized marker must fail closed rather than leave an
-# earlier resolvable verdict selected.
+# markers (``* item``) stay handled by ``_MARKDOWN_LIST_PREFIX``. Balanced,
+# direct top-level wrappers may be normalized into successful candidates;
+# malformed or nested forms use this attempt-only strip and still fail closed.
 _MARKDOWN_EMPHASIS_PREFIX = re.compile(r"^(?:\*{1,3}|_{1,3})(?=\S)")
 # Leading ATX Markdown headings (``# AWF-VERDICT: …``, ``### AWF-VERDICT: …``).
 # CommonMark allows 1–6 hashes followed by whitespace. Attempt-only strip —

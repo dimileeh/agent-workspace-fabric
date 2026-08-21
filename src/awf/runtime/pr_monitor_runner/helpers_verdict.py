@@ -389,8 +389,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             # let the first reason group absorb a trailing second marker.
             for segment in _awf_verdict_segments(verdict_line):
                 # Underscore emphasis (``_AWF-VERDICT: …``) glues to the marker
-                # so ``\b`` search misses it; still treat stripped leading
-                # attempts as mentions so they fail closed.
+                # so ``\b`` search misses the raw form. Still count it as an
+                # attempt: a balanced direct wrapper is followed by its
+                # normalized candidate, while malformed wrappers fail closed.
                 is_attempt = _awf_verdict_segment_is_attempt(segment)
                 if _AWF_VERDICT_MARKER.search(segment) or is_attempt:
                     saw_awf_mention = True
@@ -1040,23 +1041,64 @@ def _strip_markdown_heading_prefix(stripped: str) -> str:
     return _MARKDOWN_HEADING_PREFIX.sub("", stripped, count=1)
 
 
+def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
+    """Return a canonical verdict wrapped in balanced top-level emphasis.
+
+    Agents commonly emphasize either the whole verdict line or only the
+    ``AWF-VERDICT: LABEL:`` prefix. Accept only matching one-to-three character
+    ``*`` / ``_`` delimiters and require the normalized line to satisfy the
+    canonical verdict grammar. Nested containers and prose wrappers remain
+    untouched and therefore continue to fail closed.
+    """
+    emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
+    if emphasis_match is None:
+        return None
+    opener = emphasis_match.group(0)
+    inner = line[len(opener) :]
+
+    marker_match = _AWF_VERDICT.match(inner)
+    if marker_match is not None:
+        reason_start = marker_match.start("reason")
+        closer_end = reason_start + len(opener)
+        if inner.startswith(opener, reason_start) and (
+            closer_end == len(inner) or inner[closer_end] != opener[0]
+        ):
+            candidate = inner[:reason_start] + inner[reason_start + len(opener) :]
+            if _AWF_VERDICT.fullmatch(candidate) is not None:
+                return candidate
+
+    closer_start = len(inner) - len(opener)
+    if inner.endswith(opener) and (closer_start == 0 or inner[closer_start - 1] != opener[0]):
+        candidate = inner[:closer_start]
+        if _AWF_VERDICT.fullmatch(candidate) is not None:
+            return candidate
+    return None
+
+
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:
     """Yield line forms that may carry a canonical ``AWF-VERDICT:`` match.
 
-    Do not yield Markdown-list-, task-list-, blockquote-, emphasis-, or
-    heading-stripped variants here. Those prefixes are stripped only in
+    Balanced, direct top-level emphasis is normalized because agents commonly
+    render canonical verdicts that way. Do not yield Markdown-list-, task-list-,
+    blockquote-, heading-, prose-wrapper-, or malformed-emphasis-stripped
+    variants here. Those prefixes are stripped only in
     ``_awf_verdict_segment_is_attempt`` so garbled finals fail closed; treating
-    ``- AWF-VERDICT: …``, ``- [ ] AWF-VERDICT: …``, ``> AWF-VERDICT: …``,
-    ``**AWF-VERDICT: …**``, or ``### AWF-VERDICT: …`` as a successful match
-    would let quoted/option-list lines override an earlier hard block.
+    quoted/option-list lines as successful matches would let them override an
+    earlier hard block.
     """
     yield stripped
+    emphasized = _normalize_markdown_emphasized_verdict_line(stripped)
+    if emphasized is not None:
+        yield emphasized
     code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
     if code_match is None:
         return
     inner = code_match.group("line").strip()
     if inner:
         yield inner
+        emphasized = _normalize_markdown_emphasized_verdict_line(inner)
+        if emphasized is not None:
+            yield emphasized
 
 
 def _awf_verdict_segments(verdict_line: str) -> list[str]:

@@ -1231,7 +1231,7 @@ async def test_review_comment_false_positive_is_recorded_by_pr_identity(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: automated review wrapper only")
+    adapter.queue(stdout="**AWF-VERDICT: FALSE POSITIVE:** automated review wrapper only")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -1289,7 +1289,7 @@ async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FIXED: committed repair")
+    adapter.queue(stdout="**AWF-VERDICT: FIXED: committed repair**")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="pushed")

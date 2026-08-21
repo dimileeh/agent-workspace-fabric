@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 from awf.runtime.pr_monitor_runner.helpers_verdict import (
     _aggressively_peel_verdict_reason_wrappers,
     _html_wrapper_close_suffix_start,
+    _normalize_markdown_emphasized_verdict_line,
     _peel_all_outer_html_verdict_reason_wrappers,
     _peel_all_outer_unconditional_verdict_reason_wrappers,
     _peel_one_unconditional_verdict_reason_wrapper,
@@ -1100,26 +1101,121 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("stdout", "expected_verdict", "expected_reason"),
+        [
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:** Review 4990956104 is Codex boilerplate",
+                "false_positive",
+                "Review 4990956104 is Codex boilerplate",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: stale wrapper__",
+                "false_positive",
+                "stale wrapper",
+            ),
+            ("*AWF-VERDICT: NEEDS_HUMAN: unsure*", "needs_human", "unsure"),
+            ("_AWF-VERDICT: DEFER:_ track separately", "defer", "track separately"),
+            ("***AWF-VERDICT: FIXED: committed repair***", "fix_committed", "committed repair"),
+            (
+                "___AWF-VERDICT: NEEDS_HUMAN: maintainer decision___",
+                "needs_human",
+                "maintainer decision",
+            ),
+            (
+                "`**AWF-VERDICT: FALSE POSITIVE:** code-formatted wrapper`",
+                "false_positive",
+                "code-formatted wrapper",
+            ),
+        ],
+    )
+    def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
+        self,
+        stdout: str,
+        expected_verdict: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == expected_verdict
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    def test_private_markdown_emphasis_normalizer_rejects_multiline_candidate(
+        self,
+    ) -> None:
+        assert (
+            _normalize_markdown_emphasized_verdict_line(
+                "**AWF-VERDICT: FALSE POSITIVE:** rationale\ntrailing prose"
+            )
+            is None
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_verdict", "expected_reason"),
+        [
+            (
+                "AWF-VERDICT: FALSE POSITIVE: earlier\n"
+                "**AWF-VERDICT: NEEDS_HUMAN: maintainer decision**",
+                "needs_human",
+                "maintainer decision",
+            ),
+            (
+                "AWF-VERDICT: NEEDS_HUMAN: earlier blocker\n"
+                "**AWF-VERDICT: FALSE POSITIVE:** review wrapper only",
+                "false_positive",
+                "review wrapper only",
+            ),
+        ],
+    )
+    def test_private_awf_verdict_emphasized_final_preserves_final_marker_precedence(
+        self,
+        stdout: str,
+        expected_verdict: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == expected_verdict
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            ("**AWF-VERDICT: FIXED: <one-sentence summary>**", "fixed_placeholder_echo"),
+            ("**AWF-VERDICT: FALSE POSITIVE:** <reason>", "verdict_placeholder_echo"),
+            ("__AWF-VERDICT: DEFER:__ <what to track>", "verdict_placeholder_echo"),
+        ],
+    )
+    def test_private_awf_emphasized_resolvable_placeholders_still_fail_closed(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "final_line",
         [
-            "**AWF-VERDICT: NEEDS_HUMAN: unsure**",
-            "__AWF-VERDICT: NEEDS_HUMAN: unsure__",
-            "*AWF-VERDICT: NEEDS_HUMAN: unsure*",
-            "_AWF-VERDICT: NEEDS_HUMAN: unsure_",
             "***AWF-VERDICT: SHIPPED: done***",
-            # Nested Markdown + emphasis must strip repeatedly.
             "> **AWF-VERDICT: NEEDS_HUMAN: unsure**",
             "- **AWF-VERDICT: SHIPPED: done**",
             "**Final answer: AWF-VERDICT: NEEDS_HUMAN: unsure**",
+            "**AWF-VERDICT: NEEDS_HUMAN: unbalanced",
+            "**AWF-VERDICT: NEEDS_HUMAN: mismatched__",
+            "**AWF-VERDICT: NEEDS_HUMAN: extra closer***",
+            "*AWF-VERDICT: NEEDS_HUMAN:** extra closer",
         ],
     )
-    def test_private_awf_verdict_emphasis_wrapped_final_fail_closed(
+    def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
         self,
         final_line: str,
     ) -> None:
-        # Markdown emphasis wrappers leave a leading ``**`` / ``*`` so a
-        # start-only attempt check ignores the marker and an earlier
-        # resolvable verdict stays selected (#822 PRRT_kwDOSJAM6s6ZmLYh).
         result = _parse_verdict_result(f"AWF-VERDICT: FALSE POSITIVE: rationale\n{final_line}")
 
         assert result.verdict == "needs_human"
