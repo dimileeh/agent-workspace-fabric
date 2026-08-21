@@ -320,7 +320,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         # a fork-only commit (and its statuses) are not present on the destination.
         head_repo = self._source_repo_for_commit_resolve(pr, repo)
         head_sha = await self._resolve_full_commit_sha(head_repo, head_sha, retry=retry)
-        self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
+        self._remember_pr(repo, pr_number, pr, head_sha=head_sha, head_repo=head_repo)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
@@ -517,8 +517,12 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         """
         ctx = self._pr_context.get(repo.slug())
         source_branch = ctx.source_branch if ctx is not None else None
+        # Statuses live on the head commit's repository (fork for cross-fork PRs).
+        # Destination lookups 404 for fork-only commits; pipeline chain below still
+        # uses ``repo`` because Bitbucket owns PR pipelines on the destination.
+        status_repo = ctx.head_repo if ctx is not None and ctx.head_repo is not None else repo
         statuses = await self._paginate(
-            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            f"{self._repo_path(status_repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_failing_check_logs statuses",
             params={"refname": source_branch} if source_branch else None,
         )
@@ -1170,7 +1174,13 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         return self._account_id
 
     def _remember_pr(
-        self, repo: RepoRef, pr_number: int, pr: dict[str, Any], *, head_sha: str
+        self,
+        repo: RepoRef,
+        pr_number: int,
+        pr: dict[str, Any],
+        *,
+        head_sha: str,
+        head_repo: RepoRef,
     ) -> None:
         """Capture per-repo PR context for the repo-less Protocol methods.
 
@@ -1178,6 +1188,10 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         the abbreviated ``source.commit.hash`` on the raw payload — it is stored as
         ``source_sha`` so ``rerun_failed_workflow_jobs`` reconstructs the pipeline
         target with the full hash, consistent with ``PRStatus.head_sha`` (#477).
+
+        ``head_repo`` is the repository that owns that head commit and its commit
+        statuses (``source.repository`` for fork PRs). Failure-evidence status
+        reads reuse it so fork-only commits do not 404 against the destination.
         """
         source = _as_dict(pr.get("source"))
         destination = _as_dict(pr.get("destination"))
@@ -1191,6 +1205,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             dest_sha=_clean_optional_str(_as_dict(destination.get("commit")).get("hash")),
             merge_strategies=merge_strategies if isinstance(merge_strategies, list) else None,
             default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
+            head_repo=head_repo,
         )
 
     async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str, *, retry: bool = True) -> str:

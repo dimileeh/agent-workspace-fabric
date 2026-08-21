@@ -354,6 +354,68 @@ async def test_failing_check_logs_scopes_statuses_by_refname() -> None:
     assert all(r.url.params.get("refname") == "feature/head" for r in statuses_calls)
 
 
+async def test_failing_check_logs_uses_fork_head_repo_for_statuses() -> None:
+    """Fork PR failure evidence must read statuses from source.repository.
+
+    ``fetch_pr_status`` already remembers the fork as the head repo for commit
+    resolve + status listing. ``fetch_failing_check_logs`` must reuse that
+    remembered head repo: querying the destination 404s for fork-only commits
+    (PRRT_kwDOSJAM6s6bKQA8). Pipeline chain stays on the destination repo —
+    Bitbucket PR pipelines are owned there.
+    """
+    fork_path = "/2.0/repositories/fork-owner/repo"
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json=pr_payload()
+        | {
+            "source": {
+                "branch": {"name": "feature/head"},
+                "commit": {"hash": _HEAD},
+                "repository": {"full_name": "fork-owner/repo"},
+            }
+        },
+    )
+    fake.page("GET", f"{fork_path}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "viewer"})
+    # Second statuses read for fetch_failing_check_logs (same fork path).
+    fake.page(
+        "GET",
+        f"{fork_path}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "COMPLETED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+
+    status_paths = [r.url.path for r in fake.calls("GET") if r.url.path.endswith("/statuses")]
+    assert status_paths == [
+        f"{fork_path}/commit/{_HEAD}/statuses",
+        f"{fork_path}/commit/{_HEAD}/statuses",
+    ]
+    assert f"{_REPO}/commit/{_HEAD}/statuses" not in status_paths
+    pipeline_paths = [r.url.path for r in fake.calls("GET") if "/pipelines" in r.url.path]
+    assert any(p.startswith(_PIPELINES.rstrip("/")) for p in pipeline_paths)
+    assert not any(p.startswith(f"{fork_path}/pipelines") for p in pipeline_paths)
+    assert len(failures) == 1
+    assert failures[0].name == "Test"
+
+
 async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
     """Without remembered PR context, fall back to an unscoped statuses fetch."""
     fake = FakeBitbucket()
