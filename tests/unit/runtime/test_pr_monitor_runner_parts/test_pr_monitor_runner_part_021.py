@@ -1243,6 +1243,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
+            # Mid-reason opener + trailing closer is not a whole-line wrap
+            # (PRRT_kwDOSJAM6s6bRrWv).
+            "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
+            "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
+            "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1278,6 +1283,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
+            # Mid-reason same-delimiter opener steals the trailing closer; the
+            # line-leading wrapper stays unbalanced (PRRT_kwDOSJAM6s6bRrWv).
+            "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
+            "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
+            "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1369,6 +1379,10 @@ class TestParseVerdict:
             (r"see \**literal and **ok**", "**", True),
             # Trailing whitespace makes the closer invalid (not right-flanking).
             ("bold** ", "**", False),
+            # Mid-reason opener pairs the trailing closer (PRRT_kwDOSJAM6s6bRrWv).
+            ("rationale **unclosed**", "**", True),
+            ("rationale *unclosed*", "*", True),
+            ("rationale __unclosed__", "__", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(

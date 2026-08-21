@@ -1190,7 +1190,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     Whole-line stripping must also fail closed when the remaining reason begins
     with the same opener run: the trailing closer then belongs to reason
     emphasis (or a placeholder echo), not the line wrapper
-    (PRRT_kwDOSJAM6s6bQqbC).
+    (PRRT_kwDOSJAM6s6bQqbC). The same applies when a mid-reason same-delimiter
+    opener steals the trailing closer (``**… rationale **unclosed**``) — pair
+    across the whole candidate before accepting the strip
+    (PRRT_kwDOSJAM6s6bRrWv).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
@@ -1228,6 +1231,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
             return None
         # Trailing closer paired with a reason-leading same run — not whole-line.
         if _verdict_reason_begins_with_emphasis_opener(matched.group("reason"), opener):
+            return None
+        # Mid-reason opener that claims the trailing closer leaves the line
+        # wrapper unbalanced — reject before stripping (PRRT_kwDOSJAM6s6bRrWv).
+        if _verdict_reason_trailing_emphasis_is_balanced(inner, opener):
             return None
         return candidate
     return None
