@@ -29,7 +29,11 @@ from awf.common.auto_merge import (
 from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.common.workspace_policy import (
+    CURSOR_AUTO_MODE_POLICY_KEY,
+    DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+    cursor_auto_mode_from_task_policy,
+)
 from awf.db.enums import AgentRuntime, TaskKind
 from awf.db.models import (
     ResourceReservation,
@@ -336,6 +340,7 @@ def workspace_create_payload_matches(
             payload.task.owned_paths,
         )
         and _stored_task_agent_model(existing) == payload.task.model
+        and cursor_auto_mode_from_task_policy(existing.task_policy) == payload.task.cursor_auto_mode
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
@@ -1354,6 +1359,8 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
         policy["agent_model"] = payload.task.model
     if payload.task.effort is not None:
         policy["agent_effort"] = payload.task.effort
+    if payload.task.cursor_auto_mode is not None:
+        policy[CURSOR_AUTO_MODE_POLICY_KEY] = payload.task.cursor_auto_mode.value
     if payload.task.out_of_scope_changes is not None:
         policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
     if payload.task.provider_recovery is not None:

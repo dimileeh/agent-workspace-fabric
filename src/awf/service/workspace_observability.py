@@ -27,6 +27,10 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
 )
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import (
+    cursor_auto_mode_from_task_policy,
+    cursor_auto_model_selector,
+)
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_agent_runtime
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
@@ -187,6 +191,7 @@ class WorkspaceRecoverySummary:
 class AgentIdentityPayload(TypedDict):
     agent_model: str | None
     agent_effort: str | None
+    cursor_auto_mode: str | None
     agent_model_source: AgentIdentitySource
     agent_effort_source: AgentIdentitySource
 
@@ -410,6 +415,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         agent=parse_agent_runtime(ws.agent),
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
+        cursor_auto_mode=observability["cursor_auto_mode"],
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
         network_posture=network_posture_from_profile_snapshot(
@@ -515,6 +521,9 @@ def effective_agent_identity(
     defaults = HISTORICAL_AGENT_DEFAULTS.get(runtime) if runtime is not None else None
     explicit_model = _nonblank_policy_string(task_policy, "agent_model")
     explicit_effort = _nonblank_policy_string(task_policy, "agent_effort")
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(task_policy)
+    if runtime is AgentRuntime.cursor and cursor_auto_mode is not None:
+        explicit_model = cursor_auto_model_selector(cursor_auto_mode)
 
     if explicit_effort is not None:
         effort: str | None = explicit_effort
@@ -912,9 +921,11 @@ def compute_cost_estimate(
 
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
     identity = effective_agent_identity_for_workspace(workspace)
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(workspace.task_policy)
     return {
         "agent_model": identity.model,
         "agent_effort": identity.effort,
+        "cursor_auto_mode": cursor_auto_mode.value if cursor_auto_mode is not None else None,
         "agent_model_source": identity.model_source,
         "agent_effort_source": identity.effort_source,
     }

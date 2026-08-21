@@ -28,7 +28,10 @@ from awf.common.github_client import (
     parse_github_pull_request_url,
 )
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import pr_adoption_execution_policy
+from awf.common.workspace_policy import (
+    CURSOR_AUTO_MODE_POLICY_KEY,
+    pr_adoption_execution_policy,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -84,6 +87,7 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_METADATA_INVALID"},
     {"error_code": "PR_ADOPTION_POLICY_CONFLICT"},
     {"error_code": "TASK_EXTERNAL_ID_CONFLICT"},
+    {"error_code": "PROVIDER_READINESS_PRECHECK_FAILED"},
     {"error_code": "HOSTED_DELEGATION_NOT_CONFIGURED"},
 )
 _NON_RESUMABLE_ADOPTION_STATUSES = frozenset(
@@ -590,7 +594,38 @@ def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[
         agent_defaults = defaults.get(agent_runtime)
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
+    if request.cursor_auto_mode is not None:
+        policy[CURSOR_AUTO_MODE_POLICY_KEY] = request.cursor_auto_mode.value
     return policy
+
+
+async def _cursor_auto_mode_provider_preflight(
+    settings: Settings, request: PullRequestMonitorAdoptionRequest
+) -> dict[str, Any] | None:
+    if request.cursor_auto_mode is None:
+        return None
+    from awf.service.workspaces_create import (  # noqa: PLC0415
+        _selected_provider_preflight_for_task_async,
+    )
+
+    preflight = await _selected_provider_preflight_for_task_async(
+        settings,
+        agent=request.agent,
+        task_policy=_requested_agent_policy(request),
+        override=False,
+        override_reason=None,
+        provider_environ=None,
+        run_subprocess=None,
+        http_get=None,
+    )
+    if preflight.get("blocks_launch") is True:
+        raise PRMonitorAdoptionError(
+            error_code="PROVIDER_READINESS_PRECHECK_FAILED",
+            message=str(preflight.get("message") or "Provider readiness blocked adoption."),
+            status_code=503,
+            detail={"provider_readiness_preflight": dict(preflight)},
+        )
+    return preflight
 
 
 def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
@@ -1294,7 +1329,7 @@ def _raise_if_agent_policy_conflicts(
 ) -> None:
     existing_policy = _workspace_agent_policy(workspace)
     requested_policy = _requested_agent_policy(request)
-    for key in ("agent_model", "agent_effort"):
+    for key in ("agent_model", "agent_effort", CURSOR_AUTO_MODE_POLICY_KEY):
         existing_value = existing_policy.get(key)
         requested_value = requested_policy.get(key)
         if existing_value == requested_value:
@@ -1317,10 +1352,13 @@ def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
     agent_policy: dict[str, str] = {}
     model = _optional_str(policy.get("agent_model"))
     effort = _optional_str(policy.get("agent_effort"))
+    cursor_auto_mode = _optional_str(policy.get(CURSOR_AUTO_MODE_POLICY_KEY))
     if model is not None:
         agent_policy["agent_model"] = model
     if effort is not None:
         agent_policy["agent_effort"] = effort
+    if cursor_auto_mode is not None:
+        agent_policy[CURSOR_AUTO_MODE_POLICY_KEY] = cursor_auto_mode
     return agent_policy
 
 
@@ -1413,6 +1451,7 @@ __all__ = (
     "_raise_if_repo_identity_conflicts",
     "_adoption_task_policy",
     "_requested_agent_policy",
+    "_cursor_auto_mode_provider_preflight",
     "_requested_execution_policy",
     "_raise_if_hosted_delegation_unconfigured",
     "_adoption_task_prompt",

@@ -34,6 +34,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import (
     AgentRuntime,
+    CursorAutoMode,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -241,6 +242,13 @@ def register_workspace_tools(
             max_length=64,
             description="Optional reasoning effort override for the selected agent runtime.",
         ),
+        cursor_auto_mode: CursorAutoMode | None = Field(
+            default=None,
+            description=(
+                "Cursor Auto routing mode: cost, balance, or intelligence. Cursor "
+                "only; incompatible with generic effort or a fixed model."
+            ),
+        ),
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
@@ -416,6 +424,7 @@ def register_workspace_tools(
                     "agent": agent,
                     "model": model,
                     "effort": effort,
+                    "cursor_auto_mode": cursor_auto_mode,
                     "external_id": task_external_id,
                     "task_tag": task_tag,
                     "task_class": task_class,

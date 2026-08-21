@@ -70,3 +70,29 @@ test("formatAgentEffort omits missing legacy provenance fields", () => {
     "xhigh",
   );
 });
+
+test("formatAgentLabel names an explicit Cursor Auto routing mode", () => {
+  assert.equal(
+    formatAgentLabel({
+      agent: "cursor",
+      agent_model: "auto-smart[optimize_for=intelligence]",
+      agent_effort: null,
+      cursor_auto_mode: "intelligence",
+    }),
+    "cursor · Auto Intelligence",
+  );
+});
+
+test("formatAgentTitle names an explicit Cursor Auto routing mode", () => {
+  assert.equal(
+    formatAgentTitle({
+      agent: "cursor",
+      agent_model: "auto-smart[optimize_for=balanced]",
+      agent_effort: null,
+      cursor_auto_mode: "balance",
+      agent_model_source: "task_policy",
+      agent_effort_source: "unavailable",
+    }),
+    "cursor / Auto Balance / model task_policy / effort unavailable",
+  );
+});

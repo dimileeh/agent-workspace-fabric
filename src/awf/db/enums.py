@@ -231,6 +231,19 @@ class TaskClass(StrEnum):
     build_config_task = "build_config_task"
 
 
+class CursorAutoMode(StrEnum):
+    """Cursor Router optimization modes exposed when Auto routing is selected.
+
+    Cursor's product label is ``Balance`` while its SDK/CLI model-parameter wire
+    value is ``balanced``. AWF persists the product-facing value ``balance`` and
+    centralizes that provider translation outside the public API enum.
+    """
+
+    cost = "cost"
+    balance = "balance"
+    intelligence = "intelligence"
+
+
 class AgentRuntime(StrEnum):
     """Which coding CLI should execute the task inside the workspace.
 

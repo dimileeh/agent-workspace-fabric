@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
 from awf.api import schemas_workspace_io as _schemas_workspace_io
+from awf.api.cursor_auto import CursorAutoModeResponseMixin, CursorAutoModeSelectionMixin
 from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
@@ -110,7 +111,7 @@ class PullRequestMonitorExecutionPolicy(BaseModel):
     )
 
 
-class PullRequestMonitorAdoptionRequest(BaseModel):
+class PullRequestMonitorAdoptionRequest(CursorAutoModeSelectionMixin):
     """Input for adopting an already-open GitHub PR into AWF monitoring."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -258,7 +259,7 @@ class WorkspaceLaunchPreflight(BaseModel):
     ] = None
 
 
-class WorkspaceTask(BaseModel):
+class WorkspaceTask(CursorAutoModeSelectionMixin):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     title: Annotated[str, Field(min_length=1, max_length=512)]
@@ -930,7 +931,7 @@ class WorkspaceBlockStateResponse(BaseModel):
     violations: list[WorkspaceBlockViolationResponse] = Field(default_factory=list)
 
 
-class WorkspaceResponse(BaseModel):
+class WorkspaceResponse(CursorAutoModeResponseMixin):
     """Representation of a workspace in API responses."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -1128,7 +1129,7 @@ class WorkspaceEventListResponse(BaseModel):
     cursor: str | None = None
 
 
-class TaskResponse(BaseModel):
+class TaskResponse(CursorAutoModeResponseMixin):
     """Workspace-backed task row for operator consoles."""
 
     task_id: str
@@ -1202,7 +1203,7 @@ class TaskAttemptListResponse(BaseModel):
     cursor: str | None = None
 
 
-class WorkspaceOverviewResponse(BaseModel):
+class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     model_config = ConfigDict(from_attributes=True)
 
     workspace_id: str

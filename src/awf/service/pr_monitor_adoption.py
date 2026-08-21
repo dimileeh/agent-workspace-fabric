@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -59,6 +59,7 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _adoption_task_prompt,
     _adoption_workspace_is_resumable,
     _allocate_superseded_adoption_idempotency_key,
+    _cursor_auto_mode_provider_preflight,
     _default_metadata_fetcher,
     _effective_adoption_external_id,
     _github_repo_url_like,
@@ -150,6 +151,10 @@ class PullRequestMonitorAdoptionService:
                 return await self._response(existing, attached_existing=True)
 
         _raise_if_unsupported_agent(request)
+        provider_readiness_preflight = await _cursor_auto_mode_provider_preflight(
+            self._settings,
+            request,
+        )
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
@@ -181,6 +186,7 @@ class PullRequestMonitorAdoptionService:
                     superseded_adoption=superseded_adoption,
                     superseded_workspace=superseded_workspace,
                     effective_external_id=effective_external_id,
+                    provider_readiness_preflight=provider_readiness_preflight,
                 )
         except TaskExternalIdConflictError as exc:
             raise _task_external_id_conflict_error(exc) from exc
@@ -353,6 +359,7 @@ class PullRequestMonitorAdoptionService:
         superseded_adoption: dict[str, Any] | None = None,
         superseded_workspace: Workspace | None = None,
         effective_external_id: str,
+        provider_readiness_preflight: Mapping[str, Any] | None = None,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
         repo_url = _adoption_repo_url(request=request, repo=repo)
@@ -366,6 +373,8 @@ class PullRequestMonitorAdoptionService:
                 previous_terminal_adoptions=previous_terminal_adoptions,
             ),
         )
+        if provider_readiness_preflight is not None:
+            task_policy["provider_readiness_preflight"] = dict(provider_readiness_preflight)
         operator_reason = _redacted_optional_text(request.reason)
         task_class = request.task_class.value if request.task_class is not None else None
         explicit_external_id = request.external_id is not None

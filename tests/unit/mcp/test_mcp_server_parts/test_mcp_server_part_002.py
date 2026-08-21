@@ -302,6 +302,57 @@ class TestCreateWorkspace:
             monkeypatch.delenv(key, raising=False)
 
     @pytest.mark.unit
+    async def test_forwards_cursor_auto_mode_into_canonical_create_request(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async def _ready(*_args: object, **kwargs: object) -> dict[str, object]:
+            assert kwargs["agent"].value == "cursor"
+            assert kwargs["task_policy"]["cursor_auto_mode"] == "balance"
+            return {
+                "provider": "cursor",
+                "agent": "cursor",
+                "model": "auto-smart[optimize_for=balanced]",
+                "readiness_status": "ready",
+                "auth_status": "ready",
+                "auth_source": "CURSOR_API_KEY",
+                "probe_status": "ok",
+                "reason_code": "PROVIDER_READY",
+                "message": "Cursor Router is ready.",
+                "override_required": False,
+                "override_used": False,
+                "blocks_launch": False,
+                "checked_at": "2026-08-21T00:00:00+00:00",
+            }
+
+        monkeypatch.setattr(
+            "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+            _ready,
+        )
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/cursor-router.git",
+                "base_branch": "development",
+                "task_title": "Cursor Router task",
+                "task_prompt": "Use balanced Cursor Auto routing.",
+                "agent": "cursor",
+                "cursor_auto_mode": "balance",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert workspace is not None
+        assert workspace.agent == "cursor"
+        assert workspace.task_policy["cursor_auto_mode"] == "balance"
+
+    @pytest.mark.unit
     async def test_persists_canonical_create_contract_fields(
         self,
         mcp,

@@ -46,6 +46,7 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--execution" in visible_help
     assert "--external-id" in visible_help
     assert "--task-class" in visible_help
+    assert "--cursor-auto-mode" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -55,7 +56,54 @@ def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
 
 
+@pytest.mark.unit
+def test_workspace_create_emits_cursor_auto_mode() -> None:
+    response = _mock_response(status_code=202, payload={"workspace_id": "ws_cursor"})
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(
+            app,
+            [
+                "workspace",
+                "create",
+                "--repo",
+                "git@github.com:x/y.git",
+                "--title",
+                "Router task",
+                "--prompt",
+                "Use Cursor Router.",
+                "--agent",
+                "cursor",
+                "--cursor-auto-mode",
+                "intelligence",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert mock.call_args.kwargs["json"]["task"]["cursor_auto_mode"] == "intelligence"
+
+
 class TestWorkspaceAdoptPr:
+    @pytest.mark.unit
+    def test_emits_cursor_auto_mode_to_adoption_request(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_cursor"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/x/y/pull/1",
+                    "--agent",
+                    "cursor",
+                    "--cursor-auto-mode",
+                    "balance",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["json"]["cursor_auto_mode"] == "balance"
+
     @pytest.mark.unit
     def test_posts_adoption_request_with_api_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AWF_API_TOKEN", "env-secret")

@@ -80,6 +80,12 @@ Optional adoption identity inputs (parity with workspace create):
   parity (`docs_task`, `test_task`, `refactor_task`, `migration_task`,
   `dependency_task`, or `build_config_task`). Omit it to leave the class unset.
 
+Cursor Auto routing is also part of the adoption policy. For local execution,
+pass `--agent cursor --cursor-auto-mode cost|balance|intelligence` (REST/MCP:
+`cursor_auto_mode`). Do not combine it with generic `effort` or a fixed model.
+Hosted adoption rejects this field until the AWF Cloud task contract supports
+it explicitly.
+
 Retry with the same raw grace override used by the first adoption request. An
 omitted/null value means "use the profile policy" and is stored separately from
 an explicit `900`, even when the resolved profile default is also 900 seconds.
@@ -123,6 +129,8 @@ curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
     "initial_review_grace_period_seconds": 900,
     "external_id": "CLOUD-TASK-42",
     "task_class": "test_task",
+    "agent": "cursor",
+    "cursor_auto_mode": "intelligence",
     "reason": "attach AWF to existing PR"
   }'
 ```
@@ -155,7 +163,8 @@ The MCP response mirrors `PullRequestMonitorAdoptionResponse`. Structured
 terminal PR errors include `PR_ALREADY_CLOSED`, `PR_ALREADY_MERGED`,
 `PR_NOT_FOUND`, `INVALID_GITHUB_REPO`, `PR_ADOPTION_INPUT_REQUIRED`,
 `PR_METADATA_FETCH_FAILED`, `PR_METADATA_INVALID`,
-`PR_ADOPTION_POLICY_CONFLICT`, and `TASK_EXTERNAL_ID_CONFLICT`.
+`PR_ADOPTION_POLICY_CONFLICT`, `TASK_EXTERNAL_ID_CONFLICT`, and
+`PROVIDER_READINESS_PRECHECK_FAILED`.
 
 ## Idempotency And Retries
 
@@ -167,7 +176,7 @@ create another monitor workspace.
 
 Policy changes on an existing live adoption return
 `PR_ADOPTION_POLICY_CONFLICT`. That includes changes to `repo_url`, `agent`,
-`model`, `effort`, `profile_ref`, inline profile, `auto_merge`,
+`model`, `effort`, `cursor_auto_mode`, `profile_ref`, inline profile, `auto_merge`,
 `initial_review_grace_period_seconds`, `external_id`, or `task_class`.
 
 For idempotent retries, omitted/null and explicit `900` are different adoption

@@ -5,12 +5,43 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from awf.db.enums import CursorAutoMode
+
 # Fallback source branch for ``sync_release_pr`` worktrees. Shared across the
 # control, service, and node layers so the release-sync default cannot drift
 # between task admission, provisioning, and execution.
 DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 PR_ADOPTION_EXECUTION_MODE_LOCAL = "local"
 PR_ADOPTION_EXECUTION_MODE_HOSTED = "hosted"
+CURSOR_AUTO_MODE_POLICY_KEY = "cursor_auto_mode"
+
+_CURSOR_AUTO_MODE_WIRE_VALUES: Mapping[CursorAutoMode, str] = {
+    CursorAutoMode.cost: "cost",
+    CursorAutoMode.balance: "balanced",
+    CursorAutoMode.intelligence: "intelligence",
+}
+
+
+def cursor_auto_mode_from_task_policy(task_policy: object) -> CursorAutoMode | None:
+    """Return a canonical persisted Cursor Auto mode, if configured."""
+
+    if not isinstance(task_policy, Mapping):
+        return None
+    value = task_policy.get(CURSOR_AUTO_MODE_POLICY_KEY)
+    if not isinstance(value, str):
+        return None
+    try:
+        return CursorAutoMode(value.strip())
+    except ValueError:
+        return None
+
+
+def cursor_auto_model_selector(mode: CursorAutoMode | str) -> str:
+    """Return Cursor's parameterized Router selector for one public AWF mode."""
+
+    resolved = mode if isinstance(mode, CursorAutoMode) else CursorAutoMode(mode)
+    wire_value = _CURSOR_AUTO_MODE_WIRE_VALUES[resolved]
+    return f"auto-smart[optimize_for={wire_value}]"
 
 
 def release_sync_source_branch(task_policy: object) -> str:
