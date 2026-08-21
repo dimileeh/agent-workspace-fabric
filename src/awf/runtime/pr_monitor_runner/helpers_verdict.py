@@ -1076,6 +1076,27 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
     return not any(_markdown_char_is_escaped(text, i) for i in range(closer_start, closer_end))
 
 
+def _markdown_emphasis_prefix_closer_is_valid(text: str, closer_start: int, opener: str) -> bool:
+    """Return whether ``opener`` at ``closer_start`` closes a label-prefix wrap.
+
+    Prefix closers sit at the start of the reason group. Require end-of-string or
+    whitespace after the run so a reason that begins with the same ``*`` / ``_``
+    markers (``:**committed``, ``:**<placeholder>``) is not treated as a closer.
+    """
+    if not _markdown_emphasis_closer_is_valid(text, closer_start, opener):
+        return False
+    after = closer_start + len(opener)
+    return after >= len(text) or text[after].isspace()
+
+
+def _verdict_reason_begins_with_emphasis_opener(reason: str, opener: str) -> bool:
+    """Return whether ``reason`` begins with an exact ``opener`` delimiter run."""
+    if not reason.startswith(opener):
+        return False
+    # A longer run (``***`` vs ``**``) is a different delimiter, not the opener.
+    return not (len(reason) > len(opener) and reason[len(opener)] == opener[0])
+
+
 def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     """Return a canonical verdict wrapped in balanced top-level emphasis.
 
@@ -1089,6 +1110,11 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
     absorb leftover markers into the reason, and do not fall back to a
     whole-line strip that would leave the prefix closer inside the reason.
+
+    Whole-line stripping must also fail closed when the remaining reason begins
+    with the same opener run: the trailing closer then belongs to reason
+    emphasis (or a placeholder echo), not the line wrapper
+    (PRRT_kwDOSJAM6s6bQqbC).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
@@ -1100,7 +1126,7 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     marker_match = _AWF_VERDICT.match(inner)
     if marker_match is not None:
         reason_start = marker_match.start("reason")
-        if _markdown_emphasis_closer_is_valid(inner, reason_start, opener):
+        if _markdown_emphasis_prefix_closer_is_valid(inner, reason_start, opener):
             prefix_closer_valid = True
             candidate = inner[:reason_start] + inner[reason_start + len(opener) :]
             trailing_closer_start = len(candidate) - len(opener)
@@ -1117,8 +1143,13 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
         if prefix_closer_valid:
             return None
         candidate = inner[:closer_start]
-        if _AWF_VERDICT.fullmatch(candidate) is not None:
-            return candidate
+        matched = _AWF_VERDICT.fullmatch(candidate)
+        if matched is None:
+            return None
+        # Trailing closer paired with a reason-leading same run — not whole-line.
+        if _verdict_reason_begins_with_emphasis_opener(matched.group("reason"), opener):
+            return None
+        return candidate
     return None
 
 

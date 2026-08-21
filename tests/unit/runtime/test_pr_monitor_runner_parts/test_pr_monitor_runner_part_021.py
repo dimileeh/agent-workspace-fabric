@@ -1289,6 +1289,12 @@ class TestParseVerdict:
                 r"**AWF-VERDICT: FALSE POSITIVE: rationale\***",
                 r"AWF-VERDICT: FALSE POSITIVE: rationale\*",
             ),
+            # Reason-leading longer run than the line opener is a different
+            # delimiter, so whole-line strip still applies (PRRT_kwDOSJAM6s6bQqbC).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
+                "AWF-VERDICT: FALSE POSITIVE: ***lead* rest",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1297,6 +1303,61 @@ class TestParseVerdict:
         expected: str,
     ) -> None:
         assert _normalize_markdown_emphasized_verdict_line(line) == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # Reason-leading same run with no space after the markers is content,
+            # not a label-prefix closer (PRRT_kwDOSJAM6s6bQqbC).
+            "**AWF-VERDICT: FIXED:**committed",
+            "*AWF-VERDICT: FIXED:*committed",
+            "__AWF-VERDICT: DEFER:__track later",
+            "***AWF-VERDICT: FIXED:***committed",
+            # Whole-line wrap whose reason opens with the same run: trailing
+            # closer belongs to the reason span; do not strip it and resolve.
+            "**AWF-VERDICT: FIXED: **committed****",
+            "**AWF-VERDICT: FIXED: **committed**",
+            "*AWF-VERDICT: FALSE POSITIVE: *star lead* rest*",
+            "__AWF-VERDICT: DEFER: __track__ later__",
+            "**AWF-VERDICT: FIXED:**committed**",
+            "*AWF-VERDICT: FIXED:*committed*",
+        ],
+    )
+    def test_private_markdown_emphasis_normalizer_rejects_reason_leading_same_run(
+        self,
+        line: str,
+    ) -> None:
+        assert _normalize_markdown_emphasized_verdict_line(line) is None
+        result = _parse_verdict_result(line)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stdout", "expected_reason"),
+        [
+            # Whole-line emphasis must not orphan a leading run on a placeholder
+            # and let FIXED / FALSE POSITIVE resolve (PRRT_kwDOSJAM6s6bQqbC).
+            ("**AWF-VERDICT: FIXED: **<one-sentence summary>**", "garbled_verdict_marker"),
+            ("*AWF-VERDICT: FIXED: *<one-sentence summary>*", "garbled_verdict_marker"),
+            ("__AWF-VERDICT: FIXED: __<one-sentence summary>__", "garbled_verdict_marker"),
+            ("**AWF-VERDICT: FALSE POSITIVE: **<reason>**", "garbled_verdict_marker"),
+            ("**AWF-VERDICT: FIXED:**<one-sentence summary>**", "garbled_verdict_marker"),
+            # No trailing whole-line closer: prefix path must not strip markers
+            # off a placeholder either.
+            ("**AWF-VERDICT: FIXED:**<one-sentence summary>", "garbled_verdict_marker"),
+        ],
+    )
+    def test_private_awf_emphasized_reason_leading_placeholders_fail_closed(
+        self,
+        stdout: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == expected_reason
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
