@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 
 from awf.common.redaction import redact_secrets
@@ -1051,6 +1052,11 @@ def _markdown_char_is_escaped(text: str, index: int) -> bool:
     return count % 2 == 1
 
 
+def _markdown_char_is_unicode_punctuation(ch: str) -> bool:
+    """Return whether ``ch`` is Unicode punctuation (CommonMark Pc–Ps)."""
+    return unicodedata.category(ch).startswith("P")
+
+
 def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str) -> bool:
     """Return whether ``opener`` at ``closer_start`` is a usable emphasis closer.
 
@@ -1126,6 +1132,13 @@ def _markdown_emphasis_run_can_open(text: str, start: int, length: int, marker: 
         return False
     if end < len(text) and text[end].isspace():
         return False
+    # CommonMark left-flanking (2b): a run followed by punctuation opens only
+    # when also preceded by BOS, whitespace, or punctuation. Alphanumeric-to-
+    # punctuation runs (``a**.``) are closing-only (PRRT_kwDOSJAM6s6bSOmb).
+    if end < len(text) and _markdown_char_is_unicode_punctuation(text[end]):
+        preceded_ok = start == 0 or text[start - 1].isspace()
+        if not preceded_ok and not _markdown_char_is_unicode_punctuation(text[start - 1]):
+            return False
     if marker == "_" and start > 0 and text[start - 1].isalnum():
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))

@@ -1246,6 +1246,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
+            # Alphanumeric-to-punctuation mid run is closing-only; pairing it as
+            # an opener would wrongly accept a false_positive (PRRT_kwDOSJAM6s6bSOmb).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**. more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale a*. more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__. more__",
             # Mid-reason opener + trailing closer is not a whole-line wrap
             # (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -1291,6 +1296,10 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
+            # Alphanumeric-to-punctuation mid run must not open (PRRT_kwDOSJAM6s6bSOmb).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**. more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale a*. more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__. more__",
             # Mid-reason same-delimiter opener steals the trailing closer; the
             # line-leading wrapper stays unbalanced (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -1399,6 +1408,12 @@ class TestParseVerdict:
             ("rationale** more**", "**", False),
             ("rationale* more*", "*", False),
             ("rationale__ more__", "__", False),
+            # Alphanumeric-to-punctuation mid run is closing-only under
+            # CommonMark left-flanking; must not pair with the trailing closer
+            # (PRRT_kwDOSJAM6s6bSOmb).
+            ("rationale a**. more**", "**", False),
+            ("rationale a*. more*", "*", False),
+            ("rationale a__. more__", "__", False),
             # Longer mid-run may literalize leftovers; trailing exact pair of
             # ``**done**`` still balances (open units need not return to zero).
             ("***lead* and **done**", "**", True),
@@ -1445,6 +1460,13 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_close(" *", 1, 1, "*") is False  # preceded by space
         assert _markdown_emphasis_run_can_close("a_b", 1, 1, "_") is False  # intra-word closer
         assert _markdown_emphasis_run_can_open("a_b", 1, 1, "_") is False  # intra-word opener
+        # Alphanumeric then punctuation: not left-flanking (PRRT_kwDOSJAM6s6bSOmb).
+        assert _markdown_emphasis_run_can_open("a*.", 1, 1, "*") is False
+        assert _markdown_emphasis_run_can_open("a**.", 1, 2, "*") is False
+        # Punctuation/whitespace/BOS before + punctuation after remains left-flanking.
+        assert _markdown_emphasis_run_can_open(".*.", 1, 1, "*") is True
+        assert _markdown_emphasis_run_can_open("**.", 0, 2, "*") is True
+        assert _markdown_emphasis_run_can_open(" **.", 1, 2, "*") is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True) is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False) is False
         assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True) is False
