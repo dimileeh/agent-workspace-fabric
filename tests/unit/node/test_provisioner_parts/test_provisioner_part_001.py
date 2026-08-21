@@ -1164,6 +1164,35 @@ class TestSuccess:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "preferred_is_ancestor, merge_base, expected",
+        [
+            (True, None, "c" * 40),
+            (True, "b" * 40, "c" * 40),
+            (False, "b" * 40, "b" * 40),
+            (False, "  " + "b" * 40 + "  ", "b" * 40),
+            (False, None, "c" * 40),
+            (False, "   ", "c" * 40),
+        ],
+    )
+    def test_retain_ancestor_base_commit_prefers_shared_history(
+        self,
+        preferred_is_ancestor: bool,
+        merge_base: str | None,
+        expected: str,
+    ) -> None:
+        from awf.node.provisioner import _retain_ancestor_base_commit
+
+        assert (
+            _retain_ancestor_base_commit(
+                "c" * 40,
+                preferred_is_ancestor=preferred_is_ancestor,
+                merge_base=merge_base,
+            )
+            == expected
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "task_kind, task_policy",
         [
             ("feature_branch_pr", {"pr_adoption": {"head_ref": "feature/ignored"}}),

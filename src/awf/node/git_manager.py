@@ -845,6 +845,42 @@ class GitManager:
         )
         return result.stdout.strip()
 
+    async def is_ancestor_of_head(self, *, workspace_id: str, commit: str) -> bool:
+        """Return whether ``commit`` is an ancestor of the worktree HEAD."""
+        worktree_path = self._worktree_path_for(workspace_id)
+        try:
+            await self._run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "merge-base",
+                    "--is-ancestor",
+                    commit,
+                    "HEAD",
+                ],
+                operation="worktree.is_ancestor",
+            )
+        except GitOperationError as exc:
+            # Exit 1 = not an ancestor; other failures are real git errors.
+            if exc.returncode == 1:
+                return False
+            raise
+        return True
+
+    async def merge_base_with_head(self, *, workspace_id: str, commit: str) -> str | None:
+        """Return ``merge-base(commit, HEAD)``, or ``None`` when histories diverge."""
+        worktree_path = self._worktree_path_for(workspace_id)
+        try:
+            result = await self._run(
+                ["git", "-C", str(worktree_path), "merge-base", commit, "HEAD"],
+                operation="worktree.merge_base",
+            )
+        except GitOperationError:
+            return None
+        cleaned = result.stdout.strip()
+        return cleaned or None
+
     # ── Internals ───────────────────────────────────────────────────────────
 
     @staticmethod

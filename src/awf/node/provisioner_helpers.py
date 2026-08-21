@@ -157,7 +157,9 @@ def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:
     Preserved feature PRs start their worktree at the PR head so subsequent
     pushes remain fast-forward. Their pre-existing ``base_commit`` still marks
     the target-branch side of the complete PR diff and must not be replaced by
-    that checkout head.
+    that checkout head. Callers must still run
+    :func:`_retain_ancestor_base_commit` after checkout: a live forge tip is
+    not always an ancestor of an unrebased PR head.
     """
     preserves_feature_pr = ws.task_kind == "sync_feature_pr" or bool(
         ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
@@ -165,6 +167,28 @@ def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:
     if preserves_feature_pr and ws.base_commit:
         return ws.base_commit
     return checked_out_head
+
+
+def _retain_ancestor_base_commit(
+    preferred_base: str,
+    *,
+    preferred_is_ancestor: bool,
+    merge_base: str | None,
+) -> str:
+    """Prefer ``preferred_base`` when it ancestors HEAD; else retain merge-base.
+
+    Retry admission may record the forge ``baseRefOid`` (current target tip).
+    When the PR head has not been rebased onto that tip, the tip is not an
+    ancestor of HEAD. Keeping it as ``base_commit`` makes orphan recovery
+    squash onto the tip and breaks non-force push back to the existing PR
+    head. The merge-base is still an ancestor and preserves related history.
+    True orphans (no merge-base) keep ``preferred_base`` so executor recovery
+    can reattach or fail closed.
+    """
+    if preferred_is_ancestor:
+        return preferred_base
+    cleaned = (merge_base or "").strip()
+    return cleaned or preferred_base
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:

@@ -1012,6 +1012,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=128, stderr="fatal: no merge base")  # merge-base: unrelated
         fake.queue_result(returncode=0)  # git reset --soft <base>
         fake.queue_result(returncode=0)  # git commit (re-anchor)
         fake.queue_result(returncode=0)  # merge-base is-ancestor: OK after recovery
@@ -1036,9 +1037,47 @@ class TestFailurePaths:
         # reset + commit + verify show up in the call sequence in order.
         reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)
         assert reset_call.args[-1] == "a" * 40  # base_commit
-        # Two `merge-base --is-ancestor` calls (pre and post recovery).
+        # is-ancestor, unrelated merge-base probe, then post-recovery is-ancestor.
         ancestor_calls = [c for c in fake.calls if "merge-base" in c.args]
-        assert len(ancestor_calls) == 2
+        assert len(ancestor_calls) == 3
+
+    @pytest.mark.unit
+    async def test_behind_target_base_retains_shared_history_without_squash(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Live forge baseRefOid can be the advanced target tip while the PR head
+        # is still based on an older ancestor. That tip is not an ancestor of
+        # HEAD, but merge-base succeeds — squashing would rewrite history and
+        # break non-force push to the existing PR head.
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # shared merge-base
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="behind base tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/456\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/456"
+        assert not any("reset" in c.args and "--soft" in c.args for c in fake.calls)
 
     @pytest.mark.unit
     async def test_orphan_history_fails_loudly_if_recovery_fails(
@@ -1058,6 +1097,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=128, stderr="fatal: no merge base")  # unrelated
         fake.queue_result(
             returncode=128, stderr="fatal: unknown revision"
         )  # git reset --soft: FAIL
@@ -1120,6 +1160,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="")  # diff --cached (already committed)
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=128, stderr="fatal: no merge base")  # unrelated
         fake.queue_result(
             returncode=128, stderr="fatal: unknown revision"
         )  # git reset --soft: FAIL

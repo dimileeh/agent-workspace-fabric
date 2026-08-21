@@ -101,6 +101,7 @@ _provision_profile_auto_merge_is_trusted = (
     _provisioner_helpers._provision_profile_auto_merge_is_trusted
 )
 _provision_remote_push_branch = _provisioner_helpers._provision_remote_push_branch
+_retain_ancestor_base_commit = _provisioner_helpers._retain_ancestor_base_commit
 _reconcile_active_reservation_for_profile = (
     _provisioner_helpers._reconcile_active_reservation_for_profile
 )
@@ -319,7 +320,31 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             ):
                 return
             checked_out_head = await self._git.head_sha(workspace_id=workspace_id)
-            base_commit = _provision_base_commit(ws, checked_out_head=checked_out_head)
+            preferred_base = _provision_base_commit(ws, checked_out_head=checked_out_head)
+            if preferred_base == checked_out_head:
+                base_commit = preferred_base
+            else:
+                # Preserved feature-PR retries may record the live target tip
+                # (forge baseRefOid). When that tip has advanced past an
+                # unrebased head it is not an ancestor — retain the merge-base
+                # so orphan recovery does not squash a still-related history.
+                preferred_is_ancestor = await self._git.is_ancestor_of_head(
+                    workspace_id=workspace_id,
+                    commit=preferred_base,
+                )
+                merge_base = (
+                    None
+                    if preferred_is_ancestor
+                    else await self._git.merge_base_with_head(
+                        workspace_id=workspace_id,
+                        commit=preferred_base,
+                    )
+                )
+                base_commit = _retain_ancestor_base_commit(
+                    preferred_base,
+                    preferred_is_ancestor=preferred_is_ancestor,
+                    merge_base=merge_base,
+                )
             profile_resolution = None
             if ws.resolved_profile is None:
                 profile_resolution = resolve_workspace_profile(
