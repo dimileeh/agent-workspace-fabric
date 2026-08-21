@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.db.repositories as repositories
 import awf.service.workspaces_retry as workspaces_retry_service
 from awf.api.schemas import WorkspaceCreateRequest
+from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
@@ -998,7 +999,7 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     )
 
     async def unavailable(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
-        raise RuntimeError("forge unavailable")
+        raise ForgeClientError("forge unavailable")
 
     async with factory() as session:
         with pytest.raises(WorkspaceRetryPrStateUnavailableError) as exc_info:
@@ -1020,6 +1021,41 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
         "reason_code": "PR_STATE_LOOKUP_FAILED",
     }
     assert [workspace.id for workspace in workspaces] == [first.id]
+
+
+async def test_retry_propagates_programming_error_from_pr_state_lookup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+    await _mark_failed(
+        factory,
+        first.id,
+        pr_url="https://github.com/example/retryable/pull/10",
+    )
+
+    async def broken(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        raise TypeError("injected checker signature bug")
+
+    async with factory() as session:
+        with pytest.raises(TypeError, match="injected checker signature bug"):
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry existing PR",
+                settings=settings,
+                provider_environ={},
+                pr_lifecycle_checker=broken,
+            )
 
 
 async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(

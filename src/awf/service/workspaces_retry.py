@@ -16,6 +16,7 @@ from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
@@ -508,7 +509,11 @@ async def retry_workspace_row(
                 existing_pr_lifecycle = existing_pr_snapshot.lifecycle
                 live_pr_head_ref = existing_pr_snapshot.head_ref
                 live_pr_base_commit = existing_pr_snapshot.base_sha
-        except Exception as exc:
+        except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+            # Forge transport/API faults, runner I/O timeouts, and malformed
+            # RepoRef.from_url input map to PR_STATE_LOOKUP_FAILED. Programming
+            # errors (TypeError/AttributeError) must propagate unmasked
+            # (AGENTS.md: catch specific exceptions, not bare Exception).
             raise workspaces.WorkspaceRetryPrStateUnavailableError(
                 "Could not verify whether the existing pull request is still open.",
                 detail={
