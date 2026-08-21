@@ -69,6 +69,7 @@ from awf.node.compose_manager import (
 )
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
 from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
@@ -134,7 +135,11 @@ _log = get_logger(__name__)
 _parse_agent_runtime = parse_agent_runtime
 
 
-class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
+class Provisioner(
+    ProvisionerCursorPreflightMixin,
+    ProvisionerHostPortCheckMixin,
+    ProvisionerShortTxnHelpersMixin,
+):
     """Orchestrate one workspace at a time, safely across concurrent provisions."""
 
     _run_claimed_provision = _provisioner_helpers._run_claimed_provision
@@ -313,6 +318,15 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 if profile_resolution is not None
                 else None
             )
+            # Adoption may defer Cursor Router preflight until this checkout
+            # profile is known (``profile_ref=auto`` + repo-local CURSOR_API_KEY).
+            if await self._run_deferred_cursor_auto_router_preflight(
+                workspace_id=workspace_id,
+                ws=ws,
+                profile=profile,
+                execution_claim_epoch=execution_claim_epoch,
+            ):
+                return
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)

@@ -31,6 +31,7 @@ from awf.db.enums import AgentRuntime, CursorAutoMode
 from awf.profiles.models import WorkspaceProfile
 from awf.service.pr_monitor_adoption_cursor_preflight import (
     _cursor_auto_mode_provider_preflight,
+    run_deferred_cursor_auto_mode_provider_preflight,
 )
 from awf.service.pr_monitor_adoption_helpers import (
     PRMonitorAdoptionError,
@@ -607,3 +608,112 @@ async def test_adoption_cursor_auto_mode_preflight_overlays_profile_cursor_env_l
     environ = captured["provider_environ"]
     assert isinstance(environ, Mapping)
     assert environ.get("CURSOR_API_KEY") == "lease-cursor-key"
+
+
+@pytest.mark.asyncio
+async def test_deferred_cursor_auto_preflight_skips_when_already_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    async def _must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"blocks_launch": True}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _must_not_run,
+    )
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy={
+            "cursor_auto_mode": "intelligence",
+            "provider_readiness_preflight": {"blocks_launch": False},
+        },
+        resolved_profile={"name": "repo-local"},
+    )
+    assert result is None
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_deferred_cursor_auto_preflight_skips_without_cursor_auto_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    async def _must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"blocks_launch": True}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _must_not_run,
+    )
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy={},
+        resolved_profile={"name": "repo-local"},
+    )
+    assert result is None
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_deferred_cursor_auto_preflight_runs_after_resolved_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adoption deferral completes once checkout resolves the repo-local profile."""
+    captured: dict[str, object] = {}
+
+    async def _capture(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured["provider_environ"] = kwargs.get("provider_environ")
+        return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _capture,
+    )
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile={
+            "name": "repo-local",
+            "runtime": {"environment": {"CURSOR_API_KEY": "resolved-profile-key"}},
+        },
+    )
+    assert result == {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+    environ = captured["provider_environ"]
+    assert isinstance(environ, Mapping)
+    assert environ.get("CURSOR_API_KEY") == "resolved-profile-key"
+
+
+@pytest.mark.asyncio
+async def test_deferred_cursor_auto_preflight_surfaces_router_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _blocked(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "blocks_launch": True,
+            "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            "message": "Router is unavailable.",
+        }
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _blocked,
+    )
+    monkeypatch.setenv("CURSOR_API_KEY", "worker-cursor-key")
+    result = await run_deferred_cursor_auto_mode_provider_preflight(
+        agent=AgentRuntime.cursor,
+        task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile={"name": "repo-local"},
+    )
+    assert result == {
+        "blocks_launch": True,
+        "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+        "message": "Router is unavailable.",
+    }
