@@ -1347,6 +1347,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
             "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
             "__AWF-VERDICT: FALSE POSITIVE: ___lead_ rest__",
+            # Shorter mid opener + trailing wrapper at EOS: EOS is not
+            # left-flanking, so rule 9 does not block and the mid run steals
+            # the closer (PRRT_kwDOSJAM6s6bTBv4).
+            "**AWF-VERDICT: FALSE POSITIVE: reason *x**",
+            "*AWF-VERDICT: FALSE POSITIVE: reason *x*",
+            "__AWF-VERDICT: FALSE POSITIVE: reason _x__",
             # Punctuation-to-alphanumeric mid run is opening-only; treating it as
             # a closer would consume an earlier opener and wrongly accept the
             # whole-line wrap (PRRT_kwDOSJAM6s6bShqh).
@@ -1509,9 +1515,11 @@ class TestParseVerdict:
             ("already_correct_", "_", False),
             ("see_this_", "_", False),
             ("please clarify_", "_", False),
-            # Multiple-of-3 rule blocks pairing a length-1 opener run against a
-            # length-2 closer that can also open (``*foo**``).
-            ("*foo**", "**", False),
+            # Trailing ``**`` at EOS cannot open (CommonMark EOL=whitespace), so
+            # rule 9 does not block; the length-1 mid opener steals one closer
+            # star (PRRT_kwDOSJAM6s6bTBv4).
+            ("*foo**", "**", True),
+            ("reason *x**", "**", True),
             # Code-span markers are opaque; trailing closer is not claimed
             # (PRRT_kwDOSJAM6s6bShql).
             ("see `**`**", "**", False),
@@ -1548,7 +1556,10 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_close("**", -1, 2, "*") is False
         assert _markdown_emphasis_run_can_close("ab", 0, 2, "*") is False
         assert _markdown_emphasis_run_can_open("**", 0, 0, "*") is False
-        assert _markdown_emphasis_run_can_open("x*", 1, 1, "*") is True  # EOF is left-flanking
+        # CommonMark: end of line counts as whitespace → not left-flanking
+        # (PRRT_kwDOSJAM6s6bTBv4).
+        assert _markdown_emphasis_run_can_open("x*", 1, 1, "*") is False
+        assert _markdown_emphasis_run_can_open("**", 0, 2, "*") is False
         assert _markdown_emphasis_run_can_open("* ", 0, 1, "*") is False  # followed by space
         assert _markdown_emphasis_run_can_close(" *", 1, 1, "*") is False  # preceded by space
         assert _markdown_emphasis_run_can_close("a_b", 1, 1, "_") is False  # intra-word closer

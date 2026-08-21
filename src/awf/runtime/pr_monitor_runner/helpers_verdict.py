@@ -1160,7 +1160,9 @@ def _markdown_emphasis_run_can_open(text: str, start: int, length: int, marker: 
         return False
     if text[start:end] != marker * length:
         return False
-    if end < len(text) and text[end].isspace():
+    # CommonMark: beginning and end of the line count as Unicode whitespace for
+    # flanking, so a run at EOS is not left-flanking (PRRT_kwDOSJAM6s6bTBv4).
+    if end >= len(text) or text[end].isspace():
         return False
     # CommonMark left-flanking (2b): a run followed by punctuation opens only
     # when also preceded by BOS, whitespace, or punctuation. Alphanumeric-to-
