@@ -35,6 +35,7 @@ from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_creator import PullRequestError
+from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 
 _PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
 # Post-push forge reads can lag behind a just-completed push. Retry briefly
@@ -47,6 +48,24 @@ class _PostPushReuseDisposition(StrEnum):
     keep = "keep"
     open_replacement = "open_replacement"
     fail_closed = "fail_closed"
+
+
+def _apply_sync_feature_replacement_policy(policy: dict[str, Any], *, repo_url: str | None) -> None:
+    """Convert closed sync-feature adoption into a coding feature task.
+
+    Clears PR identity inside ``pr_adoption`` but retains distinct fork
+    ``head_repo_slug`` / ``head_repo_url`` so replacement pushes stay on the
+    fork instead of ``origin``.
+    """
+    adoption = policy.get("pr_adoption")
+    retained = retained_fork_pr_adoption(
+        repo_url=repo_url,
+        adoption=adoption if isinstance(adoption, dict) else None,
+    )
+    policy.pop("pr_adoption", None)
+    if retained is not None:
+        policy["pr_adoption"] = retained
+    policy["task_kind"] = TaskKind.feature_branch_pr.value
 
 
 async def _clear_stale_pr_identity_for_replacement(
@@ -62,6 +81,8 @@ async def _clear_stale_pr_identity_for_replacement(
     executor must not hand the monitor a terminal PR URL after pushing new
     commits. Clearing identity (and sync-feature adoption) mirrors the closed-PR
     retry path so the replacement PR is opened on the workspace branch tip.
+    Fork head-repo fields are retained so the replacement push still targets the
+    adopted fork when that differs from the base repository.
     """
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
@@ -72,8 +93,10 @@ async def _clear_stale_pr_identity_for_replacement(
             persisted.remote_push_branch = None
             policy = dict(persisted.task_policy or {})
             if persisted.task_kind == TaskKind.sync_feature_pr.value:
-                policy.pop("pr_adoption", None)
-                policy["task_kind"] = TaskKind.feature_branch_pr.value
+                _apply_sync_feature_replacement_policy(
+                    policy,
+                    repo_url=getattr(persisted, "repo_url", None) or getattr(ws, "repo_url", None),
+                )
                 persisted.task_kind = TaskKind.feature_branch_pr.value
                 persisted.task_policy = policy
             await session.commit()
@@ -83,8 +106,10 @@ async def _clear_stale_pr_identity_for_replacement(
     if getattr(ws, "task_kind", None) == TaskKind.sync_feature_pr.value:
         ws.task_kind = TaskKind.feature_branch_pr.value
         policy = dict(ws.task_policy or {})
-        policy.pop("pr_adoption", None)
-        policy["task_kind"] = TaskKind.feature_branch_pr.value
+        _apply_sync_feature_replacement_policy(
+            policy,
+            repo_url=getattr(ws, "repo_url", None),
+        )
         ws.task_policy = policy
 
 
@@ -609,7 +634,7 @@ async def push_and_open_pr(
                             repo_url=ws.repo_url,
                             existing_pr_url=None,
                             remote_branch_name=None,
-                            remote_url=None,
+                            remote_url=existing_pr_remote_url,
                         )
                 else:
                     await _clear_stale_pr_identity_for_replacement(
@@ -628,7 +653,7 @@ async def push_and_open_pr(
                         repo_url=ws.repo_url,
                         existing_pr_url=None,
                         remote_branch_name=None,
-                        remote_url=None,
+                        remote_url=existing_pr_remote_url,
                     )
         else:
             # New PR: ``make_forge_client`` builds the Bitbucket client eagerly

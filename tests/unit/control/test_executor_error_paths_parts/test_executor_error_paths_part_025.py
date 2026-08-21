@@ -787,6 +787,8 @@ class TestPrReuseIdentityClearAndBitbucketAuthPart025:
                     "base_ref": "development",
                     "head_sha": "h" * 40,
                     "base_sha": "b" * 40,
+                    # Same-repo adoption: no fork head to retain.
+                    "head_repo_slug": "x/y",
                 },
             },
         )
@@ -806,10 +808,15 @@ class TestPrReuseIdentityClearAndBitbucketAuthPart025:
             pr_url="https://github.com/x/y/pull/55",
             pr_number=55,
             remote_push_branch="feature/existing",
+            repo_url="git@github.com:x/y.git",
             task_kind=TaskKind.sync_feature_pr.value,
             task_policy={
                 "task_kind": TaskKind.sync_feature_pr.value,
-                "pr_adoption": {"pr_number": 55, "head_ref": "feature/existing"},
+                "pr_adoption": {
+                    "pr_number": 55,
+                    "head_ref": "feature/existing",
+                    "head_repo_slug": "x/y",
+                },
             },
         )
         await _pr_open_step._clear_stale_pr_identity_for_replacement(
@@ -834,6 +841,92 @@ class TestPrReuseIdentityClearAndBitbucketAuthPart025:
             assert persisted.task_policy == {"task_kind": TaskKind.feature_branch_pr.value}
 
     @pytest.mark.unit
+    async def test_clear_stale_pr_identity_retains_fork_head_repo_for_replacement(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Fork adoptions must keep head_repo_* so replacement pushes stay on the fork."""
+        from awf.db.enums import TaskKind
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind=TaskKind.sync_feature_pr.value,
+            task_policy={
+                "task_kind": TaskKind.sync_feature_pr.value,
+                "pr_adoption": {
+                    "repo_slug": "base-org/project",
+                    "pr_number": 55,
+                    "pr_url": "https://github.com/base-org/project/pull/55",
+                    "head_ref": "feature/existing",
+                    "head_repo_slug": "fork-owner/project",
+                    "head_repo_url": "git@github.com:fork-owner/project.git",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                },
+            },
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            persisted = await repo.get(ws_id)
+            assert persisted is not None
+            persisted.pr_url = "https://github.com/base-org/project/pull/55"
+            persisted.pr_number = 55
+            persisted.remote_push_branch = "feature/existing"
+            persisted.repo_url = "git@github.com:base-org/project.git"
+            await session.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        memory_ws = SimpleNamespace(
+            pr_url="https://github.com/base-org/project/pull/55",
+            pr_number=55,
+            remote_push_branch="feature/existing",
+            repo_url="git@github.com:base-org/project.git",
+            task_kind=TaskKind.sync_feature_pr.value,
+            task_policy={
+                "task_kind": TaskKind.sync_feature_pr.value,
+                "pr_adoption": {
+                    "pr_number": 55,
+                    "head_ref": "feature/existing",
+                    "head_repo_slug": "fork-owner/project",
+                    "head_repo_url": "git@github.com:fork-owner/project.git",
+                },
+            },
+        )
+        await _pr_open_step._clear_stale_pr_identity_for_replacement(
+            _Executor(),
+            workspace_id=ws_id,
+            ws=memory_ws,
+        )
+
+        retained = {
+            "head_repo_slug": "fork-owner/project",
+            "head_repo_url": "git@github.com:fork-owner/project.git",
+        }
+        assert memory_ws.pr_url is None
+        assert memory_ws.pr_number is None
+        assert memory_ws.remote_push_branch is None
+        assert memory_ws.task_kind == TaskKind.feature_branch_pr.value
+        assert memory_ws.task_policy == {
+            "task_kind": TaskKind.feature_branch_pr.value,
+            "pr_adoption": retained,
+        }
+
+        async with factory() as session:
+            persisted = await WorkspaceRepository(session).get(ws_id)
+            assert persisted is not None
+            assert persisted.pr_url is None
+            assert persisted.pr_number is None
+            assert persisted.remote_push_branch is None
+            assert persisted.task_kind == TaskKind.feature_branch_pr.value
+            assert persisted.task_policy == {
+                "task_kind": TaskKind.feature_branch_pr.value,
+                "pr_adoption": retained,
+            }
+
+    @pytest.mark.unit
     async def test_clear_stale_pr_identity_skips_missing_row_but_clears_memory(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -848,6 +941,7 @@ class TestPrReuseIdentityClearAndBitbucketAuthPart025:
             pr_url="https://github.com/x/y/pull/55",
             pr_number=55,
             remote_push_branch="feature/existing",
+            repo_url="git@github.com:x/y.git",
             task_kind=TaskKind.sync_feature_pr.value,
             task_policy={
                 "task_kind": TaskKind.sync_feature_pr.value,

@@ -975,16 +975,14 @@ class TestPushAndOpen:
         assert repo == RepoRef(owner="dimileeh", name="aira-agent", forge="github")
 
     @pytest.mark.unit
-    async def test_remote_url_wins_over_repo_url_for_repo_ref(self) -> None:
-        # The locked expression is RepoRef.from_url(remote_url or repo_url): an
-        # explicit fork push URL targets the fork's RepoRef, not the base repo_url.
-        # (No PR is opened on the reuse path, so this asserts via a non-reuse call
-        # by leaving existing_pr_url unset while still passing remote_url.)
+    async def test_fork_remote_url_pushes_fork_and_opens_pr_on_base(self) -> None:
+        # Replacement / new PR from an adopted fork: push to the fork URL, but
+        # open the PR against the base repo_url with a cross-fork head.
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # git push
 
-        forge = _FakeForgeClient(url="https://github.com/contributor/aira-agent/pull/3")
+        forge = _FakeForgeClient(url="https://github.com/dimileeh/aira-agent/pull/3")
         creator = PullRequestCreator(runner)
         await creator.push_and_open(
             worktree_path=_WORKTREE,
@@ -996,8 +994,13 @@ class TestPushAndOpen:
             repo_url=_GH_REPO_URL,
             remote_url="git@github.com:contributor/aira-agent.git",
         )
-        repo = forge.calls[0]["repo"]
-        assert repo == RepoRef(owner="contributor", name="aira-agent", forge="github")
+        push_args = runner.calls[3].args
+        push_index = push_args.index("push")
+        assert push_args[push_index + 1] == "git@github.com:contributor/aira-agent.git"
+        assert forge.calls[0]["repo"] == RepoRef(
+            owner="dimileeh", name="aira-agent", forge="github"
+        )
+        assert forge.calls[0]["head"] == "contributor:awf/ws_xyz"
 
     @pytest.mark.unit
     async def test_reuses_existing_pr_after_push_without_creating_duplicate(self) -> None:

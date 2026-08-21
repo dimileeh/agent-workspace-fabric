@@ -277,7 +277,7 @@ def _with_release_sync_pr_metadata(
 
 
 def _existing_pr_remote_push_url(ws: Workspace) -> str | None:
-    if ws.task_kind != "sync_feature_pr":
+    if ws.task_kind not in {"sync_feature_pr", "feature_branch_pr"}:
         return None
     try:
         base_repo = RepoRef.from_url(ws.repo_url)
