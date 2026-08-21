@@ -1332,6 +1332,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
+            # Unmatched label closer is not a link; destination stars steal the
+            # outer closer (PRRT_kwDOSJAM6s6bTW7q).
+            "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see ](foo*bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see ](foo __bar)__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1423,6 +1428,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
+            # Unmatched ``]`` is not a label closer; parenthesized stars steal
+            # the whole-line closer (PRRT_kwDOSJAM6s6bTW7q).
+            "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see ](foo*bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see ](foo __bar)__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1664,6 +1674,13 @@ class TestParseVerdict:
             ("see [link](foo __bar__", "__", True),
             # Escaped ``]`` is not a label closer; following dest stars claim.
             (r"see [link\](foo**bar)**", "**", True),
+            # Unmatched ``]`` has no active label opener; parenthesized stars
+            # claim the trailing closer (PRRT_kwDOSJAM6s6bTW7q).
+            ("see ](foo**bar)**", "**", True),
+            ("see ](foo*bar)*", "*", True),
+            ("see ](foo __bar)__", "__", True),
+            # Prior closed link does not leave a spare opener for a later bare ``]``.
+            ("see [a](x) and ](foo**bar)**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
