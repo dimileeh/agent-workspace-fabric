@@ -1057,6 +1057,10 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
     CommonMark closing delimiter runs must be right-flanking (not preceded by
     whitespace) and must not include backslash-escaped marker characters. Also
     reject when the run is longer than ``opener`` on either side.
+
+    Underscore closers additionally follow CommonMark's intra-word rule: a
+    ``_`` / ``__`` / ``___`` run cannot close when followed by an ASCII
+    alphanumeric character (PRRT_kwDOSJAM6s6bRy5w).
     """
     closer_end = closer_start + len(opener)
     if closer_start < 0 or closer_end > len(text):
@@ -1072,6 +1076,8 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
     if closer_end < len(text) and text[closer_end] == opener[0]:
         return False
     if closer_start > 0 and text[closer_start - 1].isspace():
+        return False
+    if opener[0] == "_" and closer_end < len(text) and text[closer_end].isalnum():
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(closer_start, closer_end))
 
@@ -1103,6 +1109,10 @@ def _markdown_emphasis_opener_is_valid(text: str, opener_start: int, opener: str
     Mirrors ``_markdown_emphasis_closer_is_valid`` with left-flanking rules: the
     run must not be followed by whitespace, must be exact-length, and must not
     include backslash-escaped marker characters.
+
+    Underscore openers additionally follow CommonMark's intra-word rule: a
+    ``_`` / ``__`` / ``___`` run cannot open when preceded by an ASCII
+    alphanumeric character (PRRT_kwDOSJAM6s6bRy5w).
     """
     opener_end = opener_start + len(opener)
     if opener_start < 0 or opener_end > len(text):
@@ -1118,6 +1128,8 @@ def _markdown_emphasis_opener_is_valid(text: str, opener_start: int, opener: str
     if opener_end < len(text) and text[opener_end] == opener[0]:
         return False
     if opener_end < len(text) and text[opener_end].isspace():
+        return False
+    if opener[0] == "_" and opener_start > 0 and text[opener_start - 1].isalnum():
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(opener_start, opener_end))
 
@@ -1193,7 +1205,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     (PRRT_kwDOSJAM6s6bQqbC). The same applies when a mid-reason same-delimiter
     opener steals the trailing closer (``**… rationale **unclosed**``) — pair
     across the whole candidate before accepting the strip
-    (PRRT_kwDOSJAM6s6bRrWv).
+    (PRRT_kwDOSJAM6s6bRrWv). Underscore balance checks use the reason span only
+    and ignore word-internal ``_`` so ``NEEDS_HUMAN`` / snake_case reasons do
+    not falsely reject a valid whole-line ``_…_`` wrap (PRRT_kwDOSJAM6s6bRy5w).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
@@ -1234,7 +1248,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
             return None
         # Mid-reason opener that claims the trailing closer leaves the line
         # wrapper unbalanced — reject before stripping (PRRT_kwDOSJAM6s6bRrWv).
-        if _verdict_reason_trailing_emphasis_is_balanced(inner, opener):
+        # Scope to reason + trailing closer: label tokens such as NEEDS_HUMAN
+        # must not participate (PRRT_kwDOSJAM6s6bRy5w).
+        reason_with_trailing = f"{matched.group('reason')}{opener}"
+        if _verdict_reason_trailing_emphasis_is_balanced(reason_with_trailing, opener):
             return None
         return candidate
     return None

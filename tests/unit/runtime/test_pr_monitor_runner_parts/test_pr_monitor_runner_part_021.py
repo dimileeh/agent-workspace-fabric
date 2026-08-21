@@ -1248,6 +1248,7 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
+            "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1288,6 +1289,7 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
+            "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1351,6 +1353,24 @@ class TestParseVerdict:
                 r"**AWF-VERDICT: FALSE POSITIVE:** see \**literal and **ok**",
                 r"AWF-VERDICT: FALSE POSITIVE: see \**literal and **ok**",
             ),
+            # Word-internal `_` in NEEDS_HUMAN / snake_case must not steal the
+            # trailing whole-line closer (PRRT_kwDOSJAM6s6bRy5w).
+            (
+                "_AWF-VERDICT: NEEDS_HUMAN: please clarify_",
+                "AWF-VERDICT: NEEDS_HUMAN: please clarify",
+            ),
+            (
+                "_AWF-VERDICT: FALSE POSITIVE: already_correct_",
+                "AWF-VERDICT: FALSE POSITIVE: already_correct",
+            ),
+            (
+                "_AWF-VERDICT: FIXED: see_this_",
+                "AWF-VERDICT: FIXED: see_this",
+            ),
+            (
+                "_AWF-VERDICT: DEFER: track_follow_up later_",
+                "AWF-VERDICT: DEFER: track_follow_up later",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1383,6 +1403,11 @@ class TestParseVerdict:
             ("rationale **unclosed**", "**", True),
             ("rationale *unclosed*", "*", True),
             ("rationale __unclosed__", "__", True),
+            ("rationale _unclosed_", "_", True),
+            # Word-internal `_` is not an emphasis opener (PRRT_kwDOSJAM6s6bRy5w).
+            ("already_correct_", "_", False),
+            ("see_this_", "_", False),
+            ("please clarify_", "_", False),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
