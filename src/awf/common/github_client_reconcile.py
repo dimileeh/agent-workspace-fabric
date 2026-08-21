@@ -14,19 +14,19 @@ from awf.common.github_client_ref import RepoRef
 
 class _BranchOpenPrLike(Protocol):
     @property
-    def number(self) -> int: ...
+    def number(self) -> int: ...  # pragma: no cover - Protocol declaration only.
 
     @property
-    def url(self) -> str: ...
+    def url(self) -> str: ...  # pragma: no cover - Protocol declaration only.
 
     @property
-    def head_ref(self) -> str: ...
+    def head_ref(self) -> str: ...  # pragma: no cover - Protocol declaration only.
 
     @property
-    def head_repo_slug(self) -> str: ...
+    def head_repo_slug(self) -> str: ...  # pragma: no cover - Protocol declaration only.
 
     @property
-    def head_sha(self) -> str | None: ...
+    def head_sha(self) -> str | None: ...  # pragma: no cover - Protocol declaration only.
 
 
 def _branch_open_pr_metadata(pr: _BranchOpenPrLike) -> dict[str, object]:

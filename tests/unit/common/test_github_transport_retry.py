@@ -47,6 +47,12 @@ def test_create_pr_reconcile_head_maps_cross_fork_and_same_repo() -> None:
         "fork-owner/project-renamed",
         None,
     )
+    # Plain head with an explicit push/fork source still matches that slug.
+    assert _create_pr_reconcile_head(repo=repo, head="feature", source_repo=fork) == (
+        "feature",
+        "fork-owner/project-renamed",
+        None,
+    )
     # Malformed qualified heads fall back to same-repo matching on the raw value.
     assert _create_pr_reconcile_head(repo=repo, head=":feature") == (
         ":feature",

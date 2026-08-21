@@ -73,6 +73,14 @@ def test_retained_fork_pr_adoption_keeps_only_distinct_head_repo_fields() -> Non
         "head_repo_slug": "fork-owner/project",
         "head_repo_url": "git@github.com:fork-owner/project.git",
     }
+    assert retained_fork_pr_adoption(
+        repo_url="git@github.com:base-org/project.git",
+        adoption={"head_repo_slug": "fork-owner/project", "pr_number": 55},
+    ) == {"head_repo_slug": "fork-owner/project"}
+    assert retained_fork_pr_adoption(
+        repo_url="git@github.com:base-org/project.git",
+        adoption={"head_repo_url": "git@github.com:fork-owner/project.git"},
+    ) == {"head_repo_url": "git@github.com:fork-owner/project.git"}
     assert (
         retained_fork_pr_adoption(
             repo_url="git@github.com:base-org/project.git",
@@ -84,6 +92,8 @@ def test_retained_fork_pr_adoption_keeps_only_distinct_head_repo_fields() -> Non
         retained_fork_pr_adoption(repo_url="not a url", adoption={"head_repo_slug": "a/b"}) is None
     )
     assert retained_fork_pr_adoption(repo_url="git@github.com:a/b.git", adoption=None) is None
+    assert retained_fork_pr_adoption(repo_url=None, adoption={"head_repo_slug": "fork/x"}) is None
+    assert retained_fork_pr_adoption(repo_url="   ", adoption={"head_repo_slug": "fork/x"}) is None
 
 
 @pytest.mark.unit
