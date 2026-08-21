@@ -1281,6 +1281,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
             "*AWF-VERDICT: FALSE POSITIVE: lead *open.*x rest*",
             "__AWF-VERDICT: FALSE POSITIVE: lead __open.__x rest__",
+            # Escaped tick + later real tick must not swallow mid-reason steal
+            # (PRRT_kwDOSJAM6s6bSsnj).
+            r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
+            r"*AWF-VERDICT: FALSE POSITIVE: \` *unclosed`x*",
+            r"__AWF-VERDICT: FALSE POSITIVE: \` __unclosed`x__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1346,6 +1351,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: lead **open$**x rest**",
             "**AWF-VERDICT: FALSE POSITIVE: lead **open+**x rest**",
             "**AWF-VERDICT: FALSE POSITIVE: lead **open^**x rest**",
+            # Escaped backtick is not a code-span opener; a later real tick must
+            # not hide mid-reason stealers of the whole-line closer
+            # (PRRT_kwDOSJAM6s6bSsnj).
+            r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
+            r"*AWF-VERDICT: FALSE POSITIVE: \` *unclosed`x*",
+            r"__AWF-VERDICT: FALSE POSITIVE: \` __unclosed`x__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1505,6 +1516,12 @@ class TestParseVerdict:
             # Mismatched tick lengths do not close; later emphasis still pairs
             # (PRRT_kwDOSJAM6s6bShql).
             ("see ```**x`y**", "**", True),
+            # Escaped opener tick is literal; a later real tick must not open a
+            # false code span that swallows mid-reason stealers
+            # (PRRT_kwDOSJAM6s6bSsnj).
+            (r"\` **unclosed`x**", "**", True),
+            (r"\` *unclosed`x*", "*", True),
+            (r"\` __unclosed`x__", "__", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(

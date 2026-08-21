@@ -1172,9 +1172,9 @@ def _emphasis_run_pair_blocked_by_multiple_of_three(
 def _advance_past_markdown_code_span(text: str, start: int) -> int:
     """Return index after a closed backtick code span, or after an unclosed opener.
 
-    Caller must pass ``start`` at a backtick. CommonMark code spans use a run of
-    N backticks as the opener; only a later run of the same length closes.
-    Markers inside a closed span are literal (PRRT_kwDOSJAM6s6bShql). An
+    Caller must pass ``start`` at an unescaped backtick. CommonMark code spans
+    use a run of N backticks as the opener; only a later run of the same length
+    closes. Markers inside a closed span are literal (PRRT_kwDOSJAM6s6bShql). An
     unclosed opener run is itself literal, so scanning resumes after that run.
     """
     open_len = 1
@@ -1213,7 +1213,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
 
     Closed Markdown code spans are opaque: ``*`` / ``_`` runs inside them are
     literal content and must not claim the trailing wrapper closer
-    (PRRT_kwDOSJAM6s6bShql).
+    (PRRT_kwDOSJAM6s6bShql). Backslash-escaped backticks are literal openers
+    under CommonMark and must not start that skip — otherwise a later real
+    tick can swallow mid-reason stealers (PRRT_kwDOSJAM6s6bSsnj).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1223,7 +1225,7 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     trailing_paired = False
     i = 0
     while i < len(reason):
-        if reason[i] == "`":
+        if reason[i] == "`" and not _markdown_char_is_escaped(reason, i):
             i = _advance_past_markdown_code_span(reason, i)
             continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
@@ -1294,7 +1296,8 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     snake_case reasons do not falsely reject a valid whole-line ``_…_`` wrap
     (PRRT_kwDOSJAM6s6bRy5w). Inline code-span markers are opaque to that
     balance scan so ``**… see `**`**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bShql).
+    (PRRT_kwDOSJAM6s6bShql). Escaped backticks are not code-span openers, so
+    ``\\` **unclosed`x**`` still fails closed (PRRT_kwDOSJAM6s6bSsnj).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
