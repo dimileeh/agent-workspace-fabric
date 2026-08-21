@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1313,21 +1313,61 @@ def _nested_value(mapping: Mapping[str, Any], key: str, nested_key: str) -> obje
     return value.get(nested_key)
 
 
-from awf.service import provider_recovery_state as _provider_recovery_state  # noqa: E402
+# Compatibility re-exports for callers that still import state views from this
+# module. Keep them lazy so ``provider_recovery_state`` can import constants /
+# helpers from here without a circular AttributeError during module init.
+# TYPE_CHECKING imports keep mypy signatures; ``__getattr__`` supplies runtime.
+if TYPE_CHECKING:
+    from awf.service.provider_recovery_state import (
+        ProviderRecoveryStateView as ProviderRecoveryStateView,
+    )
+    from awf.service.provider_recovery_state import (
+        _build_provider_recovery_state_view as _build_provider_recovery_state_view,
+    )
+    from awf.service.provider_recovery_state import (
+        _merge_recovery_views as _merge_recovery_views,
+    )
+    from awf.service.provider_recovery_state import (
+        _parse_not_before as _parse_not_before,
+    )
+    from awf.service.provider_recovery_state import (
+        _provider_recovery_state_from_events as _provider_recovery_state_from_events,
+    )
+    from awf.service.provider_recovery_state import (
+        _provider_recovery_state_from_task_policy as _provider_recovery_state_from_task_policy,
+    )
+    from awf.service.provider_recovery_state import (
+        _recommended_action_for_action as _recommended_action_for_action,
+    )
+    from awf.service.provider_recovery_state import (
+        _validate_recovery_action as _validate_recovery_action,
+    )
+    from awf.service.provider_recovery_state import (
+        provider_recovery_decision_from_workspace as provider_recovery_decision_from_workspace,
+    )
+    from awf.service.provider_recovery_state import (
+        provider_recovery_state_for_workspace as provider_recovery_state_for_workspace,
+    )
 
-ProviderRecoveryStateView = _provider_recovery_state.ProviderRecoveryStateView
-_build_provider_recovery_state_view = _provider_recovery_state._build_provider_recovery_state_view
-_merge_recovery_views = _provider_recovery_state._merge_recovery_views
-_parse_not_before = _provider_recovery_state._parse_not_before
-_provider_recovery_state_from_events = _provider_recovery_state._provider_recovery_state_from_events
-_provider_recovery_state_from_task_policy = (
-    _provider_recovery_state._provider_recovery_state_from_task_policy
+_COMPAT_STATE_REEXPORT_NAMES = frozenset(
+    {
+        "ProviderRecoveryStateView",
+        "_build_provider_recovery_state_view",
+        "_merge_recovery_views",
+        "_parse_not_before",
+        "_provider_recovery_state_from_events",
+        "_provider_recovery_state_from_task_policy",
+        "_recommended_action_for_action",
+        "_validate_recovery_action",
+        "provider_recovery_decision_from_workspace",
+        "provider_recovery_state_for_workspace",
+    }
 )
-_recommended_action_for_action = _provider_recovery_state._recommended_action_for_action
-_validate_recovery_action = _provider_recovery_state._validate_recovery_action
-provider_recovery_decision_from_workspace = (
-    _provider_recovery_state.provider_recovery_decision_from_workspace
-)
-provider_recovery_state_for_workspace = (
-    _provider_recovery_state.provider_recovery_state_for_workspace
-)
+
+
+def __getattr__(name: str) -> object:
+    if name in _COMPAT_STATE_REEXPORT_NAMES:
+        from awf.service import provider_recovery_state as _provider_recovery_state
+
+        return getattr(_provider_recovery_state, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
