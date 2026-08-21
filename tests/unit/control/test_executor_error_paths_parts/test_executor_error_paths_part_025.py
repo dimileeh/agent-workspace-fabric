@@ -755,3 +755,183 @@ class TestPrMonitorFactoryPath:
         assert len(factory_workspaces) == 1
         assert factory_workspaces[0].id == ws_id
         assert factory_workspaces[0].auto_merge is False
+
+
+class TestPrReuseIdentityClearAndBitbucketAuthPart025:
+    @pytest.mark.unit
+    async def test_clear_stale_pr_identity_converts_sync_feature_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Merged/closed reuse must drop adoption and become a coding feature task."""
+        from awf.db.enums import TaskKind
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind=TaskKind.sync_feature_pr.value,
+            task_policy={
+                "task_kind": TaskKind.sync_feature_pr.value,
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 55,
+                    "pr_url": "https://github.com/x/y/pull/55",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                },
+            },
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            persisted = await repo.get(ws_id)
+            assert persisted is not None
+            persisted.pr_url = "https://github.com/x/y/pull/55"
+            persisted.pr_number = 55
+            persisted.remote_push_branch = "feature/existing"
+            await session.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        memory_ws = SimpleNamespace(
+            pr_url="https://github.com/x/y/pull/55",
+            pr_number=55,
+            remote_push_branch="feature/existing",
+            task_kind=TaskKind.sync_feature_pr.value,
+            task_policy={
+                "task_kind": TaskKind.sync_feature_pr.value,
+                "pr_adoption": {"pr_number": 55, "head_ref": "feature/existing"},
+            },
+        )
+        await _pr_open_step._clear_stale_pr_identity_for_replacement(
+            _Executor(),
+            workspace_id=ws_id,
+            ws=memory_ws,
+        )
+
+        assert memory_ws.pr_url is None
+        assert memory_ws.pr_number is None
+        assert memory_ws.remote_push_branch is None
+        assert memory_ws.task_kind == TaskKind.feature_branch_pr.value
+        assert memory_ws.task_policy == {"task_kind": TaskKind.feature_branch_pr.value}
+
+        async with factory() as session:
+            persisted = await WorkspaceRepository(session).get(ws_id)
+            assert persisted is not None
+            assert persisted.pr_url is None
+            assert persisted.pr_number is None
+            assert persisted.remote_push_branch is None
+            assert persisted.task_kind == TaskKind.feature_branch_pr.value
+            assert persisted.task_policy == {"task_kind": TaskKind.feature_branch_pr.value}
+
+    @pytest.mark.unit
+    async def test_clear_stale_pr_identity_skips_missing_row_but_clears_memory(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """If the row vanished mid-push, still clear the in-memory reuse identity."""
+        from awf.db.enums import TaskKind
+
+        class _Executor:
+            _session_factory = factory
+
+        memory_ws = SimpleNamespace(
+            pr_url="https://github.com/x/y/pull/55",
+            pr_number=55,
+            remote_push_branch="feature/existing",
+            task_kind=TaskKind.sync_feature_pr.value,
+            task_policy={
+                "task_kind": TaskKind.sync_feature_pr.value,
+                "pr_adoption": {"pr_number": 55},
+            },
+        )
+        await _pr_open_step._clear_stale_pr_identity_for_replacement(
+            _Executor(),
+            workspace_id="ws_missing_for_clear",
+            ws=memory_ws,
+        )
+        assert memory_ws.pr_url is None
+        assert memory_ws.pr_number is None
+        assert memory_ws.remote_push_branch is None
+        assert memory_ws.task_kind == TaskKind.feature_branch_pr.value
+        assert memory_ws.task_policy == {"task_kind": TaskKind.feature_branch_pr.value}
+
+    @pytest.mark.unit
+    async def test_sync_reuse_remote_push_branch_updates_memory_when_row_missing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Live head-ref sync must still update the in-memory push target if the row is gone."""
+
+        class _Executor:
+            _session_factory = factory
+
+        memory_ws = SimpleNamespace(remote_push_branch="awf/stale")
+        await _pr_open_step._sync_reuse_remote_push_branch(
+            _Executor(),
+            workspace_id="ws_missing_for_sync",
+            ws=memory_ws,
+            live_head_ref="contributors/renamed-head",
+        )
+        assert memory_ws.remote_push_branch == "contributors/renamed-head"
+
+    @pytest.mark.unit
+    async def test_reuse_push_fails_when_bitbucket_client_construction_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reuse revalidation builds the forge client before push; auth errors fail closed."""
+        from awf.common.bitbucket_client import (
+            BITBUCKET_AUTH_NOT_CONFIGURED,
+            BitbucketClientError,
+        )
+        from awf.control.executor.constants import (
+            _AUDIT_GIT_PUSH_EVENT,
+            _AUDIT_PR_CREATED_EVENT,
+            _PR_CREATE_FAILED_REASON_CODE,
+        )
+
+        def _raise_make_forge_client(forge: str, runner: object) -> object:
+            raise BitbucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _raise_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:workspace/repo.git"
+            ws.pr_url = "https://bitbucket.org/workspace/repo/pull-requests/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "feature/existing"
+            await session.commit()
+
+        _queue_full_happy_path(fake)
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert pr_creator.calls == []
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url == "https://bitbucket.org/workspace/repo/pull-requests/55"
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+            pr_create_events = [
+                event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
+            ]
+            assert len(pr_create_events) == 1
+            assert pr_create_events[0].reason_code == _PR_CREATE_FAILED_REASON_CODE
+            assert pr_create_events[0].payload["outcome"] == "failed"
+            assert not [event for event in ws.events if event.event_type == _AUDIT_GIT_PUSH_EVENT]

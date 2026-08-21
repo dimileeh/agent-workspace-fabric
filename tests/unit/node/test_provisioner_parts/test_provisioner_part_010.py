@@ -172,3 +172,42 @@ def test_mount_metadata_event_redacts_companion_secret_fields() -> None:
     assert mount_md["providers"] == ["env"]
     assert mount_md["targets"] == ["GH_TOKEN"]
     assert mount_md["env_count"] == 1
+
+
+@pytest.mark.unit
+def test_workspace_supports_github_pull_head_ref_rejects_non_github_pr_url() -> None:
+    """A Bitbucket PR URL must not select GitHub's synthetic pull-head ref."""
+    from types import SimpleNamespace
+
+    from awf.node.provisioner_helpers import _workspace_supports_github_pull_head_ref
+
+    ws = SimpleNamespace(
+        resolved_profile={"forge": "auto"},
+        repo_url="git@github.com:x/y.git",
+        pr_url="https://bitbucket.org/workspace/repo/pull-requests/1",
+    )
+    assert _workspace_supports_github_pull_head_ref(ws) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("pr_url", "expected"),
+    [
+        (None, True),
+        ("https://github.com/x/y/pull/1", True),
+    ],
+)
+def test_workspace_supports_github_pull_head_ref_allows_github_or_missing_pr_url(
+    pr_url: str | None,
+    expected: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from awf.node.provisioner_helpers import _workspace_supports_github_pull_head_ref
+
+    ws = SimpleNamespace(
+        resolved_profile={"forge": "github"},
+        repo_url="git@github.com:x/y.git",
+        pr_url=pr_url,
+    )
+    assert _workspace_supports_github_pull_head_ref(ws) is expected

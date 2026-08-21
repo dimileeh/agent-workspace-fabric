@@ -659,6 +659,63 @@ class TestPushAndOpen:
         assert failures[-1]["will_retry"] is False
 
     @pytest.mark.unit
+    async def test_github_duplicate_pr_create_records_github_client_lookup_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Transport-level reconcile failures keep operation/returncode evidence."""
+        from awf.common import github_client as github_client_module
+        from awf.common.github_client import GitHubClientError
+
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        duplicate_error = (
+            'a pull request for branch "awf/ws_x" into branch "development" already exists'
+        )
+        runner.queue_result(returncode=1, stderr=duplicate_error)
+
+        async def _raise_github_client_error(**_kwargs: object) -> list[object]:
+            raise GitHubClientError(
+                operation="gh pr list",
+                returncode=1,
+                stderr="connection reset by peer",
+            )
+
+        monkeypatch.setattr(
+            github_client_module,
+            "list_open_pull_requests_for_branch",
+            _raise_github_client_error,
+        )
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_max_retries=0,
+        )
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=_gh_client(runner),
+                repo_url=_GH_REPO_URL,
+            )
+
+        assert exc.value.details is not None
+        assert exc.value.details["strategy"] == "duplicate_lookup_failed"
+        lookups = exc.value.details["reconcile_lookups"]
+        assert isinstance(lookups, list)
+        assert lookups[0] == {
+            "status": "failed",
+            "reason_code": "OPEN_PR_LOOKUP_FAILED",
+            "operation": "gh pr list",
+            "returncode": 1,
+            "error_message": "connection reset by peer",
+        }
+
+    @pytest.mark.unit
     async def test_github_transient_pr_create_ignores_fork_pr_collision(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)

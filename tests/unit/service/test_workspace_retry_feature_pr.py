@@ -1251,3 +1251,147 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
     assert retried.pr_number == 10
     assert retried.remote_push_branch == "contributors/open-head"
     assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"
+
+
+def test_existing_feature_pr_url_reads_adoption_when_column_missing() -> None:
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        pr_url=None,
+        task_kind="sync_feature_pr",
+        task_policy={
+            "pr_adoption": {"pr_url": " https://github.com/example/retryable/pull/42 "},
+        },
+    )
+    assert (
+        workspaces_retry_service._existing_feature_pr_url(source)
+        == "https://github.com/example/retryable/pull/42"
+    )
+
+
+@pytest.mark.parametrize(
+    "adoption_pr_url",
+    ["", "   ", 42, None],
+)
+def test_existing_feature_pr_url_ignores_invalid_adoption_url(
+    adoption_pr_url: object,
+) -> None:
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        pr_url=None,
+        task_kind="sync_feature_pr",
+        task_policy={"pr_adoption": {"pr_url": adoption_pr_url}},
+    )
+    assert workspaces_retry_service._existing_feature_pr_url(source) is None
+
+
+@pytest.mark.parametrize(
+    ("adoption_number", "expected"),
+    [
+        (42, 42),
+        ("77", 77),
+        ("0", None),
+        (0, None),
+        (-3, None),
+        (True, None),
+        ("not-a-number", None),
+        (None, None),
+    ],
+)
+def test_existing_feature_pr_number_reads_adoption_fallbacks(
+    adoption_number: object,
+    expected: int | None,
+) -> None:
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        pr_url=None,
+        pr_number=None,
+        task_kind="sync_feature_pr",
+        task_policy={"pr_adoption": {"pr_number": adoption_number}},
+    )
+    assert workspaces_retry_service._existing_feature_pr_number(source) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("contributors/head", "contributors/head"),
+        ("  contributors/head  ", "contributors/head"),
+        ("", None),
+        ("   ", None),
+        (42, None),
+        (None, None),
+    ],
+)
+def test_adoption_policy_str_rejects_empty_and_non_string(
+    raw: object,
+    expected: str | None,
+) -> None:
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        task_kind="sync_feature_pr",
+        task_policy={"pr_adoption": {"head_ref": raw}},
+    )
+    assert workspaces_retry_service._adoption_policy_str(source, "head_ref") == expected
+
+
+@pytest.mark.unit
+async def test_source_runtime_not_yet_released_honors_pre_launch_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Null-compose failed rows with placement evidence consult the pre-launch marker."""
+    from types import SimpleNamespace
+
+    async def _no_terminal(_session: object, _workspace_id: str) -> bool:
+        return False
+
+    class _ReservationRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_for_workspace(self, _workspace_id: str, *, limit: int = 1) -> list[object]:
+            return [object()]
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "has_terminal_runtime_released_event",
+        _no_terminal,
+    )
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "ResourceReservationRepository",
+        _ReservationRepo,
+    )
+
+    source = SimpleNamespace(
+        id="ws_prelaunch_gate",
+        status=WorkspaceStatus.failed.value,
+        compose_project_name=None,
+        compose_file_path=None,
+        node_id="local",
+    )
+
+    async def _has_marker(_session: object, _workspace_id: str) -> bool:
+        return True
+
+    async def _missing_marker(_session: object, _workspace_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "_source_has_pre_launch_failure_event",
+        _has_marker,
+    )
+    assert (
+        await workspaces_retry_service._source_runtime_not_yet_released(object(), source) is False
+    )
+
+    monkeypatch.setattr(
+        workspaces_retry_service,
+        "_source_has_pre_launch_failure_event",
+        _missing_marker,
+    )
+    assert await workspaces_retry_service._source_runtime_not_yet_released(object(), source) is True
