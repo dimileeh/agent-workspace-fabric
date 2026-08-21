@@ -256,12 +256,12 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#cursor_auth_missing](#cursor_auth_missing)
 
-### CURSOR_ROUTER_UNAVAILABLE
-**Problem:** The authenticated Cursor model catalog does not advertise the `auto-smart` Router model required by the requested Auto mode.
-**Likely Cause:** Cursor Router is not enabled for this API key/team or the account is not eligible for Router.
-**Operator Fix:** Enable Cursor Router for the team, use an eligible API key, or omit `cursor_auto_mode` to use portable plain `auto`.
-**Related Command:** `awf workspace create --agent cursor --cursor-auto-mode intelligence`
-**Docs Link:** [Cursor Router](https://cursor.com/docs/cursor-router)
+### CURSOR_ROUTER_PROBE_ERROR
+**Problem:** AWF could not complete the Cursor Router model-catalog probe.
+**Likely Cause:** Docker or the subprocess runtime raised an unexpected local error before the catalog command completed.
+**Operator Fix:** Inspect redacted preflight detail, verify Docker and the agent runtime image, then retry.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#cursor_router_probe_error](#cursor_router_probe_error)
 
 ### CURSOR_ROUTER_PROBE_FAILED
 **Problem:** `cursor-agent models` exited non-zero while AWF checked Cursor Router availability.
@@ -277,12 +277,12 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service status --provider cursor --format pretty`
 **Docs Link:** [docs/REASON_CATALOG.md#cursor_router_probe_timeout](#cursor_router_probe_timeout)
 
-### CURSOR_ROUTER_PROBE_ERROR
-**Problem:** AWF could not complete the Cursor Router model-catalog probe.
-**Likely Cause:** Docker or the subprocess runtime raised an unexpected local error before the catalog command completed.
-**Operator Fix:** Inspect redacted preflight detail, verify Docker and the agent runtime image, then retry.
-**Related Command:** `awf service doctor`
-**Docs Link:** [docs/REASON_CATALOG.md#cursor_router_probe_error](#cursor_router_probe_error)
+### CURSOR_ROUTER_UNAVAILABLE
+**Problem:** The authenticated Cursor model catalog does not advertise the `auto-smart` Router model required by the requested Auto mode.
+**Likely Cause:** Cursor Router is not enabled for this API key/team or the account is not eligible for Router.
+**Operator Fix:** Enable Cursor Router for the team, use an eligible API key, or omit `cursor_auto_mode` to use portable plain `auto`.
+**Related Command:** `awf workspace create --agent cursor --cursor-auto-mode intelligence`
+**Docs Link:** [Cursor Router](https://cursor.com/docs/cursor-router)
 
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
