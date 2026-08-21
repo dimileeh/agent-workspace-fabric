@@ -609,13 +609,17 @@ async def retry_workspace_row(
     # external call. The forge lookup itself already ran before get_for_update
     # so RetryPolicy.READ sleeps never hold the source row lock either.
     existing_feature_pr_number = _existing_feature_pr_number(source)
+    # Preserve uses the same candidate helper as unlocked prefetch so the two
+    # gates cannot drift. Closed-PR snapshot handling still keys off raw
+    # feature-PR identity (planning-scope retries may clear a closed head even
+    # when preserve_existing_feature_pr is False).
+    preserve_existing_feature_pr = _is_existing_feature_pr_preserve_candidate(source)
     existing_feature_pr = (
-        source.task_kind == TaskKind.feature_branch_pr.value
+        existing_feature_pr_number is not None
+        and source.task_kind == TaskKind.feature_branch_pr.value
         and bool(source.pr_url)
-        and existing_feature_pr_number is not None
     )
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
-    preserve_existing_feature_pr = bool(planning_scope_context is None and existing_feature_pr)
     live_pr_head_ref: str | None = None
     live_pr_base_commit: str | None = None
     retry_base_commit: str | None = None
