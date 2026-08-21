@@ -1292,9 +1292,11 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     PRRT_kwDOSJAM6s6bTtr6). Only CommonMark-valid link destinations are opaque:
     angle-bracket form may contain spaces; the non-bracket form must be
     nonempty and free of ASCII space/controls, with parentheses only when
-    balanced or escaped. An optional quoted/parenthesized title may follow,
+    balanced or escaped.     An optional quoted/parenthesized title may follow,
     but CommonMark requires whitespace between destination and title — a
     glued title after ``>`` is not opaque (PRRT_kwDOSJAM6s6bTvK5).
+    Parenthesized titles end at the first unescaped ``)`` and must not contain
+    an unescaped ``(`` (CommonMark §6.3; PRRT_kwDOSJAM6s6bUOZ9).
     ``*`` / ``_`` inside a valid destination or title are literal and must not
     participate in emphasis pairing (PRRT_kwDOSJAM6s6bTLZq). Invalid
     destinations (whitespace in non-bracket form, newline, unclosed ``)``,
@@ -1413,9 +1415,10 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
         else:
             return start
     elif text[index] == "(":
+        # CommonMark §6.3: parenthesized titles contain no unescaped ``(`` /
+        # ``)``; close at the first unescaped ``)`` (PRRT_kwDOSJAM6s6bUOZ9).
         index += 1
-        depth = 1
-        while index < n and depth > 0:
+        while index < n:
             ch = text[index]
             if ch == "\n":
                 return start
@@ -1423,11 +1426,12 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
                 index += 2
                 continue
             if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
+                return start
+            if ch == ")":
+                index += 1
+                break
             index += 1
-        if depth != 0:
+        else:
             return start
     else:
         # Leftover content after an invalid/partial destination (e.g. ``foo **bar``).
@@ -1628,6 +1632,8 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     Markdown link (PRRT_kwDOSJAM6s6bTW7q). ``]`` must be followed immediately by
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
+    Parenthesized link titles reject unescaped nested ``(`` so markers in
+    ``[link](url (a(**bar)))`` remain emphasis (PRRT_kwDOSJAM6s6bUOZ9).
     Links cannot contain links: after an inline/reference link is formed, earlier
     link (non-image) label openers are deactivated. An inactive opener still
     matches a later ``]`` as literal brackets, so a nested

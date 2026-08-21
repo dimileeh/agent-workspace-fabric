@@ -1209,6 +1209,13 @@ class TestParseVerdict:
                 "false_positive",
                 "see [link](<url> (a ** b))",
             ),
+            # Escaped nested ``\(`` in a parenthesized title is literal; markers
+            # stay opaque (PRRT_kwDOSJAM6s6bUOZ9).
+            (
+                r"**AWF-VERDICT: FALSE POSITIVE: see [link](url (a\(** b)))**",
+                "false_positive",
+                r"see [link](url (a\(** b)))",
+            ),
             # URI/email autolink interiors are opaque (PRRT_kwDOSJAM6s6bTgB-).
             (
                 "**AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a**b>**",
@@ -1422,6 +1429,11 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE: see [link](<url>'*steal') rest*",
             "**AWF-VERDICT: FALSE POSITIVE: see [link](<url>(**steal)) rest**",
             '__AWF-VERDICT: FALSE POSITIVE: see [link](<url>"__steal") rest__',
+            # Unescaped ``(`` inside a parenthesized title is not CommonMark;
+            # interior markers steal the outer closer (PRRT_kwDOSJAM6s6bUOZ9).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](url (a(**bar)))**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](url (a(*bar)))*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link](url (a(__bar)))__",
             # Unmatched label closer is not a link; destination stars steal the
             # outer closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -1872,7 +1884,13 @@ class TestParseVerdict:
             ("see [link](url 'a * b')*", "*", False),
             ("see [link](url (a ** b))**", "**", False),
             ("see [link](<url> (a ** b))**", "**", False),
+            (r"see [link](url (a\(** b)))**", "**", False),
             ("see [link]( foo**bar )**", "**", False),
+            # Unescaped ``(`` in a parenthesized title is invalid; markers claim
+            # the closer (PRRT_kwDOSJAM6s6bUOZ9).
+            ("see [link](url (a(**bar)))**", "**", True),
+            ("see [link](url (a(*bar)))*", "*", True),
+            ("see [link](url (a(__bar)))__", "__", True),
             # Real mid-reason emphasis after a link destination still claims.
             ("see [link](foo**bar) and **unclosed**", "**", True),
             ("see [link](foo __bar) and __unclosed__", "__", True),
