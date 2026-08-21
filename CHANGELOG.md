@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed PR-monitor verdict parsing for balanced Markdown-emphasized
+  `AWF-VERDICT` lines while keeping malformed wrappers and nested containers
+  fail-closed.
 - Fixed local worker/agent Git configuration loss across Docker Desktop
   rewrites and service restarts with immutable, content-addressed config
   bundles that preserve worker relative includes and native-Linux agent
