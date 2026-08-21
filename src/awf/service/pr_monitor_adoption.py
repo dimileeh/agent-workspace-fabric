@@ -41,8 +41,10 @@ from awf.service.node_identity import effective_worker_node_id
 from awf.service.pr_monitor_adoption_cursor_preflight import (
     _cursor_auto_mode_provider_preflight,
 )
-from awf.service.pr_monitor_adoption_helpers import *  # noqa: F403
-from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
+from awf.service.pr_monitor_adoption_helpers import (
+    _LIVE_ADOPTION_STATUSES as _LIVE_ADOPTION_STATUSES,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     _SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS,
     PR_ADOPTION_ADMITTED_REASON,
     PR_ADOPTION_OPERATION_ACTION,
@@ -51,8 +53,6 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     PR_ADOPTION_SUPERSEDED_EVENT_TYPE,
     PR_ADOPTION_SUPERSEDED_REASON,
     PR_ADOPTION_TASK_KIND,
-    PRMonitorAdoptionError,
-    _adoption_external_id,
     _adoption_generation_external_id,
     _adoption_lineage_payload,
     _adoption_owns_task_identity,
@@ -85,7 +85,21 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _task_has_shared_ownership_attempt,
     _terminal_adoption_lineage,
     _workspace_status_for_response,
-    pr_adoption_idempotency_key,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    PRMonitorAdoptionError as PRMonitorAdoptionError,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _adoption_external_id as _adoption_external_id,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _inline_profile_name as _inline_profile_name,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _raise_if_repo_identity_conflicts as _raise_if_repo_identity_conflicts,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    pr_adoption_idempotency_key as pr_adoption_idempotency_key,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary

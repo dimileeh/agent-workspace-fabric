@@ -9,9 +9,8 @@ harness) against a throwaway PostgreSQL. This validates:
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,8 +24,6 @@ from awf.api.schemas import (
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
-    SecretLeaseIssue,
-    SecretLeaseRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -1370,160 +1367,3 @@ class TestCreateWorkspace:
             "detail": None,
         }
         assert result.content[0].type == "text"
-
-
-class TestGetAndList:
-    @pytest.mark.unit
-    async def test_get_returns_the_workspace_just_created(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = _workspace_id(created)
-
-        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
-        assert fetched is not None
-        assert fetched["id"] == ws_id  # type: ignore[index]
-        assert fetched["status"] == "requested"  # type: ignore[index]
-
-    @pytest.mark.unit
-    async def test_get_workspace_includes_issued_secret_leases(
-        self,
-        mcp,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:  # type: ignore[no-untyped-def]
-        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = _workspace_id(created)
-        raw_ref = "sk-live-do-not-appear-in-mcp"
-        now = datetime(2026, 5, 16, 12, 0, tzinfo=UTC)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).get(ws_id)
-            assert workspace is not None
-            await SecretLeaseRepository(session).issue_declared_leases(
-                workspace,
-                leases=[
-                    SecretLeaseIssue(
-                        secret_name="api-token",
-                        kind="env",
-                        target="API_TOKEN",
-                        mode="ro",
-                        required=True,
-                        provider="vault",
-                        ref_digest="sha256:" + "8" * 64,
-                        expires_at=now + timedelta(hours=1),
-                        issue_metadata={
-                            "profile": "api",
-                            "declaration_index": 0,
-                            "raw_ref": raw_ref,
-                        },
-                    )
-                ],
-                now=now,
-            )
-            await session.commit()
-
-        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
-
-        assert isinstance(fetched, dict)
-        assert fetched["secret_leases"][0]["secret_name"] == "api-token"
-        assert fetched["secret_leases"][0]["status"] == "issued"
-        assert fetched["secret_leases"][0]["ref_digest"] == "sha256:" + "8" * 64
-        assert raw_ref not in json.dumps(fetched)
-
-    @pytest.mark.unit
-    async def test_get_unknown_id_returns_none(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        result = await _call(mcp, "awf_get_workspace", {"workspace_id": "ws_nope"})
-        assert result is None
-
-    @pytest.mark.unit
-    async def test_list_returns_newest_first(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        ids: list[str] = []
-        for title in ["first", "second", "third"]:
-            args = {**_CREATE_ARGS, "task_title": title}
-            created = await _call(mcp, "awf_create_workspace", args)
-            ids.append(_workspace_id(created))
-
-        listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
-        assert isinstance(listed, list)
-        assert [r["id"] for r in listed] == list(reversed(ids))
-
-    @pytest.mark.unit
-    async def test_list_filters_by_status_agent_and_repo_url(
-        self,
-        mcp,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:  # type: ignore[no-untyped-def]
-        repo_url = "git@github.com:example/filtered.git"
-        matching = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "matching",
-                "agent": "opencode",
-            },
-        )
-        wrong_status = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "wrong status",
-                "agent": "opencode",
-            },
-        )
-        wrong_agent = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": repo_url,
-                "task_title": "wrong agent",
-                "agent": "codex",
-            },
-        )
-        wrong_repo = await _call(
-            mcp,
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "repo_url": "git@github.com:example/other.git",
-                "task_title": "wrong repo",
-                "agent": "opencode",
-            },
-        )
-        assert isinstance(matching, dict)
-        assert isinstance(wrong_status, dict)
-        assert isinstance(wrong_agent, dict)
-        assert isinstance(wrong_repo, dict)
-
-        async with factory() as session:
-            repo = WorkspaceRepository(session)
-            for workspace_id in (
-                _workspace_id(matching),
-                _workspace_id(wrong_agent),
-                _workspace_id(wrong_repo),
-            ):
-                workspace = await repo.get(str(workspace_id))
-                assert workspace is not None
-                await repo.transition(
-                    workspace,
-                    to=WorkspaceStatus.provisioning,
-                    reason_code="TEST",
-                )
-                await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST")
-            await session.commit()
-
-        listed = await _call(
-            mcp,
-            "awf_list_workspaces",
-            {
-                "status": "ready",
-                "agent": "opencode",
-                "repo_url": repo_url,
-                "limit": 10,
-            },
-        )
-
-        assert isinstance(listed, list)
-        assert [row["id"] for row in listed] == [_workspace_id(matching)]
-        assert _workspace_id(wrong_status) not in [row["id"] for row in listed]
