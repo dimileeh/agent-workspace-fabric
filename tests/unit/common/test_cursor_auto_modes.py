@@ -214,6 +214,32 @@ def test_executor_resolves_mode_for_initial_and_monitor_recovery_runs() -> None:
     )
 
 
+def test_provider_recovery_fixed_model_clears_cursor_auto_mode_for_executor() -> None:
+    """Recovery must drop Auto mode when installing a fixed fallback model.
+
+    Otherwise helpers keep preferring ``auto-smart[...]`` and silently ignore the
+    selected recovery target (see PR #850 review thread).
+    """
+    from awf.service.provider_recovery import _install_fixed_recovery_model
+
+    policy = _install_fixed_recovery_model(
+        {CURSOR_AUTO_MODE_POLICY_KEY: "intelligence", "keep": True},
+        "gpt-5.6-sol",
+    )
+    workspace = SimpleNamespace(agent=AgentRuntime.cursor.value, task_policy=policy)
+    defaults = AgentDefaults(model="auto", effort=None)
+
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in policy
+    assert policy["agent_model"] == "gpt-5.6-sol"
+    assert policy["keep"] is True
+    assert _agent_run_model_for_workspace(workspace) == "gpt-5.6-sol"
+    assert _agent_defaults_for_workspace(workspace, defaults) == AgentDefaults(
+        model="gpt-5.6-sol",
+        effort=None,
+    )
+    assert _agent_identity_model_and_effort(workspace, defaults) == ("gpt-5.6-sol", None)
+
+
 def test_observability_projects_effective_selector_and_explicit_mode_source() -> None:
     identity = effective_agent_identity(
         agent=AgentRuntime.cursor,

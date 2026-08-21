@@ -19,6 +19,7 @@ from awf.adapters.provider_failures import (
     infer_provider,
 )
 from awf.common.redaction import redact_secrets
+from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
@@ -585,10 +586,10 @@ async def create_provider_recovery_attempt_row(
         if decision.action == "fallback":  # pragma: no branch
             source.agent = decision.target_agent or source.agent
             if decision.target_model is not None:  # pragma: no branch
-                source.task_policy = {
-                    **source.task_policy,
-                    "agent_model": decision.target_model,
-                }
+                source.task_policy = _install_fixed_recovery_model(
+                    source.task_policy,
+                    decision.target_model,
+                )
     if source_workspace_mutated:  # pragma: no branch
         await repo.advance_workspace_version(source)
     if source_not_before is not None:
@@ -641,7 +642,7 @@ async def create_provider_recovery_attempt_row(
     )
     target_agent = decision.target_agent or source.agent
     if decision.target_model is not None:
-        new_policy["agent_model"] = decision.target_model
+        new_policy = _install_fixed_recovery_model(new_policy, decision.target_model)
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -1074,6 +1075,23 @@ async def _record_monitor_in_place_recovery(
         provider_recovery=provider_payload,
         in_place=True,
     )
+
+
+def _install_fixed_recovery_model(
+    task_policy: Mapping[str, Any],
+    target_model: str,
+) -> dict[str, Any]:
+    """Install a fixed recovery model and clear Cursor Auto mode if present.
+
+    Admission treats ``cursor_auto_mode`` and a fixed ``agent_model`` as mutually
+    exclusive. Provider recovery historically copied Auto mode while writing the
+    fallback model, so executor helpers kept preferring ``auto-smart[...]`` and
+    silently ignored the selected recovery target.
+    """
+
+    updated = {**dict(task_policy), "agent_model": target_model}
+    updated.pop(CURSOR_AUTO_MODE_POLICY_KEY, None)
+    return updated
 
 
 def _recovery_task_policy(

@@ -914,6 +914,70 @@ def test_recovery_task_policy_persists_recommended_action():
     assert state.get("recommended_action") == "Refresh credentials and retry."
 
 
+def test_install_fixed_recovery_model_clears_cursor_auto_mode():
+    from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
+    from awf.service.provider_recovery import _install_fixed_recovery_model
+
+    policy = _install_fixed_recovery_model(
+        {CURSOR_AUTO_MODE_POLICY_KEY: "balance", "agent_effort": None},
+        "composer-2",
+    )
+    assert policy["agent_model"] == "composer-2"
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in policy
+    assert "agent_effort" in policy
+
+
+@pytest.mark.unit
+async def test_create_provider_recovery_attempt_row_clears_cursor_auto_mode_on_fallback(
+    factory,
+):
+    from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="title",
+            task_prompt="prompt",
+            agent="cursor",
+            task_policy={
+                CURSOR_AUTO_MODE_POLICY_KEY: "intelligence",
+                "provider_recovery": {
+                    "fallbacks": [{"agent": "cursor", "model": "gpt-5.6-sol"}],
+                    "max_same_provider_retries": 0,
+                    "max_fallback_attempts": 1,
+                },
+            },
+            test_commands=[],
+            owned_paths=[],
+        )
+        await session.commit()
+        ws_id = ws.id
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            ws_id,
+            metadata={
+                "retryable": True,
+                "provider": "cursor",
+                "model": "auto-smart[optimize_for=intelligence]",
+                "failure_fingerprint": "cursor-auto:fallback-clear-mode",
+            },
+            now=datetime.now(UTC),
+        )
+        assert result is not None
+        assert result != "terminal"
+        assert result.action == "fallback"
+        await session.commit()
+        fallback = await WorkspaceRepository(session).get(result.new_workspace_id)
+
+    assert fallback is not None
+    assert fallback.task_policy["agent_model"] == "gpt-5.6-sol"
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in fallback.task_policy
+
+
 def test_source_suppression_not_before_more():
     decision = ProviderRecoveryDecision(
         action="retry",
