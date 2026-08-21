@@ -1299,7 +1299,10 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     participate in emphasis pairing (PRRT_kwDOSJAM6s6bTLZq). Invalid
     destinations (whitespace in non-bracket form, newline, unclosed ``)``,
     leftover junk) leave ``start`` unchanged so mid-span markers remain
-    emphasis (PRRT_kwDOSJAM6s6bTgB6).
+    emphasis (PRRT_kwDOSJAM6s6bTgB6). Non-bracket backslash skips only apply
+    when the successor is CommonMark-escapable ASCII punctuation — a
+    backslash before ASCII space does not escape that space
+    (PRRT_kwDOSJAM6s6bT50A).
     """
     if start >= len(text) or text[start] != "(":
         return start
@@ -1348,7 +1351,7 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
             code = ord(ch)
             if code <= 0x20 or code == 0x7F:
                 return start
-            if ch == "\\" and index + 1 < n:
+            if ch == "\\" and index + 1 < n and text[index + 1] in _COMMONMARK_ASCII_PUNCTUATION:
                 index += 2
                 dest_chars += 1
                 continue

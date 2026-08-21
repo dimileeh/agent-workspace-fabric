@@ -1405,6 +1405,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo **bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo *bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+            # Backslash before ASCII space is not a CommonMark escape, so the
+            # space still invalidates the destination and markers steal the
+            # closer (PRRT_kwDOSJAM6s6bT50A).
+            r"**AWF-VERDICT: FALSE POSITIVE: see [link](foo\ **bar)**",
+            r"*AWF-VERDICT: FALSE POSITIVE: see [link](foo\ *bar)*",
+            r"__AWF-VERDICT: FALSE POSITIVE: see [link](foo\ __bar)__",
             # Angle-bracket destination glued to a title (no required whitespace)
             # is not a CommonMark link; title markers steal the outer closer
             # (PRRT_kwDOSJAM6s6bTvK5).
@@ -1532,6 +1538,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see [link](foo **bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see [link](foo *bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+            # ``\ `` is not escapable punctuation; space still invalidates the
+            # destination (PRRT_kwDOSJAM6s6bT50A).
+            r"**AWF-VERDICT: FALSE POSITIVE: see [link](foo\ **bar)**",
+            r"*AWF-VERDICT: FALSE POSITIVE: see [link](foo\ *bar)*",
+            r"__AWF-VERDICT: FALSE POSITIVE: see [link](foo\ __bar)__",
             # Unmatched ``]`` is not a label closer; parenthesized stars steal
             # the whole-line closer (PRRT_kwDOSJAM6s6bTW7q).
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
@@ -1854,6 +1865,11 @@ class TestParseVerdict:
             ("see [link](foo **bar)**", "**", True),
             ("see [link](foo *bar)*", "*", True),
             ("see [link](foo __bar)__", "__", True),
+            # Non-escapable ``\ `` leaves the space; destination invalid
+            # (PRRT_kwDOSJAM6s6bT50A).
+            (r"see [link](foo\ **bar)**", "**", True),
+            (r"see [link](foo\ *bar)*", "*", True),
+            (r"see [link](foo\ __bar)__", "__", True),
             # Angle-bracket destination glued to title (no whitespace) is not a
             # link; title markers claim the closer (PRRT_kwDOSJAM6s6bTvK5).
             ('see [link](<url>"**steal") rest**', "**", True),
