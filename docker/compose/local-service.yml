@@ -220,7 +220,10 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - test -S /run/awf-gitconfig-source/source.sock
+        # Require an accepting listener; test -S can pass on a stale socket
+        # left on the volume before serve() unlinks and rebinds.
+        - >-
+          python -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/awf-gitconfig-source/source.sock'); s.close()"
       interval: 2s
       timeout: 2s
       retries: 10

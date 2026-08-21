@@ -390,6 +390,16 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "--socket",
         "/run/awf-gitconfig-source/source.sock",
     ]
+    healthcheck = gitconfig_source["healthcheck"]
+    assert healthcheck["interval"] == "2s"
+    assert healthcheck["timeout"] == "2s"
+    assert healthcheck["retries"] == 10
+    assert healthcheck["test"][0] == "CMD-SHELL"
+    healthcheck_cmd = healthcheck["test"][1]
+    assert "test -S" not in healthcheck_cmd
+    assert "socket.AF_UNIX" in healthcheck_cmd
+    assert "/run/awf-gitconfig-source/source.sock" in healthcheck_cmd
+    assert ".connect(" in healthcheck_cmd
     assert all(not volume.endswith(":/run:ro") for volume in gitconfig_source["volumes"])
     assert all(
         "/:/run/awf-host-root:ro" not in services[service_name].get("volumes", [])
