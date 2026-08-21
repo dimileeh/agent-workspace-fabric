@@ -1210,6 +1210,16 @@ class TestParseVerdict:
             "**AWF-VERDICT: NEEDS_HUMAN: mismatched__",
             "**AWF-VERDICT: NEEDS_HUMAN: extra closer***",
             "*AWF-VERDICT: NEEDS_HUMAN:** extra closer",
+            # Whitespace before closer is not right-flanking (PRRT_kwDOSJAM6s6bQoY6).
+            "**AWF-VERDICT: FALSE POSITIVE: ** rationale",
+            "**AWF-VERDICT: FALSE POSITIVE: rationale **",
+            "*AWF-VERDICT: FALSE POSITIVE: * rationale",
+            "__AWF-VERDICT: FALSE POSITIVE: __ rationale",
+            # Backslash-escaped closer stars/underscores cannot close the opener.
+            r"**AWF-VERDICT: FALSE POSITIVE: rationale \**",
+            r"**AWF-VERDICT: FALSE POSITIVE: rationale\**",
+            r"*AWF-VERDICT: FALSE POSITIVE: rationale \*",
+            r"__AWF-VERDICT: FALSE POSITIVE: rationale \__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1220,6 +1230,61 @@ class TestParseVerdict:
 
         assert result.verdict == "needs_human"
         assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "**AWF-VERDICT: FALSE POSITIVE: ** rationale",
+            "**AWF-VERDICT: FALSE POSITIVE: rationale **",
+            r"**AWF-VERDICT: FALSE POSITIVE: rationale \**",
+            r"**AWF-VERDICT: FALSE POSITIVE: rationale\**",
+            "*AWF-VERDICT: FALSE POSITIVE: * rationale",
+            r"*AWF-VERDICT: FALSE POSITIVE: rationale \*",
+            "__AWF-VERDICT: FALSE POSITIVE: __ rationale",
+            r"__AWF-VERDICT: FALSE POSITIVE: rationale \__",
+        ],
+    )
+    def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
+        self,
+        line: str,
+    ) -> None:
+        # Standalone: invalid closers must not normalize into a resolvable verdict.
+        assert _normalize_markdown_emphasized_verdict_line(line) is None
+        result = _parse_verdict_result(line)
+        assert result.verdict == "needs_human"
+        assert result.reason == "garbled_verdict_marker"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (
+                "**AWF-VERDICT: FALSE POSITIVE:** rationale",
+                "AWF-VERDICT: FALSE POSITIVE: rationale",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: rationale**",
+                "AWF-VERDICT: FALSE POSITIVE: rationale",
+            ),
+            # Literal backslash then a real closer remains valid.
+            (
+                r"**AWF-VERDICT: FALSE POSITIVE: rationale\\**",
+                r"AWF-VERDICT: FALSE POSITIVE: rationale\\",
+            ),
+            # Escaped same-marker before the closer is content, not a longer run.
+            (
+                r"**AWF-VERDICT: FALSE POSITIVE: rationale\***",
+                r"AWF-VERDICT: FALSE POSITIVE: rationale\*",
+            ),
+        ],
+    )
+    def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
+        self,
+        line: str,
+        expected: str,
+    ) -> None:
+        assert _normalize_markdown_emphasized_verdict_line(line) == expected
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

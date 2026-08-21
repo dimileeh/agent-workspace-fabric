@@ -1041,6 +1041,41 @@ def _strip_markdown_heading_prefix(stripped: str) -> str:
     return _MARKDOWN_HEADING_PREFIX.sub("", stripped, count=1)
 
 
+def _markdown_char_is_escaped(text: str, index: int) -> bool:
+    """Return True when ``text[index]`` is preceded by an odd backslash run."""
+    count = 0
+    i = index - 1
+    while i >= 0 and text[i] == "\\":
+        count += 1
+        i -= 1
+    return count % 2 == 1
+
+
+def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str) -> bool:
+    """Return whether ``opener`` at ``closer_start`` is a usable emphasis closer.
+
+    CommonMark closing delimiter runs must be right-flanking (not preceded by
+    whitespace) and must not include backslash-escaped marker characters. Also
+    reject when the run is longer than ``opener`` on either side.
+    """
+    closer_end = closer_start + len(opener)
+    if closer_start < 0 or closer_end > len(text):
+        return False
+    if text[closer_start:closer_end] != opener:
+        return False
+    if (
+        closer_start > 0
+        and text[closer_start - 1] == opener[0]
+        and not _markdown_char_is_escaped(text, closer_start - 1)
+    ):
+        return False
+    if closer_end < len(text) and text[closer_end] == opener[0]:
+        return False
+    if closer_start > 0 and text[closer_start - 1].isspace():
+        return False
+    return not any(_markdown_char_is_escaped(text, i) for i in range(closer_start, closer_end))
+
+
 def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     """Return a canonical verdict wrapped in balanced top-level emphasis.
 
@@ -1059,16 +1094,13 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     marker_match = _AWF_VERDICT.match(inner)
     if marker_match is not None:
         reason_start = marker_match.start("reason")
-        closer_end = reason_start + len(opener)
-        if inner.startswith(opener, reason_start) and (
-            closer_end == len(inner) or inner[closer_end] != opener[0]
-        ):
+        if _markdown_emphasis_closer_is_valid(inner, reason_start, opener):
             candidate = inner[:reason_start] + inner[reason_start + len(opener) :]
             if _AWF_VERDICT.fullmatch(candidate) is not None:
                 return candidate
 
     closer_start = len(inner) - len(opener)
-    if inner.endswith(opener) and (closer_start == 0 or inner[closer_start - 1] != opener[0]):
+    if _markdown_emphasis_closer_is_valid(inner, closer_start, opener):
         candidate = inner[:closer_start]
         if _AWF_VERDICT.fullmatch(candidate) is not None:
             return candidate
