@@ -1097,21 +1097,48 @@ def _verdict_reason_begins_with_emphasis_opener(reason: str, opener: str) -> boo
     return not (len(reason) > len(opener) and reason[len(opener)] == opener[0])
 
 
+def _markdown_emphasis_opener_is_valid(text: str, opener_start: int, opener: str) -> bool:
+    """Return whether ``opener`` at ``opener_start`` is a usable emphasis opener.
+
+    Mirrors ``_markdown_emphasis_closer_is_valid`` with left-flanking rules: the
+    run must not be followed by whitespace, must be exact-length, and must not
+    include backslash-escaped marker characters.
+    """
+    opener_end = opener_start + len(opener)
+    if opener_start < 0 or opener_end > len(text):
+        return False
+    if text[opener_start:opener_end] != opener:
+        return False
+    if (
+        opener_start > 0
+        and text[opener_start - 1] == opener[0]
+        and not _markdown_char_is_escaped(text, opener_start - 1)
+    ):
+        return False
+    if opener_end < len(text) and text[opener_end] == opener[0]:
+        return False
+    if opener_end < len(text) and text[opener_end].isspace():
+        return False
+    return not any(_markdown_char_is_escaped(text, i) for i in range(opener_start, opener_end))
+
+
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
     After a prefix-only emphasis strip, a candidate may still end on a valid
-    same-delimiter closer. An even count of exact-length delimiter runs that
-    ends at EOF means the reason owns a separately balanced span
-    (``This is **expected**``), not an unmatched leftover (``rationale**``)
-    (PRRT_kwDOSJAM6s6bRROQ).
+    same-delimiter closer. Track left-flanking openers and right-flanking
+    closers so a separately balanced span (``This is **expected**``) is kept,
+    while unmatched leftovers (``rationale**``) and even counts of closing-only
+    runs (``rationale** more**``) are rejected (PRRT_kwDOSJAM6s6bRROQ,
+    PRRT_kwDOSJAM6s6bRfTo).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
         return False
     marker = opener[0]
     run_len = len(opener)
-    run_count = 0
+    open_depth = 0
+    trailing_paired = False
     i = 0
     while i < len(reason):
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
@@ -1123,9 +1150,18 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         while j < len(reason) and reason[j] == marker:
             j += 1
         if j - i == run_len:
-            run_count += 1
+            can_close = _markdown_emphasis_closer_is_valid(reason, i, opener)
+            can_open = _markdown_emphasis_opener_is_valid(reason, i, opener)
+            is_trailing = j == len(reason)
+            # Prefer closing an open span when both sides are flanking.
+            if can_close and open_depth > 0:
+                open_depth -= 1
+                if is_trailing:
+                    trailing_paired = True
+            elif can_open:
+                open_depth += 1
         i = j
-    return run_count >= 2 and run_count % 2 == 0
+    return trailing_paired and open_depth == 0
 
 
 def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
@@ -1141,6 +1177,10 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
     absorb leftover markers into the reason, and do not fall back to a
     whole-line strip that would leave the prefix closer inside the reason.
+    Closing-only mid-reason runs that leave an even delimiter count (for
+    example ``**AWF-VERDICT: FALSE POSITIVE:** rationale** more**``) are
+    likewise rejected — balance tracks opener/closer state, not run parity
+    (PRRT_kwDOSJAM6s6bRfTo).
 
     A prefix closer plus a separately balanced reason span that ends on the
     same delimiter (``**AWF-VERDICT: FALSE POSITIVE:** This is **expected**``)

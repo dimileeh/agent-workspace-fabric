@@ -1238,6 +1238,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__",
+            # Two closing-only runs are even-parity but not an opener/closer pair
+            # (PRRT_kwDOSJAM6s6bRfTo).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1268,6 +1273,11 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE:* rationale*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale__",
             "___AWF-VERDICT: FALSE POSITIVE:___ rationale___",
+            # Closing-only mid-reason run + trailing closer: even run count is not
+            # a balanced span (PRRT_kwDOSJAM6s6bRfTo).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale** more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale* more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale__ more__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1348,6 +1358,11 @@ class TestParseVerdict:
             ("rationale**", "**", False),
             ("rationale", "**", False),
             ("**a** junk**", "**", False),
+            # Two closing-only exact runs: even parity, but neither opens
+            # (PRRT_kwDOSJAM6s6bRfTo).
+            ("rationale** more**", "**", False),
+            ("rationale* more*", "*", False),
+            ("rationale__ more__", "__", False),
             # Longer mid-run is skipped; trailing exact pair still balances.
             ("***lead* and **done**", "**", True),
             # Escaped markers are not delimiter runs.
