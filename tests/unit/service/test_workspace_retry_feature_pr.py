@@ -103,14 +103,19 @@ async def test_retry_preserves_existing_feature_pr_identity(
     assert retried.pr_number == 10
     assert retried.remote_push_branch == expected_remote_push_branch
     assert retried.base_commit == "b" * 40
-    assert _provision_checkout_base_branch(retried) == expected_remote_push_branch
+    # Checkout uses GitHub's rename-stable pull head; push still uses remote_push_branch.
+    assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"
 
 
 @pytest.mark.parametrize(
-    ("pr_url", "expected_pr_number"),
+    ("pr_url", "expected_pr_number", "expected_checkout_base"),
     [
-        ("https://github.com/example/retryable/pull/10", 10),
-        ("https://bitbucket.org/example/retryable/pull-requests/11", 11),
+        ("https://github.com/example/retryable/pull/10", 10, "refs/pull/10/head"),
+        (
+            "https://bitbucket.org/example/retryable/pull-requests/11",
+            11,
+            "awf/legacy-feature",
+        ),
     ],
 )
 async def test_retry_recovers_missing_feature_pr_number_from_url(
@@ -118,6 +123,7 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
     tmp_path,
     pr_url: str,
     expected_pr_number: int,
+    expected_checkout_base: str,
 ) -> None:  # type: ignore[no-untyped-def]
     settings = _settings_with_host_home(tmp_path)
     async with factory() as session:
@@ -159,7 +165,7 @@ async def test_retry_recovers_missing_feature_pr_number_from_url(
     assert retried.pr_url == pr_url
     assert retried.pr_number == expected_pr_number
     assert retried.remote_push_branch == "awf/legacy-feature"
-    assert _provision_checkout_base_branch(retried) == "awf/legacy-feature"
+    assert _provision_checkout_base_branch(retried) == expected_checkout_base
 
 
 async def test_retry_rejects_open_feature_pr_without_persisted_head_ref(
@@ -264,7 +270,7 @@ async def test_retry_recovers_open_feature_pr_head_ref_from_live_snapshot(
     assert retried.pr_number == 10
     assert retried.remote_push_branch == "contributors/live-feature-head"
     assert retried.base_commit == "c" * 40
-    assert _provision_checkout_base_branch(retried) == "contributors/live-feature-head"
+    assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"
     assert _provision_base_commit(retried, checked_out_head="h" * 40) == "c" * 40
 
 
@@ -379,7 +385,7 @@ async def test_retry_prefers_live_open_pr_head_and_base_over_stale_persisted_ref
     retried = retry.new_workspace
     assert retried.remote_push_branch == "contributors/current-live-head"
     assert retried.base_commit == "c" * 40
-    assert _provision_checkout_base_branch(retried) == "contributors/current-live-head"
+    assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"
     assert _provision_base_commit(retried, checked_out_head="h" * 40) == "c" * 40
 
 
@@ -527,7 +533,7 @@ async def test_retry_preserves_feature_pr_reopened_after_external_close(
     assert retried.pr_url == "https://github.com/example/retryable/pull/10"
     assert retried.pr_number == 10
     assert retried.remote_push_branch == "contributors/reopened-head"
-    assert _provision_checkout_base_branch(retried) == "contributors/reopened-head"
+    assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"
 
 
 async def test_retry_replaces_feature_pr_closed_after_unrelated_failure(
@@ -1244,4 +1250,4 @@ async def test_retry_ignores_stale_closed_pr_failure_after_remonitor(
     assert retried.pr_url == "https://github.com/example/retryable/pull/10"
     assert retried.pr_number == 10
     assert retried.remote_push_branch == "contributors/open-head"
-    assert _provision_checkout_base_branch(retried) == "contributors/open-head"
+    assert _provision_checkout_base_branch(retried) == "refs/pull/10/head"

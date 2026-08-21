@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_value
+from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
 from awf.common.task_tag import branch_with_task_tag
 from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision
@@ -137,11 +138,17 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
     preserved remote head. The executor later updates the same head with a
     non-force push, so starting from ``branch_base`` would discard the PR's
     existing ancestry and make the push non-fast-forward.
+
+    On GitHub, prefer ``refs/pull/<n>/head`` over the persisted
+    ``remote_push_branch``: admission may snapshot a head name that is renamed
+    before provisioning, and ``add_worktree`` would then fail resolving
+    ``origin/<old-name>``. The pull-head ref tracks the PR tip across renames.
     """
     return (
         _sync_feature_pr_pull_head_ref(ws)
         or _sync_feature_pr_head_ref(ws)
         or _release_sync_source_branch(ws)
+        or _feature_branch_pr_pull_head_ref(ws)
         or (
             ws.remote_push_branch
             if ws.task_kind == "feature_branch_pr" and ws.pr_url and ws.pr_number is not None
@@ -242,6 +249,41 @@ def _sync_feature_pr_pull_head_ref(ws: Workspace) -> str | None:
     if pr_number is None:
         return None
     return f"refs/pull/{pr_number}/head"
+
+
+def _feature_branch_pr_pull_head_ref(ws: Workspace) -> str | None:
+    """Return GitHub ``refs/pull/N/head`` for a preserved feature PR, or None.
+
+    Feature retries reuse an existing PR and must check out that tip. The
+    persisted ``remote_push_branch`` can lag a forge head rename between
+    admission and provisioning; GitHub's pull-head ref tracks the tip across
+    renames. Non-GitHub forges lack this synthetic ref and keep using
+    ``remote_push_branch``.
+    """
+    if ws.task_kind != "feature_branch_pr":
+        return None
+    if not (ws.pr_url and ws.pr_number is not None):
+        return None
+    pr_number = _positive_int(ws.pr_number)
+    if pr_number is None:
+        return None
+    if not _workspace_supports_github_pull_head_ref(ws):
+        return None
+    return f"refs/pull/{pr_number}/head"
+
+
+def _workspace_supports_github_pull_head_ref(ws: Workspace) -> bool:
+    """Whether this workspace's forge exposes GitHub ``refs/pull/<n>/head``."""
+    profile = ws.resolved_profile if isinstance(ws.resolved_profile, dict) else {}
+    if concrete_forge_for_repo(profile.get("forge"), ws.repo_url) != "github":
+        return False
+    # Prefer the PR URL when present so a Bitbucket PR on a mis-matched repo
+    # snapshot cannot select GitHub's synthetic pull-head ref.
+    if ws.pr_url:
+        pr_forge = detect_forge_from_url(ws.pr_url)
+        if pr_forge is not None and pr_forge != "github":
+            return False
+    return True
 
 
 def _sync_feature_pr_pr_number(ws: Workspace) -> int | None:

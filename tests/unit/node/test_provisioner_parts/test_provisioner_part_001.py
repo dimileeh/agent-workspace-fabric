@@ -1156,6 +1156,64 @@ class TestSuccess:
         assert _provision_remote_push_branch(ws) == "feature/fork-head"
 
     @pytest.mark.unit
+    def test_feature_branch_pr_checkout_uses_pull_head_ref_when_pr_is_preserved(
+        self,
+    ) -> None:
+        """Preserved GitHub feature PRs must not depend on a renameable head name.
+
+        Admission may persist ``remote_push_branch`` under an older name; if the
+        forge renames the PR head before provisioning, ``origin/<old-name>`` is
+        missing. GitHub's ``refs/pull/<n>/head`` tracks the tip across renames.
+        """
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/stale-renamed-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/278",
+            pr_number=278,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
+        assert _provision_remote_push_branch(ws) == "contributors/stale-renamed-head"
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_checkout_keeps_branch_name_on_non_github_forge(
+        self,
+    ) -> None:
+        """Bitbucket has no ``refs/pull/<n>/head``; keep the persisted push head."""
+        ws = Workspace(
+            repo_url="https://bitbucket.org/example/retryable.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/bitbucket-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://bitbucket.org/example/retryable/pull-requests/11",
+            pr_number=11,
+            resolved_profile={"forge": "bitbucket"},
+        )
+
+        assert _provision_checkout_base_branch(ws) == "contributors/bitbucket-head"
+        assert _provision_remote_push_branch(ws) == "contributors/bitbucket-head"
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_checkout_falls_back_when_pr_number_is_not_positive(
+        self,
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="contributors/existing-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/0",
+            pr_number=0,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "contributors/existing-head"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "task_kind, task_policy",
         [
