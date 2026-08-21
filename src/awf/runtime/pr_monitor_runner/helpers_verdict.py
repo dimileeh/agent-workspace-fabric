@@ -1287,16 +1287,17 @@ def _advance_past_markdown_autolink(text: str, start: int) -> int:
 def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     """Return index after a Markdown inline link ``(…)``, or ``start`` if none.
 
-    Caller must pass ``start`` at ``(`` after a label closer ``]`` (optional
-    whitespace already consumed by the caller). Only CommonMark-valid link
-    destinations are opaque: angle-bracket form may contain spaces; the
-    non-bracket form must be nonempty and free of ASCII space/controls, with
-    parentheses only when balanced or escaped. An optional quoted/parenthesized
-    title may follow. ``*`` / ``_`` inside a valid destination or title are
-    literal and must not participate in emphasis pairing
-    (PRRT_kwDOSJAM6s6bTLZq). Invalid destinations (whitespace in non-bracket
-    form, newline, unclosed ``)``, leftover junk) leave ``start`` unchanged so
-    mid-span markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6).
+    Caller must pass ``start`` at ``(`` immediately after a label closer ``]``
+    (no intervening whitespace — CommonMark inline links require adjacency;
+    PRRT_kwDOSJAM6s6bTtr6). Only CommonMark-valid link destinations are opaque:
+    angle-bracket form may contain spaces; the non-bracket form must be
+    nonempty and free of ASCII space/controls, with parentheses only when
+    balanced or escaped. An optional quoted/parenthesized title may follow.
+    ``*`` / ``_`` inside a valid destination or title are literal and must not
+    participate in emphasis pairing (PRRT_kwDOSJAM6s6bTLZq). Invalid
+    destinations (whitespace in non-bracket form, newline, unclosed ``)``,
+    leftover junk) leave ``start`` unchanged so mid-span markers remain
+    emphasis (PRRT_kwDOSJAM6s6bTgB6).
     """
     if start >= len(text) or text[start] != "(":
         return start
@@ -1465,9 +1466,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     Inline link destinations (``](…)``) are opaque so
     URL stars do not steal the closer (PRRT_kwDOSJAM6s6bTLZq), but only when an
     active unmatched ``[`` label opener is present — a bare ``](…)`` is not a
-    Markdown link (PRRT_kwDOSJAM6s6bTW7q). Non-angle-bracket destinations with
-    ASCII spaces are not links; their markers remain emphasis
-    (PRRT_kwDOSJAM6s6bTgB6).
+    Markdown link (PRRT_kwDOSJAM6s6bTW7q). ``]`` must be followed immediately by
+    ``(`` — intervening whitespace is not a CommonMark inline link, so stars
+    inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
+    Non-angle-bracket destinations with ASCII spaces are not links; their
+    markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1500,9 +1503,8 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
             if label_depth > 0:
                 label_depth -= 1
+                # CommonMark: destination ``(`` must immediately follow ``]``.
                 k = i + 1
-                while k < len(reason) and reason[k] in " \t":
-                    k += 1
                 if k < len(reason) and reason[k] == "(":
                     next_i = _advance_past_markdown_link_destination(reason, k)
                     if next_i > k:
@@ -1594,11 +1596,13 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``\\<span title="**">x**`` still fails closed (PRRT_kwDOSJAM6s6bTLZk).
     URI and email autolinks are opaque so
     ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bTgB-). Inline link destinations are opaque so
+    (PRRT_kwDOSJAM6s6bTgB-).     Inline link destinations are opaque so
     ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bTLZq). A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
-    (PRRT_kwDOSJAM6s6bTW7q). Invalid destinations with whitespace
+    (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
+    inline link (``[link] (foo**bar)``), so markers steal the closer
+    (PRRT_kwDOSJAM6s6bTtr6). Invalid destinations with whitespace
     (``[link](foo **bar)``) likewise leave markers as emphasis
     (PRRT_kwDOSJAM6s6bTgB6).
     """

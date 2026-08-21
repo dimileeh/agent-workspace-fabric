@@ -1400,6 +1400,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see ](foo*bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see ](foo __bar)__",
+            # Whitespace between ``]`` and ``(`` is not a CommonMark inline link;
+            # parenthesized stars steal the outer closer (PRRT_kwDOSJAM6s6bTtr6).
+            # Underscore needs a non-word-internal mid run (``foo__bar`` cannot open).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link] (foo**bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link] (foo*bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link] (__bar)__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1514,6 +1520,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: see ](foo**bar)**",
             "*AWF-VERDICT: FALSE POSITIVE: see ](foo*bar)*",
             "__AWF-VERDICT: FALSE POSITIVE: see ](foo __bar)__",
+            # Whitespace between ``]`` and ``(`` is not an inline link; stars
+            # steal the closer (PRRT_kwDOSJAM6s6bTtr6). Underscore needs a
+            # non-word-internal mid run.
+            "**AWF-VERDICT: FALSE POSITIVE: see [link] (foo**bar)**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link] (foo*bar)*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link] (__bar)__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1803,7 +1815,11 @@ class TestParseVerdict:
             ("see [link](foo**bar)**", "**", False),
             ("see [link](foo*bar)*", "*", False),
             ("see [link](foo__bar)__", "__", False),
-            ("see [link] (foo**bar)**", "**", False),
+            # Space between ``]`` and ``(`` is not a CommonMark link; stars
+            # claim the trailing closer (PRRT_kwDOSJAM6s6bTtr6).
+            ("see [link] (foo**bar)**", "**", True),
+            ("see [link]\t(foo**bar)**", "**", True),
+            ("see [link] (__bar)__", "__", True),
             ("see [link](a_(b)**c)**", "**", False),
             ("see ![img](foo**bar)**", "**", False),
             ("see [link](<foo **bar>)**", "**", False),
