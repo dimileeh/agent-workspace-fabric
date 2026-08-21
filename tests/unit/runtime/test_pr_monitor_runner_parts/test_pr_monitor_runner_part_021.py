@@ -1195,6 +1195,27 @@ class TestParseVerdict:
                 "false_positive",
                 "see [link](url (a ** b))",
             ),
+            # URI/email autolink interiors are opaque (PRRT_kwDOSJAM6s6bTgB-).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a**b>**",
+                "false_positive",
+                "see <https://example.test/a**b>",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a*b>*",
+                "false_positive",
+                "see <https://example.test/a*b>",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a__b>__",
+                "false_positive",
+                "see <https://example.test/a__b>",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <user**name@example.com>**",
+                "false_positive",
+                "see <user**name@example.com>",
+            ),
         ],
     )
     def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
@@ -1343,6 +1364,13 @@ class TestParseVerdict:
             r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
             r"*AWF-VERDICT: FALSE POSITIVE: see \<em class='*'>x*",
             r'__AWF-VERDICT: FALSE POSITIVE: see \<span title="__">x__',
+            # Incomplete URI/email autolinks are not opaque; interior markers
+            # steal the outer closer (PRRT_kwDOSJAM6s6bTgB-). Underscore needs
+            # flanking space so the mid run can open (intra-word ``a__b`` cannot).
+            "**AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a**b**",
+            "*AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a*b*",
+            "__AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a __b__",
+            "**AWF-VERDICT: FALSE POSITIVE: see <user**name@example.com**",
             # Incomplete link destination is not opaque; destination stars steal
             # the outer closer (PRRT_kwDOSJAM6s6bTLZq). Underscore incomplete
             # cases need flanking space so the mid run can open (intra-word
@@ -1606,6 +1634,23 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: see [link]( foo**bar )**",
                 "AWF-VERDICT: FALSE POSITIVE: see [link]( foo**bar )",
             ),
+            # URI/email autolinks are opaque (PRRT_kwDOSJAM6s6bTgB-).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a**b>**",
+                "AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a**b>",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a*b>*",
+                "AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a*b>",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a__b>__",
+                "AWF-VERDICT: FALSE POSITIVE: see <https://example.test/a__b>",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see <user**name@example.com>**",
+                "AWF-VERDICT: FALSE POSITIVE: see <user**name@example.com>",
+            ),
             # Both-flanking mid ``*`` plus closing-only trailing ``**``: rule 9
             # blocks pairing when the opener can close, so the outer wrapper
             # stays valid (PRRT_kwDOSJAM6s6bTW7t).
@@ -1718,6 +1763,18 @@ class TestParseVerdict:
             (r'see \<span title="__">x__', "__", True),
             # Even backslash run leaves ``<`` unescaped; HTML stays opaque.
             (r'see \\<span title="**">ok</span>**', "**", False),
+            # URI/email autolink markers are opaque; trailing closer is not
+            # claimed (PRRT_kwDOSJAM6s6bTgB-).
+            ("see <https://example.test/a**b>**", "**", False),
+            ("see <https://example.test/a*b>*", "*", False),
+            ("see <https://example.test/a__b>__", "__", False),
+            ("see <user**name@example.com>**", "**", False),
+            ("see <user*name@example.com>*", "*", False),
+            # Real mid-reason emphasis after an autolink still claims.
+            ("see <https://example.test/a**b> and **unclosed**", "**", True),
+            # Incomplete autolink (no ``>``) is not opaque; interior stars claim.
+            ("see <https://example.test/a**b**", "**", True),
+            ("see <user**name@example.com**", "**", True),
             # Link destinations are opaque; trailing closer is not claimed
             # (PRRT_kwDOSJAM6s6bTLZq).
             ("see [link](foo**bar)**", "**", False),

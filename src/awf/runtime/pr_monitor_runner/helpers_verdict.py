@@ -1255,6 +1255,33 @@ def _advance_past_markdown_inline_html(text: str, start: int) -> int:
     return match.end()
 
 
+# CommonMark URI autolinks (§6.5): scheme (2–32 chars) + ``:`` + URI chars
+# excluding ASCII controls/space and ``<>``. Email autolinks use the HTML5
+# address production. Interior ``*`` / ``_`` are literal link content
+# (PRRT_kwDOSJAM6s6bTgB-).
+_MARKDOWN_URI_AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20\x7f]*>")
+_MARKDOWN_EMAIL_AUTOLINK = re.compile(
+    r"<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*>"
+)
+
+
+def _advance_past_markdown_autolink(text: str, start: int) -> int:
+    """Return index after a CommonMark URI/email autolink, or ``start`` if none.
+
+    Caller must pass ``start`` at an unescaped ``<``. Incomplete or non-matching
+    angle-bracket text is left alone so subsequent ``*`` / ``_`` stay emphasis
+    (PRRT_kwDOSJAM6s6bTgB-).
+    """
+    match = _MARKDOWN_URI_AUTOLINK.match(text, start)
+    if match is None:
+        match = _MARKDOWN_EMAIL_AUTOLINK.match(text, start)
+    if match is None:
+        return start
+    return match.end()
+
+
 def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     """Return index after a Markdown inline link ``(…)``, or ``start`` if none.
 
@@ -1424,7 +1451,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
     the outer closer (PRRT_kwDOSJAM6s6bTBv6). Backslash-escaped ``\\<`` is not an
     HTML opener — attribute markers remain emphasis and can steal the closer
-    (PRRT_kwDOSJAM6s6bTLZk).     Inline link destinations (``](…)``) are opaque so
+    (PRRT_kwDOSJAM6s6bTLZk). URI and email autolinks are opaque so stars inside
+    ``<https://…/**>`` or ``<user**name@…>`` do not steal the closer
+    (PRRT_kwDOSJAM6s6bTgB-). Incomplete autolinks leave markers as emphasis.
+    Inline link destinations (``](…)``) are opaque so
     URL stars do not steal the closer (PRRT_kwDOSJAM6s6bTLZq), but only when an
     active unmatched ``[`` label opener is present — a bare ``](…)`` is not a
     Markdown link (PRRT_kwDOSJAM6s6bTW7q). Non-angle-bracket destinations with
@@ -1448,6 +1478,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
             continue
         if reason[i] == "<" and not _markdown_char_is_escaped(reason, i):
             next_i = _advance_past_markdown_inline_html(reason, i)
+            if next_i > i:
+                i = next_i
+                continue
+            next_i = _advance_past_markdown_autolink(reason, i)
             if next_i > i:
                 i = next_i
                 continue
@@ -1543,8 +1577,11 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     HTML tokens are similarly opaque so attribute stars do not steal the
     closer (PRRT_kwDOSJAM6s6bTBv6). Escaped ``\\<`` is not an HTML token, so
     ``\\<span title="**">x**`` still fails closed (PRRT_kwDOSJAM6s6bTLZk).
-    Inline link destinations are opaque so ``**… see [link](foo**bar)**`` stays
-    a valid whole-line wrap (PRRT_kwDOSJAM6s6bTLZq). A bare unmatched ``](…)``
+    URI and email autolinks are opaque so
+    ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
+    (PRRT_kwDOSJAM6s6bTgB-). Inline link destinations are opaque so
+    ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
+    (PRRT_kwDOSJAM6s6bTLZq). A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Invalid destinations with whitespace
     (``[link](foo **bar)``) likewise leave markers as emphasis
