@@ -25,6 +25,12 @@ _PERSISTED_CLARIFICATION_MODEL_NETWORK_RECONCILED = (
 _PERSISTED_CLARIFICATION_SERVICE_MANAGED = "x-awf-persisted-clarification-service-managed"
 _PERSISTED_CLARIFICATION_SERVICE_RUNTIME = "x-awf-persisted-clarification-service-runtime"
 
+__all__ = (
+    "clarification_runtime_signature",
+    "is_managed_persisted_clarification_service",
+    "persisted_clarification_runtime_enum",
+)
+
 
 def persisted_clarification_runtime_enum(agent_runtime: AgentRuntime | str) -> AgentRuntime:
     """Normalize a live or persisted runtime label to its enum member."""
@@ -62,7 +68,7 @@ def _persisted_clarification_runtime_is_current(service: object, signature: str)
     return not isinstance(persisted, str) or persisted == signature
 
 
-def _is_managed_persisted_clarification_service(
+def is_managed_persisted_clarification_service(
     service: object,
     *,
     legacy_agent_image: object = None,
@@ -90,6 +96,10 @@ def _is_managed_persisted_clarification_service(
         and legacy_agent_working_dir == "/workspace"
         and service.get("working_dir") == legacy_agent_working_dir
     )
+
+
+# Thin alias for in-package callers that still use the historical private name.
+_is_managed_persisted_clarification_service = is_managed_persisted_clarification_service
 
 
 def _clarification_model_service_names(

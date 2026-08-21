@@ -25,7 +25,7 @@ from awf.common.token_patterns import (
 )
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager_clarification import (
-    _is_managed_persisted_clarification_service,
+    is_managed_persisted_clarification_service,
 )
 from awf.profiles.compose_postgres_env import compose_service_env_file_paths
 from awf.profiles.models import WorkspaceProfile
@@ -358,7 +358,7 @@ def _hosted_validation_rendered_stack_services(
         if (
             service_name == "agent"
             or not isinstance(service, Mapping)
-            or _is_managed_persisted_clarification_service(service)
+            or is_managed_persisted_clarification_service(service)
         ):
             continue
         payload[service_name] = _hosted_validation_sanitize_compose_service(
