@@ -30,6 +30,7 @@ from awf.common.github_client import (
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
+    canonical_agent_model_for_cursor_auto,
     pr_adoption_execution_policy,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -584,13 +585,17 @@ def _adoption_task_policy(
 
 def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[str, str]:
     policy: dict[str, str] = {}
-    if request.model is not None:
-        policy["agent_model"] = request.model
+    effective_model = canonical_agent_model_for_cursor_auto(
+        model=request.model,
+        cursor_auto_mode=request.cursor_auto_mode,
+    )
+    if effective_model is not None:
+        policy["agent_model"] = effective_model
     if request.effort is not None:
         policy["agent_effort"] = request.effort
-    elif request.model is not None:
+    elif effective_model is not None:
         agent_runtime = AgentRuntime(request.agent.value)
-        defaults = defaults_with_model_overrides({agent_runtime: request.model})
+        defaults = defaults_with_model_overrides({agent_runtime: effective_model})
         agent_defaults = defaults.get(agent_runtime)
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
@@ -1321,9 +1326,12 @@ def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
     if not isinstance(policy, Mapping):
         return {}
     agent_policy: dict[str, str] = {}
-    model = _optional_str(policy.get("agent_model"))
-    effort = _optional_str(policy.get("agent_effort"))
     cursor_auto_mode = _optional_str(policy.get(CURSOR_AUTO_MODE_POLICY_KEY))
+    model = canonical_agent_model_for_cursor_auto(
+        model=_optional_str(policy.get("agent_model")),
+        cursor_auto_mode=cursor_auto_mode,
+    )
+    effort = _optional_str(policy.get("agent_effort"))
     if model is not None:
         agent_policy["agent_model"] = model
     if effort is not None:

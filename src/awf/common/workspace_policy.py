@@ -74,6 +74,29 @@ def agent_model_from_task_policy(task_policy: object) -> str | None:
     return stripped or None
 
 
+def canonical_agent_model_for_cursor_auto(
+    *,
+    model: str | None,
+    cursor_auto_mode: CursorAutoMode | str | None,
+) -> str | None:
+    """Normalize agent model for Cursor Auto mode persistence and idempotency.
+
+    Request validation treats ``model='auto'`` as equivalent to omitting model
+    when ``cursor_auto_mode`` is set. Persist and compare the omitted form so
+    those two allowed requests do not conflict on replay/reattach.
+    Portable plain ``auto`` without a Cursor Auto mode stays explicit.
+    """
+
+    if model is None:
+        return None
+    stripped = model.strip()
+    if not stripped:
+        return None
+    if cursor_auto_mode is not None and stripped == "auto":
+        return None
+    return stripped
+
+
 def pr_adoption_execution_policy(task_policy: object) -> dict[str, str]:
     """Return the persisted PR-adoption execution policy, defaulting to local.
 

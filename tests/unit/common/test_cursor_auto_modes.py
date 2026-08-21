@@ -18,6 +18,7 @@ from awf.api.schemas import (
 )
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
+    canonical_agent_model_for_cursor_auto,
     cursor_auto_mode_from_task_policy,
     cursor_auto_model_selector,
 )
@@ -88,6 +89,37 @@ def test_workspace_task_accepts_explicit_plain_auto_with_cursor_auto_mode() -> N
     assert task.cursor_auto_mode is CursorAutoMode.balance
 
 
+def test_canonical_agent_model_treats_plain_auto_as_omitted_with_cursor_auto_mode() -> None:
+    assert (
+        canonical_agent_model_for_cursor_auto(
+            model="auto",
+            cursor_auto_mode=CursorAutoMode.balance,
+        )
+        is None
+    )
+    assert (
+        canonical_agent_model_for_cursor_auto(
+            model="  auto  ",
+            cursor_auto_mode="cost",
+        )
+        is None
+    )
+    assert (
+        canonical_agent_model_for_cursor_auto(
+            model="auto",
+            cursor_auto_mode=None,
+        )
+        == "auto"
+    )
+    assert (
+        canonical_agent_model_for_cursor_auto(
+            model="gpt-5.6-sol",
+            cursor_auto_mode=CursorAutoMode.intelligence,
+        )
+        == "gpt-5.6-sol"
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -127,6 +159,75 @@ def test_create_policy_persists_mode_without_encoding_it_as_generic_effort() -> 
     assert policy[CURSOR_AUTO_MODE_POLICY_KEY] == "balance"
     assert "agent_effort" not in policy
     assert "agent_model" not in policy
+
+
+def test_create_policy_omits_agent_model_when_plain_auto_accompanies_cursor_auto_mode() -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "https://github.com/example/repo.git", "base_branch": "development"},
+        task={
+            "title": "Router task",
+            "prompt": "Use Cursor Router",
+            "agent": "cursor",
+            "model": "auto",
+            "cursor_auto_mode": "balance",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert policy[CURSOR_AUTO_MODE_POLICY_KEY] == "balance"
+    assert "agent_model" not in policy
+
+
+def test_create_idempotency_equates_omitted_model_and_plain_auto_with_cursor_auto_mode() -> None:
+    omitted = WorkspaceCreateRequest(
+        repo={"url": "https://github.com/example/repo.git", "base_branch": "development"},
+        task={
+            "title": "Router task",
+            "prompt": "Use Cursor Router",
+            "agent": "cursor",
+            "cursor_auto_mode": "intelligence",
+        },
+    )
+    explicit_auto = WorkspaceCreateRequest(
+        repo={"url": "https://github.com/example/repo.git", "base_branch": "development"},
+        task={
+            "title": "Router task",
+            "prompt": "Use Cursor Router",
+            "agent": "cursor",
+            "model": "auto",
+            "cursor_auto_mode": "intelligence",
+        },
+    )
+    policy = workspace_create_task_policy_snapshot(omitted)
+    existing = SimpleNamespace(
+        repo_url=omitted.repo.url,
+        branch_base=omitted.repo.base_branch,
+        task_tag=None,
+        task_title=omitted.task.title,
+        task_prompt=omitted.task.prompt,
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy=policy,
+        auto_merge=False,
+        initial_review_grace_period_seconds=None,
+        agent=AgentRuntime.cursor.value,
+        task_kind="feature_branch_pr",
+        profile_ref="auto",
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        resource_reservations=[],
+        requires_database=False,
+        env_profile=None,
+    )
+
+    assert workspace_create_payload_matches(existing, explicit_auto)
+
+    # Legacy rows that already stored agent_model='auto' must still match omit.
+    existing.task_policy = {**policy, "agent_model": "auto"}
+    assert workspace_create_payload_matches(existing, omitted)
 
 
 def test_create_idempotency_compares_persisted_cursor_auto_mode() -> None:
@@ -176,6 +277,46 @@ def test_adoption_policy_persists_mode_without_effort() -> None:
     )
 
     assert _requested_agent_policy(request) == {CURSOR_AUTO_MODE_POLICY_KEY: "cost"}
+
+
+def test_adoption_policy_omits_agent_model_when_plain_auto_accompanies_cursor_auto_mode() -> None:
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="auto",
+        cursor_auto_mode=CursorAutoMode.cost,
+    )
+
+    assert _requested_agent_policy(request) == {CURSOR_AUTO_MODE_POLICY_KEY: "cost"}
+
+
+def test_adoption_policy_conflict_equates_omitted_model_and_plain_auto_with_cursor_auto_mode() -> (
+    None
+):
+    workspace = SimpleNamespace(
+        id="ws_cursor",
+        task_policy={CURSOR_AUTO_MODE_POLICY_KEY: "cost"},
+    )
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="auto",
+        cursor_auto_mode=CursorAutoMode.cost,
+    )
+
+    _raise_if_agent_policy_conflicts(workspace, request)
+
+    # Legacy persisted agent_model='auto' must not conflict with an omitted replay.
+    workspace.task_policy = {
+        CURSOR_AUTO_MODE_POLICY_KEY: "cost",
+        "agent_model": "auto",
+    }
+    omitted = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.cost,
+    )
+    _raise_if_agent_policy_conflicts(workspace, omitted)
 
 
 def test_adoption_policy_conflict_compares_cursor_auto_mode() -> None:

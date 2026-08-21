@@ -32,6 +32,7 @@ from awf.common.logging import get_logger
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
     DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+    canonical_agent_model_for_cursor_auto,
     cursor_auto_mode_from_task_policy,
 )
 from awf.db.enums import AgentRuntime, TaskKind
@@ -339,7 +340,11 @@ def workspace_create_payload_matches(
             cast(Sequence[str], getattr(existing, "owned_paths", None) or []),
             payload.task.owned_paths,
         )
-        and _stored_task_agent_model(existing) == payload.task.model
+        and _stored_task_agent_model(existing)
+        == canonical_agent_model_for_cursor_auto(
+            model=payload.task.model,
+            cursor_auto_mode=payload.task.cursor_auto_mode,
+        )
         and cursor_auto_mode_from_task_policy(existing.task_policy) == payload.task.cursor_auto_mode
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
@@ -801,7 +806,11 @@ def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | No
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     """Return the agent model string stored in the workspace's task policy."""
     model = _stored_task_policy(existing).get("agent_model")
-    return model if isinstance(model, str) and model else None
+    raw = model if isinstance(model, str) and model else None
+    return canonical_agent_model_for_cursor_auto(
+        model=raw,
+        cursor_auto_mode=cursor_auto_mode_from_task_policy(existing.task_policy),
+    )
 
 
 def _stored_task_agent_effort(existing: Workspace) -> str | None:
@@ -1356,7 +1365,12 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
             human_boost=payload.task.human_boost,
         )
     if payload.task.model is not None:
-        policy["agent_model"] = payload.task.model
+        effective_model = canonical_agent_model_for_cursor_auto(
+            model=payload.task.model,
+            cursor_auto_mode=payload.task.cursor_auto_mode,
+        )
+        if effective_model is not None:
+            policy["agent_model"] = effective_model
     if payload.task.effort is not None:
         policy["agent_effort"] = payload.task.effort
     if payload.task.cursor_auto_mode is not None:
