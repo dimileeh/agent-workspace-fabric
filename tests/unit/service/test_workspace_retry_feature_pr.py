@@ -627,6 +627,55 @@ async def test_retry_rejects_adopted_sync_feature_pr_merged_after_failure(
     assert [workspace.id for workspace in workspaces] == [first_id]
 
 
+async def test_retry_recovers_adopted_sync_feature_pr_head_and_base_from_policy(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Incomplete adopted rows must use pr_adoption head/base, not local feature-sync."""
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/incomplete-adopted",
+        remote_push_branch=None,
+        failure_reason_code="MONITOR_FAILED",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        adoption = source.task_policy["pr_adoption"]
+        assert adoption["head_ref"] == "contributors/fix-123"
+        assert adoption["base_sha"] == "a" * 40
+        source.base_commit = None
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry incomplete adopted PR",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.open),
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "sync_feature_pr"
+    assert retried.pr_url == "https://github.com/example/retryable/pull/42"
+    assert retried.pr_number == 42
+    # Must prefer adoption head_ref over the local feature-sync/… branch_name.
+    assert retried.remote_push_branch == "contributors/fix-123"
+    assert retried.base_commit == "a" * 40
+    # sync_feature_pr checkouts use refs/pull/N/head; base_commit scopes the PR.
+    assert _provision_checkout_base_branch(retried) == "refs/pull/42/head"
+    assert _provision_base_commit(retried, checked_out_head="h" * 40) == "a" * 40
+
+
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,

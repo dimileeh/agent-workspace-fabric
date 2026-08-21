@@ -177,6 +177,28 @@ def _existing_feature_pr_number(source: Workspace) -> int | None:
     return None
 
 
+def _adoption_policy_str(source: Workspace, key: str) -> str | None:
+    """Return a non-empty string from ``task_policy.pr_adoption[key]``, if present."""
+    adoption = _sync_feature_pr_adoption(source)
+    if adoption is None:
+        return None
+    raw = adoption.get(key)
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _existing_feature_pr_adoption_head_ref(source: Workspace) -> str | None:
+    """Return the adopted PR head ref from ``pr_adoption.head_ref``."""
+    return _adoption_policy_str(source, "head_ref")
+
+
+def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
+    """Return the adopted PR base SHA from ``pr_adoption.base_sha``."""
+    return _adoption_policy_str(source, "base_sha")
+
+
 def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
     """Return whether retry should consult live forge state for this source PR."""
     if _planning_scope_retry_context(source) is not None:
@@ -758,9 +780,14 @@ async def retry_workspace_row(
         # merge-base after checkout, and orphan recovery will not squash a
         # still-related history. Persisted refs remain fallbacks for lifecycle
         # checkers and legacy rows without a live snapshot.
+        # Adopted sync-feature rows keep the forge head/base in pr_adoption
+        # while branch_name is often a local feature-sync/… name. Prefer
+        # adoption refs over that local name so incomplete adopted rows do not
+        # push to the wrong branch or fail when columns were never filled.
         candidate_head_refs = (
             live_pr_head_ref,
             source.remote_push_branch,
+            _existing_feature_pr_adoption_head_ref(source),
             source.branch_name,
         )
         retry_remote_push_branch = next(
@@ -777,7 +804,11 @@ async def retry_workspace_row(
                     "reason_code": "PR_HEAD_REF_UNAVAILABLE",
                 },
             )
-        candidate_base_commits = (live_pr_base_commit, source.base_commit)
+        candidate_base_commits = (
+            live_pr_base_commit,
+            source.base_commit,
+            _existing_feature_pr_adoption_base_sha(source),
+        )
         retry_base_commit = next(
             (
                 base_commit.strip()
