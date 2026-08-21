@@ -6,10 +6,26 @@ import pytest
 
 from awf.adapters.base import AgentDefaults
 from awf.adapters.defaults import (
+    DEFAULT_AGENT_DEFAULTS,
     HISTORICAL_AGENT_DEFAULTS,
     defaults_with_model_overrides,
 )
+from awf.adapters.model_selection import CURSOR_DEFAULT_MODEL
 from awf.db.enums import AgentRuntime
+
+
+@pytest.mark.unit
+def test_historical_cursor_retains_legacy_effort_while_live_default_omits_it() -> None:
+    assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
+        model=CURSOR_DEFAULT_MODEL,
+        effort=None,
+    )
+    assert HISTORICAL_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
+        model=CURSOR_DEFAULT_MODEL,
+        effort="xhigh",
+    )
+    merged = defaults_with_model_overrides({AgentRuntime.cursor: "gpt-5"})
+    assert merged[AgentRuntime.cursor] == AgentDefaults(model="gpt-5", effort="xhigh")
 
 
 @pytest.mark.unit

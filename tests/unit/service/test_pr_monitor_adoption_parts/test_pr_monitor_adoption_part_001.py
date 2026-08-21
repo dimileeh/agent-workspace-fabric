@@ -1259,3 +1259,69 @@ class TestPullRequestMonitorAdoptionServicePart001:
 
         assert response.attached_existing is True
         assert response.workspace_id == existing_id
+
+    @pytest.mark.unit
+    async def test_adopt_pr_allows_cursor_legacy_replay_with_omitted_effort_and_model_override(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Pre-change Cursor adoptions filled agent_effort=xhigh from the old default.
+
+        Replaying the same explicit-model / omitted-effort request must still
+        resolve that historical implicit effort so idempotent reattachment does
+        not raise PR_ADOPTION_POLICY_CONFLICT after Cursor dropped portable effort.
+        """
+        idempotency_key = "pr-adoption:acme/app:456"
+        async with factory() as session:
+            workspace_repo = WorkspaceRepository(session)
+            workspace = await workspace_repo.create(
+                repo_url="https://github.com/acme/app",
+                branch_base="main",
+                task_title="Pre-upgrade Cursor adoption",
+                task_prompt="prompt",
+                agent="cursor",
+                test_commands=[],
+                requires_database=False,
+                owned_paths=[],
+                task_policy={
+                    "agent_model": "gpt-5",
+                    "agent_effort": "xhigh",
+                    "auto_merge_intent": None,
+                    "pr_adoption": {
+                        "repo_slug": "acme/app",
+                        "pr_number": 456,
+                        "execution": {"mode": "local"},
+                    },
+                },
+                profile_ref="auto",
+                idempotency_key=idempotency_key,
+                task_kind="sync_feature_pr",
+                task_external_id=adoption_module._adoption_external_id(
+                    repo_slug="acme/app",
+                    pr_number=456,
+                ),
+                remote_push_branch="feature/test",
+            )
+            workspace.pr_number = 456
+            workspace.pr_url = "https://github.com/acme/app/pull/456"
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            await session.commit()
+            existing_id = workspace.id
+
+        request = PullRequestMonitorAdoptionRequest(
+            repo_slug="acme/app",
+            pr_number=456,
+            agent=AgentRuntime.cursor,
+            model="gpt-5",
+            effort=None,
+        )
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(number=456, head_repo_slug="acme/app")),
+            )
+            response = await service.adopt(request)
+
+        assert response.attached_existing is True
+        assert response.workspace_id == existing_id
