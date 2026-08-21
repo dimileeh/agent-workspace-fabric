@@ -1156,6 +1156,28 @@ class TestParseVerdict:
                 "false_positive",
                 'see <span title="**">ok</span>',
             ),
+            # Stars inside Markdown link destinations are literal URL content
+            # and must not steal the whole-line closer (PRRT_kwDOSJAM6s6bTLZq).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar)**",
+                "false_positive",
+                "see [link](foo**bar)",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar)*",
+                "false_positive",
+                "see [link](foo*bar)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo__bar)__",
+                "false_positive",
+                "see [link](foo__bar)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+                "false_positive",
+                "see [link](foo __bar)",
+            ),
         ],
     )
     def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
@@ -1303,6 +1325,13 @@ class TestParseVerdict:
             r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
             r"*AWF-VERDICT: FALSE POSITIVE: see \<em class='*'>x*",
             r'__AWF-VERDICT: FALSE POSITIVE: see \<span title="__">x__',
+            # Incomplete link destination is not opaque; destination stars steal
+            # the outer closer (PRRT_kwDOSJAM6s6bTLZq). Underscore incomplete
+            # cases need flanking space so the mid run can open (intra-word
+            # ``foo__bar`` cannot).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1389,6 +1418,11 @@ class TestParseVerdict:
             r'**AWF-VERDICT: FALSE POSITIVE: see \<span title="**">x**',
             r"*AWF-VERDICT: FALSE POSITIVE: see \<em class='*'>x*",
             r'__AWF-VERDICT: FALSE POSITIVE: see \<span title="__">x__',
+            # Incomplete link destination leaves destination markers as emphasis
+            # that steal the trailing closer (PRRT_kwDOSJAM6s6bTLZq).
+            "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar**",
+            "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar*",
+            "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar__",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
@@ -1497,6 +1531,32 @@ class TestParseVerdict:
                 '__AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>__',
                 'AWF-VERDICT: FALSE POSITIVE: see <span title="__">ok</span>',
             ),
+            # Link destinations are opaque; destination stars do not claim the
+            # outer closer (PRRT_kwDOSJAM6s6bTLZq).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar)**",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](foo**bar)",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar)*",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](foo*bar)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo__bar)__",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](foo__bar)",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)__",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](foo __bar)",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [link](a_(b)**c)**",
+                "AWF-VERDICT: FALSE POSITIVE: see [link](a_(b)**c)",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)**",
+                "AWF-VERDICT: FALSE POSITIVE: see ![img](foo**bar)",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1587,6 +1647,23 @@ class TestParseVerdict:
             (r'see \<span title="__">x__', "__", True),
             # Even backslash run leaves ``<`` unescaped; HTML stays opaque.
             (r'see \\<span title="**">ok</span>**', "**", False),
+            # Link destinations are opaque; trailing closer is not claimed
+            # (PRRT_kwDOSJAM6s6bTLZq).
+            ("see [link](foo**bar)**", "**", False),
+            ("see [link](foo*bar)*", "*", False),
+            ("see [link](foo__bar)__", "__", False),
+            ("see [link](foo __bar)__", "__", False),
+            ("see [link] (foo**bar)**", "**", False),
+            ("see [link](a_(b)**c)**", "**", False),
+            ("see ![img](foo**bar)**", "**", False),
+            # Real mid-reason emphasis after a link destination still claims.
+            ("see [link](foo**bar) and **unclosed**", "**", True),
+            ("see [link](foo __bar) and __unclosed__", "__", True),
+            # Incomplete destination is not opaque; destination stars claim.
+            ("see [link](foo**bar**", "**", True),
+            ("see [link](foo __bar__", "__", True),
+            # Escaped ``]`` is not a label closer; following dest stars claim.
+            (r"see [link\](foo**bar)**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(

@@ -1247,6 +1247,37 @@ def _advance_past_markdown_inline_html(text: str, start: int) -> int:
     return match.end()
 
 
+def _advance_past_markdown_link_destination(text: str, start: int) -> int:
+    """Return index after a Markdown link destination ``(…)``, or ``start`` if none.
+
+    Caller must pass ``start`` at ``(`` after a label closer ``]`` (optional
+    whitespace already consumed by the caller). Destinations may contain
+    balanced parentheses and backslash-escaped characters; ``*`` / ``_`` inside
+    are literal URL content and must not participate in emphasis pairing
+    (PRRT_kwDOSJAM6s6bTLZq). Incomplete destinations (newline or unclosed ``)``)
+    leave ``start`` unchanged so mid-destination markers remain emphasis.
+    """
+    if start >= len(text) or text[start] != "(":
+        return start
+    depth = 1
+    index = start + 1
+    while index < len(text) and depth > 0:
+        ch = text[index]
+        if ch == "\n":
+            break
+        if ch == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        index += 1
+    if depth == 0:
+        return index
+    return start
+
+
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
@@ -1272,7 +1303,8 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     tokens are likewise opaque so attribute stars (``title="**"``) do not steal
     the outer closer (PRRT_kwDOSJAM6s6bTBv6). Backslash-escaped ``\\<`` is not an
     HTML opener — attribute markers remain emphasis and can steal the closer
-    (PRRT_kwDOSJAM6s6bTLZk).
+    (PRRT_kwDOSJAM6s6bTLZk). Inline link destinations (``](…)``) are opaque so
+    URL stars do not steal the closer (PRRT_kwDOSJAM6s6bTLZq).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1290,6 +1322,15 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
             if next_i > i:
                 i = next_i
                 continue
+        if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
+            k = i + 1
+            while k < len(reason) and reason[k] in " \t":
+                k += 1
+            if k < len(reason) and reason[k] == "(":
+                next_i = _advance_past_markdown_link_destination(reason, k)
+                if next_i > k:
+                    i = next_i
+                    continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
             i += 1
             continue
@@ -1363,6 +1404,8 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     HTML tokens are similarly opaque so attribute stars do not steal the
     closer (PRRT_kwDOSJAM6s6bTBv6). Escaped ``\\<`` is not an HTML token, so
     ``\\<span title="**">x**`` still fails closed (PRRT_kwDOSJAM6s6bTLZk).
+    Inline link destinations are opaque so ``**… see [link](foo**bar)**`` stays
+    a valid whole-line wrap (PRRT_kwDOSJAM6s6bTLZq).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
