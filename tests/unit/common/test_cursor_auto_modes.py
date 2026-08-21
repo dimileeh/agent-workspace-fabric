@@ -34,6 +34,7 @@ from awf.service.pr_monitor_adoption_cursor_preflight import (
     run_deferred_cursor_auto_mode_provider_preflight,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    AGENT_EFFORT_INTENT_POLICY_KEY,
     PRMonitorAdoptionError,
     _raise_if_agent_policy_conflicts,
     _requested_agent_policy,
@@ -291,6 +292,56 @@ def test_adoption_policy_cursor_fixed_model_omits_effort() -> None:
     assert _requested_agent_policy(request) == {"agent_model": "gpt-5"}
 
 
+def test_adoption_policy_persists_effort_intent_key_for_explicit_and_omitted() -> None:
+    from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
+    from awf.service.pr_monitor_adoption_helpers import _adoption_task_policy
+
+    metadata = PullRequestAdoptionMetadata(
+        number=1,
+        head_ref="feature/x",
+        head_repo_slug="example/repo",
+        base_ref="main",
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        state="OPEN",
+        is_draft=False,
+        closed=False,
+        merged=False,
+        author="octocat",
+        url="https://github.com/example/repo/pull/1",
+        title="t",
+    )
+    repo = RepoRef(owner="example", name="repo")
+    explicit = _adoption_task_policy(
+        repo=repo,
+        metadata=metadata,
+        request=PullRequestMonitorAdoptionRequest(
+            pr_url="https://github.com/example/repo/pull/1",
+            agent=AgentRuntime.cursor,
+            model="gpt-5",
+            effort="xhigh",
+        ),
+        repo_url="https://github.com/example/repo",
+    )
+    omitted = _adoption_task_policy(
+        repo=repo,
+        metadata=metadata,
+        request=PullRequestMonitorAdoptionRequest(
+            pr_url="https://github.com/example/repo/pull/1",
+            agent=AgentRuntime.cursor,
+            model="gpt-5",
+        ),
+        repo_url="https://github.com/example/repo",
+    )
+
+    assert AGENT_EFFORT_INTENT_POLICY_KEY in explicit
+    assert explicit[AGENT_EFFORT_INTENT_POLICY_KEY] == "xhigh"
+    assert explicit["agent_effort"] == "xhigh"
+    assert AGENT_EFFORT_INTENT_POLICY_KEY in omitted
+    assert omitted[AGENT_EFFORT_INTENT_POLICY_KEY] is None
+    assert "agent_effort" not in omitted
+
+
 def test_adoption_policy_conflict_equates_legacy_cursor_xhigh_with_omitted_effort() -> None:
     workspace = SimpleNamespace(
         id="ws_cursor_legacy",
@@ -304,6 +355,34 @@ def test_adoption_policy_conflict_equates_legacy_cursor_xhigh_with_omitted_effor
     )
 
     _raise_if_agent_policy_conflicts(workspace, request)
+
+
+def test_adoption_policy_conflict_rejects_new_world_explicit_xhigh_when_effort_omitted() -> None:
+    """Explicit effort=xhigh is not legacy: omitted replay must conflict."""
+    workspace = SimpleNamespace(
+        id="ws_cursor_explicit_xhigh",
+        task_policy={
+            "agent_model": "gpt-5",
+            "agent_effort": "xhigh",
+            AGENT_EFFORT_INTENT_POLICY_KEY: "xhigh",
+        },
+    )
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="gpt-5",
+        effort=None,
+    )
+
+    with pytest.raises(PRMonitorAdoptionError) as excinfo:
+        _raise_if_agent_policy_conflicts(workspace, request)
+
+    assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+    assert excinfo.value.detail == {
+        "workspace_id": "ws_cursor_explicit_xhigh",
+        "existing_agent_effort": "xhigh",
+        "requested_agent_effort": None,
+    }
 
 
 def test_adoption_policy_conflict_still_rejects_explicit_cursor_effort_mismatch() -> None:

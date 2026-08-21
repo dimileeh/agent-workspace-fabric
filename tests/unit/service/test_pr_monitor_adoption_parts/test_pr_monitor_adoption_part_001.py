@@ -839,6 +839,10 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 assert workspace.task_policy[key] == value
             if "agent_model" not in expected_policy:
                 assert "agent_model" not in workspace.task_policy
+            assert adoption_helpers.AGENT_EFFORT_INTENT_POLICY_KEY in workspace.task_policy
+            assert workspace.task_policy[
+                adoption_helpers.AGENT_EFFORT_INTENT_POLICY_KEY
+            ] == request_kwargs.get("effort")
 
     @pytest.mark.unit
     async def test_persists_task_tag_on_adopted_workspace(
@@ -1325,3 +1329,70 @@ class TestPullRequestMonitorAdoptionServicePart001:
 
         assert response.attached_existing is True
         assert response.workspace_id == existing_id
+
+    @pytest.mark.unit
+    async def test_adopt_pr_rejects_new_world_cursor_explicit_xhigh_when_effort_omitted(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Current explicit effort=xhigh must not use the legacy omitted-effort bypass."""
+        idempotency_key = "pr-adoption:acme/app:457"
+        async with factory() as session:
+            workspace_repo = WorkspaceRepository(session)
+            workspace = await workspace_repo.create(
+                repo_url="https://github.com/acme/app",
+                branch_base="main",
+                task_title="Explicit Cursor effort adoption",
+                task_prompt="prompt",
+                agent="cursor",
+                test_commands=[],
+                requires_database=False,
+                owned_paths=[],
+                task_policy={
+                    "agent_model": "gpt-5",
+                    "agent_effort": "xhigh",
+                    adoption_helpers.AGENT_EFFORT_INTENT_POLICY_KEY: "xhigh",
+                    "auto_merge_intent": None,
+                    "pr_adoption": {
+                        "repo_slug": "acme/app",
+                        "pr_number": 457,
+                        "execution": {"mode": "local"},
+                    },
+                },
+                profile_ref="auto",
+                idempotency_key=idempotency_key,
+                task_kind="sync_feature_pr",
+                task_external_id=adoption_module._adoption_external_id(
+                    repo_slug="acme/app",
+                    pr_number=457,
+                ),
+                remote_push_branch="feature/test",
+            )
+            workspace.pr_number = 457
+            workspace.pr_url = "https://github.com/acme/app/pull/457"
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            await session.commit()
+            existing_id = workspace.id
+
+        request = PullRequestMonitorAdoptionRequest(
+            repo_slug="acme/app",
+            pr_number=457,
+            agent=AgentRuntime.cursor,
+            model="gpt-5",
+            effort=None,
+        )
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(number=457, head_repo_slug="acme/app")),
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(request)
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": existing_id,
+            "existing_agent_effort": "xhigh",
+            "requested_agent_effort": None,
+        }

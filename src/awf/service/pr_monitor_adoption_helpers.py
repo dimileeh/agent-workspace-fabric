@@ -57,6 +57,10 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+#: Raw tri-state adoption effort intent (``str`` / ``None``). New-world rows always
+#: persist this key so Cursor ``xhigh`` compatibility can distinguish pre-change
+#: implicit default fills (key absent) from current explicit ``effort="xhigh"``.
+AGENT_EFFORT_INTENT_POLICY_KEY = "agent_effort_intent"
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
 # #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
 # clears the adoption forge gate. But the *default* adoption metadata fetcher
@@ -579,6 +583,9 @@ def _adoption_task_policy(
     # resolves the final flag from it and idempotent replays compare the stable
     # intent (not the provisional-then-resolved column).
     policy[AUTO_MERGE_INTENT_POLICY_KEY] = request.auto_merge
+    # Persist raw effort intent (including omitted ``None``) so legacy Cursor
+    # ``xhigh`` replay matching only applies to pre-change rows that lack this key.
+    policy[AGENT_EFFORT_INTENT_POLICY_KEY] = request.effort
     policy.update(_requested_agent_policy(request))
     return policy
 
@@ -1311,6 +1318,7 @@ def _raise_if_agent_policy_conflicts(
         if existing_value == requested_value:
             continue
         if key == "agent_effort" and _legacy_cursor_effort_replay_matches(
+            workspace,
             request,
             existing_effort=existing_value,
             requested_effort=requested_value,
@@ -1328,6 +1336,7 @@ def _raise_if_agent_policy_conflicts(
 
 
 def _legacy_cursor_effort_replay_matches(
+    workspace: Workspace,
     request: PullRequestMonitorAdoptionRequest,
     *,
     existing_effort: str | None,
@@ -1339,7 +1348,14 @@ def _legacy_cursor_effort_replay_matches(
     the former default. Live defaults no longer fill that effort, so identical
     replays omit ``agent_effort``; treat that shape as matching the stored
     historical value instead of raising ``PR_ADOPTION_POLICY_CONFLICT``.
+
+    New-world rows always persist ``AGENT_EFFORT_INTENT_POLICY_KEY`` (even when
+    the intent is ``None``). An explicit ``effort="xhigh"`` adoption therefore
+    cannot be confused with a legacy implicit fill: presence of the intent key
+    disables this compatibility path.
     """
+    if _task_policy_has_agent_effort_intent(workspace.task_policy):
+        return False
     if requested_effort is not None or existing_effort != "xhigh":
         return False
     if request.agent is not AgentRuntime.cursor:
@@ -1347,6 +1363,11 @@ def _legacy_cursor_effort_replay_matches(
     if request.effort is not None or request.cursor_auto_mode is not None:
         return False
     return request.model is not None
+
+
+def _task_policy_has_agent_effort_intent(task_policy: object) -> bool:
+    """Whether a task policy carries the new-world effort-intent key."""
+    return isinstance(task_policy, Mapping) and AGENT_EFFORT_INTENT_POLICY_KEY in task_policy
 
 
 def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
@@ -1431,7 +1452,9 @@ __all__ = (
     "PR_ADOPTION_ADMITTED_REASON",
     "PR_ADOPTION_OPERATION_ACTION",
     "PR_ADOPTION_TASK_KIND",
+    "AGENT_EFFORT_INTENT_POLICY_KEY",
     "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY",
+    "_task_policy_has_agent_effort_intent",
     "_LIVE_ADOPTION_STATUSES",
     "_PR_ADOPTION_ERROR_CODE_CONTRACT",
     "_NON_RESUMABLE_ADOPTION_STATUSES",
