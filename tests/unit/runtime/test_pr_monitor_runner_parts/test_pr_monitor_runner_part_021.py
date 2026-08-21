@@ -10,6 +10,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _parse_verdict_result,
 )
 from awf.runtime.pr_monitor_runner.helpers_verdict import (
+    _advance_past_markdown_link_reference_label,
     _aggressively_peel_verdict_reason_wrappers,
     _emphasis_run_pair_blocked_by_multiple_of_three,
     _html_wrapper_close_suffix_start,
@@ -1722,6 +1723,16 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: a*x**",
                 "AWF-VERDICT: FALSE POSITIVE: a*x",
             ),
+            # Full reference-link labels are opaque; stars in the ref id must not
+            # steal the whole-line closer (PRRT_kwDOSJAM6s6bT50C).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]**",
+                "AWF-VERDICT: FALSE POSITIVE: see [details][issue**ref]",
+            ),
+            (
+                "*AWF-VERDICT: FIXED: see [details][issue*ref]*",
+                "AWF-VERDICT: FIXED: see [details][issue*ref]",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1893,6 +1904,23 @@ class TestParseVerdict:
             ("see ](foo __bar)__", "__", True),
             # Prior closed link does not leave a spare opener for a later bare ``]``.
             ("see [a](x) and ](foo**bar)**", "**", True),
+            # Full reference labels are opaque; trailing closer is not claimed
+            # (PRRT_kwDOSJAM6s6bT50C).
+            ("see [details][issue**ref]**", "**", False),
+            ("see [details][issue*ref]*", "*", False),
+            ("see ![img][issue**ref]**", "**", False),
+            ("see [details][]**", "**", False),
+            # Space between ``]`` and ``[`` is not a full reference link; stars
+            # in the second bracket span claim the closer.
+            ("see [details] [issue**ref]**", "**", True),
+            # Incomplete / invalid reference labels leave markers as emphasis.
+            ("see [details][issue**ref**", "**", True),
+            ("see [details][iss[ue**ref]**", "**", True),
+            # Link text remains inlines; stars there still claim the closer.
+            ("see [de**tails][ref]**", "**", True),
+            # A later shortcut/definition-shaped span is not the full-ref label;
+            # its stars remain emphasis and claim the closer.
+            ("see [details][issue**ref] [issue**ref]: /issue**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
@@ -1965,6 +1993,24 @@ class TestParseVerdict:
         # Escaped marker characters are never flanking runs.
         assert _markdown_emphasis_run_can_close(r"a\*", 2, 1, "*") is False
         assert _markdown_emphasis_run_can_open(r"\*", 1, 1, "*") is False
+
+    @pytest.mark.unit
+    def test_private_advance_past_markdown_link_reference_label(self) -> None:
+        # Defensive / CommonMark label edges for opaque full-ref skipping
+        # (PRRT_kwDOSJAM6s6bT50C).
+        assert _advance_past_markdown_link_reference_label("x", 0) == 0
+        assert _advance_past_markdown_link_reference_label("", 0) == 0
+        assert _advance_past_markdown_link_reference_label("[", 0) == 0
+        assert _advance_past_markdown_link_reference_label("[]", 0) == 2
+        assert _advance_past_markdown_link_reference_label("[ ]", 0) == 0
+        assert _advance_past_markdown_link_reference_label("[a]", 0) == 3
+        assert _advance_past_markdown_link_reference_label("[a\nb]", 0) == 0
+        assert _advance_past_markdown_link_reference_label(r"[\]]", 0) == 4
+        assert _advance_past_markdown_link_reference_label("[iss[ue]", 0) == 0
+        assert _advance_past_markdown_link_reference_label("[" + ("a" * 999) + "]", 0) == 1001
+        assert _advance_past_markdown_link_reference_label("[" + ("a" * 1000) + "]", 0) == 0
+        # Escaped pairs count toward the 999-character label limit.
+        assert _advance_past_markdown_link_reference_label("[" + (r"\*" * 1000) + "]", 0) == 0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

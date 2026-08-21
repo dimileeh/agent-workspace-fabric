@@ -1439,6 +1439,50 @@ def _advance_past_markdown_link_destination(text: str, start: int) -> int:
     return start
 
 
+def _advance_past_markdown_link_reference_label(text: str, start: int) -> int:
+    """Return index after a CommonMark link reference label, or ``start`` if none.
+
+    Caller must pass ``start`` at ``[`` immediately after a label closer ``]``
+    (full or collapsed reference form; no intervening whitespace). Label rules
+    follow CommonMark §6.3: ends at the first unescaped ``]``; interior
+    unescaped ``[`` is invalid; at most 999 characters inside; nonempty labels
+    need at least one non-whitespace character; empty ``[]`` is the collapsed
+    form. ``*`` / ``_`` inside a valid reference label are literal and must not
+    participate in emphasis pairing (PRRT_kwDOSJAM6s6bT50C). Invalid or
+    incomplete labels leave ``start`` unchanged so markers remain emphasis.
+    """
+    if start >= len(text) or text[start] != "[":
+        return start
+    n = len(text)
+    index = start + 1
+    content_len = 0
+    saw_non_ws = False
+    while index < n:
+        ch = text[index]
+        if ch == "\n":
+            return start
+        if ch == "\\" and index + 1 < n:
+            index += 2
+            content_len += 1
+            saw_non_ws = True
+            if content_len > 999:
+                return start
+            continue
+        if ch == "[":
+            return start
+        if ch == "]":
+            if content_len > 0 and not saw_non_ws:
+                return start
+            return index + 1
+        if ch not in " \t":
+            saw_non_ws = True
+        content_len += 1
+        if content_len > 999:
+            return start
+        index += 1
+    return start
+
+
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
@@ -1482,6 +1526,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     Markdown link (PRRT_kwDOSJAM6s6bTW7q). ``]`` must be followed immediately by
     ``(`` — intervening whitespace is not a CommonMark inline link, so stars
     inside the parentheses remain emphasis (PRRT_kwDOSJAM6s6bTtr6).
+    Full/collapsed reference labels (``][…]`` / ``][]``) are likewise opaque so
+    stars in the reference id do not steal the closer (PRRT_kwDOSJAM6s6bT50C);
+    whitespace between ``]`` and ``[`` is not a full reference link.
     Non-angle-bracket destinations with ASCII spaces are not links; their
     markers remain emphasis (PRRT_kwDOSJAM6s6bTgB6). An angle-bracket
     destination glued to a quoted/parenthesized title (no whitespace) is
@@ -1519,10 +1566,16 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         if reason[i] == "]" and not _markdown_char_is_escaped(reason, i):
             if label_depth > 0:
                 label_depth -= 1
-                # CommonMark: destination ``(`` must immediately follow ``]``.
+                # CommonMark: destination ``(`` or reference label ``[`` must
+                # immediately follow ``]``.
                 k = i + 1
                 if k < len(reason) and reason[k] == "(":
                     next_i = _advance_past_markdown_link_destination(reason, k)
+                    if next_i > k:
+                        i = next_i
+                        continue
+                if k < len(reason) and reason[k] == "[":
+                    next_i = _advance_past_markdown_link_reference_label(reason, k)
                     if next_i > k:
                         i = next_i
                         continue
@@ -1614,7 +1667,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``**… see <https://example.test/a**b>**`` stays a valid whole-line wrap
     (PRRT_kwDOSJAM6s6bTgB-).     Inline link destinations are opaque so
     ``**… see [link](foo**bar)**`` stays a valid whole-line wrap
-    (PRRT_kwDOSJAM6s6bTLZq). A bare unmatched ``](…)``
+    (PRRT_kwDOSJAM6s6bTLZq). Full reference labels are opaque so
+    ``**… see [details][issue**ref]**`` stays a valid whole-line wrap
+    (PRRT_kwDOSJAM6s6bT50C). A bare unmatched ``](…)``
     is not a link, so destination stars still steal the closer
     (PRRT_kwDOSJAM6s6bTW7q). Whitespace between ``]`` and ``(`` is not an
     inline link (``[link] (foo**bar)``), so markers steal the closer
