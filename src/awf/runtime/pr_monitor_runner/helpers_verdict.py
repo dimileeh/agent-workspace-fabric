@@ -1131,12 +1131,14 @@ def _markdown_emphasis_run_can_close(text: str, start: int, length: int, marker:
         return False
     if text[start:end] != marker * length:
         return False
-    if start > 0 and text[start - 1].isspace():
+    # CommonMark: beginning and end of the line count as Unicode whitespace for
+    # flanking, so a run at BOS is not right-flanking (PRRT_kwDOSJAM6s6bTi4S).
+    if start == 0 or text[start - 1].isspace():
         return False
     # CommonMark right-flanking (2b): a run preceded by punctuation closes only
     # when also followed by EOS, whitespace, or punctuation. Punctuation-to-
     # alphanumeric runs (``.**x``) are opening-only (PRRT_kwDOSJAM6s6bShqh).
-    if start > 0 and _markdown_char_is_unicode_punctuation(text[start - 1]):
+    if _markdown_char_is_unicode_punctuation(text[start - 1]):
         followed_ok = end >= len(text) or text[end].isspace()
         if not followed_ok and not _markdown_char_is_unicode_punctuation(text[end]):
             return False
@@ -1440,8 +1442,11 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     (PRRT_kwDOSJAM6s6bR2FM). Leftover unmatched opener runs that would
     literalize (``***lead* and **done**``) do not block ``trailing_paired``.
     Rule 9 must consult both delimiter sides: a both-flanking opener blocked
-    against a closing-only complementary-length run (``a*x**``, ``**lead*``)
+    against a closing-only complementary-length run (``a*x**``, ``x**lead*``)
     must not claim the trailing wrapper closer (PRRT_kwDOSJAM6s6bTW7t).
+    Reason-leading runs at BOS are opening-only (BOS is whitespace), so
+    complementary lengths such as ``*foo**`` and ``**lead* rest*`` do steal
+    and reject a false whole-line wrap (PRRT_kwDOSJAM6s6bTi4S).
 
     Closed Markdown code spans are opaque: ``*`` / ``_`` runs inside them are
     literal content and must not claim the trailing wrapper closer

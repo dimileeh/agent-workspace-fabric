@@ -1344,6 +1344,12 @@ class TestParseVerdict:
             # against a complementary-length closer (``**lead*``) do not steal
             # and remain valid whole-line wraps (PRRT_kwDOSJAM6s6bTW7t).
             "**AWF-VERDICT: FALSE POSITIVE: ***lead* rest**",
+            # Reason-leading complementary openers at BOS are opening-only and
+            # steal the wrapper closer — fail closed (PRRT_kwDOSJAM6s6bTi4S).
+            "**AWF-VERDICT: FALSE POSITIVE: *foo**",
+            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: _foo__",
+            "_AWF-VERDICT: FALSE POSITIVE: __lead_ rest_",
             # Punctuation-to-alphanumeric mid run is opening-only; consuming it as
             # a closer would wrongly resolve false_positive (PRRT_kwDOSJAM6s6bShqh).
             "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
@@ -1451,6 +1457,13 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: reason *x**",
             "*AWF-VERDICT: FALSE POSITIVE: reason *x*",
             "__AWF-VERDICT: FALSE POSITIVE: reason _x__",
+            # Reason-leading complementary opener at BOS is opening-only
+            # (BOS counts as whitespace); rule 9 must not falsely block, so the
+            # mid run steals the trailing wrapper closer (PRRT_kwDOSJAM6s6bTi4S).
+            "**AWF-VERDICT: FALSE POSITIVE: *foo**",
+            "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
+            "__AWF-VERDICT: FALSE POSITIVE: _foo__",
+            "_AWF-VERDICT: FALSE POSITIVE: __lead_ rest_",
             # Punctuation-to-alphanumeric mid run is opening-only; treating it as
             # a closer would consume an earlier opener and wrongly accept the
             # whole-line wrap (PRRT_kwDOSJAM6s6bShqh).
@@ -1658,14 +1671,6 @@ class TestParseVerdict:
                 "**AWF-VERDICT: FALSE POSITIVE: a*x**",
                 "AWF-VERDICT: FALSE POSITIVE: a*x",
             ),
-            (
-                "*AWF-VERDICT: FALSE POSITIVE: **lead* rest*",
-                "AWF-VERDICT: FALSE POSITIVE: **lead* rest",
-            ),
-            (
-                "**AWF-VERDICT: FALSE POSITIVE: *foo**",
-                "AWF-VERDICT: FALSE POSITIVE: *foo",
-            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1700,10 +1705,9 @@ class TestParseVerdict:
             # Partial longer-run match consumes the trailing wrapper-length
             # closer inside the reason (PRRT_kwDOSJAM6s6bR2FM).
             ("***lead* rest**", "**", True),
-            # Both-flanking opener + complementary closer: rule 9 blocks when
-            # the opener can close, so the trailing run is not stolen
-            # (PRRT_kwDOSJAM6s6bTW7t).
-            ("**lead* rest*", "*", False),
+            # Truly both-flanking mid opener + complementary closer: rule 9
+            # blocks when the opener can close (PRRT_kwDOSJAM6s6bTW7t).
+            ("x**lead* rest*", "*", False),
             ("___lead_ rest__", "__", True),
             # Escaped markers are not delimiter runs.
             (r"see \**literal and **ok**", "**", True),
@@ -1720,9 +1724,12 @@ class TestParseVerdict:
             ("please clarify_", "_", False),
             # Space-preceded length-1 mid opener cannot close, so rule 9 does
             # not block; it steals one star from the trailing ``**``
-            # (PRRT_kwDOSJAM6s6bTBv4). A BOL both-flanking ``*`` is blocked by
-            # rule 9 against trailing ``**`` (PRRT_kwDOSJAM6s6bTW7t).
-            ("*foo**", "**", False),
+            # (PRRT_kwDOSJAM6s6bTBv4). BOS-leading complementary openers are
+            # likewise opening-only and steal (PRRT_kwDOSJAM6s6bTi4S).
+            ("*foo**", "**", True),
+            ("**lead* rest*", "*", True),
+            ("_foo__", "__", True),
+            ("__lead_ rest_", "_", True),
             ("reason *x**", "**", True),
             # Both-flanking mid ``*`` can close: rule 9 must also consult the
             # opener and block pairing with trailing ``**`` (PRRT_kwDOSJAM6s6bTW7t).
@@ -1831,11 +1838,15 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_close("ab", 0, 2, "*") is False
         assert _markdown_emphasis_run_can_open("**", 0, 0, "*") is False
         # CommonMark: end of line counts as whitespace → not left-flanking
-        # (PRRT_kwDOSJAM6s6bTBv4).
+        # (PRRT_kwDOSJAM6s6bTBv4). Beginning of line likewise → not right-flanking
+        # (PRRT_kwDOSJAM6s6bTi4S).
         assert _markdown_emphasis_run_can_open("x*", 1, 1, "*") is False
         assert _markdown_emphasis_run_can_open("**", 0, 2, "*") is False
         assert _markdown_emphasis_run_can_open("* ", 0, 1, "*") is False  # followed by space
         assert _markdown_emphasis_run_can_close(" *", 1, 1, "*") is False  # preceded by space
+        assert _markdown_emphasis_run_can_close("*foo", 0, 1, "*") is False  # BOS
+        assert _markdown_emphasis_run_can_close("**lead", 0, 2, "*") is False  # BOS
+        assert _markdown_emphasis_run_can_close("_foo", 0, 1, "_") is False  # BOS
         assert _markdown_emphasis_run_can_close("a_b", 1, 1, "_") is False  # intra-word closer
         assert _markdown_emphasis_run_can_open("a_b", 1, 1, "_") is False  # intra-word opener
         # Non-whitespace, non-punctuation Unicode symbols also block underscore
