@@ -13,9 +13,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import RepoRef
 from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
@@ -109,25 +111,78 @@ async def _sync_reuse_remote_push_branch(
     ws.remote_push_branch = live_head_ref
 
 
-def _pr_snapshot_contains_pushed_tip(
+async def _live_head_descends_from_pushed(
+    *,
+    runner: AsyncCommandRunner,
+    worktree_path: Path,
+    ancestor_sha: str,
+    descendant_sha: str,
+    fetch_remote: str = "origin",
+) -> bool:
+    """Return True when ``descendant_sha`` is a descendant of ``ancestor_sha``.
+
+    Used after a reuse push when the live PR head moved forward (ordinary
+    fast-forward) so containment is not exact SHA equality. Fetches the live
+    tip when it is not yet in the worktree. A force-push that dropped the
+    pushed tip fails this check.
+    """
+    git_prefix = [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+    ]
+    has_object = await runner.run(
+        [*git_prefix, "cat-file", "-e", f"{descendant_sha}^{{commit}}"],
+    )
+    if not has_object.ok:
+        fetched = await runner.run(
+            [*git_prefix, "fetch", "--no-tags", fetch_remote, descendant_sha],
+        )
+        if not fetched.ok:
+            return False
+    ancestor = await runner.run(
+        [*git_prefix, "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
+    )
+    return bool(ancestor.ok)
+
+
+async def _pr_snapshot_contains_pushed_tip(
     *,
     snapshot: PullRequestSnapshot,
     pushed_head_sha: str | None,
+    runner: AsyncCommandRunner | None = None,
+    worktree_path: Path | None = None,
+    fetch_remote: str = "origin",
 ) -> bool:
-    """Return whether the forge snapshot's head OID equals the tip we just pushed.
+    """Return whether the forge snapshot's head still contains the tip we pushed.
 
-    Equality against the forge ``head_sha`` (not ``merge_commit`` ancestry) is
-    intentional: squash merges create a new merge OID that does not contain the
-    PR tip as a git ancestor, but ``headRefOid`` / source commit still names the
-    tip that was merged. The same equality is used for still-open reuse so a
-    concurrent force-push that rewrote the head cannot be mistaken for success.
+    Compares forge ``head_sha`` (not ``merge_commit`` ancestry): squash merges
+    create a new merge OID that does not contain the PR tip as a git ancestor,
+    but ``headRefOid`` / source commit still names the tip that was merged.
+
+    Exact OID equality is the common case. When another actor fast-forward-
+    pushes a descendant between our non-force push and this snapshot, the live
+    head still contains the validated tip — verify descent via
+    ``merge-base --is-ancestor``. A concurrent force-push that rewrote the head
+    off the tip fails both checks.
     """
     if not pushed_head_sha:
         return False
     live_head_sha = snapshot.head_sha
     if not isinstance(live_head_sha, str) or not live_head_sha:
         return False
-    return pushed_head_sha.lower() == live_head_sha.lower()
+    if pushed_head_sha.lower() == live_head_sha.lower():
+        return True
+    if runner is None or worktree_path is None:
+        return False
+    return await _live_head_descends_from_pushed(
+        runner=runner,
+        worktree_path=worktree_path,
+        ancestor_sha=pushed_head_sha,
+        descendant_sha=live_head_sha,
+        fetch_remote=fetch_remote,
+    )
 
 
 async def _resolve_post_push_reuse(
@@ -137,13 +192,17 @@ async def _resolve_post_push_reuse(
     pr_number: int,
     snapshot: PullRequestSnapshot,
     pushed_head_sha: str | None,
+    runner: AsyncCommandRunner | None = None,
+    worktree_path: Path | None = None,
+    fetch_remote: str = "origin",
 ) -> tuple[_PostPushReuseDisposition, PullRequestSnapshot]:
     """Decide whether post-push reuse may keep the existing PR.
 
-    Open snapshots must still show the pushed tip (with brief retries for forge
-    propagation). An open head that never equals the tip after retries fails
-    closed — a still-open PR owns the head branch, so a replacement cannot be
-    opened safely. Merged-with-tip keeps; closed / merged-without-tip replace.
+    Open snapshots must still contain the pushed tip — exact head OID or a
+    fast-forward descendant — with brief retries for forge propagation. An open
+    head that never contains the tip after retries fails closed — a still-open
+    PR owns the head branch, so a replacement cannot be opened safely.
+    Merged-with-tip keeps; closed / merged-without-tip replace.
     """
     current = snapshot
     for attempt in range(_POST_PUSH_TIP_RETRY_ATTEMPTS):
@@ -151,9 +210,12 @@ async def _resolve_post_push_reuse(
             if not pushed_head_sha:
                 # Local tip unknown: cannot prove exclusion; keep prior behavior.
                 return _PostPushReuseDisposition.keep, current
-            if _pr_snapshot_contains_pushed_tip(
+            if await _pr_snapshot_contains_pushed_tip(
                 snapshot=current,
                 pushed_head_sha=pushed_head_sha,
+                runner=runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
             ):
                 return _PostPushReuseDisposition.keep, current
             if attempt + 1 >= _POST_PUSH_TIP_RETRY_ATTEMPTS:
@@ -164,9 +226,15 @@ async def _resolve_post_push_reuse(
                 pr_number=pr_number,
             )
             continue
-        if current.lifecycle is PullRequestLifecycle.merged and _pr_snapshot_contains_pushed_tip(
-            snapshot=current,
-            pushed_head_sha=pushed_head_sha,
+        if (
+            current.lifecycle is PullRequestLifecycle.merged
+            and await _pr_snapshot_contains_pushed_tip(
+                snapshot=current,
+                pushed_head_sha=pushed_head_sha,
+                runner=runner,
+                worktree_path=worktree_path,
+                fetch_remote=fetch_remote,
+            )
         ):
             return _PostPushReuseDisposition.keep, current
         return _PostPushReuseDisposition.open_replacement, current
@@ -242,12 +310,13 @@ async def push_and_open_pr(
     its head ref was renamed after admission, the persisted push target is
     updated to the live ``head_ref`` before reuse. After a reuse push, the live
     snapshot is fetched again: an open PR is kept only when its head OID equals
-    the pushed tip (briefly retried for forge propagation; otherwise fail
-    closed); if the PR merged concurrently, reuse is kept only when the merged
-    PR's head OID equals the pushed tip; otherwise identity is cleared and a
-    replacement PR is opened. If ``pr_number`` cannot be resolved, or snapshot
-    lookup fails (pre- or post-push), reuse fails closed (identity kept,
-    workspace marked failed) so a still-open PR is not unlinked or duplicated.
+    the pushed tip or is a fast-forward descendant of it (briefly retried for
+    forge propagation; otherwise fail closed); if the PR merged concurrently,
+    reuse is kept only when the merged PR's head OID equals or descends from the
+    pushed tip; otherwise identity is cleared and a replacement PR is opened. If
+    ``pr_number`` cannot be resolved, or snapshot lookup fails (pre- or
+    post-push), reuse fails closed (identity kept, workspace marked failed) so a
+    still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
@@ -465,6 +534,9 @@ async def push_and_open_pr(
                             pr_number=pr_number,
                             snapshot=post_snapshot,
                             pushed_head_sha=pr.head_sha,
+                            runner=self._runner,
+                            worktree_path=worktree_path,
+                            fetch_remote=existing_pr_remote_url or "origin",
                         )
                     except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
                         await _fail_reuse_pr_state_lookup(
@@ -502,7 +574,7 @@ async def push_and_open_pr(
                             evidence_operation="post_push_open_tip_mismatch",
                             error_message=(
                                 "reused PR remained open but head_sha "
-                                f"{post_snapshot.head_sha!r} does not equal "
+                                f"{post_snapshot.head_sha!r} does not contain "
                                 f"pushed tip {pr.head_sha!r}"
                             ),
                             failure_message=(

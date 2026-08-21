@@ -23,5 +23,5 @@ class PullRequestSnapshot:
     # Last known PR head OID (GitHub ``headRefOid`` / Bitbucket source commit).
     # Used for post-push tip-containment checks: a concurrently merged or still-
     # open reused PR contains the retry tip when this equals the pushed
-    # ``head_sha``.
+    # ``head_sha`` or is a fast-forward descendant of it.
     head_sha: str | None = None

@@ -59,12 +59,16 @@ class TestPullRequestUnexpectedErrorReuseTipPart025:
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
             return forge
 
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            return False
+
         async def _no_delay(_seconds: float) -> None:
             return None
 
         monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
         monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
         monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -173,7 +177,11 @@ class TestPullRequestUnexpectedErrorReuseTipPart025:
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
             return forge
 
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            return False
+
         monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
 
         pr_creator = _ForgeRecordingPrCreator(
             new_pr_url="https://github.com/x/y/pull/99",

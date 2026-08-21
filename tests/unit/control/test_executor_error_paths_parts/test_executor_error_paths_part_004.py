@@ -812,9 +812,9 @@ def _release_sync_policy() -> dict[str, Any]:
 
 class TestPostPushReuseTipResolution:
     @pytest.mark.unit
-    def test_snapshot_contains_pushed_tip_equality(self) -> None:
+    async def test_snapshot_contains_pushed_tip_equality(self) -> None:
         tip = "Ab" + ("c" * 38)
-        assert _pr_open_step._pr_snapshot_contains_pushed_tip(
+        assert await _pr_open_step._pr_snapshot_contains_pushed_tip(
             snapshot=PullRequestSnapshot(
                 PullRequestLifecycle.open,
                 "head",
@@ -822,13 +822,90 @@ class TestPostPushReuseTipResolution:
             ),
             pushed_head_sha=tip,
         )
-        assert not _pr_open_step._pr_snapshot_contains_pushed_tip(
+        assert not await _pr_open_step._pr_snapshot_contains_pushed_tip(
             snapshot=PullRequestSnapshot(PullRequestLifecycle.open, "head", head_sha=""),
             pushed_head_sha=tip,
         )
-        assert not _pr_open_step._pr_snapshot_contains_pushed_tip(
+        assert not await _pr_open_step._pr_snapshot_contains_pushed_tip(
             snapshot=PullRequestSnapshot(PullRequestLifecycle.open, "head", head_sha=tip),
             pushed_head_sha=None,
+        )
+
+    @pytest.mark.unit
+    async def test_snapshot_contains_pushed_tip_when_live_head_descends(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tip = "b" * 40
+        descendant = "d" * 40
+        runner = FakeCommandRunner()
+        # Live tip object missing locally → fetch, then ancestor check succeeds.
+        runner.queue_result(returncode=1)  # cat-file miss
+        runner.queue_result(returncode=0)  # fetch descendant
+        runner.queue_result(returncode=0)  # merge-base --is-ancestor
+
+        assert await _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha=descendant,
+            ),
+            pushed_head_sha=tip,
+            runner=runner,
+            worktree_path=tmp_path,
+            fetch_remote="origin",
+        )
+        assert any("cat-file" in call.args for call in runner.calls)
+        assert any("fetch" in call.args for call in runner.calls)
+        assert any(
+            "merge-base" in call.args and "--is-ancestor" in call.args for call in runner.calls
+        )
+
+    @pytest.mark.unit
+    async def test_snapshot_rejects_when_descendant_fetch_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tip = "b" * 40
+        descendant = "d" * 40
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1)  # cat-file miss
+        runner.queue_result(returncode=1)  # fetch fails
+
+        assert not await _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha=descendant,
+            ),
+            pushed_head_sha=tip,
+            runner=runner,
+            worktree_path=tmp_path,
+        )
+        assert any("fetch" in call.args for call in runner.calls)
+        assert not any("merge-base" in call.args for call in runner.calls)
+
+    @pytest.mark.unit
+    async def test_snapshot_rejects_when_live_head_does_not_descend(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tip = "b" * 40
+        rewritten = "c" * 40
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0)  # cat-file hit
+        runner.queue_result(returncode=1)  # not an ancestor (force-push / rewrite)
+
+        assert not await _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha=rewritten,
+            ),
+            pushed_head_sha=tip,
+            runner=runner,
+            worktree_path=tmp_path,
         )
 
     @pytest.mark.unit
@@ -848,6 +925,66 @@ class TestPostPushReuseTipResolution:
         assert disposition is _pr_open_step._PostPushReuseDisposition.keep
         assert snapshot.lifecycle is PullRequestLifecycle.open
         assert forge.snapshot_calls == 0
+
+    @pytest.mark.unit
+    async def test_resolve_keeps_open_when_live_head_is_descendant(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tip = "b" * 40
+        descendant = "d" * 40
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open, head_sha=descendant)
+
+        async def _descends(**_kwargs: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _descends)
+        disposition, snapshot = await _pr_open_step._resolve_post_push_reuse(
+            forge_client=forge,
+            repo=SimpleNamespace(),
+            pr_number=1,
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha=descendant,
+            ),
+            pushed_head_sha=tip,
+            runner=FakeCommandRunner(),
+            worktree_path=tmp_path,
+        )
+        assert disposition is _pr_open_step._PostPushReuseDisposition.keep
+        assert snapshot.head_sha == descendant
+        assert forge.snapshot_calls == 0
+
+    @pytest.mark.unit
+    async def test_resolve_keeps_merged_when_live_head_is_descendant(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tip = "b" * 40
+        descendant = "d" * 40
+
+        async def _descends(**_kwargs: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _descends)
+        disposition, snapshot = await _pr_open_step._resolve_post_push_reuse(
+            forge_client=_LifecycleForgeClient(),
+            repo=SimpleNamespace(),
+            pr_number=1,
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.merged,
+                "head",
+                head_sha=descendant,
+            ),
+            pushed_head_sha=tip,
+            runner=FakeCommandRunner(),
+            worktree_path=tmp_path,
+        )
+        assert disposition is _pr_open_step._PostPushReuseDisposition.keep
+        assert snapshot.lifecycle is PullRequestLifecycle.merged
 
     @pytest.mark.unit
     async def test_resolve_replaces_when_retry_sees_closed(
@@ -1241,7 +1378,8 @@ class TestPullRequestUnexpectedErrorPart002:
     ) -> None:
         # Reuse path must resolve a forge client to revalidate live lifecycle, then
         # push_and_open still receives forge_client=None once the PR is confirmed open.
-        # Post-push open reuse also requires the live head OID to equal the pushed tip.
+        # Post-push open reuse also requires the live head to contain the pushed
+        # tip (exact OID or a fast-forward descendant).
         forge = _LifecycleForgeClient(
             lifecycle=PullRequestLifecycle.open,
             head_ref="awf/ws_original",
@@ -1367,9 +1505,14 @@ class TestPullRequestUnexpectedErrorPart002:
         async def _no_delay(_seconds: float) -> None:
             return None
 
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            # Lagging heads are older tips, not FF descendants of the push.
+            return False
+
         monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
         monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
         monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -1388,6 +1531,66 @@ class TestPullRequestUnexpectedErrorPart002:
         await executor.execute(ws_id)
 
         assert forge.snapshot_calls == 3
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_reuse_push_keeps_open_pr_when_live_head_is_descendant(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Another actor may FF-push a descendant between our push and the
+        # post-push snapshot. The PR still contains the validated tip.
+        descendant = "d" * 40
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha=descendant,
+                ),
+            ]
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        async def _is_descendant(**_kwargs: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _is_descendant)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.snapshot_calls == 2
         assert len(pr_creator.calls) == 1
         assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
         async with factory() as s:
@@ -1437,9 +1640,13 @@ class TestPullRequestUnexpectedErrorPart002:
         async def _no_delay(_seconds: float) -> None:
             return None
 
+        async def _not_descendant(**_kwargs: Any) -> bool:
+            return False
+
         monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
         monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
         monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        monkeypatch.setattr(_pr_open_step, "_live_head_descends_from_pushed", _not_descendant)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
