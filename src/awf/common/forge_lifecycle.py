@@ -20,3 +20,7 @@ class PullRequestSnapshot:
     lifecycle: PullRequestLifecycle
     head_ref: str | None
     base_sha: str | None = None
+    # Last known PR head OID (GitHub ``headRefOid`` / Bitbucket source commit).
+    # Used for post-push merge-containment checks: a concurrently merged PR
+    # contains the retry tip when this equals the pushed ``head_sha``.
+    head_sha: str | None = None

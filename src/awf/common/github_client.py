@@ -284,7 +284,7 @@ class GitHubClient:
         repo: RepoRef,
         pr_number: int,
     ) -> PullRequestSnapshot:
-        """Return a PR's lifecycle, live head branch, and target SHA."""
+        """Return a PR's lifecycle, live head branch, head SHA, and target SHA."""
         payload = await self._graphql(
             query=_GQL_PR_LIFECYCLE,
             variables={"owner": repo.owner, "repo": repo.name, "number": pr_number},
@@ -303,6 +303,7 @@ class GitHubClient:
             lifecycle,
             _clean_optional_str(pr.get("headRefName")),
             _clean_optional_str(pr.get("baseRefOid")),
+            _clean_optional_str(pr.get("headRefOid")),
         )
 
     async def fetch_pr_status(

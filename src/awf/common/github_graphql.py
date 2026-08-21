@@ -20,6 +20,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       closed
       merged
       headRefName
+      headRefOid
       baseRefOid
     }
   }

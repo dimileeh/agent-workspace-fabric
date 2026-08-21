@@ -415,7 +415,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         repo: RepoRef,
         pr_number: int,
     ) -> PullRequestSnapshot:
-        """Return a PR's lifecycle, live head branch, and target SHA."""
+        """Return a PR's lifecycle, live head branch, head SHA, and target SHA."""
         return await self._fetch_pull_request_snapshot(
             repo=repo,
             pr_number=pr_number,
@@ -462,12 +462,17 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         head_ref = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
+        head_sha = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("commit")).get("hash")
+        )
         base_sha = _clean_optional_str(
             _as_dict(_as_dict(pr.get("destination")).get("commit")).get("hash")
         )
+        if head_sha is not None and len(head_sha) < 40:
+            head_sha = await self._resolve_full_commit_sha(repo, head_sha)
         if base_sha is not None and len(base_sha) < 40:
             base_sha = await self._resolve_full_commit_sha(repo, base_sha)
-        return PullRequestSnapshot(lifecycle, head_ref, base_sha)
+        return PullRequestSnapshot(lifecycle, head_ref, base_sha, head_sha)
 
     async def fetch_failing_check_logs(
         self,

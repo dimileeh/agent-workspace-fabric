@@ -131,7 +131,10 @@ async def test_pull_request_snapshot_includes_live_head_ref() -> None:
         _PR,
         json={
             "state": "OPEN",
-            "source": {"branch": {"name": "contributors/live-head"}},
+            "source": {
+                "branch": {"name": "contributors/live-head"},
+                "commit": {"hash": "a" * 40},
+            },
             "destination": {"commit": {"hash": "b" * 40}},
         },
     )
@@ -141,6 +144,7 @@ async def test_pull_request_snapshot_includes_live_head_ref() -> None:
 
     assert snapshot.lifecycle is PullRequestLifecycle.open
     assert snapshot.head_ref == "contributors/live-head"
+    assert snapshot.head_sha == "a" * 40
     assert snapshot.base_sha == "b" * 40
     assert [request.url.path for request in fake.requests] == [_PR]
 

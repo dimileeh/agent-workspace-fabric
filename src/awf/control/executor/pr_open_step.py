@@ -13,7 +13,7 @@ from typing import Any
 
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
 from awf.common.github_client import RepoRef
 from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
@@ -97,6 +97,72 @@ async def _sync_reuse_remote_push_branch(
     ws.remote_push_branch = live_head_ref
 
 
+def _merged_pr_contains_pushed_tip(
+    *,
+    snapshot: PullRequestSnapshot,
+    pushed_head_sha: str | None,
+) -> bool:
+    """Return whether a merged PR's recorded head OID is the tip we just pushed.
+
+    Equality against the forge ``head_sha`` (not ``merge_commit`` ancestry) is
+    intentional: squash merges create a new merge OID that does not contain the
+    PR tip as a git ancestor, but ``headRefOid`` / source commit still names the
+    tip that was merged.
+    """
+    if not pushed_head_sha:
+        return False
+    live_head_sha = snapshot.head_sha
+    if not isinstance(live_head_sha, str) or not live_head_sha:
+        return False
+    return pushed_head_sha.lower() == live_head_sha.lower()
+
+
+async def _fail_reuse_pr_state_lookup(
+    self: Any,
+    *,
+    workspace_id: str,
+    ws: Any,
+    push_branch_name: str,
+    audit_remote_branch: str,
+    pr_number: int | None,
+    evidence_operation: str,
+    error_message: str,
+    failure_message: str,
+) -> None:
+    """Fail closed when reuse cannot revalidate live PR state."""
+    _log.error(
+        "executor.pr_reuse_revalidate_failed",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        pr_url=ws.pr_url,
+        error=error_message[:500],
+        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+    )
+    await self._record_executor_pr_audit_event(
+        workspace_id,
+        event_type=_AUDIT_PR_CREATED_EVENT,
+        action="pr_create",
+        outcome="failed",
+        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+        branch_name=push_branch_name,
+        remote_branch=audit_remote_branch,
+        pr_number=pr_number,
+        pr_url=ws.pr_url,
+        source_head_sha=None,
+        evidence={
+            "operation": evidence_operation,
+            "error_message": error_message.strip() or "<no output>",
+        },
+    )
+    await self._mark_failed(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.pushing,
+        failure_reason=FailureReason.infrastructure_failure,
+        message=failure_message[:2000],
+        reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+    )
+
+
 async def push_and_open_pr(
     self: Any,
     *,
@@ -118,9 +184,13 @@ async def push_and_open_pr(
     that merged or closed after admission is not reused: identity is cleared and
     a replacement PR is opened for the pushed tip. When the PR is still open but
     its head ref was renamed after admission, the persisted push target is
-    updated to the live ``head_ref`` before reuse. If ``pr_number`` cannot be
-    resolved, or snapshot lookup fails, reuse fails closed (identity kept,
-    workspace marked failed) so a still-open PR is not unlinked or duplicated.
+    updated to the live ``head_ref`` before reuse. After a reuse push, the live
+    snapshot is fetched again: if the PR merged concurrently, reuse is kept only
+    when the merged PR's head OID equals the pushed tip; otherwise identity is
+    cleared and a replacement PR is opened. If ``pr_number`` cannot be resolved,
+    or snapshot lookup fails (pre- or post-push), reuse fails closed (identity
+    kept, workspace marked failed) so a still-open PR is not unlinked or
+    duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
@@ -307,6 +377,74 @@ async def push_and_open_pr(
                         remote_branch_name=existing_pr_remote_branch,
                         remote_url=existing_pr_remote_url,
                     )
+                    # Pre-push open is not atomic with the push: the PR can merge
+                    # in between. Recheck containment before handing the monitor
+                    # a terminal URL that may exclude the retry tip.
+                    try:
+                        post_snapshot = await forge_client.fetch_pull_request_snapshot(
+                            repo=RepoRef.from_url(ws.repo_url),
+                            pr_number=pr_number,
+                        )
+                    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+                        await _fail_reuse_pr_state_lookup(
+                            self,
+                            workspace_id=workspace_id,
+                            ws=ws,
+                            push_branch_name=push_branch_name,
+                            audit_remote_branch=audit_remote_branch,
+                            pr_number=pr_number,
+                            evidence_operation="fetch_pull_request_snapshot_post_push",
+                            error_message=str(exc),
+                            failure_message=(
+                                "Could not verify whether the reused pull request "
+                                "still contains the pushed tip after reuse."
+                            ),
+                        )
+                        return None
+                    if post_snapshot.lifecycle is PullRequestLifecycle.open:
+                        pass
+                    elif (
+                        post_snapshot.lifecycle is PullRequestLifecycle.merged
+                        and _merged_pr_contains_pushed_tip(
+                            snapshot=post_snapshot,
+                            pushed_head_sha=pr.head_sha,
+                        )
+                    ):
+                        _log.info(
+                            "executor.pr_reuse_merged_tip_contained",
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            pr_url=ws.pr_url,
+                            head_sha=pr.head_sha,
+                        )
+                    else:
+                        _log.info(
+                            "executor.pr_reuse_abandoned_post_push",
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            pr_url=ws.pr_url,
+                            lifecycle=str(post_snapshot.lifecycle),
+                            pushed_head_sha=pr.head_sha,
+                            merged_head_sha=post_snapshot.head_sha,
+                        )
+                        await _clear_stale_pr_identity_for_replacement(
+                            self,
+                            workspace_id=workspace_id,
+                            ws=ws,
+                        )
+                        audit_remote_branch = push_branch_name
+                        pr = await self._pr_creator.push_and_open(
+                            worktree_path=worktree_path,
+                            branch_name=push_branch_name,
+                            base_branch=ws.branch_base,
+                            title=pr_title,
+                            body=pr_body,
+                            forge_client=forge_client,
+                            repo_url=ws.repo_url,
+                            existing_pr_url=None,
+                            remote_branch_name=None,
+                            remote_url=None,
+                        )
                 else:
                     await _clear_stale_pr_identity_for_replacement(
                         self,
