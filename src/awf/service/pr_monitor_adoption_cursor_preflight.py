@@ -48,10 +48,19 @@ async def _cursor_auto_mode_provider_preflight(
 
     # Overlay profile-declared Cursor credentials (runtime.environment or kind=env
     # secret leases) so Router preflight sees the same auth provisioning injects.
+    profile_snapshot = _adoption_provider_preflight_profile(request)
     preflight_environ = overlay_profile_provider_credentials(
         os.environ,
-        _adoption_provider_preflight_profile(request),
+        profile_snapshot,
     )
+    # ``profile_ref=auto`` (default) cannot resolve the repo-local
+    # ``.awf/workspace.yml`` until provisioning clones the worktree. A strict
+    # probe here would 503 with CURSOR_AUTH_MISSING even when that profile later
+    # supplies CURSOR_API_KEY via an env lease whose host source is present.
+    # Defer when no credential is visible yet; still probe when the worker (or a
+    # resolvable inline/named profile) already exposes a key.
+    if profile_snapshot is None and not str(preflight_environ.get("CURSOR_API_KEY") or "").strip():
+        return None
     preflight = await _selected_provider_preflight_for_task_async(
         settings,
         agent=request.agent,

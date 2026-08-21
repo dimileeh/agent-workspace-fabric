@@ -479,6 +479,9 @@ async def test_adoption_cursor_auto_mode_blocks_when_router_is_unavailable(
         "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
         _blocked,
     )
+    # Worker-visible key keeps the auto-profile probe active (fail-fast when Router
+    # is known-unavailable). Without a key, auto profiles defer instead.
+    monkeypatch.setenv("CURSOR_API_KEY", "worker-cursor-key")
     request = PullRequestMonitorAdoptionRequest(
         pr_url="https://github.com/example/repo/pull/1",
         agent=AgentRuntime.cursor,
@@ -496,6 +499,38 @@ async def test_adoption_cursor_auto_mode_blocks_when_router_is_unavailable(
             "message": "Router is unavailable.",
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_adoption_cursor_auto_mode_defers_router_preflight_for_unresolved_auto_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default profile_ref=auto cannot see repo-local CURSOR_API_KEY leases yet.
+
+    Blocking here would 503 before clone even when provisioning would inject the
+    key from ``.awf/workspace.yml``. Defer until the profile is resolved.
+    """
+    called = False
+
+    async def _must_not_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"blocks_launch": True, "reason_code": "CURSOR_AUTH_MISSING"}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _must_not_run,
+    )
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.intelligence,
+        profile_ref="auto",
+    )
+
+    assert await _cursor_auto_mode_provider_preflight(SimpleNamespace(), request) is None
+    assert called is False
 
 
 @pytest.mark.asyncio
