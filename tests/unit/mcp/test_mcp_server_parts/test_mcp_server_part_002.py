@@ -353,6 +353,36 @@ class TestCreateWorkspace:
         assert workspace.task_policy["cursor_auto_mode"] == "balance"
 
     @pytest.mark.unit
+    async def test_create_workspace_returns_structured_validation_for_cursor_auto_cross_field(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Cross-field Cursor Auto errors must be INVALID_REQUEST, not an MCP crash."""
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/cursor-auto-conflict.git",
+                "base_branch": "main",
+                "task_title": "Incompatible Cursor Auto create",
+                "task_prompt": "Codex cannot carry cursor_auto_mode.",
+                "agent": "codex",
+                "cursor_auto_mode": "cost",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp cursor auto cross-field regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert result.structuredContent["message"]
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
     async def test_persists_canonical_create_contract_fields(
         self,
         mcp,
