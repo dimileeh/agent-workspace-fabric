@@ -99,6 +99,12 @@ from awf.service.pr_monitor_adoption_helpers import (
     _raise_if_repo_identity_conflicts as _raise_if_repo_identity_conflicts,
 )
 from awf.service.pr_monitor_adoption_helpers import (
+    _requested_agent_policy as _requested_agent_policy,
+)
+from awf.service.pr_monitor_adoption_helpers import (
+    _task_external_id_family_idempotency_keys as _task_external_id_family_idempotency_keys,
+)
+from awf.service.pr_monitor_adoption_helpers import (
     pr_adoption_idempotency_key as pr_adoption_idempotency_key,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
