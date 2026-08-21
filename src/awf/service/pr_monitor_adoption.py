@@ -38,6 +38,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.service.node_identity import effective_worker_node_id
+from awf.service.pr_monitor_adoption_cursor_preflight import (
+    _cursor_auto_mode_provider_preflight,
+)
 from awf.service.pr_monitor_adoption_helpers import *  # noqa: F403
 from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _SUPERSEDED_EXTERNAL_ID_ALLOCATION_ATTEMPTS,
@@ -59,7 +62,6 @@ from awf.service.pr_monitor_adoption_helpers import (  # noqa: F401
     _adoption_task_prompt,
     _adoption_workspace_is_resumable,
     _allocate_superseded_adoption_idempotency_key,
-    _cursor_auto_mode_provider_preflight,
     _default_metadata_fetcher,
     _effective_adoption_external_id,
     _github_repo_url_like,

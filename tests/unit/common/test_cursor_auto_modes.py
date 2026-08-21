@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,9 +27,12 @@ from awf.control.executor.helpers import (
     _agent_run_model_for_workspace,
 )
 from awf.db.enums import AgentRuntime, CursorAutoMode
+from awf.profiles.models import WorkspaceProfile
+from awf.service.pr_monitor_adoption_cursor_preflight import (
+    _cursor_auto_mode_provider_preflight,
+)
 from awf.service.pr_monitor_adoption_helpers import (
     PRMonitorAdoptionError,
-    _cursor_auto_mode_provider_preflight,
     _raise_if_agent_policy_conflicts,
     _requested_agent_policy,
 )
@@ -302,3 +306,79 @@ async def test_adoption_cursor_auto_mode_blocks_when_router_is_unavailable(
             "message": "Router is unavailable.",
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_adoption_cursor_auto_mode_preflight_overlays_profile_cursor_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile-only CURSOR_API_KEY must reach Router preflight (create/retry parity)."""
+    captured: dict[str, object] = {}
+
+    async def _capture(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured["provider_environ"] = kwargs.get("provider_environ")
+        return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _capture,
+    )
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.intelligence,
+        profile=WorkspaceProfile(
+            name="cursor-profile",
+            runtime={"environment": {"CURSOR_API_KEY": "profile-only-cursor-key"}},
+        ),
+    )
+
+    result = await _cursor_auto_mode_provider_preflight(SimpleNamespace(), request)
+
+    assert result == {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+    environ = captured["provider_environ"]
+    assert isinstance(environ, Mapping)
+    assert environ.get("CURSOR_API_KEY") == "profile-only-cursor-key"
+
+
+@pytest.mark.asyncio
+async def test_adoption_cursor_auto_mode_preflight_overlays_profile_cursor_env_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile ``kind=env`` CURSOR_API_KEY lease must overlay like create readiness."""
+    captured: dict[str, object] = {}
+
+    async def _capture(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured["provider_environ"] = kwargs.get("provider_environ")
+        return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
+
+    monkeypatch.setattr(
+        "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
+        _capture,
+    )
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.setenv("HOST_CURSOR_KEY", "lease-cursor-key")
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.intelligence,
+        profile=WorkspaceProfile(
+            name="cursor-lease-profile",
+            secrets=[
+                {
+                    "name": "cursor-key",
+                    "kind": "env",
+                    "target": "CURSOR_API_KEY",
+                    "ref": "env/HOST_CURSOR_KEY",
+                    "provider": "env",
+                }
+            ],
+        ),
+    )
+
+    await _cursor_auto_mode_provider_preflight(SimpleNamespace(), request)
+
+    environ = captured["provider_environ"]
+    assert isinstance(environ, Mapping)
+    assert environ.get("CURSOR_API_KEY") == "lease-cursor-key"

@@ -522,6 +522,41 @@ def test_overlay_profile_provider_credentials_overlays_profile_declared_key() ->
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_cursor_api_key() -> None:
+    """Cursor auth declared only in the profile must reach create/adoption preflight.
+
+    Without overlaying CURSOR_API_KEY, Cursor Router admission inspects the worker
+    environ alone and rejects with CURSOR_AUTH_MISSING even though provisioning
+    injects the profile credential into the agent container.
+    """
+    runtime_declared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "cursor-profile",
+            "runtime": {"environment": {"CURSOR_API_KEY": "cursor-profile-only"}},
+        },
+    )
+    assert runtime_declared["CURSOR_API_KEY"] == "cursor-profile-only"
+
+    lease_declared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_CURSOR_KEY": "cursor-from-lease"},
+        {
+            "name": "cursor-lease-profile",
+            "secrets": [
+                {
+                    "name": "cursor-key",
+                    "kind": "env",
+                    "target": "CURSOR_API_KEY",
+                    "ref": "env/HOST_CURSOR_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+    assert lease_declared["CURSOR_API_KEY"] == "cursor-from-lease"
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_overlays_ollama_cloud_key() -> None:
     """An ``OLLAMA_API_KEY`` declared solely in the profile env reaches the agent
     container but not the worker. A ``:cloud`` Ollama model whose sidecar base URL is

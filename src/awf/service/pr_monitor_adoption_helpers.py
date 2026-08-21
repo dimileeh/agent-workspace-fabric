@@ -599,35 +599,6 @@ def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[
     return policy
 
 
-async def _cursor_auto_mode_provider_preflight(
-    settings: Settings, request: PullRequestMonitorAdoptionRequest
-) -> dict[str, Any] | None:
-    if request.cursor_auto_mode is None:
-        return None
-    from awf.service.workspaces_create import (  # noqa: PLC0415
-        _selected_provider_preflight_for_task_async,
-    )
-
-    preflight = await _selected_provider_preflight_for_task_async(
-        settings,
-        agent=request.agent,
-        task_policy=_requested_agent_policy(request),
-        override=False,
-        override_reason=None,
-        provider_environ=None,
-        run_subprocess=None,
-        http_get=None,
-    )
-    if preflight.get("blocks_launch") is True:
-        raise PRMonitorAdoptionError(
-            error_code="PROVIDER_READINESS_PRECHECK_FAILED",
-            message=str(preflight.get("message") or "Provider readiness blocked adoption."),
-            status_code=503,
-            detail={"provider_readiness_preflight": dict(preflight)},
-        )
-    return preflight
-
-
 def _raise_if_unsupported_agent(request: PullRequestMonitorAdoptionRequest) -> None:
     from awf.service.provider_readiness import (
         is_launchable_agent,
@@ -1451,7 +1422,6 @@ __all__ = (
     "_raise_if_repo_identity_conflicts",
     "_adoption_task_policy",
     "_requested_agent_policy",
-    "_cursor_auto_mode_provider_preflight",
     "_requested_execution_policy",
     "_raise_if_hosted_delegation_unconfigured",
     "_adoption_task_prompt",
