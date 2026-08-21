@@ -338,6 +338,12 @@ never guessed as a fix. Explicit `AWF-VERDICT: FALSE POSITIVE` /
 `AWF-VERDICT: DEFER` still resolve without a commit; `NEEDS_HUMAN` blocks
 merge.
 
+AWF accepts balanced top-level Markdown emphasis (`*`, `**`, `***`, `_`, `__`,
+or `___`) around either the complete canonical verdict or only its
+`AWF-VERDICT: LABEL:` prefix. List items, task lists, blockquotes, headings,
+prose-prefixed markers, unknown labels, and unbalanced or mismatched emphasis
+remain fail-closed.
+
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
 
