@@ -37,6 +37,7 @@ def test_apply_service_git_environment_drops_removed_global_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/stale/snapshot/.gitconfig")
+    monkeypatch.setenv("HOME", os.environ.get("HOME", "/root"))
     worker_mod._apply_service_git_environment({"HOME": "/host-home"})
     assert "GIT_CONFIG_GLOBAL" not in os.environ
 
