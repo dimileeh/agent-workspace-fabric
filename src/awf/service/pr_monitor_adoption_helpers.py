@@ -1310,6 +1310,12 @@ def _raise_if_agent_policy_conflicts(
         requested_value = requested_policy.get(key)
         if existing_value == requested_value:
             continue
+        if key == "agent_effort" and _legacy_cursor_effort_replay_matches(
+            request,
+            existing_effort=existing_value,
+            requested_effort=requested_value,
+        ):
+            continue
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message=f"Existing adopted PR monitor uses a different {key} policy.",
@@ -1319,6 +1325,28 @@ def _raise_if_agent_policy_conflicts(
                 f"requested_{key}": requested_value,
             },
         )
+
+
+def _legacy_cursor_effort_replay_matches(
+    request: PullRequestMonitorAdoptionRequest,
+    *,
+    existing_effort: str | None,
+    requested_effort: str | None,
+) -> bool:
+    """Match omitted-effort Cursor replays against pre-change xhigh fills.
+
+    Pre-Auto fixed-model Cursor adoptions persisted ``agent_effort="xhigh"`` from
+    the former default. Live defaults no longer fill that effort, so identical
+    replays omit ``agent_effort``; treat that shape as matching the stored
+    historical value instead of raising ``PR_ADOPTION_POLICY_CONFLICT``.
+    """
+    if requested_effort is not None or existing_effort != "xhigh":
+        return False
+    if request.agent is not AgentRuntime.cursor:
+        return False
+    if request.effort is not None or request.cursor_auto_mode is not None:
+        return False
+    return request.model is not None
 
 
 def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
@@ -1466,6 +1494,7 @@ __all__ = (
     "_adoption_auto_merge_intent",
     "_adoption_auto_merge_conflicts",
     "_raise_if_agent_policy_conflicts",
+    "_legacy_cursor_effort_replay_matches",
     "_workspace_agent_policy",
     "_requested_inline_profile_policy",
     "_inline_profile_name",

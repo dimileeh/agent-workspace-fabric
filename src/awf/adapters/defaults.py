@@ -33,12 +33,10 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
 HISTORICAL_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
         **DEFAULT_AGENT_DEFAULTS,
-        # Pre-Auto Cursor adoptions with an explicit model and omitted effort
-        # persisted agent_effort="xhigh" from the former default. Keep that
-        # historical fill so idempotent replays still match stored policy.
-        AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_MODEL, effort="xhigh"),
         # Retired runtimes retained so historical adoptions resolve implicit effort
         # and historical workspace projections report last-known defaults.
+        # Pre-Auto Cursor rows that persisted agent_effort="xhigh" are reconciled
+        # only in adoption replay comparison — not as a live/global default fill.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
     }
 )

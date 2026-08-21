@@ -279,6 +279,55 @@ def test_adoption_policy_persists_mode_without_effort() -> None:
     assert _requested_agent_policy(request) == {CURSOR_AUTO_MODE_POLICY_KEY: "cost"}
 
 
+def test_adoption_policy_cursor_fixed_model_omits_effort() -> None:
+    """Live Cursor defaults omit portable effort; do not persist historical xhigh."""
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="gpt-5",
+    )
+
+    assert _requested_agent_policy(request) == {"agent_model": "gpt-5"}
+
+
+def test_adoption_policy_conflict_equates_legacy_cursor_xhigh_with_omitted_effort() -> None:
+    workspace = SimpleNamespace(
+        id="ws_cursor_legacy",
+        task_policy={"agent_model": "gpt-5", "agent_effort": "xhigh"},
+    )
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="gpt-5",
+        effort=None,
+    )
+
+    _raise_if_agent_policy_conflicts(workspace, request)
+
+
+def test_adoption_policy_conflict_still_rejects_explicit_cursor_effort_mismatch() -> None:
+    workspace = SimpleNamespace(
+        id="ws_cursor_legacy",
+        task_policy={"agent_model": "gpt-5", "agent_effort": "xhigh"},
+    )
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        model="gpt-5",
+        effort="high",
+    )
+
+    with pytest.raises(PRMonitorAdoptionError) as excinfo:
+        _raise_if_agent_policy_conflicts(workspace, request)
+
+    assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+    assert excinfo.value.detail == {
+        "workspace_id": "ws_cursor_legacy",
+        "existing_agent_effort": "xhigh",
+        "requested_agent_effort": "high",
+    }
+
+
 def test_adoption_policy_omits_agent_model_when_plain_auto_accompanies_cursor_auto_mode() -> None:
     request = PullRequestMonitorAdoptionRequest(
         pr_url="https://github.com/example/repo/pull/1",
