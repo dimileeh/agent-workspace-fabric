@@ -1073,8 +1073,10 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
     reject when the run is longer than ``opener`` on either side.
 
     Underscore closers additionally follow CommonMark's intra-word rule: a
-    ``_`` / ``__`` / ``___`` run cannot close when followed by an ASCII
-    alphanumeric character (PRRT_kwDOSJAM6s6bRy5w).
+    ``_`` / ``__`` / ``___`` run cannot close when also left-flanking and not
+    followed by Unicode punctuation. That covers alphanumeric neighbors and
+    non-punctuation symbols such as emoji (PRRT_kwDOSJAM6s6bRy5w,
+    PRRT_kwDOSJAM6s6bSs2f).
     """
     closer_end = closer_start + len(opener)
     if closer_start < 0 or closer_end > len(text):
@@ -1091,7 +1093,12 @@ def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str
         return False
     if closer_start > 0 and text[closer_start - 1].isspace():
         return False
-    if opener[0] == "_" and closer_end < len(text) and text[closer_end].isalnum():
+    if (
+        opener[0] == "_"
+        and closer_end < len(text)
+        and not text[closer_end].isspace()
+        and not _markdown_char_is_unicode_punctuation(text[closer_end])
+    ):
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(closer_start, closer_end))
 
@@ -1133,7 +1140,15 @@ def _markdown_emphasis_run_can_close(text: str, start: int, length: int, marker:
         followed_ok = end >= len(text) or text[end].isspace()
         if not followed_ok and not _markdown_char_is_unicode_punctuation(text[end]):
             return False
-    if marker == "_" and end < len(text) and text[end].isalnum():
+    # Underscore: both-flanking runs cannot close unless followed by punctuation.
+    # ``isalnum()`` alone misses Unicode symbols (emoji) that are neither
+    # whitespace nor punctuation (PRRT_kwDOSJAM6s6bSs2f).
+    if (
+        marker == "_"
+        and end < len(text)
+        and not text[end].isspace()
+        and not _markdown_char_is_unicode_punctuation(text[end])
+    ):
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))
 
@@ -1154,7 +1169,15 @@ def _markdown_emphasis_run_can_open(text: str, start: int, length: int, marker: 
         preceded_ok = start == 0 or text[start - 1].isspace()
         if not preceded_ok and not _markdown_char_is_unicode_punctuation(text[start - 1]):
             return False
-    if marker == "_" and start > 0 and text[start - 1].isalnum():
+    # Underscore: both-flanking runs cannot open unless preceded by punctuation.
+    # Symmetric with the closer rule for non-alnum Unicode symbols
+    # (PRRT_kwDOSJAM6s6bSs2f).
+    if (
+        marker == "_"
+        and start > 0
+        and not text[start - 1].isspace()
+        and not _markdown_char_is_unicode_punctuation(text[start - 1])
+    ):
         return False
     return not any(_markdown_char_is_escaped(text, i) for i in range(start, end))
 

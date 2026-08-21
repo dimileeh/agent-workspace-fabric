@@ -1281,6 +1281,11 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: lead **open.**x rest**",
             "*AWF-VERDICT: FALSE POSITIVE: lead *open.*x rest*",
             "__AWF-VERDICT: FALSE POSITIVE: lead __open.__x rest__",
+            # Underscore both-flanking before a non-alnum Unicode symbol cannot
+            # close under CommonMark; consuming it leaves the outer wrap
+            # unbalanced and must not resolve (PRRT_kwDOSJAM6s6bSs2f).
+            "_AWF-VERDICT: FALSE POSITIVE: reason _open_🦄 rest_",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __open__🦄 rest__",
             # Escaped tick + later real tick must not swallow mid-reason steal
             # (PRRT_kwDOSJAM6s6bSsnj).
             r"**AWF-VERDICT: FALSE POSITIVE: \` **unclosed`x**",
@@ -1351,6 +1356,10 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE: lead **open$**x rest**",
             "**AWF-VERDICT: FALSE POSITIVE: lead **open+**x rest**",
             "**AWF-VERDICT: FALSE POSITIVE: lead **open^**x rest**",
+            # Underscore both-flanking before a Unicode symbol cannot close
+            # (PRRT_kwDOSJAM6s6bSs2f).
+            "_AWF-VERDICT: FALSE POSITIVE: reason _open_🦄 rest_",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __open__🦄 rest__",
             # Escaped backtick is not a code-span opener; a later real tick must
             # not hide mid-reason stealers of the whole-line closer
             # (PRRT_kwDOSJAM6s6bSsnj).
@@ -1544,6 +1553,15 @@ class TestParseVerdict:
         assert _markdown_emphasis_run_can_close(" *", 1, 1, "*") is False  # preceded by space
         assert _markdown_emphasis_run_can_close("a_b", 1, 1, "_") is False  # intra-word closer
         assert _markdown_emphasis_run_can_open("a_b", 1, 1, "_") is False  # intra-word opener
+        # Non-whitespace, non-punctuation Unicode symbols also block underscore
+        # open/close when the run is both-flanking (PRRT_kwDOSJAM6s6bSs2f).
+        assert _markdown_emphasis_run_can_close("n_🦄", 1, 1, "_") is False
+        assert _markdown_emphasis_run_can_open("🦄_n", 1, 1, "_") is False
+        assert _markdown_emphasis_run_can_close("n__🦄", 1, 2, "_") is False
+        assert _markdown_emphasis_run_can_open("🦄__n", 1, 2, "_") is False
+        # Followed/preceded by punctuation still allows the matching side.
+        assert _markdown_emphasis_run_can_close("n_.", 1, 1, "_") is True
+        assert _markdown_emphasis_run_can_open("._n", 1, 1, "_") is True
         # Alphanumeric then punctuation: not left-flanking (PRRT_kwDOSJAM6s6bSOmb).
         assert _markdown_emphasis_run_can_open("a*.", 1, 1, "*") is False
         assert _markdown_emphasis_run_can_open("a**.", 1, 2, "*") is False
