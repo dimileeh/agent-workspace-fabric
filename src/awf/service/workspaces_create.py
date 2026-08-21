@@ -359,7 +359,8 @@ def workspace_create_payload_matches(
             model=payload.task.model,
             cursor_auto_mode=payload.task.cursor_auto_mode,
         )
-        and cursor_auto_mode_from_task_policy(existing.task_policy) == payload.task.cursor_auto_mode
+        and cursor_auto_mode_from_task_policy(_stored_task_policy(existing))
+        == payload.task.cursor_auto_mode
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
@@ -819,11 +820,12 @@ def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | No
 
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     """Return the agent model string stored in the workspace's task policy."""
-    model = _stored_task_policy(existing).get("agent_model")
+    stored_policy = _stored_task_policy(existing)
+    model = stored_policy.get("agent_model")
     raw = model if isinstance(model, str) and model else None
     return canonical_agent_model_for_cursor_auto(
         model=raw,
-        cursor_auto_mode=cursor_auto_mode_from_task_policy(existing.task_policy),
+        cursor_auto_mode=cursor_auto_mode_from_task_policy(stored_policy),
     )
 
 
