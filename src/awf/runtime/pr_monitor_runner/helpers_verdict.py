@@ -1084,6 +1084,11 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     ``*`` / ``_`` delimiters and require the normalized line to satisfy the
     canonical verdict grammar. Nested containers and prose wrappers remain
     untouched and therefore continue to fail closed.
+
+    A prefix closer plus a later unmatched same-delimiter closer (for example
+    ``**AWF-VERDICT: FALSE POSITIVE:** rationale**``) is malformed: do not
+    absorb leftover markers into the reason, and do not fall back to a
+    whole-line strip that would leave the prefix closer inside the reason.
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
@@ -1091,16 +1096,26 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     opener = emphasis_match.group(0)
     inner = line[len(opener) :]
 
+    prefix_closer_valid = False
     marker_match = _AWF_VERDICT.match(inner)
     if marker_match is not None:
         reason_start = marker_match.start("reason")
         if _markdown_emphasis_closer_is_valid(inner, reason_start, opener):
+            prefix_closer_valid = True
             candidate = inner[:reason_start] + inner[reason_start + len(opener) :]
-            if _AWF_VERDICT.fullmatch(candidate) is not None:
+            trailing_closer_start = len(candidate) - len(opener)
+            # Leftover trailing closer means the prefix wrap was not alone.
+            if (
+                not _markdown_emphasis_closer_is_valid(candidate, trailing_closer_start, opener)
+                and _AWF_VERDICT.fullmatch(candidate) is not None
+            ):
                 return candidate
 
     closer_start = len(inner) - len(opener)
     if _markdown_emphasis_closer_is_valid(inner, closer_start, opener):
+        # Both a prefix closer and a whole-line closer ⇒ malformed emphasis.
+        if prefix_closer_valid:
+            return None
         candidate = inner[:closer_start]
         if _AWF_VERDICT.fullmatch(candidate) is not None:
             return candidate

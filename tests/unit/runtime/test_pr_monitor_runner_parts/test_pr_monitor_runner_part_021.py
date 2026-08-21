@@ -1220,6 +1220,11 @@ class TestParseVerdict:
             r"**AWF-VERDICT: FALSE POSITIVE: rationale\**",
             r"*AWF-VERDICT: FALSE POSITIVE: rationale \*",
             r"__AWF-VERDICT: FALSE POSITIVE: rationale \__",
+            # Prefix + trailing same-delimiter closer is malformed, not addressed
+            # (PRRT_kwDOSJAM6s6bQo0J).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale__",
         ],
     )
     def test_private_awf_verdict_invalid_emphasis_forms_still_fail_closed(
@@ -1243,6 +1248,13 @@ class TestParseVerdict:
             r"*AWF-VERDICT: FALSE POSITIVE: rationale \*",
             "__AWF-VERDICT: FALSE POSITIVE: __ rationale",
             r"__AWF-VERDICT: FALSE POSITIVE: rationale \__",
+            # Prefix closer plus unmatched same-delimiter closer later must not
+            # resolve with leftover markers absorbed into the reason
+            # (PRRT_kwDOSJAM6s6bQo0J).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale__",
+            "___AWF-VERDICT: FALSE POSITIVE:___ rationale___",
         ],
     )
     def test_private_markdown_emphasis_normalizer_rejects_invalid_closers(
