@@ -347,6 +347,41 @@ async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
     assert len(_FULL_HEAD) > len(_ABBREV_HEAD)
 
 
+async def test_fetch_pr_status_resolves_fork_head_sha_against_source_repo() -> None:
+    """Abbreviated fork heads resolve via source.repository.full_name, not the base."""
+    fork_path = "/2.0/repositories/fork-owner/repo"
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json=pr_payload(source_sha=_ABBREV_HEAD)
+        | {
+            "source": {
+                "branch": {"name": "feature/head"},
+                "commit": {"hash": _ABBREV_HEAD},
+                "repository": {"full_name": "fork-owner/repo"},
+            }
+        },
+    )
+    fake.enqueue("GET", f"{fork_path}/commit/{_ABBREV_HEAD}", json={"hash": _FULL_HEAD})
+    fake.page("GET", f"{_REPO}/commit/{_FULL_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "viewer"})
+    client = make_client(fake)
+
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+
+    assert status.head_sha == _FULL_HEAD
+    resolve_paths = [
+        r.url.path
+        for r in fake.calls("GET")
+        if "/commit/" in r.url.path and "statuses" not in r.url.path
+    ]
+    assert resolve_paths == [f"{fork_path}/commit/{_ABBREV_HEAD}"]
+
+
 async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:
     # (b) A PR already reporting a full 40-char hash incurs NO extra resolve GET.
     fake = FakeBitbucket()

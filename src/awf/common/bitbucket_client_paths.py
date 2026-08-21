@@ -22,6 +22,25 @@ class _BitbucketUrlsMixin:
     def _pr_head_sha(pr: dict[str, Any]) -> str | None:
         return _clean_optional_str(_as_dict(_as_dict(pr.get("source")).get("commit")).get("hash"))
 
+    @staticmethod
+    def _source_repo_for_commit_resolve(pr: dict[str, Any], base_repo: RepoRef) -> RepoRef:
+        """Return the repository that owns the PR head commit for SHA resolution.
+
+        Cross-fork PRs expose ``source.repository.full_name``. Abbreviated
+        ``source.commit.hash`` values must be resolved against that repository:
+        a fork-only head may not exist on the destination repo, and looking it
+        up there 404s even though the PR is valid.
+        """
+        full_name = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("repository")).get("full_name")
+        )
+        if full_name is None:
+            return base_repo
+        owner, sep, name = full_name.partition("/")
+        if not sep or not owner or not name or "/" in name:
+            return base_repo
+        return RepoRef(owner=owner, name=name, forge=base_repo.forge)
+
     def _repo_path(self, repo: RepoRef) -> str:
         return f"/2.0/repositories/{quote(repo.owner, safe='')}/{quote(repo.name, safe='')}"
 

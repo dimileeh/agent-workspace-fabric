@@ -174,6 +174,68 @@ async def test_pull_request_snapshot_resolves_abbreviated_target_sha() -> None:
     ]
 
 
+async def test_pull_request_snapshot_resolves_fork_head_sha_against_source_repo() -> None:
+    """Fork-only abbreviated heads must resolve via source.repository, not the base.
+
+    Bitbucket serves ``source.commit.hash`` abbreviated. Looking that hash up on
+    the destination repo 404s when the commit exists only on the fork, which
+    previously failed retry/reuse with PR_STATE_LOOKUP_FAILED for a valid PR.
+    """
+    abbreviated_head = "a59f411ce4c4"
+    full_head = "a59f411ce4c403fe6185df79df05f9b51743c084"
+    abbreviated_base = "b" * 12
+    full_base = "b" * 40
+    fork_repo_path = "/2.0/repositories/fork-owner/repo"
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        _PR,
+        json={
+            "state": "OPEN",
+            "source": {
+                "branch": {"name": "feature/from-fork"},
+                "commit": {"hash": abbreviated_head},
+                "repository": {"full_name": "fork-owner/repo"},
+            },
+            "destination": {"commit": {"hash": abbreviated_base}},
+        },
+    )
+    fake.enqueue("GET", f"{fork_repo_path}/commit/{abbreviated_head}", json={"hash": full_head})
+    fake.enqueue("GET", f"{_REPO}/commit/{abbreviated_base}", json={"hash": full_base})
+    client = make_client(fake)
+
+    snapshot = await client.fetch_pull_request_snapshot(repo=repo(), pr_number=42)
+
+    assert snapshot.head_sha == full_head
+    assert snapshot.base_sha == full_base
+    assert [request.url.path for request in fake.requests] == [
+        _PR,
+        f"{fork_repo_path}/commit/{abbreviated_head}",
+        f"{_REPO}/commit/{abbreviated_base}",
+    ]
+
+
+def test_source_repo_for_commit_resolve_falls_back_without_usable_full_name() -> None:
+    base = repo()
+    assert BitbucketClient._source_repo_for_commit_resolve({}, base) is base
+    assert (
+        BitbucketClient._source_repo_for_commit_resolve(
+            {"source": {"repository": {"full_name": "not-a-slug"}}}, base
+        )
+        is base
+    )
+    assert (
+        BitbucketClient._source_repo_for_commit_resolve(
+            {"source": {"repository": {"full_name": "a/b/c"}}}, base
+        )
+        is base
+    )
+    fork = BitbucketClient._source_repo_for_commit_resolve(
+        {"source": {"repository": {"full_name": "fork-owner/repo"}}}, base
+    )
+    assert fork == RepoRef(owner="fork-owner", name="repo", forge="bitbucket")
+
+
 async def test_pull_request_lifecycle_lookup_retries_transient_response() -> None:
     fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=429, headers={"Retry-After": "5"})

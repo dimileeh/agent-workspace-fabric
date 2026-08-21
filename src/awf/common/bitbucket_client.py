@@ -316,7 +316,11 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
         # commit-statuses fetch below, and is remembered as the rerun pipeline
         # target — all consistently full (the per-commit endpoint accepts both).
-        head_sha = await self._resolve_full_commit_sha(repo, head_sha, retry=retry)
+        # Fork PRs resolve against ``source.repository`` — a fork-only commit is
+        # not present on the destination repo.
+        head_sha = await self._resolve_full_commit_sha(
+            self._source_repo_for_commit_resolve(pr, repo), head_sha, retry=retry
+        )
         self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
@@ -486,7 +490,11 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             _as_dict(_as_dict(pr.get("destination")).get("commit")).get("hash")
         )
         if head_sha is not None and len(head_sha) < 40:
-            head_sha = await self._resolve_full_commit_sha(repo, head_sha)
+            # Fork PRs: resolve against source.repository — fork-only heads are
+            # absent from the destination repo and 404 there.
+            head_sha = await self._resolve_full_commit_sha(
+                self._source_repo_for_commit_resolve(pr, repo), head_sha
+            )
         if base_sha is not None and len(base_sha) < 40:
             base_sha = await self._resolve_full_commit_sha(repo, base_sha)
         return PullRequestSnapshot(lifecycle, head_ref, base_sha, head_sha)
