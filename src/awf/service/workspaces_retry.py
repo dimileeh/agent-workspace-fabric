@@ -47,6 +47,7 @@ from awf.runtime.planning import (
     build_planning_scope_retry_prompt,
 )
 from awf.runtime.pr_monitor_actions import AbortReason
+from awf.runtime.pr_push_remote import retained_fork_pr_adoption
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -225,6 +226,7 @@ def _clear_closed_sync_feature_pr_adoption(
     task_policy: dict[str, Any],
     *,
     source_task_kind: str,
+    repo_url: str | None = None,
 ) -> str:
     """Drop closed adoption identity so retry can open a replacement PR.
 
@@ -232,10 +234,21 @@ def _clear_closed_sync_feature_pr_adoption(
     over a cleared ``remote_push_branch``. Leaving the closed PR's adoption block
     would re-checkout and re-push that head. Adoption is also monitor-only, so
     the replacement must become a coding ``feature_branch_pr``.
+
+    Distinct fork ``head_repo_slug`` / ``head_repo_url`` are retained (same as
+    execution-time ``_apply_sync_feature_replacement_policy``) so replacement
+    pushes stay on the fork via ``remote_push_url_for_workspace``.
     """
     if source_task_kind != TaskKind.sync_feature_pr.value:
         return source_task_kind
+    adoption = task_policy.get("pr_adoption")
+    retained = retained_fork_pr_adoption(
+        repo_url=repo_url,
+        adoption=adoption if isinstance(adoption, dict) else None,
+    )
     task_policy.pop("pr_adoption", None)
+    if retained is not None:
+        task_policy["pr_adoption"] = retained
     task_policy["task_kind"] = TaskKind.feature_branch_pr.value
     return TaskKind.feature_branch_pr.value
 
@@ -811,13 +824,15 @@ async def retry_workspace_row(
     if closed_existing_feature_pr:
         # A monitor-confirmed closed PR cannot be reused, and its remote head
         # may already have been deleted. Provision a fresh branch so the retry
-        # can open a replacement PR. Adopted sync-feature rows must also drop
-        # pr_adoption (and become feature_branch_pr) or provisioning still
-        # checks out refs/pull/<closed>/head and restores the old head_ref.
+        # can open a replacement PR. Adopted sync-feature rows must drop PR
+        # identity (and become feature_branch_pr) or provisioning still checks
+        # out refs/pull/<closed>/head and restores the old head_ref. Fork
+        # head_repo_* fields are retained so replacement pushes stay on the fork.
         retry_remote_push_branch = None
         retry_task_kind = _clear_closed_sync_feature_pr_adoption(
             retried_task_policy,
             source_task_kind=source.task_kind,
+            repo_url=source.repo_url,
         )
     elif preserve_existing_feature_pr:
         # The retry executes on a fresh local branch, but it must push back to

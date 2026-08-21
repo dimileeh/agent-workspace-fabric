@@ -488,6 +488,63 @@ async def test_retry_clears_adoption_when_replacing_closed_sync_feature_pr(
     assert _provision_remote_push_branch(retried) is None
 
 
+async def test_retry_retains_fork_head_repo_when_replacing_closed_sync_feature_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Closed fork adoptions keep head_repo_* so replacement pushes stay on the fork.
+
+    Admission must match execution-time retained_fork_pr_adoption (PRRT_kwDOSJAM6s6bJdSv).
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/closed-fork-adopted",
+        remote_push_branch="contributors/closed-fork-head",
+        failure_reason_code="pr_closed_externally",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        policy = dict(source.task_policy or {})
+        adoption = dict(policy["pr_adoption"])
+        adoption["head_repo_slug"] = "fork-owner/retryable"
+        adoption["head_repo_url"] = "git@github.com:fork-owner/retryable.git"
+        policy["pr_adoption"] = adoption
+        source.task_policy = policy
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="replace closed fork-adopted PR",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
+        )
+
+    retried = retry.new_workspace
+    assert retried.task_kind == "feature_branch_pr"
+    assert retried.pr_url is None
+    assert retried.pr_number is None
+    assert retried.remote_push_branch is None
+    adoption = (retried.task_policy or {}).get("pr_adoption")
+    assert adoption == {
+        "head_repo_slug": "fork-owner/retryable",
+        "head_repo_url": "git@github.com:fork-owner/retryable.git",
+    }
+    assert (retried.task_policy or {}).get("task_kind") == "feature_branch_pr"
+    assert _provision_checkout_base_branch(retried) == retried.branch_base
+    assert _provision_remote_push_branch(retried) is None
+
+
 async def test_retry_preserves_feature_pr_reopened_after_external_close(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -830,19 +887,55 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
 
 
 @pytest.mark.parametrize(
-    ("source_task_kind", "task_policy", "expected_kind", "expected_policy"),
+    ("source_task_kind", "repo_url", "task_policy", "expected_kind", "expected_policy"),
     [
         (
             "feature_branch_pr",
+            "git@github.com:example/retryable.git",
             {"task_kind": "feature_branch_pr"},
             "feature_branch_pr",
             {"task_kind": "feature_branch_pr"},
         ),
         (
             "sync_feature_pr",
+            "git@github.com:example/retryable.git",
             {
                 "task_kind": "sync_feature_pr",
                 "pr_adoption": {"pr_number": 42, "head_ref": "contributors/old"},
+            },
+            "feature_branch_pr",
+            {"task_kind": "feature_branch_pr"},
+        ),
+        (
+            "sync_feature_pr",
+            "git@github.com:example/retryable.git",
+            {
+                "task_kind": "sync_feature_pr",
+                "pr_adoption": {
+                    "pr_number": 42,
+                    "head_ref": "contributors/old",
+                    "head_repo_slug": "fork-owner/retryable",
+                    "head_repo_url": "git@github.com:fork-owner/retryable.git",
+                },
+            },
+            "feature_branch_pr",
+            {
+                "task_kind": "feature_branch_pr",
+                "pr_adoption": {
+                    "head_repo_slug": "fork-owner/retryable",
+                    "head_repo_url": "git@github.com:fork-owner/retryable.git",
+                },
+            },
+        ),
+        (
+            "sync_feature_pr",
+            "git@github.com:example/retryable.git",
+            {
+                "task_kind": "sync_feature_pr",
+                "pr_adoption": {
+                    "pr_number": 42,
+                    "head_repo_slug": "example/retryable",
+                },
             },
             "feature_branch_pr",
             {"task_kind": "feature_branch_pr"},
@@ -851,6 +944,7 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
 )
 def test_clear_closed_sync_feature_pr_adoption_strips_identity_for_sync_only(
     source_task_kind: str,
+    repo_url: str,
     task_policy: dict,
     expected_kind: str,
     expected_policy: dict,
@@ -859,6 +953,7 @@ def test_clear_closed_sync_feature_pr_adoption_strips_identity_for_sync_only(
         workspaces_retry_service._clear_closed_sync_feature_pr_adoption(
             task_policy,
             source_task_kind=source_task_kind,
+            repo_url=repo_url,
         )
         == expected_kind
     )
