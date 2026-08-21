@@ -984,7 +984,7 @@ class TestPushAndOpen:
 
         forge = _FakeForgeClient(url="https://github.com/dimileeh/aira-agent/pull/3")
         creator = PullRequestCreator(runner)
-        await creator.push_and_open(
+        result = await creator.push_and_open(
             worktree_path=_WORKTREE,
             branch_name="awf/ws_xyz",
             base_branch="development",
@@ -1000,7 +1000,10 @@ class TestPushAndOpen:
         assert forge.calls[0]["repo"] == RepoRef(
             owner="dimileeh", name="aira-agent", forge="github"
         )
+        # Cross-fork create head is owner:branch for the API only; the result
+        # branch must stay the plain ref so remote_push_branch handoff is valid.
         assert forge.calls[0]["head"] == "contributor:awf/ws_xyz"
+        assert result.branch == "awf/ws_xyz"
 
     @pytest.mark.unit
     async def test_reuses_existing_pr_after_push_without_creating_duplicate(self) -> None:

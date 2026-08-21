@@ -281,7 +281,8 @@ class PullRequestCreator:
                     forge_client=forge_client,
                     repo=repo,
                     base_branch=base_branch,
-                    branch_name=create_head,
+                    branch_name=branch_name,
+                    head=create_head,
                     title=title,
                     body=body,
                     head_sha=head_sha,
@@ -339,6 +340,7 @@ class PullRequestCreator:
         repo: RepoRef,
         base_branch: str,
         branch_name: str,
+        head: str,
         title: str,
         body: str,
         head_sha: str | None,
@@ -352,7 +354,7 @@ class PullRequestCreator:
                 url = await github_client.create_pull_request(
                     repo=repo,
                     base=base_branch,
-                    head=branch_name,
+                    head=head,
                     title=title,
                     body=body,
                     transient_max_attempts=self._pr_create_transient_max_retries + 1,
@@ -361,7 +363,7 @@ class PullRequestCreator:
                 url = await forge_client.create_pull_request(
                     repo=repo,
                     base=base_branch,
-                    head=branch_name,
+                    head=head,
                     title=title,
                     body=body,
                 )
