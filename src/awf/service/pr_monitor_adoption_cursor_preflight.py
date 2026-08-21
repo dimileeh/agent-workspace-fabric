@@ -57,7 +57,7 @@ async def run_deferred_cursor_auto_mode_provider_preflight(
     """Complete adoption-deferred Cursor Router preflight after profile resolution.
 
     Adoption returns ``None`` from :func:`_cursor_auto_mode_provider_preflight`
-    when ``profile_ref=auto`` leaves ``CURSOR_API_KEY`` unresolved until the
+    when ``profile_ref=auto`` leaves the repo-local profile unresolved until the
     worktree clone. Provisioning must call this once the checkout profile is
     available so Router-unavailable accounts still fail before agent execution.
 
@@ -106,20 +106,21 @@ async def _cursor_auto_mode_provider_preflight(
     # Overlay profile-declared Cursor credentials (runtime.environment or kind=env
     # secret leases) so Router preflight sees the same auth provisioning injects.
     profile_snapshot = _adoption_provider_preflight_profile(request)
+    # ``profile_ref=auto`` (default) cannot resolve the repo-local
+    # ``.awf/workspace.yml`` until provisioning clones the worktree. Probing with
+    # the worker's CURSOR_API_KEY (or missing a profile-only key) would permanently
+    # record a result and skip the provision-time recheck that overlays the
+    # resolved profile credentials — same hazard as direct create. Defer whenever
+    # the adoption profile is still unresolved; still probe for resolvable
+    # inline/named profiles. Provisioning runs
+    # :func:`run_deferred_cursor_auto_mode_provider_preflight` after checkout
+    # profile resolution to complete the deferred Router gate.
+    if profile_snapshot is None:
+        return None
     preflight_environ = overlay_profile_provider_credentials(
         os.environ,
         profile_snapshot,
     )
-    # ``profile_ref=auto`` (default) cannot resolve the repo-local
-    # ``.awf/workspace.yml`` until provisioning clones the worktree. A strict
-    # probe here would 503 with CURSOR_AUTH_MISSING even when that profile later
-    # supplies CURSOR_API_KEY via an env lease whose host source is present.
-    # Defer when no credential is visible yet; still probe when the worker (or a
-    # resolvable inline/named profile) already exposes a key. Provisioning runs
-    # :func:`run_deferred_cursor_auto_mode_provider_preflight` after checkout
-    # profile resolution to complete the deferred Router gate.
-    if profile_snapshot is None and not str(preflight_environ.get("CURSOR_API_KEY") or "").strip():
-        return None
     preflight = await _selected_provider_preflight_for_task_async(
         settings,
         agent=request.agent,

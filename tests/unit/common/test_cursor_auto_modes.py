@@ -548,6 +548,8 @@ def test_operator_response_models_serialize_cursor_auto_mode(response_model: typ
 async def test_adoption_cursor_auto_mode_blocks_when_router_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Resolvable inline profiles still fail-fast when Router is unavailable."""
+
     async def _blocked(*_args: object, **_kwargs: object) -> dict[str, object]:
         return {
             "blocks_launch": True,
@@ -559,13 +561,15 @@ async def test_adoption_cursor_auto_mode_blocks_when_router_is_unavailable(
         "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
         _blocked,
     )
-    # Worker-visible key keeps the auto-profile probe active (fail-fast when Router
-    # is known-unavailable). Without a key, auto profiles defer instead.
-    monkeypatch.setenv("CURSOR_API_KEY", "worker-cursor-key")
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     request = PullRequestMonitorAdoptionRequest(
         pr_url="https://github.com/example/repo/pull/1",
         agent=AgentRuntime.cursor,
         cursor_auto_mode=CursorAutoMode.intelligence,
+        profile=WorkspaceProfile(
+            name="cursor-profile",
+            runtime={"environment": {"CURSOR_API_KEY": "profile-cursor-key"}},
+        ),
     )
 
     with pytest.raises(PRMonitorAdoptionError) as exc_info:
@@ -587,8 +591,9 @@ async def test_adoption_cursor_auto_mode_defers_router_preflight_for_unresolved_
 ) -> None:
     """Default profile_ref=auto cannot see repo-local CURSOR_API_KEY leases yet.
 
-    Blocking here would 503 before clone even when provisioning would inject the
-    key from ``.awf/workspace.yml``. Defer until the profile is resolved.
+    Defer even when the worker already has a CURSOR_API_KEY — probing with that
+    key would persist a result that skips the provision-time recheck with the
+    resolved profile credential (create-path parity).
     """
     called = False
 
@@ -601,7 +606,7 @@ async def test_adoption_cursor_auto_mode_defers_router_preflight_for_unresolved_
         "awf.service.workspaces_create._selected_provider_preflight_for_task_async",
         _must_not_run,
     )
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.setenv("CURSOR_API_KEY", "worker-cursor-key")
     request = PullRequestMonitorAdoptionRequest(
         pr_url="https://github.com/example/repo/pull/1",
         agent=AgentRuntime.cursor,
