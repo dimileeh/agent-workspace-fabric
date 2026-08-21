@@ -234,6 +234,7 @@ def workspace_create(
         body["task"]["model"] = model
     if effort is not None:
         body["task"]["effort"] = effort
+    cursor_auto_mode = _option_default(cursor_auto_mode)
     if cursor_auto_mode is not None:
         body["task"]["cursor_auto_mode"] = _option_value(cursor_auto_mode)
     if task_class is not None:
@@ -991,6 +992,7 @@ def workspace_adopt_pr(
         body["model"] = model
     if effort is not None:
         body["effort"] = effort
+    cursor_auto_mode = _option_default(cursor_auto_mode)
     if cursor_auto_mode is not None:
         body["cursor_auto_mode"] = _option_value(cursor_auto_mode)
     if task_tag is not None:
