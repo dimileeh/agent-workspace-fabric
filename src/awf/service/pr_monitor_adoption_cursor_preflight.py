@@ -10,7 +10,7 @@ from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.config import Settings, get_settings
 from awf.common.workspace_policy import cursor_auto_mode_from_task_policy
 from awf.db.enums import AgentRuntime
-from awf.profiles.resolver import resolve_workspace_profile
+from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 from awf.service.pr_monitor_adoption_helpers import (
     PRMonitorAdoptionError,
     _requested_agent_policy,
@@ -28,12 +28,22 @@ def _adoption_provider_preflight_profile(
     """
     if request.profile is None and (not request.profile_ref or request.profile_ref == "auto"):
         return None
-    resolved = resolve_workspace_profile(
-        worktree_path=None,
-        inline_profile=request.profile,
-        profile_ref=request.profile_ref,
-        repo_url=request.repo_url,
-    )
+    try:
+        resolved = resolve_workspace_profile(
+            worktree_path=None,
+            inline_profile=request.profile,
+            profile_ref=request.profile_ref,
+            repo_url=request.repo_url,
+        )
+    except ProfileResolutionError as exc:
+        # Adoption REST/MCP only catch PRMonitorAdoptionError; map create-parity
+        # INVALID_PROFILE so unknown refs / lint failures are not internal errors.
+        raise PRMonitorAdoptionError(
+            error_code="INVALID_PROFILE",
+            message=str(exc),
+            status_code=422,
+            detail=exc.detail,
+        ) from exc
     return resolved.profile.model_dump(mode="json", by_alias=True)
 
 

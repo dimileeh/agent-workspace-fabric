@@ -619,6 +619,55 @@ async def test_adoption_cursor_auto_mode_defers_router_preflight_for_unresolved_
 
 
 @pytest.mark.asyncio
+async def test_adoption_cursor_auto_mode_preflight_unknown_profile_ref_is_invalid_profile() -> None:
+    """Unknown named profile_ref must surface as INVALID_PROFILE, not an internal error."""
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.intelligence,
+        profile_ref="missing-profile",
+    )
+
+    with pytest.raises(PRMonitorAdoptionError) as raised:
+        await _cursor_auto_mode_provider_preflight(SimpleNamespace(), request)
+
+    assert raised.value.error_code == "INVALID_PROFILE"
+    assert raised.value.status_code == 422
+    assert "missing-profile" in raised.value.message
+
+
+@pytest.mark.asyncio
+async def test_adoption_cursor_auto_mode_preflight_lint_failing_inline_is_invalid_profile() -> None:
+    """Inline profile lint failures must map to INVALID_PROFILE with create-parity detail."""
+    request = PullRequestMonitorAdoptionRequest(
+        pr_url="https://github.com/example/repo/pull/1",
+        agent=AgentRuntime.cursor,
+        cursor_auto_mode=CursorAutoMode.intelligence,
+        profile={
+            "name": "bad-inline",
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "kind": "env",
+                    "target": "API_TOKEN",
+                    "provider": "inline",
+                    "ref": "sk-live-do-not-echo",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(PRMonitorAdoptionError) as raised:
+        await _cursor_auto_mode_provider_preflight(SimpleNamespace(), request)
+
+    assert raised.value.error_code == "INVALID_PROFILE"
+    assert raised.value.status_code == 422
+    assert raised.value.detail is not None
+    assert raised.value.detail.get("reason_code") == "SECRET_REF_LOOKS_RAW"
+    assert "sk-live-do-not-echo" not in raised.value.message
+
+
+@pytest.mark.asyncio
 async def test_adoption_cursor_auto_mode_preflight_overlays_profile_cursor_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
