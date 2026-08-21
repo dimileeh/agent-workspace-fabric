@@ -24,12 +24,12 @@ class _BitbucketUrlsMixin:
 
     @staticmethod
     def _source_repo_for_commit_resolve(pr: dict[str, Any], base_repo: RepoRef) -> RepoRef:
-        """Return the repository that owns the PR head commit for SHA resolution.
+        """Return the repository that owns the PR head commit (and its statuses).
 
         Cross-fork PRs expose ``source.repository.full_name``. Abbreviated
-        ``source.commit.hash`` values must be resolved against that repository:
-        a fork-only head may not exist on the destination repo, and looking it
-        up there 404s even though the PR is valid.
+        ``source.commit.hash`` values and commit-status listings must use that
+        repository: a fork-only head may not exist on the destination repo, and
+        looking it up (or its statuses) there 404s even though the PR is valid.
         """
         full_name = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("repository")).get("full_name")

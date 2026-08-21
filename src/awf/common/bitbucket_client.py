@@ -316,11 +316,10 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
         # commit-statuses fetch below, and is remembered as the rerun pipeline
         # target — all consistently full (the per-commit endpoint accepts both).
-        # Fork PRs resolve against ``source.repository`` — a fork-only commit is
-        # not present on the destination repo.
-        head_sha = await self._resolve_full_commit_sha(
-            self._source_repo_for_commit_resolve(pr, repo), head_sha, retry=retry
-        )
+        # Fork PRs resolve *and* fetch statuses against ``source.repository`` —
+        # a fork-only commit (and its statuses) are not present on the destination.
+        head_repo = self._source_repo_for_commit_resolve(pr, repo)
+        head_sha = await self._resolve_full_commit_sha(head_repo, head_sha, retry=retry)
         self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
@@ -329,7 +328,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             _as_dict(_as_dict(pr.get("destination")).get("branch")).get("name")
         )
         statuses = await self._paginate(
-            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            f"{self._repo_path(head_repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_pr_status statuses",
             params={"refname": source_branch} if source_branch else None,
             retry=retry,

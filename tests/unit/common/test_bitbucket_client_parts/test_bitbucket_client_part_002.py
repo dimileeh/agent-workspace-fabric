@@ -348,7 +348,7 @@ async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
 
 
 async def test_fetch_pr_status_resolves_fork_head_sha_against_source_repo() -> None:
-    """Abbreviated fork heads resolve via source.repository.full_name, not the base."""
+    """Fork heads resolve *and* fetch statuses via source.repository, not the base."""
     fork_path = "/2.0/repositories/fork-owner/repo"
     fake = FakeBitbucket()
     fake.enqueue(
@@ -364,7 +364,9 @@ async def test_fetch_pr_status_resolves_fork_head_sha_against_source_repo() -> N
         },
     )
     fake.enqueue("GET", f"{fork_path}/commit/{_ABBREV_HEAD}", json={"hash": _FULL_HEAD})
-    fake.page("GET", f"{_REPO}/commit/{_FULL_HEAD}/statuses", values=[])
+    # Statuses live on the fork commit too — destination path would 404 for
+    # fork-only heads (PRRT_kwDOSJAM6s6bKHcN).
+    fake.page("GET", f"{fork_path}/commit/{_FULL_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
     fake.page("GET", f"{_PR}/tasks", values=[])
@@ -380,6 +382,9 @@ async def test_fetch_pr_status_resolves_fork_head_sha_against_source_repo() -> N
         if "/commit/" in r.url.path and "statuses" not in r.url.path
     ]
     assert resolve_paths == [f"{fork_path}/commit/{_ABBREV_HEAD}"]
+    status_paths = [r.url.path for r in fake.calls("GET") if r.url.path.endswith("/statuses")]
+    assert status_paths == [f"{fork_path}/commit/{_FULL_HEAD}/statuses"]
+    assert f"{_REPO}/commit/{_FULL_HEAD}/statuses" not in status_paths
 
 
 async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:
