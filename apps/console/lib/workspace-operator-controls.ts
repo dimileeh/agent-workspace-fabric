@@ -149,8 +149,11 @@ function remonitorControl(context: WorkspaceOperatorContext): WorkspaceOperatorC
 }
 
 function requiresRuntimeReprovision(workspace: Workspace | null | undefined): boolean {
+  // Detail may be null while the workspace request is in flight (selection clears
+  // detail first) or after a failed fetch. Absence of detail is not evidence that
+  // remonitor metadata is incomplete — overview may already expose a PR URL.
   if (!workspace) {
-    return true;
+    return false;
   }
   if (workspace.pr_number == null) {
     return true;

@@ -99,6 +99,22 @@ test("control eligibility remonitor requires PR-monitorable workspace", () => {
     "remonitor",
     { enabled: false, reason: "no PR" },
   );
+  // Overview already has a PR URL while detail.workspace is still null (selection
+  // clears detail before fetch finishes, or detail fetch failed). Missing detail
+  // must not be treated as incomplete remonitor metadata.
+  assertControl(
+    { overview: overview({ status: "monitoring_pr", pr_url: "https://github.test/pr/1" }) },
+    "remonitor",
+    { enabled: true, reason: null },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: null,
+    },
+    "remonitor",
+    { enabled: true, reason: null },
+  );
   assertControl(
     { overview: overview({ status: "completed", pr_url: "https://github.test/pr/1" }) },
     "remonitor",
