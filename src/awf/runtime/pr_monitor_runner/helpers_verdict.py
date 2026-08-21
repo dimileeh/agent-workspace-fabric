@@ -1443,7 +1443,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     literalize (``***lead* and **done**``) do not block ``trailing_paired``.
     Rule 9 must consult both delimiter sides: a both-flanking opener blocked
     against a closing-only complementary-length run (``a*x**``, ``x**lead*``)
-    must not claim the trailing wrapper closer (PRRT_kwDOSJAM6s6bTW7t).
+    must not claim the trailing wrapper closer (PRRT_kwDOSJAM6s6bTW7t). When
+    rule 9 blocks the nearest opener, CommonMark continues searching earlier
+    compatible openers (``reason **lower a*b**`` pairs the trailing ``**`` with
+    the earlier ``**``, stealing the wrapper closer — PRRT_kwDOSJAM6s6bTtr5).
     Reason-leading runs at BOS are opening-only (BOS is whitespace), so
     complementary lengths such as ``*foo**`` and ``**lead* rest*`` do steal
     and reject a false whole-line wrap (PRRT_kwDOSJAM6s6bTi4S).
@@ -1521,18 +1524,25 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
         is_trailing = j == len(reason)
         remaining = length
         if can_close:
-            while remaining > 0 and open_stack:
-                opener_len, opener_can_close = open_stack[-1]
+            # Search nearest-first; rule-of-three skips do not stop the search
+            # (PRRT_kwDOSJAM6s6bTtr5). Matched earlier openers literalize any
+            # skipped openers above them.
+            stack_idx = len(open_stack) - 1
+            while remaining > 0 and stack_idx >= 0:
+                opener_len, opener_can_close = open_stack[stack_idx]
                 if _emphasis_run_pair_blocked_by_multiple_of_three(
                     opener_len, remaining, can_open, opener_can_close
                 ):
-                    break
+                    stack_idx -= 1
+                    continue
+                del open_stack[stack_idx + 1 :]
                 # Prefer strong (2) when both runs still have at least two.
                 consumed = 2 if opener_len >= 2 and remaining >= 2 else 1
-                open_stack[-1] = (opener_len - consumed, opener_can_close)
+                open_stack[stack_idx] = (opener_len - consumed, opener_can_close)
                 remaining -= consumed
-                if open_stack[-1][0] == 0:
-                    open_stack.pop()
+                if open_stack[stack_idx][0] == 0:
+                    open_stack.pop(stack_idx)
+                    stack_idx -= 1
                 if is_trailing:
                     trailing_paired = True
         if remaining > 0 and can_open:

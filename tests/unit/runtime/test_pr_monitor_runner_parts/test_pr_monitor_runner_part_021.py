@@ -1339,6 +1339,12 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
+            # Rule 9 blocks the nearest mid ``*`` against trailing ``**``, but
+            # CommonMark continues to the earlier ``**`` opener — trailing is
+            # stolen and the outer wrap must not resolve (PRRT_kwDOSJAM6s6bTtr5).
+            # Underscore uses both-flanking ``._.`` (intra-word ``a_b`` is inert).
+            "**AWF-VERDICT: FALSE POSITIVE: reason **lower a*b**",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __lower ._.x__",
             # Partial longer-run match steals the trailing closer
             # (PRRT_kwDOSJAM6s6bR2FM). Both-flanking openers blocked by rule 9
             # against a complementary-length closer (``**lead*``) do not steal
@@ -1445,6 +1451,11 @@ class TestParseVerdict:
             "*AWF-VERDICT: FALSE POSITIVE: rationale *unclosed*",
             "__AWF-VERDICT: FALSE POSITIVE: rationale __unclosed__",
             "_AWF-VERDICT: FALSE POSITIVE: rationale _unclosed_",
+            # Rule 9 blocks the nearest both-flanking length-1 opener against
+            # trailing length-2, but CommonMark continues to the earlier
+            # length-2 opener — trailing is stolen (PRRT_kwDOSJAM6s6bTtr5).
+            "**AWF-VERDICT: FALSE POSITIVE: reason **lower a*b**",
+            "__AWF-VERDICT: FALSE POSITIVE: reason __lower ._.x__",
             # Longer mid-run partially pairs with a short closer then the
             # trailing wrapper-length closer (PRRT_kwDOSJAM6s6bR2FM). A
             # both-flanking ``**`` blocked by rule 9 against ``*`` does not
@@ -1734,6 +1745,11 @@ class TestParseVerdict:
             # Both-flanking mid ``*`` can close: rule 9 must also consult the
             # opener and block pairing with trailing ``**`` (PRRT_kwDOSJAM6s6bTW7t).
             ("a*x**", "**", False),
+            # Rule 9 skips the nearest length-1 opener; search continues to the
+            # earlier length-2 opener, which claims the trailing closer
+            # (PRRT_kwDOSJAM6s6bTtr5).
+            ("reason **lower a*b**", "**", True),
+            ("reason __lower ._.x__", "__", True),
             # Code-span markers are opaque; trailing closer is not claimed
             # (PRRT_kwDOSJAM6s6bShql).
             ("see `**`**", "**", False),
