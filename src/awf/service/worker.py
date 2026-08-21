@@ -164,6 +164,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         else host_home
     )
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+    gitconfig_fallback = (
+        "host_gitconfig" if (host_home / ".gitconfig").is_file() else "no_global_gitconfig"
+    )
     try:
         gitconfig_snapshot = _materialize_service_gitconfig(
             host_home=gitconfig_source_home,
@@ -175,9 +178,16 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         _log.warning(
             "worker.gitconfig_snapshot_failed",
             error=str(exc),
-            fallback="host_gitconfig",
+            fallback=gitconfig_fallback,
         )
         gitconfig_snapshot = None
+    else:
+        if gitconfig_snapshot is None:
+            _log.warning(
+                "worker.gitconfig_snapshot_unavailable",
+                source_home=str(gitconfig_source_home),
+                fallback=gitconfig_fallback,
+            )
     git_env = _service_git_environment(
         host_home,
         github_token=settings.github_token,

@@ -77,6 +77,103 @@ def test_build_worker_runtime_falls_back_to_live_gitconfig_when_snapshot_fails(
 
 
 @pytest.mark.unit
+def test_build_worker_runtime_warns_when_snapshot_fails_without_host_gitconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+    warnings: list[tuple[str, dict[str, object]]] = []
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=object(),
+        build_feature=lambda **_kwargs: object(),
+        build_release=lambda **_kwargs: object(),
+    )
+
+    class _RecordingGitManager:
+        def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
+            created["git_env"] = env
+
+    class _RecordingAuthMountResolver:
+        def __init__(self, *, gitconfig_source: Path | None, **_kwargs: object) -> None:
+            created["gitconfig_source"] = gitconfig_source
+
+    def _raise_snapshot_error(**_kwargs: object) -> None:
+        raise OSError("snapshot missing")
+
+    monkeypatch.setattr(worker_mod, "GitManager", _RecordingGitManager)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _RecordingAuthMountResolver)
+    monkeypatch.setattr(worker_mod, "_materialize_service_gitconfig", _raise_snapshot_error)
+    monkeypatch.setattr(
+        worker_mod,
+        "_log",
+        SimpleNamespace(warning=lambda event, **kwargs: warnings.append((event, kwargs))),
+    )
+    settings = _settings(tmp_path)
+    Path(settings.host_home).mkdir(parents=True)
+
+    assert worker_mod.build_worker_runtime(settings) is not None
+    assert "GIT_CONFIG_GLOBAL" not in created["git_env"]
+    assert created["gitconfig_source"] is None
+    assert warnings == [
+        (
+            "worker.gitconfig_snapshot_failed",
+            {"error": "snapshot missing", "fallback": "no_global_gitconfig"},
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_warns_when_snapshot_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+    warnings: list[tuple[str, dict[str, object]]] = []
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=object(),
+        build_feature=lambda **_kwargs: object(),
+        build_release=lambda **_kwargs: object(),
+    )
+
+    class _RecordingGitManager:
+        def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
+            created["git_env"] = env
+
+    class _RecordingAuthMountResolver:
+        def __init__(self, *, gitconfig_source: Path | None, **_kwargs: object) -> None:
+            created["gitconfig_source"] = gitconfig_source
+
+    monkeypatch.setattr(worker_mod, "GitManager", _RecordingGitManager)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _RecordingAuthMountResolver)
+    monkeypatch.setattr(worker_mod, "_materialize_service_gitconfig", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        worker_mod,
+        "_log",
+        SimpleNamespace(warning=lambda event, **kwargs: warnings.append((event, kwargs))),
+    )
+    settings = _settings(tmp_path)
+    host_home = Path(settings.host_home)
+    host_home.mkdir(parents=True)
+
+    assert worker_mod.build_worker_runtime(settings) is not None
+    assert "GIT_CONFIG_GLOBAL" not in created["git_env"]
+    assert created["gitconfig_source"] is None
+    assert warnings == [
+        (
+            "worker.gitconfig_snapshot_unavailable",
+            {
+                "source_home": str(host_home),
+                "fallback": "no_global_gitconfig",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
 def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
