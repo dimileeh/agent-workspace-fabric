@@ -18,16 +18,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentDefaults
-from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
@@ -57,6 +54,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
 )
+from awf.node import provisioner_config as _provisioner_config
 from awf.node import provisioner_helpers as _provisioner_helpers
 from awf.node.companion_services import (
     MaterializedCompanionService,
@@ -65,7 +63,6 @@ from awf.node.companion_services import (
     validate_companion_service_graph,
 )
 from awf.node.compose_manager import (
-    DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES,
     SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
     ComposeOperationError,
     ComposeProjectPaths,
@@ -115,6 +112,9 @@ _sync_feature_pr_head_ref = _provisioner_helpers._sync_feature_pr_head_ref
 _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
 
+ProvisionerConfig = _provisioner_config.ProvisionerConfig
+ServiceStartupDiagnosticsCapturer = _provisioner_config.ServiceStartupDiagnosticsCapturer
+
 _MAX_REVOKE_EVENTS: Final = 3
 """Maximum lifetime-total revoke events before recording an operator escalation event."""
 
@@ -132,55 +132,6 @@ _log = get_logger(__name__)
 
 
 _parse_agent_runtime = parse_agent_runtime
-
-
-class ServiceStartupDiagnosticsCapturer(Protocol):
-    """Best-effort capturer of companion diagnostics on a service-startup failure.
-
-    Consumer-side structural protocol: ``ComposeManager`` satisfies it without
-    importing this module. The implementation must never raise and must return
-    an already-redacted payload safe to persist into a ``WorkspaceEvent``.
-    """
-
-    async def capture_companion_diagnostics(
-        self,
-        *,
-        project_name: str,
-        workspace_id: str,
-        tail_lines: int = ...,
-    ) -> dict[str, Any]:
-        """Return redacted diagnostics for unhealthy companions in a project."""
-        ...
-
-
-@dataclass(frozen=True)
-class ProvisionerConfig:
-    """Configuration the provisioner needs that isn't per-workspace state."""
-
-    node_id: str
-    """Identifier for the host running this provisioner (e.g. hostname)."""
-
-    branch_prefix: str = "awf"
-    """Prefix for feature branches; full branch = ``<prefix>/<workspace_id>``."""
-
-    service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
-    """How many companion log lines to capture on a service-startup failure (must be > 0)."""
-
-    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
-    """Resolved agent defaults shared with the executor's runtime configuration."""
-
-    def __post_init__(self) -> None:
-        """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
-
-        Direct callers (tests, other code) bypass ``Settings`` validation, so a
-        zero/negative tail would otherwise reach ``docker logs --tail N`` and
-        produce empty output (``--tail 0``) or a CLI error (``--tail -1``).
-        """
-        if self.service_startup_log_tail_lines <= 0:
-            raise ValueError(
-                "service_startup_log_tail_lines must be > 0, "
-                f"got {self.service_startup_log_tail_lines}"
-            )
 
 
 class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):

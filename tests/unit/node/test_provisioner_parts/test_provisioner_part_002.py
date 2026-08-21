@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     SecretLeaseRepository,
     WorkspaceRepository,
@@ -26,6 +27,7 @@ from awf.node.git_manager import GitManager, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
+    _provision_base_commit,
 )
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from tests.postgres import postgres_test_engine
@@ -1262,3 +1264,49 @@ class TestSecretLeaseIssueEdges:
 
         with pytest.raises(RuntimeError, match="lease repository unavailable"):
             await provisioner._issue_secret_leases(ws_id, _secret_profile())
+
+
+class TestRetainAncestorBaseCommit:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "preferred_is_ancestor, merge_base, expected",
+        [
+            (True, None, "c" * 40),
+            (True, "b" * 40, "c" * 40),
+            (False, "b" * 40, "b" * 40),
+            (False, "  " + "b" * 40 + "  ", "b" * 40),
+            (False, None, "c" * 40),
+            (False, "   ", "c" * 40),
+        ],
+    )
+    def test_retain_ancestor_base_commit_prefers_shared_history(
+        self,
+        preferred_is_ancestor: bool,
+        merge_base: str | None,
+        expected: str,
+    ) -> None:
+        from awf.node.provisioner import _retain_ancestor_base_commit
+
+        assert (
+            _retain_ancestor_base_commit(
+                "c" * 40,
+                preferred_is_ancestor=preferred_is_ancestor,
+                merge_base=merge_base,
+            )
+            == expected
+        )
+
+    @pytest.mark.unit
+    def test_existing_feature_pr_checkout_preserves_target_base_commit(self) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/retry",
+            remote_push_branch="feature/existing-head",
+            task_kind="feature_branch_pr",
+            pr_url="https://github.com/dimileeh/aira-web/pull/278",
+            pr_number=278,
+            base_commit="b" * 40,
+        )
+
+        assert _provision_base_commit(ws, checked_out_head="h" * 40) == "b" * 40

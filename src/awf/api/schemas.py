@@ -86,6 +86,7 @@ WorkspaceArtifactListResponse = _schemas_workspace_io.WorkspaceArtifactListRespo
 WorkspaceArtifactReadResponse = _schemas_workspace_io.WorkspaceArtifactReadResponse
 ValidationProvenanceItemResponse = _schemas_workspace_io.ValidationProvenanceItemResponse
 ValidationProvenanceListResponse = _schemas_workspace_io.ValidationProvenanceListResponse
+RuntimeServiceResponse = _schemas_workspace_io.RuntimeServiceResponse
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
@@ -1479,17 +1480,6 @@ class WorkspaceOverlapGraphResponse(BaseModel):
     nodes: list[WorkspaceOverlapGraphNodeResponse]
     edges: list[WorkspaceOverlapGraphEdgeResponse]
     summary: WorkspaceOverlapGraphSummaryResponse
-
-
-class RuntimeServiceResponse(BaseModel):
-    name: str
-    container_id: str | None = None
-    image: str | None = None
-    state: str
-    status: str | None = None
-    health: str | None = None
-    ports: list[str] = Field(default_factory=list)
-    started_at: str | None = None
 
 
 class WorkspaceRuntimeResponse(BaseModel):

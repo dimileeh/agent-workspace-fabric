@@ -23,7 +23,6 @@ import hashlib
 import os
 import re
 import shutil
-import stat
 import subprocess
 import weakref
 from collections.abc import Mapping
@@ -34,8 +33,16 @@ from pathlib import Path
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.node import git_manager_ownership as _git_manager_ownership
 
 _log = get_logger(__name__)
+
+_chown_tree = _git_manager_ownership._chown_tree
+_ensure_owner_writable_dir = _git_manager_ownership._ensure_owner_writable_dir
+git_env_for_bare_repository_probe = _git_manager_ownership.git_env_for_bare_repository_probe
+git_env_without_object_lookup_overrides = (
+    _git_manager_ownership.git_env_without_object_lookup_overrides
+)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # Path-safety guard for the ``worktrees/<workspace_id>`` sink. This is a
@@ -55,32 +62,12 @@ _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 # still forbids any ``..``. ``re.fullmatch`` anchors the whole value.
 _WORKSPACE_ID_RE = re.compile(r"(?!.*\.\.)ws_[^/\\\x00]*", re.DOTALL)
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
-_GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
-_GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_CONFIG",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_DIR",
-    "GIT_GRAFT_FILE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_INTERNAL_SUPER_PREFIX",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_PREFIX",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_SHALLOW_FILE",
-    "GIT_WORK_TREE",
-)
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/dev/null": "^/dev/null$",
     "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
 }
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
-_OWNER_WRITABLE_DIR_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
 
 @dataclass(frozen=True)
@@ -1481,56 +1468,3 @@ def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None
     if git_dir.is_dir():
         return git_dir / "objects" / "info" / "alternates"
     return None
-
-
-def git_env_without_object_lookup_overrides() -> dict[str, str]:
-    """Return a copy of ``os.environ`` without Git object-lookup override variables."""
-    env = dict(os.environ)
-    for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
-        env.pop(key, None)
-    return env
-
-
-def git_env_for_bare_repository_probe() -> dict[str, str]:
-    """Build a Git environment suitable for bare-repository probe subprocesses."""
-    env = git_env_without_object_lookup_overrides()
-    for key in _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS:
-        env.pop(key, None)
-    return env
-
-
-def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
-    """Recursively chown a directory tree, honoring symlinks and optional file skipping."""
-    if path.is_symlink():
-        os.lchown(path, uid, gid)
-        return
-
-    os.chown(path, uid, gid)
-    if not path.is_dir():
-        return
-    _ensure_owner_writable_dir(path)
-
-    for root, dirs, files in os.walk(path, followlinks=False):
-        for name in dirs:
-            child = Path(root) / name
-            if child.is_symlink():
-                os.lchown(child, uid, gid)
-            else:
-                os.chown(child, uid, gid)
-                _ensure_owner_writable_dir(child)
-        if directories_only:
-            continue
-        for name in files:
-            child = Path(root) / name
-            if child.is_symlink():
-                os.lchown(child, uid, gid)
-            else:
-                os.chown(child, uid, gid)
-
-
-def _ensure_owner_writable_dir(path: Path) -> None:
-    """Ensure ``path`` is owner-writable without changing unrelated permission bits."""
-    mode = path.stat(follow_symlinks=False).st_mode
-    desired_mode = stat.S_IMODE(mode | _OWNER_WRITABLE_DIR_MODE)
-    if desired_mode != stat.S_IMODE(mode):
-        path.chmod(desired_mode)

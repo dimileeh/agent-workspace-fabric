@@ -661,6 +661,7 @@ class TestOrphanHistoryRecoveryCommitFailure:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=128, stderr="fatal: no merge base")  # merge-base: unrelated
         fake.queue_result(returncode=0)  # git reset --soft <base>: OK
         fake.queue_result(returncode=128, stderr="commit failed")  # re-anchor commit: FAIL
 
@@ -673,12 +674,14 @@ class TestOrphanHistoryRecoveryCommitFailure:
             assert ws.failure_reason == "agent_failure"
             assert "history" in (ws.failure_message or "").lower()
             assert ws.pr_url is None
-        # The reset ran but the second ancestry verify did not (only one
-        # merge-base call), because the re-anchor commit failed.
+        # The reset ran but the post-recovery ancestry verify did not, because
+        # the re-anchor commit failed. Shared-ancestor probe still runs once.
         reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)
         assert reset_call.args[-1] == "a" * 40
         ancestor_calls = [c for c in fake.calls if "merge-base" in c.args]
-        assert len(ancestor_calls) == 1
+        assert len(ancestor_calls) == 2
+        assert "--is-ancestor" in ancestor_calls[0].args
+        assert "--is-ancestor" not in ancestor_calls[1].args
 
 
 class TestAgentRunMissingHeadRecovery:
