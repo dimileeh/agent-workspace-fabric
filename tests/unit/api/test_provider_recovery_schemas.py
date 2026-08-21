@@ -251,6 +251,7 @@ def test_workspace_response_accepts_provider_recovery_state() -> None:
         node_id=None,
         compose_project_name=None,
         compose_file_path=None,
+        remonitor_compose_runtime_available=False,
         pr_url=None,
         failure_reason=None,
         failure_message=None,

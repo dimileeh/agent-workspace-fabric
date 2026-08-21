@@ -166,6 +166,12 @@ function requiresRuntimeReprovision(workspace: Workspace | null | undefined): bo
   if (isHostedPrAdoption(workspace.task_policy)) {
     return false;
   }
+  // Prefer the server-validated Compose reuse gate: a non-empty compose_file_path
+  // can still be unusable after GC, and remonitor then always returns
+  // WORKSPACE_REMONITOR_METADATA_MISSING.
+  if (typeof workspace.remonitor_compose_runtime_available === "boolean") {
+    return !workspace.remonitor_compose_runtime_available;
+  }
   return !workspace.compose_project_name || !workspace.compose_file_path;
 }
 

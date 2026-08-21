@@ -82,6 +82,25 @@ _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
+def _compose_file_path_reusable(workspace: Workspace) -> bool:
+    """Return whether the persisted compose_file_path still resolves to a file."""
+
+    return bool(workspace.compose_file_path and Path(workspace.compose_file_path).is_file())
+
+
+def remonitor_compose_runtime_available(workspace: Workspace) -> bool:
+    """Whether remonitor can reuse this workspace's Compose runtime metadata.
+
+    Hosted PR adoption does not need a local Compose stack. Non-hosted remonitor
+    requires both a compose project name and a compose file that still exists on
+    disk — a non-empty path string alone is not enough after GC.
+    """
+
+    if pr_adoption_is_hosted(workspace.task_policy):
+        return True
+    return bool(workspace.compose_project_name) and _compose_file_path_reusable(workspace)
+
+
 def _remonitor_missing_metadata(workspace: Workspace) -> list[str]:
     """Return persisted fields required to recover this workspace's PR monitor."""
 
@@ -96,7 +115,7 @@ def _remonitor_missing_metadata(workspace: Workspace) -> list[str]:
     if not pr_adoption_is_hosted(workspace.task_policy):
         if not workspace.compose_project_name:
             missing.append("compose_project_name")
-        if not workspace.compose_file_path or not Path(workspace.compose_file_path).is_file():
+        if not _compose_file_path_reusable(workspace):
             missing.append("compose_file_path")
     return missing
 

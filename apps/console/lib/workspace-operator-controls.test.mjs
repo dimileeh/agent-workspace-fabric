@@ -86,6 +86,19 @@ test("control eligibility remonitor requires PR-monitorable workspace", () => {
       overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
       workspace: workspace({
         status: "failed",
+        compose_project_name: "awf_ws_123",
+        compose_file_path: "/tmp/awf/ws_123/compose.yml",
+        remonitor_compose_runtime_available: false,
+      }),
+    },
+    "remonitor",
+    { enabled: false, reason: "retry to reprovision existing PR" },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "failed", pr_url: "https://github.test/pr/1" }),
+      workspace: workspace({
+        status: "failed",
         compose_project_name: null,
         compose_file_path: null,
         task_policy: { pr_adoption: { execution: { mode: "hosted" } } },
@@ -573,7 +586,7 @@ function overview(overrides = {}) {
 }
 
 function workspace(overrides = {}) {
-  return {
+  const merged = {
     id: "ws_123",
     status: "monitoring_pr",
     version: 7,
@@ -588,6 +601,14 @@ function workspace(overrides = {}) {
     validation_provenance: null,
     ...overrides,
   };
+  if (!Object.hasOwn(overrides, "remonitor_compose_runtime_available")) {
+    const hosted =
+      merged.task_policy?.pr_adoption?.execution?.mode === "hosted";
+    merged.remonitor_compose_runtime_available = hosted
+      ? true
+      : Boolean(merged.compose_project_name && merged.compose_file_path);
+  }
+  return merged;
 }
 
 function mergeQueueItem(overrides = {}) {

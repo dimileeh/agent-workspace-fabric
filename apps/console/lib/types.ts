@@ -544,6 +544,8 @@ export interface Workspace {
   node_id: string | null;
   compose_project_name: string | null;
   compose_file_path: string | null;
+  /** Server-validated Compose reuse gate for remonitor (path may exist as a string but not on disk). */
+  remonitor_compose_runtime_available?: boolean;
   pr_url: string | null;
   pr_number: number | null;
   failure_reason: string | null;

@@ -11159,6 +11159,11 @@
               }
             ]
           },
+          "remonitor_compose_runtime_available": {
+            "description": "Whether remonitor can reuse this workspace's Compose runtime. Hosted PR adoption is always true. For non-hosted workspaces this is true only when compose_project_name is set and compose_file_path still resolves to an on-disk file; a non-empty path alone is not enough.",
+            "title": "Remonitor Compose Runtime Available",
+            "type": "boolean"
+          },
           "remote_push_branch": {
             "anyOf": [
               {
@@ -11329,6 +11334,7 @@
           "node_id",
           "compose_project_name",
           "compose_file_path",
+          "remonitor_compose_runtime_available",
           "pr_url",
           "failure_reason",
           "failure_message",

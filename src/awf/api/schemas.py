@@ -986,6 +986,14 @@ class WorkspaceResponse(BaseModel):
     node_id: str | None
     compose_project_name: str | None
     compose_file_path: str | None
+    remonitor_compose_runtime_available: bool = Field(
+        description=(
+            "Whether remonitor can reuse this workspace's Compose runtime. Hosted "
+            "PR adoption is always true. For non-hosted workspaces this is true "
+            "only when compose_project_name is set and compose_file_path still "
+            "resolves to an on-disk file; a non-empty path alone is not enough."
+        ),
+    )
 
     pr_url: str | None
     pr_number: int | None = None
