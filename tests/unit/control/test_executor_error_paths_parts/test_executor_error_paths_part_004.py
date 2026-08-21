@@ -814,6 +814,77 @@ def _release_sync_policy() -> dict[str, Any]:
     return copy.deepcopy(_RELEASE_SYNC_POLICY)
 
 
+class TestPostPushReuseTipResolution:
+    @pytest.mark.unit
+    def test_snapshot_contains_pushed_tip_equality(self) -> None:
+        tip = "Ab" + ("c" * 38)
+        assert _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha=tip.lower(),
+            ),
+            pushed_head_sha=tip,
+        )
+        assert not _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(PullRequestLifecycle.open, "head", head_sha=""),
+            pushed_head_sha=tip,
+        )
+        assert not _pr_open_step._pr_snapshot_contains_pushed_tip(
+            snapshot=PullRequestSnapshot(PullRequestLifecycle.open, "head", head_sha=tip),
+            pushed_head_sha=None,
+        )
+
+    @pytest.mark.unit
+    async def test_resolve_keeps_open_when_local_tip_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open, head_sha="a" * 40)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        disposition, snapshot = await _pr_open_step._resolve_post_push_reuse(
+            forge_client=forge,
+            repo=SimpleNamespace(),  # unused when no retry
+            pr_number=1,
+            snapshot=PullRequestSnapshot(PullRequestLifecycle.open, "head", head_sha="a" * 40),
+            pushed_head_sha=None,
+        )
+        assert disposition is _pr_open_step._PostPushReuseDisposition.keep
+        assert snapshot.lifecycle is PullRequestLifecycle.open
+        assert forge.snapshot_calls == 0
+
+    @pytest.mark.unit
+    async def test_resolve_replaces_when_retry_sees_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(PullRequestLifecycle.closed, "head", head_sha="c" * 40),
+            ]
+        )
+
+        async def _no_delay(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+        disposition, snapshot = await _pr_open_step._resolve_post_push_reuse(
+            forge_client=forge,
+            repo=SimpleNamespace(),
+            pr_number=1,
+            snapshot=PullRequestSnapshot(
+                PullRequestLifecycle.open,
+                "head",
+                head_sha="a" * 40,
+            ),
+            pushed_head_sha="b" * 40,
+        )
+        assert disposition is _pr_open_step._PostPushReuseDisposition.open_replacement
+        assert snapshot.lifecycle is PullRequestLifecycle.closed
+        assert forge.snapshot_calls == 1
+
+
 class TestPullRequestUnexpectedErrorPart002:
     @pytest.mark.unit
     async def test_local_coverage_uses_workspace_cpu_cap_for_parallel_workers(
@@ -1174,9 +1245,11 @@ class TestPullRequestUnexpectedErrorPart002:
     ) -> None:
         # Reuse path must resolve a forge client to revalidate live lifecycle, then
         # push_and_open still receives forge_client=None once the PR is confirmed open.
+        # Post-push open reuse also requires the live head OID to equal the pushed tip.
         forge = _LifecycleForgeClient(
             lifecycle=PullRequestLifecycle.open,
             head_ref="awf/ws_original",
+            head_sha="b" * 40,
         )
 
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
@@ -1226,6 +1299,7 @@ class TestPullRequestUnexpectedErrorPart002:
         forge = _LifecycleForgeClient(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/renamed-live-head",
+            head_sha="b" * 40,
         )
 
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
@@ -1259,6 +1333,200 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/55"
             assert ws.remote_push_branch == "contributors/renamed-live-head"
+
+    @pytest.mark.unit
+    async def test_reuse_push_keeps_open_pr_when_tip_appears_after_forge_lag(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Post-push forge reads can lag: first open snapshot still shows the old
+        # head, then the pushed tip appears. Retry rather than failing closed.
+        pushed_tip = "b" * 40
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha=pushed_tip,
+                ),
+            ]
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        async def _no_delay(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.snapshot_calls == 3
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_reuse_push_fails_closed_when_open_head_excludes_tip(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Concurrent force-push can leave the reused PR open while replacing the
+        # validated tip. Fail closed rather than handing the monitor that head.
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="c" * 40,
+                ),
+            ]
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        async def _no_delay(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.snapshot_calls == 4
+        assert len(pr_creator.calls) == 1
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_reuse_push_fails_closed_when_tip_retry_lookup_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(
+            snapshots=[
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                PullRequestSnapshot(
+                    PullRequestLifecycle.open,
+                    "awf/ws_original",
+                    head_sha="a" * 40,
+                ),
+                TimeoutError("forge tip-retry timed out"),
+            ]
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        async def _no_delay(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+        monkeypatch.setattr(_pr_open_step, "_POST_PUSH_TIP_RETRY_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(_pr_open_step.asyncio, "sleep", _no_delay)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.snapshot_calls == 3
+        assert len(pr_creator.calls) == 1
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
     async def test_reuse_push_keeps_pr_when_post_push_merge_contains_tip(
@@ -1844,7 +2112,10 @@ class TestPrMonitorFactoryPath:
             del adapter
             return _FakeMonitor()
 
-        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open)
+        forge = _LifecycleForgeClient(
+            lifecycle=PullRequestLifecycle.open,
+            head_sha="deadbeef",
+        )
 
         def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
             return forge

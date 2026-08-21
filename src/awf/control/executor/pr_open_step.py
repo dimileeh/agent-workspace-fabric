@@ -8,6 +8,8 @@ except for execution-time revalidation of a reused PR. Keeping the forge-neutral
 
 from __future__ import annotations
 
+import asyncio
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,16 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_creator import PullRequestError
 
 _PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
+# Post-push forge reads can lag behind a just-completed push. Retry briefly
+# before treating an open head that does not yet equal the tip as a race.
+_POST_PUSH_TIP_RETRY_ATTEMPTS = 3
+_POST_PUSH_TIP_RETRY_DELAY_SECONDS = 0.5
+
+
+class _PostPushReuseDisposition(StrEnum):
+    keep = "keep"
+    open_replacement = "open_replacement"
+    fail_closed = "fail_closed"
 
 
 async def _clear_stale_pr_identity_for_replacement(
@@ -97,17 +109,18 @@ async def _sync_reuse_remote_push_branch(
     ws.remote_push_branch = live_head_ref
 
 
-def _merged_pr_contains_pushed_tip(
+def _pr_snapshot_contains_pushed_tip(
     *,
     snapshot: PullRequestSnapshot,
     pushed_head_sha: str | None,
 ) -> bool:
-    """Return whether a merged PR's recorded head OID is the tip we just pushed.
+    """Return whether the forge snapshot's head OID equals the tip we just pushed.
 
     Equality against the forge ``head_sha`` (not ``merge_commit`` ancestry) is
     intentional: squash merges create a new merge OID that does not contain the
     PR tip as a git ancestor, but ``headRefOid`` / source commit still names the
-    tip that was merged.
+    tip that was merged. The same equality is used for still-open reuse so a
+    concurrent force-push that rewrote the head cannot be mistaken for success.
     """
     if not pushed_head_sha:
         return False
@@ -115,6 +128,49 @@ def _merged_pr_contains_pushed_tip(
     if not isinstance(live_head_sha, str) or not live_head_sha:
         return False
     return pushed_head_sha.lower() == live_head_sha.lower()
+
+
+async def _resolve_post_push_reuse(
+    *,
+    forge_client: Any,
+    repo: RepoRef,
+    pr_number: int,
+    snapshot: PullRequestSnapshot,
+    pushed_head_sha: str | None,
+) -> tuple[_PostPushReuseDisposition, PullRequestSnapshot]:
+    """Decide whether post-push reuse may keep the existing PR.
+
+    Open snapshots must still show the pushed tip (with brief retries for forge
+    propagation). An open head that never equals the tip after retries fails
+    closed — a still-open PR owns the head branch, so a replacement cannot be
+    opened safely. Merged-with-tip keeps; closed / merged-without-tip replace.
+    """
+    current = snapshot
+    for attempt in range(_POST_PUSH_TIP_RETRY_ATTEMPTS):
+        if current.lifecycle is PullRequestLifecycle.open:
+            if not pushed_head_sha:
+                # Local tip unknown: cannot prove exclusion; keep prior behavior.
+                return _PostPushReuseDisposition.keep, current
+            if _pr_snapshot_contains_pushed_tip(
+                snapshot=current,
+                pushed_head_sha=pushed_head_sha,
+            ):
+                return _PostPushReuseDisposition.keep, current
+            if attempt + 1 >= _POST_PUSH_TIP_RETRY_ATTEMPTS:
+                return _PostPushReuseDisposition.fail_closed, current
+            await asyncio.sleep(_POST_PUSH_TIP_RETRY_DELAY_SECONDS)
+            current = await forge_client.fetch_pull_request_snapshot(
+                repo=repo,
+                pr_number=pr_number,
+            )
+            continue
+        if current.lifecycle is PullRequestLifecycle.merged and _pr_snapshot_contains_pushed_tip(
+            snapshot=current,
+            pushed_head_sha=pushed_head_sha,
+        ):
+            return _PostPushReuseDisposition.keep, current
+        return _PostPushReuseDisposition.open_replacement, current
+    return _PostPushReuseDisposition.fail_closed, current  # pragma: no cover
 
 
 async def _fail_reuse_pr_state_lookup(
@@ -185,12 +241,13 @@ async def push_and_open_pr(
     a replacement PR is opened for the pushed tip. When the PR is still open but
     its head ref was renamed after admission, the persisted push target is
     updated to the live ``head_ref`` before reuse. After a reuse push, the live
-    snapshot is fetched again: if the PR merged concurrently, reuse is kept only
-    when the merged PR's head OID equals the pushed tip; otherwise identity is
-    cleared and a replacement PR is opened. If ``pr_number`` cannot be resolved,
-    or snapshot lookup fails (pre- or post-push), reuse fails closed (identity
-    kept, workspace marked failed) so a still-open PR is not unlinked or
-    duplicated.
+    snapshot is fetched again: an open PR is kept only when its head OID equals
+    the pushed tip (briefly retried for forge propagation; otherwise fail
+    closed); if the PR merged concurrently, reuse is kept only when the merged
+    PR's head OID equals the pushed tip; otherwise identity is cleared and a
+    replacement PR is opened. If ``pr_number`` cannot be resolved, or snapshot
+    lookup fails (pre- or post-push), reuse fails closed (identity kept,
+    workspace marked failed) so a still-open PR is not unlinked or duplicated.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
@@ -378,8 +435,8 @@ async def push_and_open_pr(
                         remote_url=existing_pr_remote_url,
                     )
                     # Pre-push open is not atomic with the push: the PR can merge
-                    # in between. Recheck containment before handing the monitor
-                    # a terminal URL that may exclude the retry tip.
+                    # or be force-pushed in between. Recheck tip containment before
+                    # handing the monitor a URL that may exclude the retry tip.
                     try:
                         post_snapshot = await forge_client.fetch_pull_request_snapshot(
                             repo=RepoRef.from_url(ws.repo_url),
@@ -401,22 +458,59 @@ async def push_and_open_pr(
                             ),
                         )
                         return None
-                    if post_snapshot.lifecycle is PullRequestLifecycle.open:
-                        pass
-                    elif (
-                        post_snapshot.lifecycle is PullRequestLifecycle.merged
-                        and _merged_pr_contains_pushed_tip(
+                    try:
+                        disposition, post_snapshot = await _resolve_post_push_reuse(
+                            forge_client=forge_client,
+                            repo=RepoRef.from_url(ws.repo_url),
+                            pr_number=pr_number,
                             snapshot=post_snapshot,
                             pushed_head_sha=pr.head_sha,
                         )
-                    ):
-                        _log.info(
-                            "executor.pr_reuse_merged_tip_contained",
+                    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+                        await _fail_reuse_pr_state_lookup(
+                            self,
                             workspace_id=workspace_id,
+                            ws=ws,
+                            push_branch_name=push_branch_name,
+                            audit_remote_branch=audit_remote_branch,
                             pr_number=pr_number,
-                            pr_url=ws.pr_url,
-                            head_sha=pr.head_sha,
+                            evidence_operation=("fetch_pull_request_snapshot_post_push_tip_retry"),
+                            error_message=str(exc),
+                            failure_message=(
+                                "Could not verify whether the reused pull request "
+                                "still contains the pushed tip after reuse."
+                            ),
                         )
+                        return None
+                    if disposition is _PostPushReuseDisposition.keep:
+                        if post_snapshot.lifecycle is PullRequestLifecycle.merged:
+                            _log.info(
+                                "executor.pr_reuse_merged_tip_contained",
+                                workspace_id=workspace_id,
+                                pr_number=pr_number,
+                                pr_url=ws.pr_url,
+                                head_sha=pr.head_sha,
+                            )
+                    elif disposition is _PostPushReuseDisposition.fail_closed:
+                        await _fail_reuse_pr_state_lookup(
+                            self,
+                            workspace_id=workspace_id,
+                            ws=ws,
+                            push_branch_name=push_branch_name,
+                            audit_remote_branch=audit_remote_branch,
+                            pr_number=pr_number,
+                            evidence_operation="post_push_open_tip_mismatch",
+                            error_message=(
+                                "reused PR remained open but head_sha "
+                                f"{post_snapshot.head_sha!r} does not equal "
+                                f"pushed tip {pr.head_sha!r}"
+                            ),
+                            failure_message=(
+                                "Reused pull request is still open but its head "
+                                "no longer contains the pushed tip after reuse."
+                            ),
+                        )
+                        return None
                     else:
                         _log.info(
                             "executor.pr_reuse_abandoned_post_push",
