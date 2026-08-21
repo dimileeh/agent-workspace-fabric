@@ -191,9 +191,11 @@ async def test_provisioner_deferred_cursor_preflight_stops_on_stale_status(
 
 
 @pytest.mark.asyncio
-async def test_provisioner_deferred_cursor_preflight_continues_when_workspace_missing(
+async def test_provisioner_deferred_cursor_preflight_stops_when_workspace_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Cancel/destroy may remove the row during the Router probe; do not continue."""
+
     async def _ready(**_kwargs: object) -> dict[str, object]:
         return {"blocks_launch": False, "reason_code": "CURSOR_ROUTER_AVAILABLE"}
 
@@ -225,5 +227,5 @@ async def test_provisioner_deferred_cursor_preflight_continues_when_workspace_mi
         ),
         profile=WorkspaceProfile(name="repo-local"),
     )
-    assert stopped is False
+    assert stopped is True
     session.commit.assert_not_awaited()

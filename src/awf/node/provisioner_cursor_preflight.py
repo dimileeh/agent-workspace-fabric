@@ -68,7 +68,9 @@ class ProvisionerCursorPreflightMixin:
             repo = WorkspaceRepository(session)
             persisted = await repo.get(workspace_id)
             if persisted is None:
-                return False
+                # Cancel/destroy may remove the row during the Router probe;
+                # do not continue into egress/stack launch with only in-memory ws.
+                return True
             if persisted.status != WorkspaceStatus.provisioning.value:
                 await self._record_stale_action_skip(
                     repo,
