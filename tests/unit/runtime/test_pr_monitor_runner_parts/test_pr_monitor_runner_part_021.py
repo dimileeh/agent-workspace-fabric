@@ -1251,6 +1251,14 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**. more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale a*. more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__. more__",
+            # ASCII punctuation whose Unicode category is not P* (Sc/Sm/Sk) still
+            # counts as CommonMark punctuation; otherwise the mid run opens and
+            # the line wrongly resolves (PRRT_kwDOSJAM6s6bSZP4).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**$ more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale a*$ more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__$ more__",
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**+ more**",
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**^ more**",
             # Mid-reason opener + trailing closer is not a whole-line wrap
             # (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -1300,6 +1308,12 @@ class TestParseVerdict:
             "**AWF-VERDICT: FALSE POSITIVE:** rationale a**. more**",
             "*AWF-VERDICT: FALSE POSITIVE:* rationale a*. more*",
             "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__. more__",
+            # ASCII punctuation outside Unicode P* (PRRT_kwDOSJAM6s6bSZP4).
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**$ more**",
+            "*AWF-VERDICT: FALSE POSITIVE:* rationale a*$ more*",
+            "__AWF-VERDICT: FALSE POSITIVE:__ rationale a__$ more__",
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**+ more**",
+            "**AWF-VERDICT: FALSE POSITIVE:** rationale a**^ more**",
             # Mid-reason same-delimiter opener steals the trailing closer; the
             # line-leading wrapper stays unbalanced (PRRT_kwDOSJAM6s6bRrWv).
             "**AWF-VERDICT: FALSE POSITIVE: rationale **unclosed**",
@@ -1463,10 +1477,17 @@ class TestParseVerdict:
         # Alphanumeric then punctuation: not left-flanking (PRRT_kwDOSJAM6s6bSOmb).
         assert _markdown_emphasis_run_can_open("a*.", 1, 1, "*") is False
         assert _markdown_emphasis_run_can_open("a**.", 1, 2, "*") is False
+        # ASCII punctuation with non-P Unicode categories (PRRT_kwDOSJAM6s6bSZP4).
+        assert _markdown_emphasis_run_can_open("a*$", 1, 1, "*") is False
+        assert _markdown_emphasis_run_can_open("a**$", 1, 2, "*") is False
+        assert _markdown_emphasis_run_can_open("a**+", 1, 2, "*") is False
+        assert _markdown_emphasis_run_can_open("a**^", 1, 2, "*") is False
         # Punctuation/whitespace/BOS before + punctuation after remains left-flanking.
         assert _markdown_emphasis_run_can_open(".*.", 1, 1, "*") is True
         assert _markdown_emphasis_run_can_open("**.", 0, 2, "*") is True
         assert _markdown_emphasis_run_can_open(" **.", 1, 2, "*") is True
+        assert _markdown_emphasis_run_can_open("**$", 0, 2, "*") is True
+        assert _markdown_emphasis_run_can_open(" **$", 1, 2, "*") is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, True) is True
         assert _emphasis_run_pair_blocked_by_multiple_of_three(1, 2, False) is False
         assert _emphasis_run_pair_blocked_by_multiple_of_three(3, 3, True) is False

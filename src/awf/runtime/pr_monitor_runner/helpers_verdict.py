@@ -538,6 +538,9 @@ _VERDICT_REASON_BACKSLASH_UNESCAPE_MAX_PASSES = 4
 # ``\&lt;reason\&gt;`` (each transform alone leaves one encoding behind).
 _VERDICT_REASON_MIXED_ESCAPE_MAX_PASSES = 4
 # CommonMark: a backslash before any ASCII punctuation yields the literal.
+# Same ASCII set is punctuation for flanking (Pc–Ps alone miss Sc/Sm/Sk chars
+# such as ``$``, ``+``, ``^`` — PRRT_kwDOSJAM6s6bSZP4).
+_COMMONMARK_ASCII_PUNCTUATION = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 _COMMONMARK_BACKSLASH_ESCAPED_PUNCT = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
 
 
@@ -1053,8 +1056,13 @@ def _markdown_char_is_escaped(text: str, index: int) -> bool:
 
 
 def _markdown_char_is_unicode_punctuation(ch: str) -> bool:
-    """Return whether ``ch`` is Unicode punctuation (CommonMark Pc–Ps)."""
-    return unicodedata.category(ch).startswith("P")
+    """Return whether ``ch`` is a CommonMark Unicode punctuation character.
+
+    CommonMark defines that as any ASCII punctuation character or a character
+    in Unicode general categories Pc–Ps. ASCII-only checks miss nothing in
+    ``P*``; ``P*``-only checks miss Sc/Sm/Sk ASCII punct such as ``$``/``+``/``^``.
+    """
+    return ch in _COMMONMARK_ASCII_PUNCTUATION or unicodedata.category(ch).startswith("P")
 
 
 def _markdown_emphasis_closer_is_valid(text: str, closer_start: int, opener: str) -> bool:
