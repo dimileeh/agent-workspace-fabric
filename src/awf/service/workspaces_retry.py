@@ -468,59 +468,13 @@ async def retry_workspace_row(
         # that legacy source node so retries stay claimable by local workers
         # while the runtime-release gate still compares against the same host.
         source_effective_node_id = target_node_id
-    if host_ports:
-        # The runtime-release gate is only meaningful when the source
-        # workspace holds host ports that could conflict with the retry.
-        # For zero-port workspaces (host_ports empty), the source's
-        # compose project is workspace-ID-scoped (awf_<id>) and cannot
-        # cause host-port conflicts, so the check is skipped.
-        # Phase 1 single-node assumption: when source_effective_node_id
-        # is None (legacy row with no node_id and no
-        # ResourceReservation), it is treated as a wildcard that matches
-        # any target_node_id.  This is safe when AWF runs a single
-        # worker node — the source's containers must be on that node —
-        # but in a multi-node deployment it could over-block retries on
-        # sibling nodes whose ports are not actually held by the
-        # source.  When Phase 2 introduces multi-node, this branch
-        # should require a resolved node_id or be replaced by a
-        # per-node runtime-release query.
-        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
-        # Read the source runtime-release state after acquiring the
-        # per-port admission lock, just before the third-party conflict
-        # SELECT, so a release committed during lock acquisition is not
-        # converted into an avoidable SOURCE_RUNTIME_NOT_RELEASED block.
-        if (
-            not ignore_source_runtime_check
-            and await _source_runtime_not_yet_released(session, source)
-            and (source_effective_node_id is None or source_effective_node_id == target_node_id)
-        ):
-            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
-                source_workspace_id=source.id,
-            )
-        conflicts = await repo.find_host_port_conflicts(
-            host_ports=host_ports,
-            excluding_workspace_id=source.id,
-            node_id=target_node_id,
-        )
-        if conflicts:
-            raise workspaces.WorkspaceCreateHostPortConflictError(
-                host_port=conflicts[0].host_port,
-                conflicting_workspace_id=conflicts[0].workspace_id,
-            )
-        # Safety note: source.id is unconditionally excluded from
-        # find_host_port_conflicts above (excluding_workspace_id=source.id).
-        # This is valid because the runtime-release gate
-        # (_source_runtime_not_yet_released) has already confirmed either that
-        # the source's containers are down or that provisioning definitively
-        # failed before Compose launch when ignore_source_runtime_check is
-        # False. If a specialized caller sets ignore_source_runtime_check=True,
-        # the provisioner still re-checks companion ports and auto-resolved
-        # profile service ports before Docker Compose launch. If the source
-        # stack still owns one of those ports, the retry fails with
-        # COMPANION_HOST_PORT_CHECK_FATAL before compose-up rather than
-        # surfacing as a Docker bind error. Reordering these two guards without
-        # updating the provisioner checks could break the invariant.
 
+    # Resolve existing feature-PR lifecycle/snapshot *before* host-port
+    # admission. ``pg_advisory_xact_lock`` is transaction-scoped, and forge
+    # reads use RetryPolicy.READ (sleep+retry). Looking up PR state after
+    # acquire_host_port_admission_lock would hold the port locks across an
+    # unbounded external call — the same hazard the merge path avoids with
+    # RetryPolicy.NEVER while holding the merge lock.
     existing_feature_pr_number = (
         source.pr_number
         if source.pr_number is not None
@@ -575,6 +529,60 @@ async def retry_workspace_row(
             )
         preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
         closed_existing_feature_pr = not preserve_existing_feature_pr
+
+    if host_ports:
+        # The runtime-release gate is only meaningful when the source
+        # workspace holds host ports that could conflict with the retry.
+        # For zero-port workspaces (host_ports empty), the source's
+        # compose project is workspace-ID-scoped (awf_<id>) and cannot
+        # cause host-port conflicts, so the check is skipped.
+        # Phase 1 single-node assumption: when source_effective_node_id
+        # is None (legacy row with no node_id and no
+        # ResourceReservation), it is treated as a wildcard that matches
+        # any target_node_id.  This is safe when AWF runs a single
+        # worker node — the source's containers must be on that node —
+        # but in a multi-node deployment it could over-block retries on
+        # sibling nodes whose ports are not actually held by the
+        # source.  When Phase 2 introduces multi-node, this branch
+        # should require a resolved node_id or be replaced by a
+        # per-node runtime-release query.
+        await repo.acquire_host_port_admission_lock(host_ports=host_ports)
+        # Read the source runtime-release state after acquiring the
+        # per-port admission lock, just before the third-party conflict
+        # SELECT, so a release committed during lock acquisition is not
+        # converted into an avoidable SOURCE_RUNTIME_NOT_RELEASED block.
+        if (
+            not ignore_source_runtime_check
+            and await _source_runtime_not_yet_released(session, source)
+            and (source_effective_node_id is None or source_effective_node_id == target_node_id)
+        ):
+            raise workspaces.WorkspaceRetrySourceRuntimeNotReleasedError(
+                source_workspace_id=source.id,
+            )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+            excluding_workspace_id=source.id,
+            node_id=target_node_id,
+        )
+        if conflicts:
+            raise workspaces.WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+        # Safety note: source.id is unconditionally excluded from
+        # find_host_port_conflicts above (excluding_workspace_id=source.id).
+        # This is valid because the runtime-release gate
+        # (_source_runtime_not_yet_released) has already confirmed either that
+        # the source's containers are down or that provisioning definitively
+        # failed before Compose launch when ignore_source_runtime_check is
+        # False. If a specialized caller sets ignore_source_runtime_check=True,
+        # the provisioner still re-checks companion ports and auto-resolved
+        # profile service ports before Docker Compose launch. If the source
+        # stack still owns one of those ports, the retry fails with
+        # COMPANION_HOST_PORT_CHECK_FATAL before compose-up rather than
+        # surfacing as a Docker bind error. Reordering these two guards without
+        # updating the provisioner checks could break the invariant.
+
     retry_remote_push_branch = (
         source.remote_push_branch
         if planning_scope_context is None

@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
@@ -233,6 +235,92 @@ async def test_retry_acquires_host_port_lock_before_source_runtime_release_gate(
         ("lock", [5434]),
         ("source-gate", source_id),
     ]
+
+
+@pytest.mark.unit
+async def test_retry_resolves_feature_pr_lifecycle_before_host_port_admission_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live forge PR lookup must not run while holding host-port admission locks.
+
+    ``pg_advisory_xact_lock`` stays held until commit, and forge reads use
+    RetryPolicy.READ (sleep+retry). Resolving PR lifecycle after acquiring the
+    admission lock would block unrelated creates/retries on the same ports.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override(
+        reason="forge lookup before host-port admission lock",
+    )
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [
+        {
+            "name": "sidecar",
+            "repo_url": "git@github.com:example/sidecar.git",
+            "base_branch": "main",
+            "ports": [[5432, 5434]],
+        }
+    ]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(
+        factory,
+        source_id,
+        branch_name="awf/feature-head",
+        remote_push_branch="contributors/feature-head",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(source_id)
+        assert workspace is not None
+        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.pr_number = 10
+        workspace.base_commit = "a" * 40
+        await session.commit()
+
+    calls: list[str] = []
+
+    async def _record_lifecycle(_source: Workspace, _pr_number: int) -> PullRequestLifecycle:
+        calls.append("forge-lifecycle")
+        return PullRequestLifecycle.open
+
+    async def _record_host_port_lock(
+        _repo: object,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        calls.append("admission-lock")
+
+    monkeypatch.setattr(
+        workspaces_retry.WorkspaceRepository,
+        "acquire_host_port_admission_lock",
+        _record_host_port_lock,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source_id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="forge lookup before host-port admission lock",
+            provider_environ={},
+            pr_lifecycle_checker=_record_lifecycle,
+        )
+
+    assert calls == ["forge-lifecycle", "admission-lock"]
+    assert retry.new_workspace.pr_number == 10
+    assert retry.new_workspace.remote_push_branch == "contributors/feature-head"
 
 
 @pytest.mark.unit
