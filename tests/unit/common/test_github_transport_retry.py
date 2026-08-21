@@ -13,6 +13,7 @@ from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     RepoRef,
+    _create_pr_reconcile_head,
 )
 from awf.common.github_retry import (
     GITHUB_TRANSPORT_MAX_ATTEMPTS,
@@ -22,6 +23,28 @@ from awf.common.github_retry import (
     past_transport_deadline,
 )
 from awf.common.github_transport import execute_gh_with_retry as _execute_gh_with_retry
+
+
+@pytest.mark.unit
+def test_create_pr_reconcile_head_maps_cross_fork_and_same_repo() -> None:
+    repo = RepoRef(owner="base-org", name="project")
+    assert _create_pr_reconcile_head(repo=repo, head="feature") == (
+        "feature",
+        "base-org/project",
+    )
+    assert _create_pr_reconcile_head(repo=repo, head="fork-owner:feature") == (
+        "feature",
+        "fork-owner/project",
+    )
+    # Malformed qualified heads fall back to same-repo matching on the raw value.
+    assert _create_pr_reconcile_head(repo=repo, head=":feature") == (
+        ":feature",
+        "base-org/project",
+    )
+    assert _create_pr_reconcile_head(repo=repo, head="acme/nested:feature") == (
+        "acme/nested:feature",
+        "base-org/project",
+    )
 
 
 class _RecordedSleep:

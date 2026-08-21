@@ -105,6 +105,24 @@ def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
     return metadata
 
 
+def _create_pr_reconcile_head(*, repo: RepoRef, head: str) -> tuple[str, str]:
+    """Map create ``head`` to ``(list_branch, expected_head_repo_slug_lower)``.
+
+    Cross-fork creates pass ``owner:branch``. ``gh pr list --head`` does not
+    accept that qualified form, so reconcile lists by the plain branch and
+    matches the fork's ``owner/<repo.name>`` slug. Same-repo creates keep the
+    plain branch and expect the base repo slug.
+    """
+    stripped = head.strip()
+    if ":" in stripped:
+        owner, branch = stripped.split(":", 1)
+        owner = owner.strip()
+        branch = branch.strip()
+        if owner and branch and "/" not in owner:
+            return branch, f"{owner}/{repo.name}".lower()
+    return stripped, repo.slug().lower()
+
+
 # GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
 # reason code. The shared ``ForgeClientError`` contract requires a stable
 # ``reason_code`` for every forge fault, so GitHub faults default to this code (the
@@ -986,11 +1004,12 @@ class GitHubClient:
 
         async def _reconcile_create_pr() -> str | None:
             nonlocal reconciled_match, duplicate_lookup_failed
+            list_branch, expected_head_repo = _create_pr_reconcile_head(repo=repo, head=head)
             try:
                 candidates = await list_open_pull_requests_for_branch(
                     runner=self._runner,
                     repo=repo,
-                    branch_name=head,
+                    branch_name=list_branch,
                     base_branch=base,
                     # Reconcile recheck after a create failure: retry a transient
                     # lookup so a blip doesn't wedge dedupe into a redundant create.
@@ -1018,22 +1037,22 @@ class GitHubClient:
                     )
                 return None
 
-            repo_slug = repo.slug().lower()
-            same_repo = [
+            matching = [
                 candidate
                 for candidate in candidates
-                if candidate.head_repo_slug.lower() == repo_slug
+                if candidate.head_repo_slug.lower() == expected_head_repo
             ]
             lookup_detail: dict[str, object] = {
-                "status": "found" if same_repo else "not_found",
+                "status": "found" if matching else "not_found",
                 "candidate_count": len(candidates),
-                "same_repo_count": len(same_repo),
-                "fork_collision_count": len(candidates) - len(same_repo),
+                "same_repo_count": len(matching),
+                "fork_collision_count": len(candidates) - len(matching),
+                "expected_head_repo_slug": expected_head_repo,
             }
-            if not same_repo:
+            if not matching:
                 reconcile_lookups.append(lookup_detail)
                 return None
-            match = same_repo[0]
+            match = matching[0]
             reconciled_match = match
             lookup_detail["matched_pr"] = _branch_open_pr_metadata(match)
             reconcile_lookups.append(lookup_detail)

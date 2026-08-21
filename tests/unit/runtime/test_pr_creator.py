@@ -51,13 +51,16 @@ def _open_pr_list_payload(
     repo_slug: str = "dimileeh/aira-agent",
     branch: str = "awf/ws_x",
     head_sha: str = "f" * 40,
+    pr_url_repo_slug: str | None = None,
 ) -> str:
     owner, repo = repo_slug.split("/", 1)
+    # Fork PRs still live on the base repo URL; only headRepository is the fork.
+    url_slug = pr_url_repo_slug or repo_slug
     return json.dumps(
         [
             {
                 "number": number,
-                "url": f"https://github.com/{repo_slug}/pull/{number}",
+                "url": f"https://github.com/{url_slug}/pull/{number}",
                 "headRefName": branch,
                 "headRefOid": head_sha,
                 "headRepository": {"name": repo, "nameWithOwner": repo_slug},
@@ -751,6 +754,62 @@ class TestPushAndOpen:
         assert isinstance(lookups, list)
         assert lookups[0]["fork_collision_count"] == 1
         assert lookups[0]["same_repo_count"] == 0
+
+    @pytest.mark.unit
+    async def test_github_transient_cross_fork_create_reconciles_fork_pr(self) -> None:
+        # Cross-fork create uses owner:branch; after a lost create response the
+        # reconcile must reuse the open fork PR (not filter it out as a collision).
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push to fork succeeds
+        runner.queue_result(
+            returncode=1,
+            stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+        )
+        runner.queue_result(
+            returncode=0,
+            stdout=_open_pr_list_payload(
+                number=55,
+                repo_slug="contributor/aira-agent",
+                branch="awf/ws_fork",
+                head_sha="b" * 40,
+                pr_url_repo_slug="dimileeh/aira-agent",
+            ),
+        )
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_fork",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=_gh_client(runner),
+            repo_url=_GH_REPO_URL,
+            remote_url="git@github.com:contributor/aira-agent.git",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/55"
+        assert result.head_sha == "b" * 40
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "reconciled_after_transient"
+        assert result.open_metadata["matched_pr"] == {
+            "number": 55,
+            "url": "https://github.com/dimileeh/aira-agent/pull/55",
+            "head_ref": "awf/ws_fork",
+            "head_repo_slug": "contributor/aira-agent",
+            "head_sha": "b" * 40,
+        }
+        create_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]
+        assert len(create_calls) == 1
+        assert "--head" in create_calls[0].args
+        assert create_calls[0].args[create_calls[0].args.index("--head") + 1] == (
+            "contributor:awf/ws_fork"
+        )
+        list_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "list"]]
+        assert len(list_calls) == 1
+        # gh pr list does not accept owner:branch; reconcile must strip to the branch.
+        assert list_calls[0].args[list_calls[0].args.index("--head") + 1] == "awf/ws_fork"
 
     @pytest.mark.unit
     async def test_github_deterministic_pr_create_failure_does_not_retry_or_lookup(self) -> None:
