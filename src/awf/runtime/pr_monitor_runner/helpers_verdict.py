@@ -1169,6 +1169,31 @@ def _emphasis_run_pair_blocked_by_multiple_of_three(
     return total % 3 == 0 and opener_len % 3 != 0 and closer_len % 3 != 0
 
 
+def _advance_past_markdown_code_span(text: str, start: int) -> int:
+    """Return index after a closed backtick code span, or after an unclosed opener.
+
+    Caller must pass ``start`` at a backtick. CommonMark code spans use a run of
+    N backticks as the opener; only a later run of the same length closes.
+    Markers inside a closed span are literal (PRRT_kwDOSJAM6s6bShql). An
+    unclosed opener run is itself literal, so scanning resumes after that run.
+    """
+    open_len = 1
+    while start + open_len < len(text) and text[start + open_len] == "`":
+        open_len += 1
+    index = start + open_len
+    while index < len(text):
+        if text[index] != "`":
+            index += 1
+            continue
+        close_len = 1
+        while index + close_len < len(text) and text[index + close_len] == "`":
+            close_len += 1
+        if close_len == open_len:
+            return index + close_len
+        index += close_len
+    return start + open_len
+
+
 def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> bool:
     """Return whether a trailing closer pairs inside ``reason``.
 
@@ -1185,6 +1210,10 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     wrapper-length closer stolen by that partial match is detected
     (PRRT_kwDOSJAM6s6bR2FM). Leftover unmatched opener runs that would
     literalize (``***lead* and **done**``) do not block ``trailing_paired``.
+
+    Closed Markdown code spans are opaque: ``*`` / ``_`` runs inside them are
+    literal content and must not claim the trailing wrapper closer
+    (PRRT_kwDOSJAM6s6bShql).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1194,6 +1223,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     trailing_paired = False
     i = 0
     while i < len(reason):
+        if reason[i] == "`":
+            i = _advance_past_markdown_code_span(reason, i)
+            continue
         if reason[i] != marker or _markdown_char_is_escaped(reason, i):
             i += 1
             continue
@@ -1260,7 +1292,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     wrapper closer (PRRT_kwDOSJAM6s6bR2FM). Underscore balance checks use the
     reason span only and ignore word-internal ``_`` so ``NEEDS_HUMAN`` /
     snake_case reasons do not falsely reject a valid whole-line ``_…_`` wrap
-    (PRRT_kwDOSJAM6s6bRy5w).
+    (PRRT_kwDOSJAM6s6bRy5w). Inline code-span markers are opaque to that
+    balance scan so ``**… see `**`**`` stays a valid whole-line wrap
+    (PRRT_kwDOSJAM6s6bShql).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:

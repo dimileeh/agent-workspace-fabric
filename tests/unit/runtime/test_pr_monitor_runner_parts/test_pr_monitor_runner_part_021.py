@@ -1142,6 +1142,13 @@ class TestParseVerdict:
                 "fix_committed",
                 "done with *emphasis*",
             ),
+            # Inline code-span stars must not steal the whole-line closer
+            # (PRRT_kwDOSJAM6s6bShql).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see `**`**",
+                "false_positive",
+                "see `**`",
+            ),
         ],
     )
     def test_private_awf_verdict_accepts_balanced_top_level_emphasis(
@@ -1414,6 +1421,25 @@ class TestParseVerdict:
                 "_AWF-VERDICT: DEFER: track_follow_up later_",
                 "AWF-VERDICT: DEFER: track_follow_up later",
             ),
+            # Stars / underscores inside inline code spans are literal content,
+            # not reason emphasis that claims the outer closer
+            # (PRRT_kwDOSJAM6s6bShql).
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see `**`**",
+                "AWF-VERDICT: FALSE POSITIVE: see `**`",
+            ),
+            (
+                "*AWF-VERDICT: FALSE POSITIVE: see `*`*",
+                "AWF-VERDICT: FALSE POSITIVE: see `*`",
+            ),
+            (
+                "__AWF-VERDICT: FALSE POSITIVE: see `__`__",
+                "AWF-VERDICT: FALSE POSITIVE: see `__`",
+            ),
+            (
+                "**AWF-VERDICT: FALSE POSITIVE: see ``**``**",
+                "AWF-VERDICT: FALSE POSITIVE: see ``**``",
+            ),
         ],
     )
     def test_private_markdown_emphasis_normalizer_keeps_valid_closers(
@@ -1466,6 +1492,19 @@ class TestParseVerdict:
             # Multiple-of-3 rule blocks pairing a length-1 opener run against a
             # length-2 closer that can also open (``*foo**``).
             ("*foo**", "**", False),
+            # Code-span markers are opaque; trailing closer is not claimed
+            # (PRRT_kwDOSJAM6s6bShql).
+            ("see `**`**", "**", False),
+            ("see `*`*", "*", False),
+            ("see `__`__", "__", False),
+            ("see ``**``**", "**", False),
+            # Real mid-reason emphasis after a code span still claims the closer.
+            ("see `**` and **unclosed**", "**", True),
+            # Unclosed code span: opening backticks are literal, so mid stars open.
+            ("see `**x**", "**", True),
+            # Mismatched tick lengths do not close; later emphasis still pairs
+            # (PRRT_kwDOSJAM6s6bShql).
+            ("see ```**x`y**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
