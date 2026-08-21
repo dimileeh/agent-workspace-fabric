@@ -41,10 +41,97 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
         _blocked,
     )
+    persisted = SimpleNamespace(
+        status=WorkspaceStatus.provisioning.value,
+        resolved_profile=None,
+        execution_claim_epoch=3,
+        task_policy={"cursor_auto_mode": "intelligence"},
+    )
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
+    session = SimpleNamespace(commit=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
     harness = _Harness()
+    harness._session_factory = lambda: _SessionCtx()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
+        lambda _session: repo,
+    )
     ws = SimpleNamespace(
         agent="cursor",
         task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=None,
+    )
+    profile = WorkspaceProfile(name="repo-local")
+    stopped = await harness._run_deferred_cursor_auto_router_preflight(
+        workspace_id="ws_test",
+        ws=ws,  # type: ignore[arg-type]
+        profile=profile,
+        execution_claim_epoch=3,
+    )
+    assert stopped is True
+    expected_profile = profile.model_dump(mode="json", by_alias=True)
+    assert persisted.resolved_profile == expected_profile
+    assert ws.resolved_profile == expected_profile
+    session.commit.assert_awaited_once()
+    harness.mark_failed.assert_awaited_once()
+    kwargs = harness.mark_failed.await_args.kwargs
+    assert kwargs["failure_reason"] is FailureReason.policy_failure
+    assert kwargs["reason_code"] == "CURSOR_ROUTER_UNAVAILABLE"
+    assert kwargs["from_status"] is WorkspaceStatus.provisioning
+    assert kwargs["execution_claim_epoch"] == 3
+    assert kwargs["event_payload"]["provider_readiness_preflight"]["blocks_launch"] is True
+
+
+@pytest.mark.asyncio
+async def test_provisioner_deferred_cursor_preflight_skips_profile_publish_when_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded claim must not write resolved_profile into the new claimant."""
+
+    async def _blocked(**_kwargs: object) -> dict[str, object]:
+        return {
+            "blocks_launch": True,
+            "reason_code": "CURSOR_ROUTER_UNAVAILABLE",
+            "message": "Router is unavailable.",
+        }
+
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.run_deferred_cursor_auto_mode_provider_preflight",
+        _blocked,
+    )
+    persisted = SimpleNamespace(
+        status=WorkspaceStatus.provisioning.value,
+        resolved_profile=None,
+        execution_claim_epoch=9,
+        task_policy={},
+    )
+    repo = SimpleNamespace(get_for_update=AsyncMock(return_value=persisted))
+    session = SimpleNamespace(commit=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return session
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    harness = _Harness()
+    harness._session_factory = lambda: _SessionCtx()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.node.provisioner_cursor_preflight.WorkspaceRepository",
+        lambda _session: repo,
+    )
+    ws = SimpleNamespace(
+        agent="cursor",
+        task_policy={"cursor_auto_mode": "intelligence"},
+        resolved_profile=None,
     )
     stopped = await harness._run_deferred_cursor_auto_router_preflight(
         workspace_id="ws_test",
@@ -53,13 +140,10 @@ async def test_provisioner_deferred_cursor_preflight_marks_failed_when_blocked(
         execution_claim_epoch=3,
     )
     assert stopped is True
+    assert persisted.resolved_profile is None
+    assert ws.resolved_profile is None
+    session.commit.assert_awaited_once()
     harness.mark_failed.assert_awaited_once()
-    kwargs = harness.mark_failed.await_args.kwargs
-    assert kwargs["failure_reason"] is FailureReason.policy_failure
-    assert kwargs["reason_code"] == "CURSOR_ROUTER_UNAVAILABLE"
-    assert kwargs["from_status"] is WorkspaceStatus.provisioning
-    assert kwargs["execution_claim_epoch"] == 3
-    assert kwargs["event_payload"]["provider_readiness_preflight"]["blocks_launch"] is True
 
 
 @pytest.mark.asyncio

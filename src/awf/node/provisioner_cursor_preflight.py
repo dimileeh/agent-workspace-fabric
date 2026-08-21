@@ -53,6 +53,25 @@ class ProvisionerCursorPreflightMixin:
                 workspace_id=workspace_id,
                 reason_code=reason_code,
             )
+            # Persist the checkout-resolved profile before failing so a normal
+            # retry inherits profile-only credentials (e.g. CURSOR_API_KEY) via
+            # source.resolved_profile instead of re-probing with an empty env.
+            resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                persisted = await repo.get_for_update(workspace_id)
+                if (
+                    persisted is not None
+                    and persisted.status == WorkspaceStatus.provisioning.value
+                    and persisted.resolved_profile is None
+                    and (
+                        execution_claim_epoch is None
+                        or persisted.execution_claim_epoch == execution_claim_epoch
+                    )
+                ):
+                    persisted.resolved_profile = resolved_profile_dict
+                    ws.resolved_profile = resolved_profile_dict
+                await session.commit()
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.policy_failure,
