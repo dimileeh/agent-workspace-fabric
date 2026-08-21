@@ -641,12 +641,12 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
 
 
 @pytest.mark.unit
-async def test_recovery_skip_push_cursor_lower_effort_handoff_uses_implicit_runtime_model(
+async def test_recovery_skip_push_cursor_effort_does_not_replace_auto_model(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Cursor lower effort must not hand the monitor a thinking model default."""
+    """Generic effort does not replace Cursor's Auto model during handoff."""
     captured: list[dict[str, object]] = []
 
     class _FakeMonitor:
@@ -693,10 +693,12 @@ async def test_recovery_skip_push_cursor_lower_effort_handoff_uses_implicit_runt
                 "cursor-agent",
                 "-p",
                 "--force",
+                "--model",
+                "auto",
                 "--output-format",
                 "text",
             ],
-            "provider_recovery_default_model": None,
+            "provider_recovery_default_model": "auto",
         }
     ]
 

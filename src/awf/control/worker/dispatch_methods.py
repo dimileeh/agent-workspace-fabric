@@ -494,6 +494,15 @@ def _tracked_monitor_workspace_ids(self: Any) -> list[str]:
     ]
 
 
+def _tracked_cancellable_execution_workspace_ids(self: Any) -> list[str]:
+    """Return task ids whose durable cancellation must stop the coroutine."""
+    return [
+        workspace_id
+        for workspace_id, kind in self._execution_task_kinds.items()
+        if kind in {_ExecutionTaskKind.MONITOR_RESUME, _ExecutionTaskKind.READY}
+    ]
+
+
 def _tracked_draining_workspace_ids(self: Any) -> list[str]:
     return [
         workspace_id
@@ -514,17 +523,35 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
     workspace_id. ``cancel()`` is cooperative, so the coroutine can keep
     running afterwards; retaining the tracking reference keeps slot dedup
     blocking a fresh dispatch for the *same* workspace until it truly stops,
-    and the existing done-callback drops it once it does. Only
-    ``MONITOR_RESUME`` tasks are inspected, so ready/preserved-active and
-    already-draining executions are never touched here.
+    and the existing done-callback drops it once it does.
+
+    Initial/adopted PR monitors retain ``READY`` task kind after their executor
+    hands off to the long-lived monitor. A durable operator cancellation must
+    therefore cancel a tracked ``READY`` task too; otherwise the coroutine keeps
+    attempting repairs against a runtime that cancellation already removed.
+    Healthy ``READY`` tasks and every ``PRESERVED_ACTIVE``/already-draining task
+    remain untouched.
     """
-    monitor_ids = self._tracked_monitor_workspace_ids()
-    if not monitor_ids:
+    cancellable_ids = _tracked_cancellable_execution_workspace_ids(self)
+    if not cancellable_ids:
         return
-    statuses = await self._load_workspace_statuses(monitor_ids)
-    for workspace_id in monitor_ids:
+    statuses = await self._load_workspace_statuses(cancellable_ids)
+    cancelled_statuses = {
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.destroying.value,
+        WorkspaceStatus.destroyed.value,
+    }
+    for workspace_id in cancellable_ids:
         status = statuses.get(workspace_id)
-        if status == WorkspaceStatus.monitoring_pr.value:
+        kind = self._execution_task_kinds.get(workspace_id)
+        stale_monitor_resume = (
+            kind is _ExecutionTaskKind.MONITOR_RESUME
+            and status != WorkspaceStatus.monitoring_pr.value
+        )
+        cancelled_ready_execution = (
+            kind is _ExecutionTaskKind.READY and status in cancelled_statuses
+        )
+        if not stale_monitor_resume and not cancelled_ready_execution:
             continue
         task = self._execution_tasks.get(workspace_id)
         if task is None:
@@ -534,6 +561,7 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
             "worker.stale_monitor_execution_task_cancelled",
             workspace_id=workspace_id,
             status=status,
+            task_kind=kind,
         )
         task.cancel()
         self._execution_task_kinds[workspace_id] = _ExecutionTaskKind.MONITOR_DRAINING

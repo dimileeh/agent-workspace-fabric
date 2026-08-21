@@ -396,35 +396,36 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("agent", "model"),
+    ("agent", "model", "effort"),
     [
-        (AgentRuntime.codex, "gpt-5.6-sol"),
-        (AgentRuntime.cursor, "sonnet-4-thinking"),
-        (AgentRuntime.antigravity, "gemini-3.1-pro-preview"),
-        (AgentRuntime.claude_code, "claude-opus-5"),
-        (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
+        (AgentRuntime.codex, "gpt-5.6-sol", "xhigh"),
+        (AgentRuntime.cursor, "auto", None),
+        (AgentRuntime.antigravity, "gemini-3.1-pro-preview", "xhigh"),
+        (AgentRuntime.claude_code, "claude-opus-5", "xhigh"),
+        (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud", "xhigh"),
     ],
 )
 def test_effective_agent_identity_uses_central_defaults(
     agent: AgentRuntime,
     model: str,
+    effort: str | None,
 ) -> None:
     identity = effective_agent_identity(agent=agent, task_policy={})
 
     assert identity.model == model
-    assert identity.effort == "xhigh"
+    assert identity.effort == effort
     assert identity.model_source == "default"
-    assert identity.effort_source == "default"
+    assert identity.effort_source == ("default" if effort is not None else "unavailable")
 
 
 @pytest.mark.unit
-def test_effective_agent_identity_cursor_lower_effort_uses_implicit_runtime_model() -> None:
+def test_effective_agent_identity_cursor_effort_does_not_replace_auto_model() -> None:
     identity = effective_agent_identity(
         agent=AgentRuntime.cursor,
         task_policy={"agent_effort": "medium"},
     )
 
-    assert identity.model is None
+    assert identity.model == "auto"
     assert identity.model_source == "default"
     assert identity.effort == "medium"
     assert identity.effort_source == "task_policy"

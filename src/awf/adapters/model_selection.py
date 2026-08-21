@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from awf.db.enums import AgentRuntime
 
-CURSOR_DEFAULT_THINKING_MODEL = "sonnet-4-thinking"
-"""Default Cursor model variant AWF uses when high effort must select a model."""
+CURSOR_DEFAULT_MODEL = "auto"
+"""Portable Cursor default; the provider/team owns Auto routing policy."""
 
 
 def selected_runtime_model_for_defaults(
@@ -36,29 +36,21 @@ def cursor_selected_model(
 ) -> str | None:
     """Return the Cursor model selected for one run.
 
-    Explicit model overrides win first. A custom default model that is not
-    Cursor's thinking default is treated as operator-controlled and bypasses
-    effort mapping, even for high/xhigh efforts. Effort mapping only selects
-    the thinking model when no default is set or the default already matches
-    AWF's Cursor thinking default.
+    Explicit model overrides win first, including Cursor Router's official
+    parameterized ``auto-smart[optimize_for=...]`` selectors. Generic AWF
+    reasoning effort does not select a Cursor model or Auto routing profile.
+    Cursor owns those provider-specific controls through its model selector and
+    team policy.
     """
 
     if model:
         return model
-    if default_model and default_model != CURSOR_DEFAULT_THINKING_MODEL:
-        return default_model
-    if effort is None:
-        return default_model
-    return cursor_model_for_effort(model=None, effort=effort)
+    del effort
+    return default_model
 
 
 def cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | None:
-    """Map AWF effort to Cursor's documented portable model controls."""
+    """Preserve an explicit model without treating effort as a Cursor control."""
 
-    if model:
-        return model
-    if effort is None:
-        return None
-    if effort.strip().lower() in {"high", "xhigh", "max"}:
-        return CURSOR_DEFAULT_THINKING_MODEL
-    return None
+    del effort
+    return model
