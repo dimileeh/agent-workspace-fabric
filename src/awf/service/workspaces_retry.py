@@ -221,6 +221,25 @@ def _sync_retried_adoption_live_refs(
         adoption["base_sha"] = base_sha.strip()
 
 
+def _clear_closed_sync_feature_pr_adoption(
+    task_policy: dict[str, Any],
+    *,
+    source_task_kind: str,
+) -> str:
+    """Drop closed adoption identity so retry can open a replacement PR.
+
+    ``sync_feature_pr`` provisioning prefers ``pr_adoption`` / ``refs/pull/<n>/head``
+    over a cleared ``remote_push_branch``. Leaving the closed PR's adoption block
+    would re-checkout and re-push that head. Adoption is also monitor-only, so
+    the replacement must become a coding ``feature_branch_pr``.
+    """
+    if source_task_kind != TaskKind.sync_feature_pr.value:
+        return source_task_kind
+    task_policy.pop("pr_adoption", None)
+    task_policy["task_kind"] = TaskKind.feature_branch_pr.value
+    return TaskKind.feature_branch_pr.value
+
+
 def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
     """Return whether retry should consult live forge state for this source PR."""
     if _planning_scope_retry_context(source) is not None:
@@ -788,11 +807,18 @@ async def retry_workspace_row(
         or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
         else None
     )
+    retry_task_kind = source.task_kind
     if closed_existing_feature_pr:
         # A monitor-confirmed closed PR cannot be reused, and its remote head
         # may already have been deleted. Provision a fresh branch so the retry
-        # can open a replacement PR.
+        # can open a replacement PR. Adopted sync-feature rows must also drop
+        # pr_adoption (and become feature_branch_pr) or provisioning still
+        # checks out refs/pull/<closed>/head and restores the old head_ref.
         retry_remote_push_branch = None
+        retry_task_kind = _clear_closed_sync_feature_pr_adoption(
+            retried_task_policy,
+            source_task_kind=source.task_kind,
+        )
     elif preserve_existing_feature_pr:
         # The retry executes on a fresh local branch, but it must push back to
         # the existing PR's live remote head. Prefer the forge baseRefOid when
@@ -878,7 +904,7 @@ async def retry_workspace_row(
         test_commands=list(source.test_commands),
         requires_database=source.requires_database,
         idempotency_key=None,
-        task_kind=source.task_kind,
+        task_kind=retry_task_kind,
         remote_push_branch=retry_remote_push_branch,
     )
     if preserve_existing_feature_pr:

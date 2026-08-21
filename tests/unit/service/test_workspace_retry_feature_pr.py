@@ -431,6 +431,57 @@ async def test_retry_replaces_feature_pr_closed_externally(
     assert _provision_checkout_base_branch(retried) == retried.branch_base
 
 
+async def test_retry_clears_adoption_when_replacing_closed_sync_feature_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Closed adopted PRs must not keep pr_adoption identity on replacement retry.
+
+    Provisioning prefers ``pr_adoption`` / ``refs/pull/<n>/head`` over a cleared
+    ``remote_push_branch``. Leaving adoption intact would re-target the closed PR
+    instead of opening a replacement (PRRT_kwDOSJAM6s6bGzoU).
+    """
+    settings = _settings_with_host_home(tmp_path)
+    first_id = await _seed_failed_source_workspace(factory, task_kind="sync_feature_pr")
+    await _mark_failed(
+        factory,
+        first_id,
+        branch_name="feature-sync/closed-adopted",
+        remote_push_branch="contributors/closed-adopted-head",
+        failure_reason_code="pr_closed_externally",
+        pr_url=None,
+    )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        assert source.task_policy["pr_adoption"]["pr_number"] == 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="replace closed adopted PR",
+            settings=settings,
+            provider_environ={},
+            pr_lifecycle_checker=_live_pr_state(PullRequestLifecycle.closed),
+        )
+
+    retried = retry.new_workspace
+    # Monitor-only adoption cannot open a replacement; become a coding feature PR.
+    assert retried.task_kind == "feature_branch_pr"
+    assert retried.pr_url is None
+    assert retried.pr_number is None
+    assert retried.remote_push_branch is None
+    assert "pr_adoption" not in (retried.task_policy or {})
+    assert (retried.task_policy or {}).get("task_kind") == "feature_branch_pr"
+    assert _provision_checkout_base_branch(retried) == retried.branch_base
+    assert _provision_remote_push_branch(retried) is None
+
+
 async def test_retry_preserves_feature_pr_reopened_after_external_close(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
@@ -770,6 +821,42 @@ def test_sync_retried_adoption_live_refs_updates_only_valid_adoption_dicts(
         base_sha=base_sha,
     )
     assert task_policy == expected
+
+
+@pytest.mark.parametrize(
+    ("source_task_kind", "task_policy", "expected_kind", "expected_policy"),
+    [
+        (
+            "feature_branch_pr",
+            {"task_kind": "feature_branch_pr"},
+            "feature_branch_pr",
+            {"task_kind": "feature_branch_pr"},
+        ),
+        (
+            "sync_feature_pr",
+            {
+                "task_kind": "sync_feature_pr",
+                "pr_adoption": {"pr_number": 42, "head_ref": "contributors/old"},
+            },
+            "feature_branch_pr",
+            {"task_kind": "feature_branch_pr"},
+        ),
+    ],
+)
+def test_clear_closed_sync_feature_pr_adoption_strips_identity_for_sync_only(
+    source_task_kind: str,
+    task_policy: dict,
+    expected_kind: str,
+    expected_policy: dict,
+) -> None:
+    assert (
+        workspaces_retry_service._clear_closed_sync_feature_pr_adoption(
+            task_policy,
+            source_task_kind=source_task_kind,
+        )
+        == expected_kind
+    )
+    assert task_policy == expected_policy
 
 
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
