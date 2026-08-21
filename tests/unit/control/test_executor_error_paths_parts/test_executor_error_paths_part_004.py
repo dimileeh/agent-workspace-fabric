@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -196,12 +197,65 @@ class _SpyForgeClient:
         return None
 
 
+class _LifecycleForgeClient:
+    """Minimal forge client for reuse revalidation tests."""
+
+    def __init__(
+        self,
+        *,
+        lifecycle: PullRequestLifecycle = PullRequestLifecycle.open,
+        create_url: str = "https://github.com/x/y/pull/99",
+        lookup_error: Exception | None = None,
+    ) -> None:
+        self.lifecycle = lifecycle
+        self.create_url = create_url
+        self.lookup_error = lookup_error
+        self.lifecycle_calls = 0
+        self.create_calls = 0
+
+    async def __aenter__(self) -> _LifecycleForgeClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    async def fetch_pull_request_lifecycle(
+        self,
+        *,
+        repo: object,
+        pr_number: int,
+    ) -> PullRequestLifecycle:
+        self.lifecycle_calls += 1
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.lifecycle
+
+    async def create_pull_request(
+        self,
+        *,
+        repo: object,
+        base: str,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        self.create_calls += 1
+        return self.create_url
+
+
 class _ForgeRecordingPrCreator:
     """Records the forge client + repo URL the executor resolves and passes in."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, new_pr_url: str = "https://github.com/x/y/pull/55") -> None:
         self.forge_client: object | None = None
         self.repo_url: str | None = None
+        self.existing_pr_url: str | None = None
+        self.remote_branch_name: str | None = None
+        self.new_pr_url = new_pr_url
+        self.calls: list[dict[str, object]] = []
 
     async def push_and_open(
         self,
@@ -209,12 +263,26 @@ class _ForgeRecordingPrCreator:
         branch_name: str,
         forge_client: object | None = None,
         repo_url: str | None = None,
+        existing_pr_url: str | None = None,
+        remote_branch_name: str | None = None,
         **_kwargs: Any,
     ) -> PullRequestResult:
         self.forge_client = forge_client
         self.repo_url = repo_url
+        self.existing_pr_url = existing_pr_url
+        self.remote_branch_name = remote_branch_name
+        self.calls.append(
+            {
+                "branch_name": branch_name,
+                "forge_client": forge_client,
+                "repo_url": repo_url,
+                "existing_pr_url": existing_pr_url,
+                "remote_branch_name": remote_branch_name,
+            }
+        )
+        url = existing_pr_url or self.new_pr_url
         return PullRequestResult(
-            url="https://github.com/x/y/pull/55",
+            url=url,
             branch=branch_name,
             head_sha="b" * 40,
         )
@@ -1069,21 +1137,113 @@ class TestPullRequestUnexpectedErrorPart002:
             assert pr_create_events[0].reason_code == _PR_CREATE_FAILED_REASON_CODE
 
     @pytest.mark.unit
-    async def test_reuse_push_skips_forge_client_resolution(
+    async def test_reuse_push_revalidates_open_pr_then_reuses(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Reuse path: when the workspace already has a PR, the push step only does
-        # a git push + PR reuse and must NOT resolve a forge client. Resolving one
-        # would gate a Bitbucket reuse push on forge API env (``from_env()``),
-        # failing the run before push even though reuse makes no forge API call.
-        def _explode_make_forge_client(forge: str, runner: object) -> object:
-            raise AssertionError("make_forge_client must not run on the PR-reuse push path")
+        # Reuse path must resolve a forge client to revalidate live lifecycle, then
+        # push_and_open still receives forge_client=None once the PR is confirmed open.
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open)
 
-        monkeypatch.setattr(_pr_open_step, "make_forge_client", _explode_make_forge_client)
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.lifecycle_calls == 1
+        assert pr_creator.forge_client is None
+        assert pr_creator.existing_pr_url == "https://github.com/x/y/pull/55"
+        assert pr_creator.remote_branch_name == "awf/ws_original"
+        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_reuse_push_opens_replacement_when_existing_pr_merged(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # If the preserved PR merged after admission, abandon reuse and open a
+        # replacement so the monitor does not ShortCircuitCompleted on a tip that
+        # never landed in the merged PR.
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.merged)
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
+
+        pr_creator = _ForgeRecordingPrCreator(
+            new_pr_url="https://github.com/x/y/pull/99",
+        )
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            ws.remote_push_branch = "awf/ws_original"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert forge.lifecycle_calls == 1
+        assert pr_creator.existing_pr_url is None
+        assert pr_creator.remote_branch_name is None
+        assert pr_creator.forge_client is forge
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/99"
+            assert ws.pr_number == 99
+            assert ws.remote_push_branch is not None
+
+    @pytest.mark.unit
+    async def test_reuse_push_fails_closed_when_lifecycle_lookup_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        forge = _LifecycleForgeClient(
+            lookup_error=TimeoutError("forge lifecycle timed out"),
+        )
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -1100,14 +1260,12 @@ class TestPullRequestUnexpectedErrorPart002:
         executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        # No forge client resolved; push_and_open received ``None`` and reused.
-        assert pr_creator.forge_client is None
-        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        assert forge.lifecycle_calls == 1
+        assert pr_creator.calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_url == "https://github.com/x/y/pull/55"
+            assert ws.status == WorkspaceStatus.failed.value
 
     @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
@@ -1327,6 +1485,7 @@ class TestPrMonitorFactoryPath:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monitor_calls: list[str] = []
 
@@ -1340,6 +1499,13 @@ class TestPrMonitorFactoryPath:
         def _monitor_factory(adapter: Any) -> _FakeMonitor:
             del adapter
             return _FakeMonitor()
+
+        forge = _LifecycleForgeClient(lifecycle=PullRequestLifecycle.open)
+
+        def _make_lifecycle_client(forge_kind: str, runner: object) -> object:
+            return forge
+
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _make_lifecycle_client)
 
         ws_id = await _seed_ready(factory)
         async with factory() as session:

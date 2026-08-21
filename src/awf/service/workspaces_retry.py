@@ -909,6 +909,8 @@ async def retry_workspace_row(
     )
     if preserve_existing_feature_pr:
         assert retry_base_commit is not None
+        # Admission snapshot only: push-time revalidation in pr_open_step abandons
+        # reuse (and opens a replacement PR) if this PR merges/closes before push.
         retried.pr_url = existing_feature_pr_url
         retried.pr_number = existing_feature_pr_number
         retried.base_commit = retry_base_commit

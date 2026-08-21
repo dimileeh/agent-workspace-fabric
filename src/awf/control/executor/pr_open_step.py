@@ -1,9 +1,9 @@
 """WorkspaceExecutor push + open-PR step.
 
-Mechanically extracted from ``execution_flow.execute``; behavior is unchanged.
-Keeping the forge-neutral ``git push`` + PR-open call and its audit/failure
-handling here keeps ``execution_flow`` focused on the agent-run → commit →
-validate → push pipeline.
+Mechanically extracted from ``execution_flow.execute``; behavior is unchanged
+except for execution-time revalidation of a reused PR. Keeping the forge-neutral
+``git push`` + PR-open call and its audit/failure handling here keeps
+``execution_flow`` focused on the agent-run → commit → validate → push pipeline.
 """
 
 from __future__ import annotations
@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.github_client import RepoRef
 from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
@@ -25,8 +28,50 @@ from awf.control.executor.helpers import (
     _extract_pr_number,
 )
 from awf.control.executor.quality_gates import _log
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_creator import PullRequestError
+
+_PR_STATE_LOOKUP_FAILED_REASON_CODE = "PR_STATE_LOOKUP_FAILED"
+
+
+async def _clear_stale_pr_identity_for_replacement(
+    self: Any,
+    *,
+    workspace_id: str,
+    ws: Any,
+) -> None:
+    """Drop persisted PR identity so push opens a replacement instead of reuse.
+
+    Admission may have copied ``pr_url``/``pr_number``/``remote_push_branch`` from a
+    PR that was open at retry time. If that PR has since merged or closed, the
+    executor must not hand the monitor a terminal PR URL after pushing new
+    commits. Clearing identity (and sync-feature adoption) mirrors the closed-PR
+    retry path so the replacement PR is opened on the workspace branch tip.
+    """
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        persisted = await repo.get(workspace_id)
+        if persisted is not None:
+            persisted.pr_url = None
+            persisted.pr_number = None
+            persisted.remote_push_branch = None
+            policy = dict(persisted.task_policy or {})
+            if persisted.task_kind == TaskKind.sync_feature_pr.value:
+                policy.pop("pr_adoption", None)
+                policy["task_kind"] = TaskKind.feature_branch_pr.value
+                persisted.task_kind = TaskKind.feature_branch_pr.value
+                persisted.task_policy = policy
+            await session.commit()
+    ws.pr_url = None
+    ws.pr_number = None
+    ws.remote_push_branch = None
+    if getattr(ws, "task_kind", None) == TaskKind.sync_feature_pr.value:
+        ws.task_kind = TaskKind.feature_branch_pr.value
+        policy = dict(ws.task_policy or {})
+        policy.pop("pr_adoption", None)
+        policy["task_kind"] = TaskKind.feature_branch_pr.value
+        ws.task_policy = policy
 
 
 async def push_and_open_pr(
@@ -44,6 +89,11 @@ async def push_and_open_pr(
     already marked FAILED (the caller must stop). PR creation is forge-neutral:
     ``push_and_open`` does a plain ``git push`` and routes the PR-open step
     through the resolved ``ForgeClient`` (GitHub or Bitbucket Cloud).
+
+    When ``ws.pr_url`` is set (e.g. a feature-PR retry that preserved the source
+    PR at admission), the live forge lifecycle is revalidated before reuse. A PR
+    that merged or closed after admission is not reused: identity is cleared and
+    a replacement PR is opened for the pushed tip.
     """
     pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
@@ -54,26 +104,140 @@ async def push_and_open_pr(
 
     try:
         if ws.pr_url:
-            # Reuse path: ``push_and_open`` only does a plain ``git push`` and
-            # reuses the existing PR — it never touches the forge client. Skip
-            # resolving one so a Bitbucket reuse push is not gated on forge API
-            # env: ``make_forge_client`` builds ``BitbucketClient`` eagerly via
-            # ``from_env()``, which would fail the run on missing/invalid
-            # Bitbucket API env before the push, even though reuse makes no forge
-            # API call. (This mirrors the pre-forge-client flow, where reuse
-            # never resolved a forge client.)
-            pr = await self._pr_creator.push_and_open(
-                worktree_path=worktree_path,
-                branch_name=push_branch_name,
-                base_branch=ws.branch_base,
-                title=pr_title,
-                body=pr_body,
-                forge_client=None,
-                repo_url=ws.repo_url,
-                existing_pr_url=ws.pr_url,
-                remote_branch_name=existing_pr_remote_branch,
-                remote_url=existing_pr_remote_url,
-            )
+            # Reuse candidates must revalidate live forge state: admission may
+            # have persisted pr_url while the PR was open, then it merged before
+            # this push. Skipping the forge client here would push to the old
+            # head and hand the monitor a merged URL (ShortCircuitCompleted)
+            # without the retry tip. Bitbucket reuse now requires forge API env
+            # for that lifecycle check — same as monitor attachment.
+            from awf.common.bitbucket_client import BitbucketClientError
+
+            try:
+                forge_client = make_forge_client(
+                    concrete_forge_for_repo(profile.forge, ws.repo_url),
+                    self._runner,
+                )
+            except BitbucketClientError as exc:
+                _log.error(
+                    "executor.pr_failed",
+                    workspace_id=workspace_id,
+                    operation=exc.operation,
+                    returncode=exc.status if exc.status is not None else 0,
+                    reason_code=exc.reason_code,
+                )
+                await self._record_executor_pr_audit_event(
+                    workspace_id,
+                    event_type=_AUDIT_PR_CREATED_EVENT,
+                    action="pr_create",
+                    outcome="failed",
+                    reason_code=_PR_CREATE_FAILED_REASON_CODE,
+                    branch_name=push_branch_name,
+                    remote_branch=audit_remote_branch,
+                    pr_number=None,
+                    pr_url=None,
+                    source_head_sha=None,
+                    evidence={
+                        "operation": exc.operation,
+                        "returncode": exc.status if exc.status is not None else 0,
+                        "error_message": exc.body.strip() or "<no output>",
+                    },
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.pushing,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=str(exc)[:2000],
+                    reason_code=exc.reason_code,
+                )
+                return None
+
+            async with forge_client:
+                pr_number = ws.pr_number or _extract_pr_number(ws.pr_url)
+                reuse_existing = False
+                if pr_number is not None:
+                    try:
+                        lifecycle = await forge_client.fetch_pull_request_lifecycle(
+                            repo=RepoRef.from_url(ws.repo_url),
+                            pr_number=pr_number,
+                        )
+                        reuse_existing = lifecycle is PullRequestLifecycle.open
+                        if not reuse_existing:
+                            _log.info(
+                                "executor.pr_reuse_abandoned",
+                                workspace_id=workspace_id,
+                                pr_number=pr_number,
+                                pr_url=ws.pr_url,
+                                lifecycle=str(lifecycle),
+                            )
+                    except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
+                        _log.error(
+                            "executor.pr_reuse_revalidate_failed",
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            pr_url=ws.pr_url,
+                            error=str(exc)[:500],
+                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                        )
+                        await self._record_executor_pr_audit_event(
+                            workspace_id,
+                            event_type=_AUDIT_PR_CREATED_EVENT,
+                            action="pr_create",
+                            outcome="failed",
+                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                            branch_name=push_branch_name,
+                            remote_branch=audit_remote_branch,
+                            pr_number=pr_number,
+                            pr_url=ws.pr_url,
+                            source_head_sha=None,
+                            evidence={
+                                "operation": "fetch_pull_request_lifecycle",
+                                "error_message": str(exc).strip() or "<no output>",
+                            },
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.pushing,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=(
+                                "Could not verify whether the existing pull request "
+                                "is still open before reuse."
+                            )[:2000],
+                            reason_code=_PR_STATE_LOOKUP_FAILED_REASON_CODE,
+                        )
+                        return None
+
+                if reuse_existing:
+                    pr = await self._pr_creator.push_and_open(
+                        worktree_path=worktree_path,
+                        branch_name=push_branch_name,
+                        base_branch=ws.branch_base,
+                        title=pr_title,
+                        body=pr_body,
+                        forge_client=None,
+                        repo_url=ws.repo_url,
+                        existing_pr_url=ws.pr_url,
+                        remote_branch_name=existing_pr_remote_branch,
+                        remote_url=existing_pr_remote_url,
+                    )
+                else:
+                    await _clear_stale_pr_identity_for_replacement(
+                        self,
+                        workspace_id=workspace_id,
+                        ws=ws,
+                    )
+                    audit_remote_branch = push_branch_name
+                    pr = await self._pr_creator.push_and_open(
+                        worktree_path=worktree_path,
+                        branch_name=push_branch_name,
+                        base_branch=ws.branch_base,
+                        title=pr_title,
+                        body=pr_body,
+                        forge_client=forge_client,
+                        repo_url=ws.repo_url,
+                        existing_pr_url=None,
+                        remote_branch_name=None,
+                        remote_url=None,
+                    )
         else:
             # New PR: ``make_forge_client`` builds the Bitbucket client eagerly
             # via ``from_env()``, so a missing/invalid Bitbucket API env raises
