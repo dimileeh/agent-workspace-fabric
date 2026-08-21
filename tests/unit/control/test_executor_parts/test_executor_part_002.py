@@ -92,7 +92,40 @@ def executor(
     )
 
 
-def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+def _queue_open_pr_lifecycle_snapshot(
+    fake: FakeCommandRunner,
+    *,
+    head_sha: str | None = None,
+    head_ref: str | None = None,
+    base_sha: str = "a" * 40,
+) -> None:
+    """Queue one open-PR ``gh api graphql`` lifecycle snapshot for reuse revalidation."""
+    fake.queue_result(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "closed": False,
+                            "merged": False,
+                            "headRefName": head_ref,
+                            "headRefOid": head_sha,
+                            "baseRefOid": base_sha,
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+
+def _queue_pre_push_diagnostics(
+    fake: FakeCommandRunner,
+    *,
+    head: str = "deadbeef01",
+    reuse_existing_pr: bool = False,
+) -> None:
     """Queue executor's committed-diff policy check plus the three canned
     git results ``PullRequestCreator`` reads for its pre-push diagnostic
     log line (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
@@ -107,11 +140,17 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
     scenario apart from a stale worktree). These queued values are
     realistic enough that the log line reads sanely if a test prints
     captured output.
+
+    When ``reuse_existing_pr`` is true, also queue the forge lifecycle
+    snapshot that ``push_and_open_pr`` fetches before reuse push
+    diagnostics (post-push tip check is queued separately after push).
     """
     fake.queue_result(
         returncode=0, stdout="src/fix.py\n"
     )  # final plan-only gate: committed base..HEAD --name-only
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
+    if reuse_existing_pr:
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha=head)
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
@@ -601,8 +640,9 @@ class TestHappyPathPart001:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_diagnostics(fake, head="reuse-head")
-        fake.queue_result(returncode=0)
+        _queue_pre_push_diagnostics(fake, head="reuse-head", reuse_existing_pr=True)
+        fake.queue_result(returncode=0)  # git push (reuse; no create)
+        _queue_open_pr_lifecycle_snapshot(fake, head_sha="reuse-head")
 
         await executor.execute(ws_id)
 
