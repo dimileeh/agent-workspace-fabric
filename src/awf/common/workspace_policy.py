@@ -62,11 +62,22 @@ def release_sync_source_branch(task_policy: object) -> str:
 
 
 def agent_model_from_task_policy(task_policy: object) -> str | None:
-    """Return the nonblank task policy agent model, if one is configured."""
+    """Return the effective task policy agent model, if one is configured.
+
+    Cursor Auto workspaces persist ``cursor_auto_mode`` without ``agent_model``.
+    Derive the Router selector from that mode so scheduler, capacity, and
+    PR-monitor circuit-breaker lookups target the same model the executor runs.
+    When both keys are present (invalid/legacy), prefer the Auto selector to
+    match executor helpers; provider recovery clears Auto mode before writing a
+    fixed fallback model.
+    """
 
     if not isinstance(task_policy, Mapping):
         return None
     policy = cast(Mapping[str, Any], task_policy)
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(policy)
+    if cursor_auto_mode is not None:
+        return cursor_auto_model_selector(cursor_auto_mode)
     value = policy.get("agent_model")
     if not isinstance(value, str):
         return None
