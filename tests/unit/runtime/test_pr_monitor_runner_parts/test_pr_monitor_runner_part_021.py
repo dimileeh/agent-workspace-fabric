@@ -1981,6 +1981,14 @@ class TestParseVerdict:
             # full-ref label stays undefined and its stars claim the closer
             # (PRRT_kwDOSJAM6s6bUCMm).
             ("see [details][issue**ref] [other]: /url**", "**", True),
+            # Reason BOS is not a document block boundary (reason sits after
+            # ``AWF-VERDICT: LABEL: `` in the same paragraph). A reason-leading
+            # ``[label]: dest`` must not skip label emphasis or let ``\S+``
+            # absorb the trailing wrapper closer (PRRT_kwDOSJAM6s6bUPZ6).
+            ("[foo**bar]: /url**", "**", True),
+            ("[a*b]: /u*", "*", True),
+            ("[x.__y]: /z__", "__", True),
+            ("[issue**ref]: /x**", "**", True),
         ],
     )
     def test_private_verdict_reason_trailing_emphasis_balance(
@@ -2102,11 +2110,33 @@ class TestParseVerdict:
         assert text[spans[1][0] : spans[1][1]] == "[bar]: /c\n"
         # Duplicate normalized label at a later block boundary is ignored.
         assert "[FOO]: /d\n" not in {text[s:e] for s, e, _ in spans}
+        # Opt-out: reason-fragment scans must not treat BOS as a boundary
+        # (PRRT_kwDOSJAM6s6bUPZ6).
+        assert (
+            _markdown_reference_definition_spans(
+                "[Foo]: /a\n",
+                bos_is_block_boundary=False,
+            )
+            == []
+        )
+        # Blank-line boundaries still count when BOS is disabled.
+        text_blank = "para\n\n[bar]: /c\n"
+        spans_blank = _markdown_reference_definition_spans(
+            text_blank,
+            bos_is_block_boundary=False,
+        )
+        assert [label for _, _, label in spans_blank] == ["bar"]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "line",
         [
+            # Reason-leading reference-definition lookalike with emphasis in the
+            # label must not strip as whole-line wrap (PRRT_kwDOSJAM6s6bUPZ6).
+            "**AWF-VERDICT: FIXED: [foo**bar]: /url**",
+            "*AWF-VERDICT: FIXED: [a*b]: /u*",
+            "__AWF-VERDICT: DEFER: [x.__y]: /z__",
+            "**AWF-VERDICT: FALSE POSITIVE: [issue**ref]: /x**",
             # Reason-leading same run with no space after the markers is content,
             # not a label-prefix closer (PRRT_kwDOSJAM6s6bQqbC).
             "**AWF-VERDICT: FIXED:**committed",

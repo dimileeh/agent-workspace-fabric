@@ -1554,18 +1554,27 @@ def _match_markdown_reference_definition_line(line: str) -> str | None:
     return _markdown_normalize_link_reference_label(raw_label)
 
 
-def _markdown_reference_definition_spans(text: str) -> list[tuple[int, int, str]]:
+def _markdown_reference_definition_spans(
+    text: str,
+    *,
+    bos_is_block_boundary: bool = True,
+) -> list[tuple[int, int, str]]:
     """Return ``(start, end, normalized_label)`` for block-level reference definitions.
 
     Definitions are recognized only at block boundaries (beginning of string or
     after a blank line), matching CommonMark's rule that they cannot interrupt a
     paragraph. Consecutive definitions may follow each other. First definition
     for a normalized label wins.
+
+    Set ``bos_is_block_boundary=False`` when ``text`` is a mid-paragraph fragment
+    (for example a verdict reason after ``AWF-VERDICT: LABEL: ``) so a
+    reason-leading ``[label]: dest`` is not treated as a definition
+    (PRRT_kwDOSJAM6s6bUPZ6).
     """
     spans: list[tuple[int, int, str]] = []
     seen: set[str] = set()
     offset = 0
-    prev_blank = True
+    prev_blank = bos_is_block_boundary
     length = len(text)
     while offset <= length:
         if offset == length:
@@ -1652,6 +1661,12 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     destination glued to a quoted/parenthesized title (no whitespace) is
     likewise invalid, so title markers remain emphasis
     (PRRT_kwDOSJAM6s6bTvK5).
+    Reason fragments are mid-paragraph (after ``AWF-VERDICT: LABEL: ``), so
+    reference definitions are recognized only after blank lines inside the
+    reason — not at reason BOS. Otherwise a reason-leading ``[label]: dest``
+    with emphasis in the label is skipped while destination ``\\S+`` absorbs
+    the trailing wrapper closer and whole-line emphasis fails open
+    (PRRT_kwDOSJAM6s6bUPZ6).
     """
     closer_start = len(reason) - len(opener)
     if not _markdown_emphasis_closer_is_valid(reason, closer_start, opener):
@@ -1666,7 +1681,9 @@ def _verdict_reason_trailing_emphasis_is_balanced(reason: str, opener: str) -> b
     # when a link (not image) is formed so links cannot nest
     # (PRRT_kwDOSJAM6s6bUCMq).
     label_opens: list[tuple[int, bool, bool]] = []
-    def_spans = _markdown_reference_definition_spans(reason)
+    # Reason is a mid-paragraph extract; do not treat BOS as a definition
+    # boundary (PRRT_kwDOSJAM6s6bUPZ6).
+    def_spans = _markdown_reference_definition_spans(reason, bos_is_block_boundary=False)
     definitions = {label for _, _, label in def_spans}
     i = 0
     while i < len(reason):
@@ -1828,7 +1845,9 @@ def _normalize_markdown_emphasized_verdict_line(line: str) -> str | None:
     inline link (``[link] (foo**bar)``), so markers steal the closer
     (PRRT_kwDOSJAM6s6bTtr6). Invalid destinations with whitespace
     (``[link](foo **bar)``) likewise leave markers as emphasis
-    (PRRT_kwDOSJAM6s6bTgB6).
+    (PRRT_kwDOSJAM6s6bTgB6). Reason-leading ``[label]: dest`` lookalikes are
+    not block definitions in the parent paragraph, so label emphasis still
+    steals the trailing whole-line closer (PRRT_kwDOSJAM6s6bUPZ6).
     """
     emphasis_match = _MARKDOWN_EMPHASIS_PREFIX.match(line)
     if emphasis_match is None:
